@@ -1,0 +1,16 @@
+from: core/suborch
+to: next
+task: T-03
+date: "2026-10-23"
+state: "Wave 1 core in progress. Claimed T-03..T-09 (owner core/suborch). Decisions D-100..D-108 recorded (test DBs, vault backend, scrub encodings, fastembed cache + FTS OR, hand-rolled MCP stdio, FileAsker, Launcher, croner + parent_run, shared test doubles). Three rust-coders running in parallel in this worktree: T-04 gate + harness_core::testing (MemStore, ScriptedAsker), T-05 vault, T-03 core-pg. No code committed yet by them at the time of writing."
+not_done: "1. Collect T-03/T-04/T-05 coder results; reviewer + tester each. 2. T-06 ledger + run folder + report.md (Q-4 in docs/08) once testing::MemStore is committed. 3. T-07 mcp dispatch/serve + core_pg::bootstrap (D-104, D-105). 4. T-08 sched loop, harnessd, harness CLI (D-106, D-107). 5. T-09 echo server + step-1 acceptance with SB_VAULT_CANARY. 6. swarm.yaml areas.core.status pr_open + final handoff (D-46, no remote)."
+gotchas:
+  - "Coders share one worktree: each commits only its own paths (git commit -- <paths>); Cargo.lock may carry others' entries."
+  - "Postgres container sheetbrowse-postgres-1 on 127.0.0.1:5433 is shared by all areas; tests use throwaway sb_t_* databases (D-100)."
+decisions_made: [D-100, D-101, D-102, D-103, D-104, D-105, D-106, D-107, D-108]
+blockers_opened: []
+files_touched:
+  - agent-memory/decisions.yaml
+  - agent-memory/tasks.yaml
+  - agent-memory/swarm.yaml
+verify: "git log --oneline main..swarm/core"
