@@ -17,17 +17,17 @@ interfaces:
     name: "core::mcp::serve(server, tools, harness), dispatch(), ToolSpec { name, description, class, args, handler }"
     tier: contract
     crate: core
-    rust: "harness_core::mcp::{serve, dispatch, Harness, ToolRegistry, ToolSpec, ToolHandler, Classified, ToolCtx, ToolOutput, ToolError}"
+    rust: "harness_core::mcp::{serve, dispatch, Harness, ToolRegistry, ToolSpec, ToolHandler, Classified, ToolCtx, ToolOutput, ToolError} + harness_core::mcp::{serve_io, PROTOCOL_VERSION, scrub_value}; harness_core::ask::{FileAsker, answer, asks_dir, card_path, answer_path} (D-71)"
     consumers: [srv-web, srv-files, srv-cli, sb-mcp]
     spec: docs/01-HARNESS-CORE.md#H-6
-    notes: "D-48: deps arrive as a Harness (built by core_pg::bootstrap in each server main); dispatch() is the H-6 pipeline without transport, for tests; site tools join through ToolCtx::registry(). classify(ctx, args) is async and side-effect free; handlers reach the vault only via ToolCtx::resolve_into and never call MemoryStore::append."
+    notes: "D-48: deps arrive as a Harness (built by core_pg::bootstrap in each server main); dispatch() is the H-6 pipeline without transport, for tests; site tools join through ToolCtx::registry(). classify(ctx, args) is async and side-effect free; handlers reach the vault only via ToolCtx::resolve_into and never call MemoryStore::append. tools/call for a name not in the registry answers JSON-RPC error -32602 (MCP 2025-06-18 Unknown tool), not an isError result; dispatch() still returns ToolError::Args for it. serve_io is the stdio test seam; harness ask (T-08) calls ask::answer (D-71)."
   - id: I-3
     name: "Gate::check(call) -> Allow | Ask(card) | Stop(reason)"
     tier: contract
     crate: core
-    rust: "harness_core::gate::{Gate, Call, Decision, AskCard, OnTimeout, StopReason, AskOutcome, Asker, HINT_JOB_APPLICATION, HINT_SIGNATURE}; harness_core::class::{Class, Mode}"
+    rust: "harness_core::gate::{Gate, Call, Decision, AskCard, OnTimeout, StopReason, AskOutcome, Asker, HINT_JOB_APPLICATION, HINT_SIGNATURE}; harness_core::class::{Class, Mode} + harness_core::gate::clean_card(AskCard) -> AskCard (D-70)"
     spec: docs/01-HARNESS-CORE.md#H-1
-    notes: "Class order D-36; rule lookup D-39; Challenge stops before any rule; empty Send recipients = Send(new); strict = run OR rule (D-48). check is async."
+    notes: "Class order D-36; rule lookup D-39; Challenge stops before any rule; empty Send recipients = Send(new); strict = run OR rule (D-48). check is async. Every ask card, from the gate or from ToolCtx::ask, goes through gate::clean_card (D-110 (5) control strip and caps); there is no second sanitiser (D-70)."
   - id: I-4
     name: "Vault::resolve_into(sink), scrub(&str)"
     tier: contract
@@ -55,10 +55,10 @@ interfaces:
     name: "toolstore::{load(domain, path) -> Vec<Tool>, fingerprint(tool, index), record(result)}"
     tier: draft
     crate: toolstore
-    rust: "toolstore::{ToolStore::{load, scan, record, folder_for, tool_path, archive_path, archive, git_commit, health, register_forged, reforge, confirm, set_pinned, log_invariant, sweep}, fingerprint, relocate, planner_class, planner_act_class, check_repair, skeleton_line, Tool, LoadReport, SweepAction, RepairKind, PlannerCheck, FingerprintResult, ToolRunResult, RunOutcome, StoreError}; pub modules header, domain, loader, fingerprint, invariants, lifecycle, archive, runner (wave-0 names re-exported at the root)"
+    rust: "toolstore::{ToolStore::{load, scan, record, folder_for, tool_path, archive_path, archive, git_commit, health, register_forged, reforge, confirm, set_pinned, log_invariant, sweep}, fingerprint, relocate, planner_class, planner_act_class, check_repair, try_tool_path, try_archive_path, valid_domain, valid_name, check_tool_id, skeleton_line, Tool, LoadReport, SweepAction, RepairKind, PlannerCheck, FingerprintResult, ToolRunResult, RunOutcome, StoreError}; pub modules header, domain, loader, fingerprint, invariants, lifecycle, archive, runner (wave-0 names re-exported at the root)"
     consumers: [srv-web, sb-mcp, toolforge, harness]
     spec: docs/03-TOOL-STORE.md#T-3
-    notes: "Tool runtime and page API per D-53 and I-12. load/scan take a host or folder and a path or full URL; scan reports skipped files (D-306). sb-act is reached through the object-safe PlannerCheck trait (D-301). record, reforge and sweep change files but never commit; the caller commits with git_commit and a message carrying its task id (StoreError::Git). sweep is retire -> archive -> delete at 90 days (D-303). Accepted as IC-300 (D-60)."
+    notes: "Tool runtime and page API per D-53 and I-12. load/scan take a host or folder and a path or full URL; scan reports skipped files (D-306). sb-act is reached through the object-safe PlannerCheck trait (D-301). record, reforge and sweep change files but never commit; the caller commits with git_commit and a message carrying its task id (StoreError::Git). sweep is retire -> archive -> delete at 90 days (D-303). Accepted as IC-300 (D-60). IC-303 (D-65): StoreError::BadPath; try_tool_path, try_archive_path, valid_domain, valid_name, check_tool_id are public; folder_for returns \"\" for hosts that cannot be a folder and every mutator refuses it; planner_class and planner_act_class reject an @vault(k) the tool source does not contain literally (D-309)."
   - id: I-8
     name: "Transport trait (send, recv)"
     tier: draft
@@ -79,23 +79,23 @@ interfaces:
     name: "sb_act::parse(program) -> Vec<Step>, classify(steps, index) -> ActClass"
     tier: draft
     crate: sb-act
-    rust: "sb_act::{parse, quote, classify, classify_step, check_planner, ActClass, Step, Scroll, ParseError, PlannerError, MAX_WAIT}"
+    rust: "sb_act::{parse, quote, classify, classify_step, check_planner, ActClass, Step, Scroll, ParseError, PlannerError (incl. ChallengeTarget{step}), MAX_WAIT}"
     consumers: [sb-driver, toolstore, toolforge]
     spec: docs/05-BROWSER.md#B-7
-    notes: "Value quoting D-52; ?s rule D-50; classify returns hints for D-39 rules. w(n) needs a unit (ms or s) and is clamped to MAX_WAIT = 30 s (D-431); sb-driver's settle cap for w() reads MAX_WAIT (D-63)."
+    notes: "Value quoting D-52; ?s rule D-50; classify returns hints for D-39 rules. w(n) needs a unit (ms or s) and is clamped to MAX_WAIT = 30 s (D-431); sb-driver's settle cap for w() reads MAX_WAIT (D-63). check_planner rejects any step targeting a CHALLENGE row with PlannerError::ChallengeTarget{step}, before the ?s rule; MissingStop{class: Challenge} no longer occurs (D-66)."
   - id: I-11
     name: "__sb in-page API: walk, id, resolve, name, role, state, index, text, act, settle, fingerprint, frames"
     tier: draft
     crate: injected
-    rust: "injected/injected.js (stub lists names and return shapes; index() returns I-5 JSON)"
-    consumers: [sb-driver]
+    rust: "injected/injected.js (stub lists names and return shapes; index() returns I-5 JSON); injected/media.js installs globalThis.__sbMedia {list, cues, frames, frame} in world sb (D-67)"
+    consumers: [sb-driver, sb-media]
     spec: docs/05-BROWSER.md#B-5
-    notes: "No in-page skeleton/find/sheet (D-51). walk({base}) so ids are never reused in a tab frame; resolve -> {why: gone|stale} (D-55)."
+    notes: "No in-page skeleton/find/sheet (D-51). walk({base}) so ids are never reused in a tab frame; resolve -> {why: gone|stale} (D-55). D-68: act(id) returns a Promise; walk(true) and walk({dirty: [ids]}) are accepted; frames() entries may carry challenge, and child entries with frame:null carry id/name; text() emits an iframe placeholder block (kind other, elem = iframe row); index() omits State fields equal to State::default(), so every I-5 reader deserializes State with serde(default). __sbMedia shapes are in media.js's header and D-420; its video ids are __sb ids."
   - id: I-12
     name: "Tool file header and page API for readers/planners"
     tier: draft
     crate: toolstore
-    rust: "toolstore::{parse_header, ToolHeader, ToolKind, ArgSpec, FpItem}; toolstore::runner::{PageHost, ApiFetch, run_reader, run_planner, run_reader_with, run_planner_with, RunOpts, RunError, SheetPage}; page API per D-53"
+    rust: "toolstore::{parse_header, ToolHeader, ToolKind, ArgSpec, FpItem}; toolstore::runner::{PageHost, ApiFetch, run_reader, run_planner, run_reader_with, run_planner_with, RunOpts, RunError, SheetPage}; ApiFetch::api(url, remaining); page API per D-53"
     consumers: [srv-web, sb-mcp]
     spec: docs/03-TOOL-STORE.md#T-2
-    notes: "Runner per D-305 and D-308: PageHost {find, find_all, text(Option<&str>), table, url, title} and ApiFetch {api(url)} are synchronous; callers run the runner inside spawn_blocking and bridge ApiFetch with Handle::block_on (B-322). In JS page.url and page.title are properties (B-321); page.api exists only for @phase 1 readers; page.table returns {header, rows, refs?} (B-320). RunOpts defaults: 2 s wall cap including api time (B-323), 32 MiB memory. SheetPage implements PageHost over (&[IndexRow], &[TextBlock], url, title). Accepted as IC-301 (D-61)."
+    notes: "Runner per D-305 and D-308: PageHost {find, find_all, text(Option<&str>), table, url, title} and ApiFetch {api(url)} are synchronous; callers run the runner inside spawn_blocking and bridge ApiFetch with Handle::block_on (B-322). In JS page.url and page.title are properties (B-321); page.api exists only for @phase 1 readers; page.table returns {header, rows, refs?} (B-320). RunOpts defaults: 2 s wall cap including api time (B-323), 32 MiB memory. SheetPage implements PageHost over (&[IndexRow], &[TextBlock], url, title). Accepted as IC-301 (D-61). IC-302 (D-64): ApiFetch::api(&self, url, remaining: Duration) must return within the run's remaining wall time or the run is RunError::Timeout; RunOpts.max_output (64 KiB default) caps reader JSON and planner text with RunError::OutputTooLarge{max, got}; q(undefined|null) throws TypeError."
