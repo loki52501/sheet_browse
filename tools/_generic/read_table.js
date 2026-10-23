@@ -5,8 +5,14 @@
 // @gate Read
 // @phase 1
 // A table on the page as {header, rows}. id is a table id (`3`, `f2.3`); without one, the
-// first table on the page. Rows are capped (default 50) and the total is reported.
-const DEFAULT_MAX = 50;
+// first table on the page. Output is short text (rule 5): at most 50 rows (max may lower
+// it, never raise it), 20 columns, 200 characters per cell and 8000 characters in all;
+// `truncated` says whether anything was cut, and `total` / `columns` give the full size.
+const MAX_ROWS = 50;
+const MAX_COLS = 20;
+const MAX_CELL = 200;
+// Total characters across all shown cells; rows stop before this is passed.
+const MAX_CHARS = 8000;
 const PROBE = 30;
 
 function firstTable(page) {
@@ -18,7 +24,8 @@ function firstTable(page) {
 }
 
 export default function (page, args) {
-  const max = args && args.max > 0 ? Math.floor(args.max) : DEFAULT_MAX;
+  const want = args && args.max > 0 ? Math.floor(args.max) : MAX_ROWS;
+  const max = Math.min(want, MAX_ROWS);
   let found = null;
   if (args && args.id) {
     const t = page.table(String(args.id));
@@ -27,11 +34,42 @@ export default function (page, args) {
     found = firstTable(page);
   }
   if (!found) return { error: args && args.id ? 'no table ' + args.id : 'no table on this page' };
-  const rows = Array.isArray(found.t.rows) ? found.t.rows : [];
+  const allRows = Array.isArray(found.t.rows) ? found.t.rows : [];
+  const allHeader = Array.isArray(found.t.header) ? found.t.header : [];
+  let truncated = allRows.length > max;
+  let columns = allHeader.length;
+  for (const r of allRows) {
+    if (Array.isArray(r) && r.length > columns) columns = r.length;
+  }
+  if (columns > MAX_COLS) truncated = true;
+  const cell = (v) => {
+    const s = v == null ? '' : String(v);
+    if (s.length <= MAX_CELL) return s;
+    truncated = true;
+    return s.slice(0, MAX_CELL - 1) + '…';
+  };
+  const line = (r) => {
+    const cells = Array.isArray(r) ? r : [r];
+    return cells.slice(0, MAX_COLS).map(cell);
+  };
+  const header = line(allHeader);
+  let used = header.reduce((n, c) => n + c.length, 0);
+  const rows = [];
+  for (const r of allRows.slice(0, max)) {
+    const l = line(r);
+    used += l.reduce((n, c) => n + c.length, 0);
+    if (used > MAX_CHARS) {
+      truncated = true;
+      break;
+    }
+    rows.push(l);
+  }
   return {
     id: found.id,
-    header: found.t.header || [],
-    total: rows.length,
-    rows: rows.slice(0, max),
+    header,
+    total: allRows.length,
+    columns,
+    rows,
+    truncated,
   };
 }

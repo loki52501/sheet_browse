@@ -28,9 +28,14 @@ pub mod loader;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_review;
 
 pub use archive::has_task_id;
-pub use domain::{normalize_host, registrable, SiteConfig, ARCHIVE, GENERIC, SITE_FILE};
+pub use domain::{
+    check_tool_id, normalize_host, registrable, valid_domain, valid_name, SiteConfig, ARCHIVE,
+    GENERIC, SITE_FILE,
+};
 pub use fingerprint::{fingerprint, fingerprint_items, relocate, role_matches, FingerprintResult};
 pub use header::{
     parse_fingerprint, parse_header, patch_fingerprint, render_fingerprint, ArgSpec, FpItem,
@@ -75,6 +80,9 @@ pub enum StoreError {
     /// The git commit helper refused (no task id, path outside the tools root) or git failed.
     #[error("git: {0}")]
     Git(String),
+    /// D-310: a domain or tool name that is not a single safe path component.
+    #[error("bad path: {0}")]
+    BadPath(String),
 }
 
 /// What `record` stores after a run (T-4, T-5, T-7).
@@ -121,7 +129,9 @@ impl ToolStore {
     /// Host → folder (T-1, D-300): the most specific existing folder among the host and its
     /// parents down to eTLD+1 (so `mail.google.com/` wins over `google.com/`), else a folder
     /// whose `_site.yaml` lists the host (or a parent) under `aliases`, else eTLD+1.
-    /// Idempotent on folder names, including `_generic`.
+    /// Idempotent on folder names, including `_generic`. Never returns a separator, `..`, a
+    /// drive or UNC prefix, or a name starting with `.`/`_` other than `_generic`: input that
+    /// is not a plain ASCII hostname gives `""`, the "no folder" sentinel (D-310).
     pub fn folder_for(&self, host: &str) -> String {
         domain::folder_for(&self.root, host)
     }

@@ -1,6 +1,7 @@
 //! T-1: host -> tool folder. eTLD+1 from the compiled-in public suffix list (D-300), a more
 //! specific folder when one exists (`mail.google.com/`, docs/07), then `_site.yaml` aliases.
 
+use crate::StoreError;
 use std::fs;
 use std::path::Path;
 
@@ -137,15 +138,83 @@ fn candidates(host: &str, etld1: &str) -> Vec<String> {
     out
 }
 
+/// Windows device names, which are not usable as file or folder names (with or without an
+/// extension).
+const DEVICE_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+fn is_device_name(s: &str) -> bool {
+    let stem = s.split('.').next().unwrap_or(s).to_ascii_lowercase();
+    DEVICE_NAMES.contains(&stem.as_str())
+}
+
+/// D-310: a site folder name that is safe to join under the tools root. `_generic`, or one
+/// path component of `[a-z0-9._-]` that is not `.`/`..`, does not start with `.` or `_`, does
+/// not end with `.` (Windows drops it) and is not a Windows device name. Everything that
+/// could be a separator, a drive prefix (`c:`), a UNC prefix, a pathspec (`:/`) or a
+/// reserved folder (`_archive`, `.git`) fails.
+pub fn valid_domain(d: &str) -> bool {
+    if d == GENERIC {
+        return true;
+    }
+    !d.is_empty()
+        && d.len() <= 253
+        && !d.starts_with(['.', '_'])
+        && !d.ends_with('.')
+        && d.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+        })
+        && !is_device_name(d)
+}
+
+/// D-310: a tool name that is safe as `<name>.js` and `<name>.<version>.js`: `[A-Za-z0-9_-]+`
+/// (every T-2 `@name`, which is `[A-Za-z0-9_]+`, passes), not a Windows device name, at most
+/// 100 bytes. No `.`, so the archive's `<name>.<version>` split stays unambiguous.
+pub fn valid_name(n: &str) -> bool {
+    !n.is_empty()
+        && n.len() <= 100
+        && n.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        && !is_device_name(n)
+}
+
+/// D-310: the one check every path builder and every mutator runs before a `domain` or a
+/// tool `name` touches the filesystem or the store.
+pub fn check_tool_id(domain: &str, name: &str) -> Result<(), StoreError> {
+    if !valid_domain(domain) {
+        return Err(StoreError::BadPath(format!(
+            "domain {domain:?} is not `_generic` or a site folder [a-z0-9._-] (D-310)"
+        )));
+    }
+    if !valid_name(name) {
+        return Err(StoreError::BadPath(format!(
+            "tool name {name:?} is not [A-Za-z0-9_-] (D-310)"
+        )));
+    }
+    Ok(())
+}
+
 fn is_site_dir(name: &str) -> bool {
-    !name.starts_with('_') && !name.starts_with('.')
+    name != GENERIC && valid_domain(name)
 }
 
 /// T-1. See the module doc for the order.
+///
+/// Returns `_generic` (for `_generic`), a site folder name that passes [`valid_domain`], or
+/// the empty string, which is the "no folder" sentinel: hosts that are not plain ASCII
+/// hostnames (Unicode hosts, which a URL parser would have punycoded, IPv6 literals, `_x`,
+/// `.git`, paths, drive letters, UNC names) map to `""`, and every path builder rejects
+/// `""`. Unicode hosts are rejected rather than converted: hosts read from URLs are already
+/// punycode, and IDNA would need a new dependency.
 pub fn folder_for(root: &Path, host: &str) -> String {
     let h = normalize_host(host);
-    if h.is_empty() || h.starts_with('_') {
+    if h == GENERIC {
         return h;
+    }
+    if !is_site_dir(&h) {
+        return String::new();
     }
     let etld1 = registrable(&h);
     let cands = candidates(&h, &etld1);
@@ -170,7 +239,11 @@ pub fn folder_for(root: &Path, host: &str) -> String {
             }
         }
     }
-    etld1
+    if is_site_dir(&etld1) {
+        etld1
+    } else {
+        String::new()
+    }
 }
 
 #[cfg(test)]

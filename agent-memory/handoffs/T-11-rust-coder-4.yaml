@@ -1,0 +1,30 @@
+from: rust-coder-4 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-23"
+state: "Fix round for review-T-11-core: all 4 blocking items and all should-fix items are fixed, each with a regression test in crates/toolstore/src/tests_review.rs (16 tests). (1) git_commit runs `git --literal-pathspecs -C <root>` for add, commit and rev-parse, and under_root refuses any path component containing `:` (`:/`, `:(top)x`, `:(glob)**`, NTFS `a.js:x`). (2) D-310: one validator, domain::check_tool_id(domain, name) -> Result<(), StoreError::BadPath>, is used by try_tool_path/try_archive_path (and through them tool_path/archive_path), archive, scan, row() (so record, reforge, confirm, set_pinned, log_invariant), register_forged, retire and sweep (sweep skips rows whose name is not a file name). (3) D-309: planner_act_class rejects a program whose @vault(k) keys are not all literal `@vault(k)` in tool.source. (4) D-310: only confirm() leaves ask; Ok, Relocated, misses and failures keep ask (counters and fingerprint still update; misses never retire an ask row), and a re-forge of an ask row stays ask. Relocated on a retired row is refused. cargo test -p toolstore: 91 lib tests (75 before plus 16 new) + 23 accept_t11 tests, all pass, including the tester's g4_vault_key_built_by_concatenation_is_rejected, t7_ask_held_until_confirm and g4_match_backslash_and_percent_encoded_host_rejected. clippy --all-targets -D warnings and fmt are clean, and cargo check --workspace is green."
+not_done: "1. 955ce52's message over-claimed T-1..T-9: T-6 (growth), T-8 (promotion) and T-5's auto @expects after 3 clean runs are reflect/toolforge work (T-16/T-28) and are not implemented. G-5's hand-edit reset (content hash) is also not done. Narrow the claimed ids in tasks.yaml. 2. Everything in T-11-rust-coder-1's not_done list still stands (roles.txt swap, vault_refs swap, SbAct todo!() until page merges)."
+gotchas:
+  - "folder_for keeps the I-7 signature `-> String`. On bad input (not a plain ASCII hostname, `_x` other than `_generic`, `.git`, `..`, paths, drive letters, UNC, IPv6 literals) it returns \"\", the 'no folder' sentinel, and every path builder rejects \"\". `C:\\\\windows` normalizes to the host `c`, a valid folder under the root."
+  - "IDN: non-ASCII hosts are rejected (folder_for gives \"\"), not converted to punycode. Hosts read from URLs are already punycode, and idna/url are not in Cargo.lock, so no new dependency was added. `LUMA.com` still maps to `luma.com`."
+  - "Names: valid_name is [A-Za-z0-9_-]{1,100}, not lowercase-only as D-310 says, because T-2 @name allows [A-Za-z0-9_]+ and a valid tool must stay recordable. No `.` is allowed, so `<name>.<version>.js` splits cleanly. Domains are [a-z0-9._-], with no leading `.`/`_` (except `_generic`), no trailing `.`, and no Windows device names (con, nul, com1...)."
+  - "tool_path/archive_path keep `-> PathBuf` (the tester's tests use them) and return the empty PathBuf on bad input, which every fs call refuses. New try_tool_path/try_archive_path return Result; the mutators use those. New StoreError::BadPath(String) variant, and new pub fns valid_domain, valid_name and check_tool_id: record them under interface_changes (IC-300 surface)."
+  - "Sweep idle clock: max(last_ok, last_fail); when both are None, the later of the @forged date and the file mtime. It is the later, not '@forged else mtime', because the tester's fixture list_events.js has `@forged 2026-10-01` and t7_ephemeral_retired_after_ten_site_visits_unused registers it now and expects no idle retire. A just-written file is never idle."
+  - "stop_count strips JS comments with a small string- and template-aware lexer (`//` inside 'https://x' is not a comment; regex literals are not recognised) and counts `?s` only when not followed by [A-Za-z0-9_$]. `'?s'` in a plain string still counts; that is the simpler variant the brief allowed."
+  - "read_table.js caps: 50 rows (max may lower it, never raise it), 20 columns, 200 chars per cell (cut with an ellipsis), 8000 chars in total. Returns truncated, total and columns. The total cap is needed because 50x20x200 alone exceeds the runner's 64 KB max_output."
+  - "Write order: retire() persists the retired row before moving the file. If the move fails, the row says retired with the file in place, and the next sweep archives it (tested by blocking _archive with a file). reforge() archives, writes, then sets the row, then the ledger. A failed write or row set restores the old content and removes the archived copy."
+  - "Bash heredocs that feed Python mangle backslash escapes in Rust char literals, and the guard_write hook blocks writing scripts to the scratchpad. Use the Edit tool for Rust source."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/toolstore/src/lib.rs
+  - crates/toolstore/src/domain.rs
+  - crates/toolstore/src/archive.rs
+  - crates/toolstore/src/loader.rs
+  - crates/toolstore/src/header.rs
+  - crates/toolstore/src/invariants.rs
+  - crates/toolstore/src/lifecycle.rs
+  - crates/toolstore/src/tests_review.rs
+  - tools/_generic/read_table.js
+  - agent-memory/handoffs/T-11-rust-coder-4.yaml
+verify: "cargo test -p toolstore"

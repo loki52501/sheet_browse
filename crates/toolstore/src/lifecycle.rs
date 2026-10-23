@@ -9,7 +9,7 @@
 //! Nothing here commits: callers stage `tools/<domain>` and `tools/_archive/<domain>` with
 //! [`ToolStore::git_commit`] and their task id.
 
-use crate::domain::{SiteConfig, ARCHIVE, GENERIC};
+use crate::domain::{check_tool_id, valid_domain, valid_name, SiteConfig, ARCHIVE};
 use crate::header::{parse_header, patch_fingerprint, render_fingerprint};
 use crate::invariants::{check_repair, RepairKind};
 use crate::{RunOutcome, StoreError, ToolRunResult, ToolStore};
@@ -61,6 +61,18 @@ fn bump(h: &mut ToolHealth) {
     h.version += 1;
     h.runs = 0;
     h.fails = 0;
+}
+
+/// The date of a tool file's `@forged` line (`2026-10-22 ...` or an RFC 3339 time), if any.
+fn forged_at(p: &Path) -> Option<Ts> {
+    let src = fs::read_to_string(p).ok()?;
+    let forged = parse_header(&src).ok()?.forged?;
+    let tok = forged.split_whitespace().next()?;
+    if let Ok(t) = DateTime::parse_from_rfc3339(tok) {
+        return Some(t.with_timezone(&Utc));
+    }
+    let d = chrono::NaiveDate::parse_from_str(tok, "%Y-%m-%d").ok()?;
+    Some(d.and_hms_opt(0, 0, 0)?.and_utc())
 }
 
 fn mtime(p: &Path) -> Option<Ts> {
@@ -123,12 +135,15 @@ impl ToolStore {
         }
     }
 
+    /// The row of a tool, or a new one; refuses a bad domain or name (D-310) so nothing below
+    /// ever builds a path from one.
     async fn row(
         &self,
         store: &dyn MemoryStore,
         domain: &str,
         name: &str,
     ) -> Result<ToolHealth, StoreError> {
+        check_tool_id(domain, name)?;
         Ok(self
             .health(store, domain, name)
             .await?
@@ -188,6 +203,7 @@ impl ToolStore {
         domain: &str,
         name: &str,
     ) -> Result<ToolHealth, StoreError> {
+        check_tool_id(domain, name)?;
         let h = match self.health(store, domain, name).await? {
             None => ToolHealth {
                 status: ToolStatus::Ephemeral,
@@ -210,7 +226,9 @@ impl ToolStore {
         Ok(h)
     }
 
-    /// Moves the file to the archive and marks the row retired.
+    /// Marks the row retired, persists it, then moves the file to the archive and writes the
+    /// ledger. The row goes first so a failed move is recoverable: a retired row whose file is
+    /// still in place is archived by the next [`ToolStore::sweep`].
     async fn retire(
         &self,
         store: &dyn MemoryStore,
@@ -218,9 +236,11 @@ impl ToolStore {
         why: String,
         at: Ts,
     ) -> Result<Option<PathBuf>, StoreError> {
-        let archived = self.archive(&h.domain, &h.name, h.version)?;
+        check_tool_id(&h.domain, &h.name)?;
         h.status = ToolStatus::Retired;
         h.why = Some(why.clone());
+        store.tool_health_set(h.clone()).await?;
+        let archived = self.archive(&h.domain, &h.name, h.version)?;
         let summary = match &archived {
             Some(p) => format!(
                 "retired {}/{}, archived to {}",
@@ -245,7 +265,10 @@ impl ToolStore {
     ///   status repaired;
     /// - `Failed`: fails += 1, streak reset, why;
     /// - `FingerprintMiss` / `ExpectsMiss`: as `Failed`, and status needs_repair;
-    /// - needs_repair with fails >= 5 and not pinned: retired, file archived.
+    /// - needs_repair with fails >= 5 and not pinned: retired, file archived;
+    /// - `ask` (raised floor, T-5, D-310) is left only by [`ToolStore::confirm`]: every
+    ///   outcome updates counters (and Relocated the fingerprint) but the status stays `ask`;
+    /// - `Relocated` on a retired tool is refused.
     pub async fn record(
         &self,
         store: &dyn MemoryStore,
@@ -259,12 +282,14 @@ impl ToolStore {
         } = result;
         let mut h = self.row(store, &domain, &name).await?;
         let retired = h.status == ToolStatus::Retired;
+        // T-5 / D-310: the user's confirmation is permission; no outcome stands in for it.
+        let held = h.status == ToolStatus::Ask;
         let fail = |h: &mut ToolHealth, why: String, miss: bool| {
             h.fails += 1;
             h.runs = 0;
             h.last_fail = Some(at);
             h.why = Some(why);
-            if miss && !retired {
+            if miss && !retired && !held {
                 h.status = ToolStatus::NeedsRepair;
             }
         };
@@ -285,7 +310,12 @@ impl ToolStore {
                 }
             }
             RunOutcome::Relocated { fingerprint } => {
-                let path = self.tool_path(&domain, &name);
+                if retired {
+                    return Err(StoreError::Invariant(format!(
+                        "{domain}/{name} is retired; a relocate cannot revive it (T-7)"
+                    )));
+                }
+                let path = self.try_tool_path(&domain, &name)?;
                 let old = fs::read_to_string(&path)?;
                 let new = patch_fingerprint(&old, &fingerprint);
                 if let Err(e) = check_repair(&old, &new, RepairKind::Relocate) {
@@ -298,7 +328,7 @@ impl ToolStore {
                     .unwrap_or_default();
                 let after = render_fingerprint(&fingerprint);
                 bump(&mut h);
-                if !retired {
+                if !held {
                     h.status = ToolStatus::Repaired;
                 }
                 let why = format!("relocated: {before} -> {after}");
@@ -326,7 +356,12 @@ impl ToolStore {
 
     /// T-5 re-forge under the same name: invariants (D-307), old file to
     /// `_archive/<domain>/<name>.<version>.js`, new file written, version += 1, status
-    /// `repaired`, or `ask` when the new `@gate` floor is higher (until [`ToolStore::confirm`]).
+    /// `repaired`, or `ask` when the new `@gate` floor is higher or the row was already `ask`
+    /// (until [`ToolStore::confirm`], D-310).
+    ///
+    /// Order: archive the old file, write the new one, persist the row, then the ledger. A
+    /// failure after the archive move puts the old file back and removes the archived copy,
+    /// so the file and the row never disagree.
     pub async fn reforge(
         &self,
         store: &dyn MemoryStore,
@@ -335,7 +370,8 @@ impl ToolStore {
         new_src: &str,
         at: Ts,
     ) -> Result<ToolHealth, StoreError> {
-        let path = self.tool_path(domain, name);
+        check_tool_id(domain, name)?;
+        let path = self.try_tool_path(domain, name)?;
         let old = fs::read_to_string(&path)?;
         if let Err(e) = check_repair(&old, new_src, RepairKind::Reforge) {
             self.log_invariant(store, domain, name, &e).await?;
@@ -348,23 +384,42 @@ impl ToolStore {
         };
         let (og, ng) = (gate(&old)?, gate(new_src)?);
         let mut h = self.row(store, domain, name).await?;
+        let held = h.status == ToolStatus::Ask;
         let archived = self.archive(domain, name, h.version)?;
-        fs::write(&path, new_src)?;
+        let undo = |archived: &Option<PathBuf>| {
+            // Best effort: the old content is in memory, so restoring does not depend on
+            // the archived copy being readable.
+            let _ = fs::write(&path, &old);
+            if let Some(a) = archived {
+                let _ = fs::remove_file(a);
+            }
+        };
+        if let Err(e) = fs::write(&path, new_src) {
+            undo(&archived);
+            return Err(e.into());
+        }
         bump(&mut h);
         let why = if ng > og {
             h.status = ToolStatus::Ask;
             format!("re-forged; @gate floor raised {og} -> {ng}, ask the user (T-5)")
+        } else if held {
+            h.status = ToolStatus::Ask;
+            "re-forged while a raised @gate floor awaits the user; still ask (T-5, D-310)"
+                .to_string()
         } else {
             h.status = ToolStatus::Repaired;
             "re-forged from a successful trace (T-5)".to_string()
         };
         h.why = Some(why.clone());
+        if let Err(e) = store.tool_health_set(h.clone()).await {
+            undo(&archived);
+            return Err(e.into());
+        }
         let summary = format!("re-forged {domain}/{name} to version {}", h.version);
         let cons =
             json!({"archived": archived.as_ref().map(|p| self.rel(p)), "written": self.rel(&path)});
         self.ledger(store, "reforge", &h, at, summary, cons, Some(why))
             .await?;
-        store.tool_health_set(h.clone()).await?;
         Ok(h)
     }
 
@@ -408,7 +463,7 @@ impl ToolStore {
                         continue;
                     }
                     if let Ok(n) = e.file_name().into_string() {
-                        if (n == GENERIC || !n.starts_with(['_', '.'])) && !out.contains(&n) {
+                        if valid_domain(&n) && !out.contains(&n) {
                             out.push(n);
                         }
                     }
@@ -435,13 +490,21 @@ impl ToolStore {
         for domain in self.swept_domains() {
             let rows = store.tool_health(&domain).await?;
             for mut h in rows.iter().cloned() {
-                if h.pinned || self.site_pinned(&domain, &h.name) {
+                // D-310: a row whose name is not a safe file name is never acted on.
+                if !valid_name(&h.name) || h.pinned || self.site_pinned(&domain, &h.name) {
                     continue;
                 }
-                let path = self.tool_path(&domain, &h.name);
+                let path = self.try_tool_path(&domain, &h.name)?;
                 match h.status {
                     ToolStatus::Ephemeral => {
-                        let since = h.last_ok.or(h.last_fail).or_else(|| mtime(&path));
+                        // Last use is the later of the last success and the last failure. A
+                        // tool never run counts from the later of its @forged date and the
+                        // file mtime, so a file written (registered, re-forged) recently is
+                        // never idle however old its @forged line is.
+                        let since = h
+                            .last_ok
+                            .max(h.last_fail)
+                            .or_else(|| forged_at(&path).max(mtime(&path)));
                         let idle = since.map(|t| now - t >= Duration::days(EPHEMERAL_IDLE_DAYS));
                         let v = visits(&h);
                         let why = if idle == Some(true) {

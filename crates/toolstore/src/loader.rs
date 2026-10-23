@@ -1,7 +1,7 @@
 //! T-3 loader: tools whose `@match` fits the path, site first, then `_generic/` at lower
 //! precedence; the skeleton line (T-3.3). Invalid files are skipped and reported (D-306).
 
-use crate::domain::{ARCHIVE, GENERIC};
+use crate::domain::{valid_domain, GENERIC};
 use crate::header::parse_header;
 use crate::{Tool, ToolStore};
 use std::fs;
@@ -124,7 +124,9 @@ impl ToolStore {
         let mut report = LoadReport::default();
         let folder = self.folder_for(domain);
         let path = url_path(path);
-        if folder.is_empty() || folder == ARCHIVE || folder.contains(['/', '\\']) {
+        // D-310: `folder_for` returns `""` for anything that is not a site folder; the check
+        // is repeated here so no other string is ever joined under the root.
+        if !valid_domain(&folder) {
             return report;
         }
         if folder != GENERIC {

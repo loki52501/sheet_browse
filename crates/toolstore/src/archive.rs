@@ -4,7 +4,7 @@
 //! An archived file's mtime is set to the moment it was archived; `sweep` deletes it 90
 //! days later (D-303). A fresh clone resets mtimes, which only delays deletion.
 
-use crate::domain::ARCHIVE;
+use crate::domain::{check_tool_id, ARCHIVE};
 use crate::{StoreError, ToolStore};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -12,17 +12,40 @@ use std::process::Command;
 use std::time::SystemTime;
 
 impl ToolStore {
-    /// `tools/<domain>/<name>.js`.
-    pub fn tool_path(&self, domain: &str, name: &str) -> PathBuf {
-        self.root.join(domain).join(format!("{name}.js"))
+    /// `tools/<domain>/<name>.js`, or `Err(BadPath)` when `domain` or `name` is not a single
+    /// safe path component (D-310).
+    pub fn try_tool_path(&self, domain: &str, name: &str) -> Result<PathBuf, StoreError> {
+        check_tool_id(domain, name)?;
+        Ok(self.root.join(domain).join(format!("{name}.js")))
     }
 
-    /// `tools/_archive/<domain>/<name>.<version>.js`.
-    pub fn archive_path(&self, domain: &str, name: &str, version: i32) -> PathBuf {
-        self.root
+    /// `tools/_archive/<domain>/<name>.<version>.js`, or `Err(BadPath)` (D-310).
+    pub fn try_archive_path(
+        &self,
+        domain: &str,
+        name: &str,
+        version: i32,
+    ) -> Result<PathBuf, StoreError> {
+        check_tool_id(domain, name)?;
+        Ok(self
+            .root
             .join(ARCHIVE)
             .join(domain)
-            .join(format!("{name}.{version}.js"))
+            .join(format!("{name}.{version}.js")))
+    }
+
+    /// `tools/<domain>/<name>.js`. For a `domain` or `name` that fails the D-310 check this is
+    /// the empty path, which no file operation accepts, so it can never point outside the
+    /// root. Mutators use [`ToolStore::try_tool_path`] and return `StoreError::BadPath`.
+    pub fn tool_path(&self, domain: &str, name: &str) -> PathBuf {
+        self.try_tool_path(domain, name).unwrap_or_default()
+    }
+
+    /// `tools/_archive/<domain>/<name>.<version>.js`; the empty path on bad input, as
+    /// [`ToolStore::tool_path`].
+    pub fn archive_path(&self, domain: &str, name: &str, version: i32) -> PathBuf {
+        self.try_archive_path(domain, name, version)
+            .unwrap_or_default()
     }
 
     /// Moves `tools/<domain>/<name>.js` to the archive as `version`. If that archive name is
@@ -34,11 +57,11 @@ impl ToolStore {
         name: &str,
         version: i32,
     ) -> Result<Option<PathBuf>, StoreError> {
-        let from = self.tool_path(domain, name);
+        let from = self.try_tool_path(domain, name)?;
         if !from.is_file() {
             return Ok(None);
         }
-        let mut to = self.archive_path(domain, name, version);
+        let mut to = self.try_archive_path(domain, name, version)?;
         let mut n = 2;
         while to.exists() {
             to = self
@@ -61,7 +84,9 @@ impl ToolStore {
 
     /// Stages exactly `paths` (additions, edits, moves and deletions) and commits them with
     /// `message`, which must carry a task id (`T-31`). Every path must lie under the tools
-    /// root. Returns the new commit's hash. Runs `git -C <root>`.
+    /// root. Returns the new commit's hash. Runs `git --literal-pathspecs -C <root>`, so `:/`,
+    /// `:(top)`, `*` and other pathspec magic are plain names (D-310); a component containing
+    /// `:` is refused before git runs.
     pub fn git_commit(&self, paths: &[PathBuf], message: &str) -> Result<String, StoreError> {
         if !has_task_id(message) {
             return Err(StoreError::Git(format!(
@@ -75,22 +100,24 @@ impl ToolStore {
         for p in paths {
             rel.push(self.under_root(p)?);
         }
-        let mut add = Command::new("git");
-        add.arg("-C")
-            .arg(&self.root)
-            .args(["add", "-A", "--"])
-            .args(&rel);
+        let mut add = self.git();
+        add.args(["add", "-A", "--"]).args(&rel);
         run(add)?;
-        let mut commit = Command::new("git");
+        let mut commit = self.git();
         commit
-            .arg("-C")
-            .arg(&self.root)
             .args(["commit", "-q", "-m", message, "--"])
             .args(&rel);
         run(commit)?;
-        let mut head = Command::new("git");
-        head.arg("-C").arg(&self.root).args(["rev-parse", "HEAD"]);
+        let mut head = self.git();
+        head.args(["rev-parse", "HEAD"]);
         Ok(run(head)?.trim().to_string())
+    }
+
+    /// `git --literal-pathspecs -C <root>`: every path argument is a literal path.
+    fn git(&self) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.arg("--literal-pathspecs").arg("-C").arg(&self.root);
+        cmd
     }
 
     /// `p` relative to the root, refusing anything outside it.
@@ -104,11 +131,14 @@ impl ToolStore {
         } else {
             p.to_path_buf()
         };
-        if rel.as_os_str().is_empty()
-            || rel
-                .components()
-                .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
-        {
+        let bad = |c: Component| match c {
+            Component::CurDir => false,
+            // `:/`, `:(top)x`: git pathspec magic (--literal-pathspecs also disarms it); `a:b`
+            // is an NTFS alternate data stream. No tool path has a `:`.
+            Component::Normal(n) => n.to_string_lossy().contains(':'),
+            _ => true,
+        };
+        if rel.as_os_str().is_empty() || rel.components().any(bad) {
             return Err(StoreError::Git(format!(
                 "{} is not a path under the tools root",
                 p.display()

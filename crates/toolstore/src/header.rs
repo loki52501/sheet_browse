@@ -132,6 +132,14 @@ pub(crate) fn match_violation(pattern: &str) -> Option<&'static str> {
         Some("contains //")
     } else if pattern.split('/').any(|seg| seg == "..") {
         Some("contains ..")
+    } else if pattern.contains('\\') {
+        // WHATWG URL parsing treats `\` as `/`, so `/\host` is protocol-relative.
+        Some("contains a backslash")
+    } else if ["%2e", "%2f", "%5c"]
+        .iter()
+        .any(|e| pattern.to_ascii_lowercase().contains(e))
+    {
+        Some("contains a percent-encoded dot, slash or backslash")
     } else if !pattern.starts_with('/') {
         Some("does not start with / (a host or relative pattern)")
     } else {

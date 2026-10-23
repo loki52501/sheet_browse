@@ -45,9 +45,111 @@ pub fn vault_keys(src: &str) -> Vec<String> {
     out
 }
 
-/// Occurrences of `?s` in the body of a tool file (the header is not counted).
+/// `src` with JS comments (`// ...`, `/* ... */`) replaced by a space, string and template
+/// literals kept. `//` inside a string (`'https://x'`) is not a comment. Regex literals are
+/// not recognised (a planner has no reason to contain `?s` in one).
+pub(crate) fn strip_js_comments(src: &str) -> String {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mode {
+        Code,
+        Str(char),
+        Template,
+    }
+    let c: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut mode = Mode::Code;
+    // Open `${` of templates: brace depth inside each.
+    let mut subst: Vec<u32> = Vec::new();
+    let mut i = 0;
+    while i < c.len() {
+        let ch = c[i];
+        let next = c.get(i + 1).copied();
+        match mode {
+            Mode::Code => match (ch, next) {
+                ('/', Some('/')) => {
+                    while i < c.len() && c[i] != '\n' {
+                        i += 1;
+                    }
+                    out.push(' ');
+                    continue;
+                }
+                ('/', Some('*')) => {
+                    i += 2;
+                    while i < c.len() && !(c[i] == '*' && c.get(i + 1) == Some(&'/')) {
+                        i += 1;
+                    }
+                    i += 2;
+                    out.push(' ');
+                    continue;
+                }
+                ('\'' | '"', _) => mode = Mode::Str(ch),
+                ('`', _) => mode = Mode::Template,
+                ('{', _) => {
+                    if let Some(d) = subst.last_mut() {
+                        *d += 1;
+                    }
+                }
+                ('}', _) => match subst.last_mut() {
+                    Some(0) => {
+                        subst.pop();
+                        mode = Mode::Template;
+                    }
+                    Some(d) => *d -= 1,
+                    None => {}
+                },
+                _ => {}
+            },
+            Mode::Str(q) => {
+                if ch == '\\' {
+                    out.push(ch);
+                    if let Some(n) = next {
+                        out.push(n);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if ch == q || ch == '\n' {
+                    mode = Mode::Code;
+                }
+            }
+            Mode::Template => {
+                if ch == '\\' {
+                    out.push(ch);
+                    if let Some(n) = next {
+                        out.push(n);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if ch == '`' {
+                    mode = Mode::Code;
+                } else if ch == '$' && next == Some('{') {
+                    out.push_str("${");
+                    subst.push(0);
+                    mode = Mode::Code;
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
+/// The `?s` act steps in the body of a tool file (the header is not counted): occurrences
+/// of `?s` outside JS comments that are not the start of a longer word (`'?sort=1'` is a
+/// query string, not a stop).
 pub fn stop_count(src: &str) -> usize {
-    src[body_start(src)..].matches("?s").count()
+    let code = strip_js_comments(&src[body_start(src)..]);
+    let b = code.as_bytes();
+    code.match_indices("?s")
+        .filter(|(i, _)| {
+            b.get(i + 2)
+                .is_none_or(|&n| !(n.is_ascii_alphanumeric() || n == b'_' || n == b'$'))
+        })
+        .count()
 }
 
 /// The header lines other than `@fingerprint`, normalised, for the relocate comparison.
@@ -149,6 +251,19 @@ pub fn planner_act_class(
         return Err(invariant(format!(
             "{} is a reader; only planners return programs",
             tool.namespaced
+        )));
+    }
+    // D-309: the emitted program is authoritative. A key the source does not spell out as
+    // a literal `@vault(k)` (built by concatenation, taken from args) is never resolved.
+    let allowed = vault_keys(&tool.source);
+    if let Some(k) = vault_keys(program)
+        .into_iter()
+        .find(|k| !allowed.contains(k))
+    {
+        return Err(invariant(format!(
+            "{} output uses vault key {} that is not a literal in the tool file (G-4, D-309)",
+            tool.namespaced,
+            harness_core::vault::vault_literal(&k)
         )));
     }
     let mut ac = check
