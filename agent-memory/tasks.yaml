@@ -68,6 +68,8 @@ tasks:
     status: doing
     owner: store/sub-orchestrator
     claimed_at: "2026-10-23"
+    shipped: [T-1, T-2, T-3, T-4, T-7, T-9, G-4, "T-5 (reforge, ask, confirm; not auto @expects)", D-53, D-300..D-311]
+    deferred: "T-6 growth, T-8 promotion and T-5 auto @expects are reflect/toolforge work (T-16, T-28); G-5 hand-edit reset needs a content hash tools.health lacks; vault canary row waits for T-05; role aliases switch to sb_sheet::data (D-59) after sheet merges."
   - id: T-12
     step: 2
     title: "srv-web: fetch→index (scraper), read/sheet/raw modes, api with vault headers, feed, search backend (decide D-31)"

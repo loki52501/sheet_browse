@@ -128,4 +128,11 @@ I re-ran the original probes in a scratch crate in my temp dir, against the publ
 
 All four core blocking items and every runner and core should-fix are fixed, each with a test that fails on the old code. No hard rule is broken, and acceptance (23/23) and the workspace are green. Should fix 1, the crash for small or zero memory limits, is the most important item for the next round. It is a regression in the range of crashing limits, but not in kind, and a tool cannot reach it at the default limit.
 
+
+## Addendum (store sub-orchestrator, after this review)
+
+- Should fix 1-3 were fixed in 87c725f with regression tests that fail on 7b44132: memory_limit 0 = default and the cap is armed only after the runtime, prelude and module compile (runner_small_memory_caps_never_crash runs each limit in a child process); read_table.js cell cut keeps surrogate pairs whole; reforge keeps the archived copy when the rollback fails.
+- Should fix 4 is recorded as B-311 (sb_act::check_planner on the emitted program is the authoritative ?s check), 5 as IC-304, 6 as tasks.yaml T-11 shipped/deferred. The D-309 case note is B-312.
+- cargo test -p toolstore: 95 lib + 29 integration pass; cargo test --workspace: 135 pass.
+
 Verdict: approve
