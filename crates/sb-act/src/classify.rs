@@ -1,4 +1,5 @@
-//! B-7 step classification: D-402, refined by D-433 (Enter, form context) and D-434 (hints).
+//! B-7 step classification: D-402, refined by D-433 (Enter, form context), D-434 (hints) and
+//! D-58 (Pay from checkout text).
 
 use crate::{ActClass, Scroll, Step};
 use harness_core::gate::{HINT_JOB_APPLICATION, HINT_SIGNATURE};
@@ -116,7 +117,7 @@ fn enter(row: &IndexRow, index: &[IndexRow]) -> ActClass {
 /// the D-434 hints.
 fn submit(button: &IndexRow, form: &[&IndexRow]) -> ActClass {
     let mut class = Class::Submit;
-    if form.iter().any(|r| is_card_field(r)) {
+    if form.iter().any(|r| is_card_field(r)) || is_pay(button, form) {
         class = class.max(Class::Pay);
     }
     if is_account(button, form) {
@@ -195,6 +196,29 @@ fn is_card_field(row: &IndexRow) -> bool {
                 || near(&toks, &["card"], &["number", "no", "num"], 1)
         }
     }
+}
+
+/// Checkout wording (D-58): checkout / check out, place order, confirm order, pay (pay now),
+/// buy now, complete purchase, add card. Small fillers between the two words are allowed
+/// ("Place your order", "Add a new card").
+///
+/// Matching is on whole words from `tokens()`, never substrings, so "Repay later",
+/// "Payroll settings", "Display options" and "PayPal account" do not say "pay". "Pay with
+/// PayPal", "Google Pay" and "Apple Pay" do, which is intended: a false Pay costs one ask,
+/// a missed Pay costs money (D-58).
+fn pay_text(toks: &[String]) -> bool {
+    has_any(toks, &["checkout", "pay"])
+        || near(toks, &["check"], &["out"], 1)
+        || near(toks, &["place", "confirm"], &["order"], 2)
+        || near(toks, &["buy"], &["now"], 1)
+        || near(toks, &["complete"], &["purchase"], 2)
+        || near(toks, &["add"], &["card"], 3)
+}
+
+/// The submit button's name, or the form's headings or name, say checkout (D-58). Raise-only:
+/// the caller takes the max with the other evidence (D-36).
+fn is_pay(button: &IndexRow, form: &[&IndexRow]) -> bool {
+    pay_text(&tokens(&button.name)) || form_texts(button, form).any(|t| pay_text(&tokens(t)))
 }
 
 /// Create account, sign up, change password or email (H-1 Account).
@@ -516,6 +540,115 @@ mod tests {
             form(submit(row(2, "button", "Card number help")), "f3"),
         ];
         assert_eq!(cls("c#2", &idx), Class::Submit);
+    }
+
+    /// A saved-card checkout: no card field anywhere, only an address and a submit.
+    fn saved_card(button: &str, h: Option<&str>) -> Vec<IndexRow> {
+        let mut idx = vec![
+            form(row(1, "textbox", "Shipping address"), "f3"),
+            form(submit(row(2, "button", button)), "f3"),
+        ];
+        if let Some(h) = h {
+            idx = idx.into_iter().map(|r| heading(r, h)).collect();
+        }
+        idx
+    }
+
+    #[test]
+    fn checkout_text_is_pay() {
+        // Button name (D-58), no card field.
+        for name in [
+            "Place order",
+            "Place your order",
+            "Pay now",
+            "Pay",
+            "Pay $42.00",
+            "Pay with PayPal",
+            "Checkout",
+            "Check out",
+            "Confirm order",
+            "Confirm your order",
+            "Buy now",
+            "Complete purchase",
+            "Complete your purchase",
+            "Add card",
+            "Add a new card",
+        ] {
+            let idx = saved_card(name, None);
+            assert_eq!(cls("c#2", &idx), Class::Pay, "{name}");
+            // Enter in the checkout form raises through its submit.
+            assert_eq!(cls("k#1=Enter", &idx), Class::Pay, "Enter: {name}");
+        }
+        // Form heading.
+        let idx = saved_card("Continue", Some("Checkout"));
+        assert_eq!(cls("c#2", &idx), Class::Pay);
+        assert_eq!(cls("k#1=Enter", &idx), Class::Pay);
+        // Typing into the checkout form is still Fill.
+        assert_eq!(cls("t#1=1 Main St", &idx), Class::Fill);
+        // Form name.
+        let mut idx = saved_card("Continue", None);
+        idx.push(form(row(3, "form", "Add card"), "f3"));
+        assert_eq!(cls("c#2", &idx), Class::Pay);
+        // A non-submit "Pay" link only navigates (the text rule is for submits).
+        assert_eq!(cls("c#1", &[row(1, "link", "Pay")]), Class::Navigate);
+    }
+
+    #[test]
+    fn checkout_text_negatives() {
+        // Whole-word matching: "repay", "payroll", "display", "paypal" are not "pay".
+        for (name, h) in [
+            ("Save", "Payroll settings"),
+            ("Apply", "Display options"),
+            ("Repay later", "Loans"),
+            ("Link PayPal account", "Wallets"),
+            ("Check status", "Order history"),
+            ("Place hold", "Library"),
+            ("Add cardholder note", "Notes"),
+        ] {
+            let idx = saved_card(name, Some(h));
+            assert_eq!(cls("c#2", &idx), Class::Submit, "{name} / {h}");
+            assert_eq!(cls("k#1=Enter", &idx), Class::Submit, "Enter: {name} / {h}");
+        }
+        // Login and register forms are unaffected.
+        assert_eq!(cls("c#14", &login()), Class::Submit);
+        assert_eq!(cls("k#8=Enter", &login()), Class::Submit);
+        assert_eq!(cls("c#14", &register()), Class::Account);
+    }
+
+    #[test]
+    fn checkout_text_keeps_hints_and_max() {
+        // Hints stay attached when checkout text raises the class (D-434).
+        let idx = vec![
+            heading(
+                form(row(1, "textbox", "Full name"), "f6"),
+                "Apply for Senior Engineer",
+            ),
+            heading(
+                form(submit(row(2, "button", "Pay application fee")), "f6"),
+                "Apply for Senior Engineer",
+            ),
+        ];
+        assert_eq!(
+            class_of("c#2", &idx),
+            ActClass {
+                class: Class::Pay,
+                hints: vec![HINT_JOB_APPLICATION.to_string()]
+            }
+        );
+        // Pay outranks Account: register during checkout (D-36 max).
+        let mut idx = saved_card("Place order", None);
+        idx.push(form(
+            input(
+                row(3, "textbox", "Password"),
+                "password",
+                Some("new-password"),
+            ),
+            "f3",
+        ));
+        assert_eq!(cls("c#2", &idx), Class::Pay);
+        // Delete wording does not lower it either way; Pay is above Delete.
+        let idx = saved_card("Remove card and pay", None);
+        assert_eq!(cls("c#2", &idx), Class::Pay);
     }
 
     #[test]
