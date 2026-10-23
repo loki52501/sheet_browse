@@ -16,9 +16,9 @@
 //!   its `default` export must be a function. If it returns a promise the runner drives the
 //!   job queue until it settles (still under the wall cap).
 //! - Wall-time cap through the interrupt handler (no sleeps, no threads), a memory cap
-//!   enforced by a counting allocator, and an output cap, all from [`RunOpts`]. The wall cap
-//!   includes host calls: `api` gets the remaining budget and a call that returns after the
-//!   deadline turns the run into [`RunError::Timeout`] (D-308).
+//!   enforced by a counting allocator once the tool's code starts, and an output cap, all
+//!   from [`RunOpts`]. The wall cap includes host calls: `api` gets the remaining budget and
+//!   a call that returns after the deadline turns the run into [`RunError::Timeout`] (D-308).
 //!
 //! Page API (the `page` argument, frozen): `find(q)`, `findAll(q)`, `text(region?)`,
 //! `table(id)`, `url`, `title`, and `api(url)` only for `@phase 1` readers that were given
@@ -65,7 +65,10 @@ pub trait ApiFetch {
 pub struct RunOpts {
     /// Wall-time cap for load + call (+ promise settling), host calls included.
     pub timeout: Duration,
-    /// QuickJS heap cap in bytes.
+    /// QuickJS heap cap in bytes; `0` means the default (32 MiB). The cap is armed once the
+    /// sandbox is built and the tool module is compiled, just before its code runs, and
+    /// counts the engine's own baseline, so a limit below that baseline is
+    /// [`RunError::OutOfMemory`] when the tool starts. Any limit is safe (no crash).
     pub memory_limit: usize,
     /// QuickJS stack cap in bytes (kept well under a 1 MiB native thread stack).
     pub max_stack: usize,
@@ -324,15 +327,25 @@ struct Clock {
 /// The engine's allocator: Rust's global allocator with a byte cap. A refused allocation
 /// sets `hit`, which is how the runner tells an engine out-of-memory from a tool that throws
 /// an error whose text says "out of memory".
+///
+/// `limit` is shared with `run` (through [`Caps`]) and starts at `usize::MAX`. rquickjs 0.14
+/// crashes (SIGSEGV) when an allocation is refused while the runtime or context is being
+/// created, and quickjs-ng corrupts a refcount when one is refused while it compiles a
+/// module. So the cap is armed only once the runtime, the context, the sandbox prelude, the
+/// page object and the compiled tool module exist, just before the module's top level runs,
+/// and is lifted again before teardown. Bytes the engine already holds still count once the
+/// cap is armed, so a limit below that baseline (about 160 KiB) fails the tool's first
+/// allocation with [`RunError::OutOfMemory`]. Compile memory is bounded by the source length
+/// of a tool file from the repo, not by anything the tool computes.
 struct CappedAlloc {
     used: usize,
-    limit: usize,
+    limit: Rc<Cell<usize>>,
     hit: Rc<Cell<bool>>,
 }
 
 impl CappedAlloc {
     fn admit(&mut self, extra: usize) -> bool {
-        if self.used.saturating_add(extra) > self.limit {
+        if self.used.saturating_add(extra) > self.limit.get() {
             self.hit.set(true);
             false
         } else {
@@ -400,6 +413,36 @@ unsafe impl Allocator for CappedAlloc {
     }
 }
 
+/// The run's limits: `opts` with `memory_limit` resolved (`0` is the default), and the
+/// allocator's live cap, which stays at `usize::MAX` until [`Caps::arm`].
+struct Caps {
+    opts: RunOpts,
+    mem: Rc<Cell<usize>>,
+}
+
+impl Caps {
+    fn new(opts: &RunOpts) -> Caps {
+        let mut opts = opts.clone();
+        if opts.memory_limit == 0 {
+            opts.memory_limit = RunOpts::default().memory_limit;
+        }
+        Caps {
+            opts,
+            mem: Rc::new(Cell::new(usize::MAX)),
+        }
+    }
+
+    /// Enforces `memory_limit` from the next allocation on.
+    fn arm(&self) {
+        self.mem.set(self.opts.memory_limit);
+    }
+
+    /// Admits every allocation again.
+    fn lift(&self) {
+        self.mem.set(usize::MAX);
+    }
+}
+
 fn engine(e: JsError) -> RunError {
     RunError::Engine(e.to_string())
 }
@@ -414,9 +457,10 @@ fn run(
 ) -> Result<Out, RunError> {
     let args = check_args(tool, args)?;
     let oom = Rc::new(Cell::new(false));
+    let caps = Caps::new(opts);
     let rt = Runtime::new_with_alloc(CappedAlloc {
         used: 0,
-        limit: opts.memory_limit,
+        limit: caps.mem.clone(),
         hit: oom.clone(),
     })
     .map_err(engine)?;
@@ -447,7 +491,9 @@ fn run(
     // this function (results become serde_json / String inside `run_in`).
     let slot: HostSlot = Rc::new(Cell::new(Some(unsafe { erase(host, api) })));
     let _guard = SlotGuard(slot.clone());
-    let res = ctx.with(|ctx| run_in(ctx, tool, &args, &slot, &clock, want, opts));
+    let res = ctx.with(|ctx| run_in(ctx, tool, &args, &slot, &clock, want, &caps));
+    // Teardown frees only, but lift the cap so nothing in it can be refused either.
+    caps.lift();
     if clock.fired.get() {
         // The wall cap wins even over `Ok`: a host call may have overrun it and the tool
         // swallowed the error.
@@ -466,8 +512,9 @@ fn run_in<'js>(
     slot: &HostSlot,
     clock: &Clock,
     want: ToolKind,
-    opts: &RunOpts,
+    caps: &Caps,
 ) -> Result<Out, RunError> {
+    let opts = &caps.opts;
     let has_api = slot.get().is_some_and(|h| h.api.is_some());
     install_prelude(&ctx)?;
     let page = page_object(&ctx, slot, clock, has_api)?;
@@ -476,6 +523,10 @@ fn run_in<'js>(
     let name = format!("{}.js", tool.namespaced);
     let module = Module::declare(ctx.clone(), name, tool.source.as_bytes())
         .map_err(|e| load_err(&ctx, e))?;
+    // The tool's own code starts here (top level, then the call, then serializing). Compiling
+    // is left uncapped: a refused allocation inside the quickjs-ng parser corrupts a refcount
+    // (`gc_decref_child` assertion) at limits just above the engine's baseline.
+    caps.arm();
     let (module, done) = module.eval().map_err(|e| load_err(&ctx, e))?;
     done.finish::<()>().map_err(|e| load_err(&ctx, e))?;
     let default: Value = module.get("default").map_err(|e| load_err(&ctx, e))?;

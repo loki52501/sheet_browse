@@ -744,3 +744,88 @@ fn runner_sheet_page_table_and_construction() {
     assert_eq!(page.table("f1.1"), serde_json::Value::Null);
     assert_eq!(page.table("junk"), serde_json::Value::Null);
 }
+
+/// Set by `runner_small_memory_caps_never_crash` for its child process: a comma list of
+/// memory limits for `runner_memory_cap_child` to run.
+const MEMCAP_CHILD_ENV: &str = "TOOLSTORE_RUNNER_MEMCAP_CHILD";
+
+/// Child half of `runner_small_memory_caps_never_crash`. Does nothing unless the parent set
+/// [`MEMCAP_CHILD_ENV`], so in a normal run it passes at once; in the child a crash kills only
+/// the child process, which the parent sees as a failed exit status.
+#[test]
+fn runner_memory_cap_child() {
+    let Ok(list) = std::env::var(MEMCAP_CHILD_ENV) else {
+        return;
+    };
+    let tools = [
+        reader(2, "return { n: 1 };"),
+        reader(2, "const a = []; for (let i = 0; i < 200; i++) a.push('x'.repeat(i) + i); return a.length;"),
+        reader(2, "const a = []; for (;;) a.push('x'.repeat(1 << 16) + a.length);"),
+        tool(
+            ToolKind::Reader,
+            2,
+            &[],
+            "export default async function (page) { const r = await Promise.resolve(page.find('input \"Email\"')); return { r, t: page.table('1'), x: page.text(), all: page.findAll('input') }; }",
+        ),
+        reader(2, "const m = /([a-z]+)@([a-z]+)/.exec('a@b.c'); return JSON.parse(JSON.stringify({ m: m.slice(), d: new Date(0).toISOString(), s: new Map([[1, 2]]).size, u: encodeURIComponent('a b') }));"),
+        reader(2, "try { const a = []; for (;;) a.push('y'.repeat(4096) + a.length); } catch (e) { return String(e); }"),
+        reader(2, "class A { constructor(x) { this.x = x; } *g() { yield this.x; } } const fs = []; for (let i = 0; i < 50; i++) fs.push(() => new A(i)); return [...fs[3]().g()].concat(fs.map(f => f().x));"),
+    ];
+    for limit in list.split(',').map(|s| s.trim().parse::<usize>().unwrap()) {
+        let opts = RunOpts {
+            memory_limit: limit,
+            ..RunOpts::default()
+        };
+        for (i, t) in tools.iter().enumerate() {
+            let r = run_reader_with(t, &FakePage::new(), &json!({}), None, &opts);
+            match (&r, i) {
+                (Ok(_), 0 | 1 | 3 | 4 | 5 | 6) | (Err(RunError::OutOfMemory), _) => {}
+                _ => panic!("limit {limit}, tool {i}: {r:?}"),
+            }
+            if limit == 0 && i != 2 {
+                assert!(r.is_ok(), "limit 0 is the default cap: {r:?}");
+            }
+        }
+        let p = run_planner_with(&register(), &FakePage::new(), &json!({"name": "A"}), &opts);
+        assert!(
+            p.is_ok() || p == Err(RunError::OutOfMemory),
+            "limit {limit}, planner: {p:?}"
+        );
+        if limit == 0 {
+            assert!(p.is_ok(), "{p:?}");
+        }
+    }
+    println!("memcap child ok: {list}");
+}
+
+/// Review-T-11 should-fix 1: rquickjs 0.14 segfaults when an allocation is refused while
+/// the runtime or context is built, which small caps (0, 1024, 16384, 40000) used to
+/// trigger, and quickjs-ng trips a refcount assertion when one is refused while it compiles
+/// the tool (165000 and 168000, just above the ~160 KiB baseline). Every limit must end in
+/// `Ok` or `OutOfMemory`; `0` is the default cap. Each limit runs in a child process (this
+/// test binary, filtered to `runner_memory_cap_child`) so a crash fails this test instead of
+/// killing the whole test binary. `TOOLSTORE_RUNNER_MEMCAP_SWEEP` overrides the list.
+#[test]
+fn runner_small_memory_caps_never_crash() {
+    let limits = std::env::var("TOOLSTORE_RUNNER_MEMCAP_SWEEP")
+        .unwrap_or_else(|_| "0,1024,16384,40000,165000,168000,300000,1048576".into());
+    for limit in limits.split(',') {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "runner::tests::runner_memory_cap_child",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(MEMCAP_CHILD_ENV, limit)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("memcap child ok"),
+            "limit {limit}: child exited {:?}\nstdout: {stdout}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

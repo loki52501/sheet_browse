@@ -6,8 +6,9 @@
 // @phase 1
 // A table on the page as {header, rows}. id is a table id (`3`, `f2.3`); without one, the
 // first table on the page. Output is short text (rule 5): at most 50 rows (max may lower
-// it, never raise it), 20 columns, 200 characters per cell and 8000 characters in all;
-// `truncated` says whether anything was cut, and `total` / `columns` give the full size.
+// it, never raise it), 20 columns, 200 UTF-16 units per cell (cut on a code point
+// boundary) and 8000 characters in all; `truncated` says whether anything was cut, and
+// `total` / `columns` give the full size.
 const MAX_ROWS = 50;
 const MAX_COLS = 20;
 const MAX_CELL = 200;
@@ -46,7 +47,11 @@ export default function (page, args) {
     const s = v == null ? '' : String(v);
     if (s.length <= MAX_CELL) return s;
     truncated = true;
-    return s.slice(0, MAX_CELL - 1) + '…';
+    // Never split a surrogate pair: a lone high surrogate is not valid JSON text.
+    let cut = MAX_CELL - 1;
+    const last = s.charCodeAt(cut - 1);
+    if (last >= 0xd800 && last <= 0xdbff) cut -= 1;
+    return s.slice(0, cut) + '…';
   };
   const line = (r) => {
     const cells = Array.isArray(r) ? r : [r];

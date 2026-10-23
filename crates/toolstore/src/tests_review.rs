@@ -25,6 +25,9 @@ struct Store {
     ledger: Mutex<Vec<LedgerEvent>>,
     /// When set, `tool_health_set` fails (to test write ordering).
     fail_set: AtomicBool,
+    /// When set, the next `tool_health_set` first turns this file into a directory, so a
+    /// rollback that writes the file back fails too (a fault injected after the archive move).
+    block_path: Mutex<Option<PathBuf>>,
 }
 
 impl Store {
@@ -103,6 +106,10 @@ impl MemoryStore for Store {
             .collect())
     }
     async fn tool_health_set(&self, h: ToolHealth) -> Result<()> {
+        if let Some(p) = self.block_path.lock().unwrap().take() {
+            fs::remove_file(&p).unwrap();
+            fs::create_dir(&p).unwrap();
+        }
         if self.fail_set.load(Ordering::SeqCst) {
             return Err(MemoryError::Invalid(
                 "tool_health_set refused (test)".into(),
@@ -753,6 +760,53 @@ fn read_table_caps_rows_columns_and_cells() {
     assert_eq!(out["rows"][0], serde_json::json!(vec!["xxx"; 20]));
 }
 
+/// A one-row table whose only cell is `.0`.
+struct OneCell(String);
+impl PageHost for OneCell {
+    fn find(&self, q: &str) -> std::result::Result<String, String> {
+        Err(format!("find({q:?}): no match"))
+    }
+    fn find_all(&self, _: &str) -> Vec<String> {
+        vec![]
+    }
+    fn text(&self, _: Option<&str>) -> String {
+        String::new()
+    }
+    fn table(&self, id: &str) -> serde_json::Value {
+        if id != "0" {
+            return serde_json::Value::Null;
+        }
+        serde_json::json!({"header": ["c"], "rows": [[self.0]]})
+    }
+    fn url(&self) -> String {
+        "https://example.org/t".into()
+    }
+    fn title(&self) -> String {
+        "t".into()
+    }
+}
+
+/// Review-T-11 should-fix 2: the 200-unit cell cut landed between the halves of U+1F600,
+/// and the lone surrogate made the whole read a `BadReturn`.
+#[test]
+fn read_table_cell_cut_keeps_surrogate_pairs_whole() {
+    let tool = read_table();
+    let cell = |host: OneCell| {
+        let out = run_reader(&tool, &host, &serde_json::json!({}), None).unwrap();
+        assert_eq!(out["truncated"], true);
+        out["rows"][0][0].as_str().unwrap().to_string()
+    };
+    // The pair sits at UTF-16 units 198..200: cutting at 199 would split it, so it goes.
+    let split = format!("{}\u{1F600}tail{}", "a".repeat(198), "b".repeat(50));
+    assert_eq!(cell(OneCell(split)), format!("{}…", "a".repeat(198)));
+    // The pair sits at units 197..199: it fits whole and stays.
+    let whole = format!("{}\u{1F600}tail{}", "a".repeat(197), "b".repeat(50));
+    assert_eq!(
+        cell(OneCell(whole)),
+        format!("{}\u{1F600}…", "a".repeat(197))
+    );
+}
+
 // ---------------------------------------------------------------- should-fix: write order
 
 #[tokio::test]
@@ -804,4 +858,41 @@ async fn reforge_rolls_back_when_the_row_cannot_be_written() {
         .is_none());
     assert_eq!(store.ledger_len(), 0);
     assert_eq!(store.row("luma.com", "register").unwrap().version, 1);
+}
+
+/// Review-T-11 should-fix 3: when the row write fails and putting the old file back fails
+/// too, the archived copy is the only one left. It must stay, and the error must name both
+/// failures and where the old version is.
+#[tokio::test]
+async fn reforge_keeps_the_archive_when_the_rollback_fails() {
+    let (dir, ts) = luma();
+    let store = Store::default();
+    store.put(row(ToolStatus::NeedsRepair, 1));
+    store.fail_set.store(true, Ordering::SeqCst);
+    let path = ts.tool_path("luma.com", "register");
+    *store.block_path.lock().unwrap() = Some(path.clone());
+    let new = REGISTER.replace(
+        "const btn",
+        "const x = 1;
+  const btn",
+    );
+    let r = ts
+        .reforge(&store, "luma.com", "register", &new, Utc::now())
+        .await;
+    let msg = match r {
+        Err(StoreError::Io(e)) => e.to_string(),
+        r => panic!("{r:?}"),
+    };
+    assert!(msg.contains("tool_health_set refused (test)"), "{msg}");
+    assert!(
+        msg.contains("restoring luma.com/register.js failed"),
+        "{msg}"
+    );
+    assert!(msg.contains("_archive/luma.com/register.1.js"), "{msg}");
+    assert!(path.is_dir(), "the injected fault is still in place");
+    let archived = ts.archive_path("luma.com", "register", 1);
+    assert_eq!(fs::read_to_string(&archived).unwrap(), REGISTER);
+    assert_eq!(store.ledger_len(), 0);
+    assert_eq!(store.row("luma.com", "register").unwrap().version, 1);
+    drop(dir);
 }

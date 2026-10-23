@@ -360,8 +360,9 @@ impl ToolStore {
     /// (until [`ToolStore::confirm`], D-310).
     ///
     /// Order: archive the old file, write the new one, persist the row, then the ledger. A
-    /// failure after the archive move puts the old file back and removes the archived copy,
-    /// so the file and the row never disagree.
+    /// failure after the archive move puts the old file back and then removes the archived
+    /// copy, so the file and the row never disagree. If putting it back fails as well, the
+    /// archived copy is kept (it is the only one left) and the error names both failures.
     pub async fn reforge(
         &self,
         store: &dyn MemoryStore,
@@ -386,17 +387,36 @@ impl ToolStore {
         let mut h = self.row(store, domain, name).await?;
         let held = h.status == ToolStatus::Ask;
         let archived = self.archive(domain, name, h.version)?;
-        let undo = |archived: &Option<PathBuf>| {
-            // Best effort: the old content is in memory, so restoring does not depend on
-            // the archived copy being readable.
-            let _ = fs::write(&path, &old);
-            if let Some(a) = archived {
-                let _ = fs::remove_file(a);
+        // Puts the old file back after `cause`. The old content is in memory, so restoring
+        // does not depend on the archived copy being readable. The archived copy is removed
+        // only once the restore succeeded: if the restore fails too, it is the only copy of
+        // the tool, so it stays and the error names both failures and where it is.
+        let undo = |archived: &Option<PathBuf>, cause: StoreError| -> StoreError {
+            match fs::write(&path, &old) {
+                Ok(()) => {
+                    if let Some(a) = archived {
+                        // A leftover copy in the archive is harmless; the sweep deletes it.
+                        let _ = fs::remove_file(a);
+                    }
+                    cause
+                }
+                Err(restore) => {
+                    let kept = archived
+                        .as_ref()
+                        .map(|a| self.rel(a))
+                        .unwrap_or_else(|| "nowhere".into());
+                    StoreError::Io(std::io::Error::new(
+                        restore.kind(),
+                        format!(
+                            "reforge {domain}/{name} failed ({cause}) and restoring {} failed                              too ({restore}); the old version is kept at {kept}",
+                            self.rel(&path)
+                        ),
+                    ))
+                }
             }
         };
         if let Err(e) = fs::write(&path, new_src) {
-            undo(&archived);
-            return Err(e.into());
+            return Err(undo(&archived, e.into()));
         }
         bump(&mut h);
         let why = if ng > og {
@@ -412,8 +432,7 @@ impl ToolStore {
         };
         h.why = Some(why.clone());
         if let Err(e) = store.tool_health_set(h.clone()).await {
-            undo(&archived);
-            return Err(e.into());
+            return Err(undo(&archived, e.into()));
         }
         let summary = format!("re-forged {domain}/{name} to version {}", h.version);
         let cons =
