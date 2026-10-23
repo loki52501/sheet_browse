@@ -14,6 +14,16 @@
 # proposals item:         reflect writes forge proposals, _generic merges, pinned-tool retirements
 
 blockers:
+  - id: B-430
+    task: T-19
+    question: "D-402 takes Pay only from card/IBAN fields in the form. A checkout with a saved card (button 'Place order', 'Pay now', 'Confirm order', 'Buy now', no card field) classifies as Submit and runs under the lenient gate without an ask. Should button text raise to Pay as H-1's table ('checkout, confirm order') suggests?"
+    default_taken: "No (D-402 followed exactly). Proposal: raise to Pay when the submit button name says pay/place order/confirm order/buy now/complete purchase/checkout; it only raises, never lowers."
+    needs_user: false
+  - id: B-431
+    task: T-19
+    question: "A SUBMIT/submitish row with no form id (SPA forms built without <form>) gets no form context, so card, password and heading evidence elsewhere on the page is not used. Should injected.js assign a pseudo form id to such groups, or should sb-act use the same frame's formless rows as context?"
+    default_taken: "Button-only context (D-433). Preferred fix is in injected.js: give formless field groups a synthetic form id so sheets, fingerprints and sb-act agree."
+    needs_user: false
 
 interface_changes:
 
