@@ -31,5 +31,15 @@ interface_changes:
     interface: I-10
     change: "sb_act adds pub const MAX_WAIT: Duration (30 s): w(n) longer than this is clamped (D-431). No I-10 signature changed."
     why: "Draft-tier addition recorded so consumers (sb-driver, toolforge) see it; sb-driver's settle cap for w() should read it."
+  - id: B-410
+    from: page/js-coder
+    interface: I-11
+    change: "New in-page API for sb-media (B-9), next to __sb: injected/media.js installs globalThis.__sbMedia {list, cues, frames, frame} in world sb (shapes in its header and D-420). Video ids are __sb ids."
+    why: "B-9's in-page seek + canvas path and video.list facts need a page API that I-11 does not name; sb-media (an I-9 consumer) calls it."
+  - id: B-411
+    from: page/js-coder
+    interface: I-11
+    change: "Additive details, no rename: act(id) returns a Promise; walk also accepts walk(true) and {dirty: [ids]}; frames() entries carry extra fields (challenge, and id/name on child entries with frame:null); text() emits an iframe placeholder block (kind other, elem = iframe row); index() omits State fields equal to State::default() (D-421)."
+    why: "Recorded so sb-driver codes against what the page really returns."
 
 proposals:
