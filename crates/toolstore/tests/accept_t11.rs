@@ -1494,3 +1494,588 @@ async fn t7_ask_held_until_confirm() {
 
     assert!(left.is_empty(), "ask left without confirm(): {left:?}");
 }
+
+// ================================================================ re-run additions (tester-2)
+//
+// D-310 path safety, the git pathspec escape (review-T-11-core blocking 1 and 2) and the D-308
+// runner budget and output cap. These went in scope once 4a61935 and f67a09f landed.
+
+/// Domains that are not one safe folder under the tools root.
+const HOSTILE_DOMAINS: &[&str] = &[
+    "",
+    ".",
+    "..",
+    "../outside",
+    "..\\outside",
+    "luma.com/../../outside",
+    "luma.com\\..\\..\\outside",
+    "/etc",
+    "C:\\Windows",
+    "c:",
+    "c:outside",
+    "\\\\evil\\share",
+    "//evil/share",
+    "_archive",
+    ".git",
+    ":/",
+    ":(top)",
+    "luma.com:x",
+    "con",
+    "LUMA.com/..",
+];
+
+/// Tool names that are not one safe file name.
+const HOSTILE_NAMES: &[&str] = &[
+    "",
+    ".",
+    "..",
+    "../../escape",
+    "..\\..\\escape",
+    "a/b",
+    "a\\b",
+    "/escape",
+    "C:\\escape",
+    "x:y",
+    ":/escape",
+    "register.js",
+    "con",
+    "../luma.com/register",
+    "../../outside/register",
+];
+
+/// Bait files where a hostile id would land if it were joined under the root.
+fn plant_bait(dir: &Path) {
+    fs::write(dir.join("escape.js"), "bait").unwrap();
+    fs::create_dir_all(dir.join("outside")).unwrap();
+    fs::write(dir.join("outside/register.js"), "bait").unwrap();
+}
+
+fn sorted_tree(dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut t = tree(dir);
+    t.sort();
+    t
+}
+
+/// Only plain components below `root`.
+fn strictly_under(p: &Path, root: &Path) -> bool {
+    p.strip_prefix(root).is_ok_and(|rel| {
+        rel.components().count() > 0
+            && rel
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+    })
+}
+
+/// D-310: record, reforge and every other mutator refuse a domain or name that is not a single
+/// safe path component, with StoreError::BadPath, and touch neither the disk nor the store.
+#[tokio::test]
+async fn d310_hostile_domain_or_name_refused_by_record_and_reforge() {
+    let (dir, ts) = sandbox();
+    let store = FakeStore::default();
+    plant_bait(dir.path());
+    let before = sorted_tree(dir.path());
+    let good_src = read(&ts.tool_path("luma.com", "register"));
+    let mut pairs: Vec<(&str, &str)> = HOSTILE_DOMAINS.iter().map(|d| (*d, "register")).collect();
+    pairs.extend(HOSTILE_NAMES.iter().map(|n| ("luma.com", *n)));
+    let bad =
+        |r: &std::result::Result<ToolHealth, StoreError>| matches!(r, Err(StoreError::BadPath(_)));
+    for (d, n) in pairs {
+        for outcome in [
+            RunOutcome::Ok,
+            RunOutcome::Relocated {
+                fingerprint: vec![],
+            },
+            fp_miss(),
+        ] {
+            let r = ts
+                .record(
+                    &store,
+                    ToolRunResult {
+                        domain: d.into(),
+                        name: n.into(),
+                        outcome: outcome.clone(),
+                        at: Utc::now(),
+                    },
+                )
+                .await;
+            assert!(bad(&r), "record({d:?}, {n:?}, {outcome:?}) = {r:?}");
+        }
+        let r = ts.reforge(&store, d, n, &good_src, Utc::now()).await;
+        assert!(bad(&r), "reforge({d:?}, {n:?}) = {r:?}");
+        let r = ts.register_forged(&store, d, n).await;
+        assert!(bad(&r), "register_forged({d:?}, {n:?}) = {r:?}");
+        let r = ts.confirm(&store, d, n).await;
+        assert!(bad(&r), "confirm({d:?}, {n:?}) = {r:?}");
+        let r = ts.set_pinned(&store, d, n, true).await;
+        assert!(bad(&r), "set_pinned({d:?}, {n:?}) = {r:?}");
+        let r = ts
+            .log_invariant(&store, d, n, &StoreError::Invariant("x".into()))
+            .await;
+        assert!(
+            matches!(r, Err(StoreError::BadPath(_))),
+            "log_invariant({d:?}, {n:?}) = {r:?}"
+        );
+        let r = ts.archive(d, n, 1);
+        assert!(
+            matches!(r, Err(StoreError::BadPath(_))),
+            "archive({d:?}, {n:?}) = {r:?}"
+        );
+        assert!(
+            matches!(ts.try_tool_path(d, n), Err(StoreError::BadPath(_))),
+            "try_tool_path({d:?}, {n:?})"
+        );
+        assert!(
+            matches!(ts.try_archive_path(d, n, 1), Err(StoreError::BadPath(_))),
+            "try_archive_path({d:?}, {n:?})"
+        );
+        assert_eq!(
+            ts.tool_path(d, n),
+            PathBuf::new(),
+            "tool_path({d:?}, {n:?})"
+        );
+        assert_eq!(
+            ts.archive_path(d, n, 1),
+            PathBuf::new(),
+            "archive_path({d:?}, {n:?})"
+        );
+    }
+    assert_eq!(sorted_tree(dir.path()), before, "files changed");
+    assert!(store.health.lock().unwrap().is_empty(), "rows written");
+    assert!(store.events().is_empty(), "ledger written");
+}
+
+/// D-310: sweep never acts on a row whose name is not a safe file name (a poisoned row in
+/// the store), never visits a domain that is not a folder under the root, and still does its
+/// normal work for the good rows next to them.
+#[tokio::test]
+async fn d310_sweep_never_acts_on_a_hostile_row() {
+    let (dir, ts) = sandbox();
+    let store = FakeStore::default();
+    let now = Utc::now();
+    plant_bait(dir.path());
+    let register_src = read(&ts.tool_path("luma.com", "register"));
+    // The good row: a stale ephemeral, which sweep retires.
+    ts.register_forged(&store, "luma.com", "list_events")
+        .await
+        .unwrap();
+    ts.record(
+        &store,
+        res("list_events", RunOutcome::Ok, now - Duration::days(15)),
+    )
+    .await
+    .unwrap();
+    let raw = |domain: &str, name: &str, status: ToolStatus| ToolHealth {
+        domain: domain.into(),
+        name: name.into(),
+        version: 1,
+        status,
+        runs: 0,
+        fails: 7,
+        last_ok: Some(now - Duration::days(100)),
+        last_fail: Some(now - Duration::days(100)),
+        why: None,
+        pinned: false,
+    };
+    let mut planted = Vec::new();
+    for n in HOSTILE_NAMES.iter().filter(|n| !n.is_empty()) {
+        // A stale ephemeral (retire + archive) and a retired row in place (archive).
+        planted.push(raw("luma.com", n, ToolStatus::Ephemeral));
+        planted.push(raw("example.com", n, ToolStatus::Retired));
+    }
+    for d in HOSTILE_DOMAINS {
+        planted.push(raw(d, "register", ToolStatus::Retired));
+        planted.push(raw(d, "escape", ToolStatus::Ephemeral));
+    }
+    for h in &planted {
+        store.tool_health_set(h.clone()).await.unwrap();
+    }
+
+    let done = ts.sweep(&store, now, &|_| 100).await;
+    let done = done.unwrap_or_else(|e| panic!("sweep failed on a hostile row: {e}"));
+    assert_eq!(done.len(), 1, "{done:?}");
+    assert!(
+        matches!(&done[0], SweepAction::Retired { name, .. } if name == "list_events"),
+        "{done:?}"
+    );
+    // Bait and the real register.js are untouched; the archive holds only list_events.
+    assert_eq!(read(&dir.path().join("escape.js")), "bait");
+    assert_eq!(read(&dir.path().join("outside/register.js")), "bait");
+    assert_eq!(read(&ts.tool_path("luma.com", "register")), register_src);
+    let archived: Vec<PathBuf> = tree(&ts.root.join(ARCHIVE))
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    assert_eq!(
+        archived,
+        vec![ts.archive_path("luma.com", "list_events", 1)],
+        "archive"
+    );
+    for (p, _) in tree(dir.path()) {
+        assert!(
+            strictly_under(&p, &ts.root)
+                || p == dir.path().join("escape.js")
+                || p == dir.path().join("outside/register.js"),
+            "unexpected file {p:?}"
+        );
+    }
+    // Hostile rows are left exactly as planted; one ledger event, for list_events.
+    for h in &planted {
+        assert_eq!(
+            store.row(&h.domain, &h.name).as_ref(),
+            Some(h),
+            "row changed"
+        );
+    }
+    let ev = store.events();
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].args["name"], "list_events");
+}
+
+/// D-310: folder_for of a hostile host is "" or one safe folder name; nothing built from it
+/// (tool_path, archive_path, load) points outside the root, even with a bait folder next to
+/// the root and a `_site.yaml` whose aliases try to escape.
+#[test]
+fn d310_folder_for_hostile_host_never_leaves_root() {
+    let (dir, ts) = sandbox();
+    let root = ts.root.clone();
+    let bait = dir.path().join("evil.com");
+    fs::create_dir_all(&bait).unwrap();
+    fs::copy(
+        manifest().join("tests/fixtures/tools/example.com/probe.js"),
+        bait.join("probe.js"),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("aliasbait.com")).unwrap();
+    fs::write(
+        root.join("aliasbait.com").join(SITE_FILE),
+        "aliases: [\"../evil.com\", \"..\", \"c:\", \"/etc\", \"\\\\\\\\evil\\\\share\"]\n",
+    )
+    .unwrap();
+    let hosts = [
+        "",
+        ".",
+        "..",
+        "../..",
+        "../evil.com",
+        "..\\evil.com",
+        "../../etc",
+        "/etc/passwd",
+        "C:\\Windows\\System32",
+        "C:",
+        "c:/windows",
+        "c:evil.com",
+        "\\\\evil\\share",
+        "//evil/share",
+        "file:///etc/passwd",
+        "file://../evil.com",
+        "http://../evil.com/x",
+        "https://user@../evil.com",
+        "luma.com\\..\\..\\evil.com",
+        "evil.com\\..\\..",
+        "_archive",
+        "_ARCHIVE",
+        ".git",
+        "%2e%2e",
+        "%2e%2e%2fevil.com",
+        "..%2fevil.com",
+        "[::1]",
+        "a:b",
+        "con",
+        "aux.com",
+        "\u{fc}n\u{ef}code.com",
+        "x\u{0}y",
+        " .. ",
+        "tools/../../evil.com",
+        "../tools/luma.com",
+        ":/",
+        ":(top)evil.com",
+    ];
+    for h in hosts {
+        let f = ts.folder_for(h);
+        assert!(f.is_empty() || valid_domain(&f), "{h:?} -> {f:?}");
+        assert!(
+            !f.contains(['/', '\\', ':', '\0'])
+                && f != "."
+                && f != ".."
+                && !f.starts_with('.')
+                && f != ARCHIVE,
+            "{h:?} -> {f:?}"
+        );
+        if !f.is_empty() {
+            assert_eq!(
+                root.join(&f).parent(),
+                Some(root.as_path()),
+                "{h:?} -> {f:?}"
+            );
+        }
+        let tp = ts.tool_path(&f, "x");
+        assert!(
+            tp.as_os_str().is_empty() || strictly_under(&tp, &root),
+            "{h:?} -> {f:?} -> {tp:?}"
+        );
+        let ap = ts.archive_path(&f, "x", 1);
+        assert!(
+            ap.as_os_str().is_empty() || strictly_under(&ap, &root),
+            "{h:?} -> {f:?} -> {ap:?}"
+        );
+        for t in ts.load(h, "/").unwrap() {
+            assert!(strictly_under(&t.path, &root), "{h:?} loaded {:?}", t.path);
+        }
+    }
+    // Normal hosts still map.
+    assert_eq!(ts.folder_for("https://luma.com/x"), "luma.com");
+    assert_eq!(ts.folder_for("LUMA.com"), "luma.com");
+    assert_eq!(ts.folder_for("_generic"), GENERIC);
+}
+
+fn git_out(repo: &Path, args: &[&str]) -> String {
+    let o = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("git must be installed for this test (it is not skipped)");
+    assert!(
+        o.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+/// D-310: git_commit with pathspec magic (`:/`, `:(top)`, `:(glob)`, `:!`), globs, `..`
+/// and absolute paths outside the root commits nothing outside tools/, including files that
+/// are modified, untracked or already staged at the repo root.
+#[test]
+fn d310_git_commit_pathspec_magic_commits_nothing_outside_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git_out(repo, &["init", "-q"]);
+    git_out(repo, &["config", "user.email", "t@example.invalid"]);
+    git_out(repo, &["config", "user.name", "toolstore tester"]);
+    git_out(repo, &["config", "commit.gpgsign", "false"]);
+    git_out(repo, &["config", "core.autocrlf", "false"]);
+    let root = repo.join("tools");
+    copy_dir(&manifest().join("tests/fixtures/tools"), &root);
+    fs::write(repo.join("README.md"), "v1\n").unwrap();
+    git_out(repo, &["add", "-A"]);
+    git_out(repo, &["commit", "-q", "-m", "base"]);
+    let base = git_out(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+    // Outside changes in every state, and one change inside tools/.
+    fs::write(repo.join("README.md"), "v2 outside\n").unwrap();
+    fs::write(repo.join("secret.txt"), "untracked outside\n").unwrap();
+    fs::write(repo.join("staged.txt"), "staged outside\n").unwrap();
+    git_out(repo, &["add", "staged.txt"]);
+    let reg = root.join("luma.com/register.js");
+    let reg_src = read(&reg);
+    fs::write(&reg, format!("{reg_src}// edit 1\n")).unwrap();
+
+    let ts = ToolStore::new(&root);
+    let hostile: Vec<Vec<PathBuf>> = vec![
+        vec![":/".into()],
+        vec![":/README.md".into()],
+        vec![":/secret.txt".into()],
+        vec![":(top)README.md".into()],
+        vec![":(top)".into()],
+        vec![":(glob)**".into()],
+        vec![":(top,glob)*".into()],
+        vec![":(top,icase)readme.md".into()],
+        vec![":!luma.com".into()],
+        vec![":^luma.com".into()],
+        vec!["*".into()],
+        vec!["**".into()],
+        vec!["../README.md".into()],
+        vec!["../*".into()],
+        vec!["luma.com/../../secret.txt".into()],
+        vec![repo.join("README.md")],
+        vec![repo.join("staged.txt")],
+        vec![root.join("../secret.txt")],
+        vec![root.join("..")],
+        vec![repo.to_path_buf()],
+        vec![reg.clone(), ":/".into()],
+        vec![reg.clone(), "../README.md".into()],
+        vec![reg.clone(), repo.join("secret.txt")],
+    ];
+    let mut oks = Vec::new();
+    for paths in &hostile {
+        let r = ts.git_commit(paths, "tools: pathspec probe (T-11)");
+        if r.is_ok() {
+            oks.push(paths.clone());
+        }
+        let changed = git_out(repo, &["diff", "--name-only", &base, "HEAD"]);
+        let outside: Vec<&str> = changed
+            .lines()
+            .filter(|l| !l.starts_with("tools/"))
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "{paths:?} -> {r:?} committed {outside:?}"
+        );
+    }
+    // Every hostile list is refused; nothing was committed at all.
+    assert!(oks.is_empty(), "accepted: {oks:?}");
+    assert_eq!(git_out(repo, &["rev-parse", "HEAD"]).trim(), base);
+    let status = git_out(repo, &["status", "--porcelain"]);
+    assert!(status.contains(" M README.md"), "{status}");
+    assert!(status.contains("?? secret.txt"), "{status}");
+    assert!(status.contains("A  staged.txt"), "{status}");
+
+    // Control: the same setup commits a tools path, and only that path.
+    ts.git_commit(std::slice::from_ref(&reg), "tools: edit (T-11)")
+        .unwrap();
+    let files = git_out(repo, &["show", "--name-only", "--format=", "HEAD"]);
+    assert_eq!(files.trim(), "tools/luma.com/register.js");
+    let status = git_out(repo, &["status", "--porcelain"]);
+    assert!(status.contains(" M README.md"), "{status}");
+    assert!(status.contains("?? secret.txt"), "{status}");
+    assert!(status.contains("A  staged.txt"), "{status}");
+}
+
+// ---------------------------------------------------------------- D-308 runner budget and cap
+
+fn mem_tool(src: &str) -> Tool {
+    let header = parse_header(src).unwrap();
+    Tool {
+        domain: "example.com".into(),
+        namespaced: format!("example.{}", header.name),
+        path: PathBuf::from("example.com/mem.js"),
+        header,
+        source: src.into(),
+    }
+}
+
+/// A host whose api call ignores its budget and comes back `extra` after it ran out.
+struct SlowApi {
+    budgets: Mutex<Vec<std::time::Duration>>,
+    extra: std::time::Duration,
+}
+
+impl ApiFetch for SlowApi {
+    fn api(
+        &self,
+        _url: &str,
+        remaining: std::time::Duration,
+    ) -> std::result::Result<Value, String> {
+        self.budgets.lock().unwrap().push(remaining);
+        // Test fake for a slow network host: overrunning `remaining` is the point, so there
+        // is no condition to wait on.
+        std::thread::sleep(remaining + self.extra);
+        Ok(json!({"jobs": []}))
+    }
+}
+
+const SLOW_CAUGHT: &str = "// @name slow_caught
+// @kind reader
+// @match /*
+// @gate Read
+// @phase 1
+export default function (page) {
+  let first = 'none';
+  let second = 'none';
+  try { page.api('https://api.example.com/a'); first = 'ok'; } catch (e) { first = 'caught'; }
+  try { page.api('https://api.example.com/b'); second = 'ok'; } catch (e) { second = 'caught'; }
+  return { first, second };
+}
+";
+
+const SLOW_UNCAUGHT: &str = "// @name slow_uncaught
+// @kind reader
+// @match /*
+// @gate Read
+// @phase 1
+export default function (page) {
+  return page.api('https://api.example.com/a');
+}
+";
+
+/// D-308: an ApiFetch slower than its `remaining` budget makes the run RunError::Timeout,
+/// whether or not the tool catches it, and a spent budget never reaches the host again.
+#[test]
+fn d308_api_slower_than_remaining_is_timeout() {
+    let timeout = std::time::Duration::from_millis(300);
+    let opts = RunOpts {
+        timeout,
+        ..RunOpts::default()
+    };
+    let page = page_at("https://jobs.example.com/acme");
+    for src in [SLOW_CAUGHT, SLOW_UNCAUGHT] {
+        let t = mem_tool(src);
+        let api = SlowApi {
+            budgets: Mutex::new(vec![]),
+            extra: std::time::Duration::from_millis(100),
+        };
+        let r = run_reader_with(&t, &page, &json!({}), Some(&api), &opts);
+        assert_eq!(r, Err(RunError::Timeout(timeout)), "{}", t.header.name);
+        let budgets = api.budgets.lock().unwrap().clone();
+        assert_eq!(
+            budgets.len(),
+            1,
+            "{}: host calls {budgets:?}",
+            t.header.name
+        );
+        assert!(
+            !budgets[0].is_zero() && budgets[0] <= timeout,
+            "{}: remaining {:?}",
+            t.header.name,
+            budgets[0]
+        );
+    }
+    // Control: a host that answers at once, same caps, same tool.
+    let fast = Api {
+        body: json!({"jobs": []}),
+        seen: Mutex::new(vec![]),
+    };
+    let r = run_reader_with(
+        &mem_tool(SLOW_CAUGHT),
+        &page,
+        &json!({}),
+        Some(&fast),
+        &opts,
+    );
+    assert_eq!(r, Ok(json!({"first": "ok", "second": "ok"})));
+    assert_eq!(fast.seen.lock().unwrap().len(), 2);
+}
+
+fn big_reader(n: usize) -> Tool {
+    mem_tool(&format!(
+        "// @name big\n// @kind reader\n// @match /*\n// @gate Read\n// @phase 2\nexport default function () {{\n  return {{ s: 'x'.repeat({n}) }};\n}}\n"
+    ))
+}
+
+/// D-308: reader output over RunOpts::max_output is RunError::OutputTooLarge (custom and
+/// default caps); output under the cap is returned. A planner's program text is capped too.
+#[test]
+fn d308_reader_output_over_max_output_is_output_too_large() {
+    let page = page_at("https://example.com/");
+    let small = RunOpts {
+        max_output: 1024,
+        ..RunOpts::default()
+    };
+    let r = run_reader_with(&big_reader(2000), &page, &json!({}), None, &small);
+    match r {
+        Err(RunError::OutputTooLarge { max, got }) => {
+            assert_eq!(max, 1024);
+            assert!(got >= 2000, "got {got}");
+        }
+        other => panic!("2000 chars under a 1024 byte cap: {other:?}"),
+    }
+    let r = run_reader_with(&big_reader(900), &page, &json!({}), None, &small).unwrap();
+    assert_eq!(r["s"].as_str().map(str::len), Some(900));
+
+    assert_eq!(RunOpts::default().max_output, 64 * 1024);
+    let r = run_reader(&big_reader(70_000), &page, &json!({}), None);
+    assert!(
+        matches!(r, Err(RunError::OutputTooLarge { max: 65536, got }) if got >= 70_000),
+        "{r:?}"
+    );
+
+    let planner = mem_tool(
+        "// @name big_plan\n// @kind planner\n// @match /*\n// @gate Fill\nexport default function () {\n  return 'c#1; '.repeat(400) + '?s';\n}\n",
+    );
+    let r = run_planner_with(&planner, &page, &json!({}), &small);
+    assert!(
+        matches!(r, Err(RunError::OutputTooLarge { max: 1024, got }) if got > 1024),
+        "{r:?}"
+    );
+}
