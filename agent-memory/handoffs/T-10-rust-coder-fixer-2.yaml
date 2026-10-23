@@ -1,0 +1,18 @@
+from: rust-coder-fixer
+to: next
+task: T-10
+date: "2026-10-23"
+state: "Review/audit round 2 fixed in crates/sb-sheet (commit 4220e1b), then main merged into swarm/sheet (no conflicts). find: synonyms of one typed n-gram are alternatives (max per group, D-217), respellings (e mail/email) weigh 1.0, idf computed once per term per part and field (no quadratic phrase df). skeleton: content hint uses only a frame-0 main. sheet: region lookup and the no-region list skip sealed frames. reader: spans into sealed frames render the outermost host link form or nothing, password values scrubbed in all escaped spellings and before escaping, code splits at line breaks keeping indentation, chunk_tokens*4 saturates (D-218). fmt, clippy --all-targets -D warnings, cargo test -p sb-sheet (lib 57, acceptance_t10 16, others green) and cargo build --workspace clean."
+not_done: "Tester to rerun the acceptance ladder and rewrite bench/results/accept-T-10.md (still says red, stale since dd00fd6; fixer may not edit it). Reviewer to re-check D-217 scoring against register.html."
+gotchas:
+  - "Writes outside the worktree (scratchpad) are blocked by the guard hook; heredocs through Bash may eat backslashes, so check YAML with python yaml.safe_load after appending."
+  - "D-217 changes find scores: typed `e-mail` now finds `Email` strongly (respelling weight 1.0)."
+decisions_made: [D-217, D-218]
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/src/find.rs
+  - crates/sb-sheet/src/reader.rs
+  - crates/sb-sheet/src/sheet.rs
+  - crates/sb-sheet/src/skeleton.rs
+  - agent-memory/decisions.yaml
+verify: "cargo test -p sb-sheet --no-fail-fast"
