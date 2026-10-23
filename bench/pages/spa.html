@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  bench/pages/spa.html: settle() fixture for docs/05 B-4 #8 and acceptance 5. The body is
+  empty at load; 400 ms after the load event the app renders a heading, a search form and a
+  paragraph, then fades in (a 250 ms CSS animation on the changed node). settle() called right
+  after load must resolve after the render and the fade, with a non-empty index, inside the
+  3 s cap. No network.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dashboard · SPA fixture</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 0; padding: 24px; }
+  .in { animation: fade 250ms ease-out; }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+  window.addEventListener("load", () => {
+    setTimeout(() => {
+      const app = document.getElementById("app");
+      app.innerHTML =
+        "<h1>Dashboard</h1>" +
+        "<form action=\"/search\"><label for=\"q\">Search projects</label> <input id=\"q\" name=\"q\">" +
+        " <button type=\"submit\">Search</button></form>" +
+        "<p>Welcome back. You have 3 open projects.</p>";
+      app.classList.add("in");
+    }, 400);
+  });
+</script>
+</body>
+</html>

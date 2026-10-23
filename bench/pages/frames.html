@@ -1,0 +1,39 @@
+<!doctype html>
+<!--
+  bench/pages/frames.html: frame fixture for docs/05 B-5 walk and acceptance 4.
+    #same       same-origin iframe (frame-child.html): one iframe row here; the child frame has
+                its own __sb and its own rows
+    #cross      cross-origin iframe: frames.html?xo=http://127.0.0.1:<other port> loads the child
+                from a second loopback port (same site, other origin): one OPAQUE row, never read.
+                Without ?xo it falls back to a sandboxed srcdoc frame (opaque origin).
+    .h-captcha  a fake hCaptcha widget around a cross-origin frame: ONE row, CHALLENGE + OPAQUE
+                (D-55); the child's own __sb sees "captcha" in its URL and reads nothing.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Frames · fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } iframe { width: 420px; height: 160px; border: 1px solid #ccc; display: block; margin: 12px 0; }</style>
+</head>
+<body>
+<main>
+  <h1>Frames</h1>
+  <iframe id="same" title="Same-origin child" src="frame-child.html"></iframe>
+  <iframe id="cross" title="Cross-origin child"></iframe>
+  <div class="h-captcha" data-sitekey="fixture-only"><iframe id="cap" title="hCaptcha widget"></iframe></div>
+  <button type="button">After the frames</button>
+</main>
+<script>
+  const xo = new URLSearchParams(location.search).get("xo");
+  const cross = document.getElementById("cross");
+  const cap = document.getElementById("cap");
+  if (xo) {
+    cross.src = xo + "/frame-child.html";
+    cap.src = xo + "/frame-child.html?widget=hcaptcha";
+  } else {
+    cross.setAttribute("sandbox", "");
+    cross.srcdoc = "<p>opaque child</p>";
+    cap.setAttribute("sandbox", "");
+    cap.srcdoc = "<p>I am not a robot</p>";
+  }
+</script>
+</body>
+</html>

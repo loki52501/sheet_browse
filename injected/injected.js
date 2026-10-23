@@ -1,20 +1,21 @@
 // injected.js: I-11 in-page API on globalThis.__sb, installed in isolated world "sb" in every
-// frame (docs/05 B-4 #3, B-5). STUB from wave 0: the function names and return shapes are the
-// contract with sb-driver; bodies are area page's (T-19).
+// frame (docs/05 B-4 #3, #4, #6, #8, B-5). Plain ES2020, no dependencies, no bundler.
 //
 // Return shapes (JSON):
 //   walk({base, dirty}) -> {count}      ids start at `base` (sb-driver passes one per document
-//                                       generation), so an id is never reused in a tab frame
+//                                       generation), so an id is never reused in a tab frame.
+//                                       dirty: true re-walks only the MutationObserver dirty set.
 //   index()            -> IndexRow[]   exactly the serde shape of sb_sheet::IndexRow (I-5, D-37);
 //                                      see crates/sb-sheet/src/index.rs test `index_row_wire_shape`.
 //                                      JS emits frame 0 and frame-local ids; sb-driver rewrites
 //                                      frame, ElemRefs and child_frame when it merges frames.
 //   text(region)       -> TextBlock[]  sb_sheet::TextBlock, frame-local `order`
 //   resolve(id)        -> element | {why: "gone" | "stale"}  ("stale": id below this document's base)
-//   act(id)            -> {x, y} | {why}
+//   act(id)            -> Promise<{x, y} | {why}>
 //   settle(opts)       -> Promise<{settled, changed}>
 //   fingerprint(spec)  -> "match" | {partial: [missing...]} | "miss"
-//   frames()           -> [{frame, parent, url, opaque}]
+//   frames()           -> [{frame, parent, url, opaque, ...}]
+//   id(el), name(el), role(el), state(el): the single-element pieces of a row.
 // skeleton / find / sheet are NOT in-page (D-51): sb-sheet scores the shipped index in Rust.
 // Never touch window globals the site can see; never read a password value; never read
 // inside a CHALLENGE frame.
@@ -23,15 +24,1809 @@
   // addScriptToEvaluateOnNewDocument plus an evaluate into already-loaded documents can run
   // this twice in one world.
   if (globalThis.__sb) return;
-  const todo = (name) => () => {
-    throw new Error("__sb." + name + " not implemented (T-19)");
+
+  const doc = globalThis.document;
+  if (!doc) return;
+
+  // ---------------------------------------------------------------- constants
+  const NAME_CAP = 150;
+  const VALUE_CAP = 200;
+  const OPTIONS_CAP = 25;
+  const NEARBY_PX = 200;
+  const NEARBY_CAP = 80;
+  const QUIET_MS = 150;
+  const CAP_MS = 3000;
+  const DIRTY_MAX = 400;
+
+  const HIDDEN = 0;
+  const CONT = 1;
+
+  const SKIP_TAGS = new Set([
+    "script", "style", "noscript", "template", "head", "meta", "link", "title", "base",
+  ]);
+  // Elements whose children are never rows or text (replaced content, graphics).
+  const LEAF_TAGS = new Set([
+    "svg", "math", "canvas", "video", "audio", "img", "picture", "object", "embed", "input",
+    "select", "textarea", "iframe", "frame",
+  ]);
+  // Roles that make a row. A row owns its subtree unless listed in NON_OWNING.
+  const ROW_ROLES = new Set([
+    "button", "link", "checkbox", "radio", "switch", "textbox", "searchbox", "combobox",
+    "listbox", "slider", "spinbutton", "option", "menuitem", "menuitemcheckbox",
+    "menuitemradio", "tab", "treeitem", "heading", "iframe", "row",
+  ]);
+  const NAME_FROM_CONTENT = new Set([
+    "button", "link", "checkbox", "radio", "switch", "option", "menuitem", "menuitemcheckbox",
+    "menuitemradio", "tab", "treeitem", "heading", "row", "cell", "gridcell",
+  ]);
+  const FIELD_ROLES = new Set(["textbox", "searchbox", "combobox", "listbox", "slider", "spinbutton"]);
+  const CHECKABLE = new Set(["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"]);
+  const BUTTONISH = new Set(["button"]);
+  const INPUT_ROLE = {
+    button: "button", submit: "button", reset: "button", image: "button", file: "button",
+    color: "button", checkbox: "checkbox", radio: "radio", range: "slider",
+    number: "spinbutton", search: "searchbox",
   };
-  const api = {};
-  for (const name of [
-    "walk", "id", "resolve", "name", "role", "state", "index", "text", "act", "settle",
-    "fingerprint", "frames",
-  ]) {
-    api[name] = todo(name);
+  const NOVALUE_INPUT = new Set(["checkbox", "radio", "submit", "button", "reset", "image", "hidden"]);
+  const LABELABLE = new Set(["input", "select", "textarea", "button", "meter", "output", "progress"]);
+  const LANDMARK_ROLE = {
+    main: "main", navigation: "nav", banner: "header", contentinfo: "footer",
+    complementary: "aside", form: "form", search: "form", region: "region", dialog: "dialog",
+    alertdialog: "dialog",
+  };
+  const BLOCK_TAGS = new Set([
+    "address", "article", "aside", "blockquote", "body", "caption", "dd", "details", "dialog",
+    "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
+    "h4", "h5", "h6", "header", "hr", "legend", "li", "main", "nav", "ol", "p", "pre", "section",
+    "summary", "table", "tbody", "thead", "tfoot", "tr", "td", "th", "ul", "html",
+  ]);
+  const INLINE_TAGS = new Set([
+    "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "dfn", "em", "i", "kbd", "mark",
+    "q", "s", "samp", "small", "span", "strong", "sub", "sup", "time", "u", "var", "wbr", "font",
+    "label", "del", "ins",
+  ]);
+  const INTERACTIVE_SEL =
+    'a[href],button,input:not([type="hidden"]),select,textarea,iframe,summary,' +
+    '[contenteditable=""],[contenteditable="true"],[role="button"],[role="link"],' +
+    '[role="checkbox"],[role="radio"],[role="switch"],[role="textbox"],[role="searchbox"],' +
+    '[role="combobox"],[role="tab"],[role="menuitem"],[role="option"],[onclick]';
+  const VISIBLE_CONTROL_SEL = 'input:not([type="hidden"]),select,button,a[href]';
+
+  // D-5: challenges are reported, never solved, never read inside.
+  const CHALLENGE_URL_RE =
+    /recaptcha|hcaptcha\.com|challenges\.cloudflare\.com|\/turnstile\/|captcha/i;
+  const CHALLENGE_FRAME_RE =
+    /captcha|turnstile|challenges\.cloudflare\.com|cloudflare security challenge|verify you are human|human verification/i;
+  const CHALLENGE_BOX_RE = /captcha|turnstile/i;
+  const CHALLENGE_TEXT_RE =
+    /verify (that )?you('| a)re (a )?human|are you a robot|i'?m not a robot|human verification/i;
+  const OVERLAY_RE =
+    /cookie|consent|gdpr|modal|popup|pop-up|overlay|newsletter|subscribe|paywall|interstitial|lightbox/i;
+  const SUBMIT_WORDS_RE =
+    /^(submit|send|sign ?up|register|create (an |my |your )?account|join|log ?in|sign ?in|continue|next|save|confirm|apply|subscribe|place (your )?order|pay|buy|check ?out|book|reserve|post|publish|finish|done)\b/i;
+  const SENSITIVE_AC_RE =
+    /\b(cc-number|cc-csc|cc-exp|cc-exp-month|cc-exp-year|one-time-code|current-password|new-password)\b/;
+  const SENSITIVE_NAME_RE =
+    /pass(word|wd|code)?|pwd|secret|token|otp|cvc|cvv|csc|ssn|iban|card.?(num|no)|security.?code|\bpin\b/i;
+
+  // In-page copy of the D-49 alias table (sb-sheet data/roles.txt), used only by fingerprint().
+  // Keep it in step with data/roles.txt.
+  const ALIASES = {
+    input: ["textbox", "searchbox", "spinbutton"],
+    textbox: ["textbox", "searchbox"],
+    textarea: ["textbox"],
+    field: ["textbox", "searchbox", "combobox", "listbox", "spinbutton", "slider", "checkbox", "radio", "switch"],
+    search: ["searchbox", "textbox"],
+    select: ["combobox", "listbox"],
+    dropdown: ["combobox", "listbox"],
+    combobox: ["combobox"],
+    checkbox: ["checkbox", "switch", "menuitemcheckbox"],
+    check: ["checkbox", "switch"],
+    radio: ["radio", "menuitemradio"],
+    switch: ["switch", "checkbox"],
+    toggle: ["switch", "checkbox"],
+    button: ["button"],
+    btn: ["button"],
+    link: ["link"],
+    a: ["link"],
+    iframe: ["iframe"],
+    frame: ["iframe"],
+    heading: ["heading"],
+    h: ["heading"],
+    tab: ["tab"],
+    option: ["option"],
+    menuitem: ["menuitem", "menuitemcheckbox", "menuitemradio"],
+    slider: ["slider"],
+    dialog: ["dialog", "alertdialog"],
+    region: ["region"],
+    row: ["row"],
+  };
+
+  // ---------------------------------------------------------------- frame state
+  const S = {
+    walked: false,
+    base: 1,
+    next: 1,
+    ids: new WeakMap(), // Element -> id
+    refs: new Map(), // id -> WeakRef<Element>
+    rec: new WeakMap(), // Element -> walk decision (cached between walks)
+    rows: [], // recs with a row, document order
+    fresh: [], // recs computed in the current walk (post pass)
+    consumed: new WeakSet(), // label elements / text nodes used as a name
+    forms: new WeakMap(), // form -> "fN"
+    formEls: new Map(), // "fN" -> WeakRef<form>
+    formN: 0,
+    tables: new WeakMap(),
+    tableN: 0,
+    dirty: new Set(),
+    full: false,
+    fullNow: false,
+    layout: false,
+    lm: new Map(), // per-walk landmark memo
+    labels: [], // label elements seen by the current walk
+    labelMap: null, // control -> {forL, wrapL}, built once per walk (el.labels is O(n) per call)
+    observed: new WeakSet(),
+    lastMut: 0,
+    mutCount: 0,
+    recent: [], // [t, node] of recently changed nodes, for settle's animation check
+    waiters: new Set(),
+  };
+
+  const now = () => performance.now();
+
+  // ---------------------------------------------------------------- small helpers
+  const parentOf = (n) => {
+    const p = n.parentNode;
+    return p && p.nodeType === 11 && p.host ? p.host : p;
+  };
+  // Shadow-including containment: is b inside a (or a itself)?
+  const contains = (a, b) => {
+    for (let n = b; n; n = parentOf(n)) if (n === a) return true;
+    return false;
+  };
+  const closestComposed = (el, sel) => {
+    for (let n = el; n && n.nodeType === 1; n = parentOf(n)) {
+      if (n.matches(sel)) return n;
+    }
+    return null;
+  };
+  const clean = (s, cap) => {
+    if (!s) return "";
+    let t = String(s).replace(/\s+/g, " ").trim();
+    const c = cap || NAME_CAP;
+    if (t.length > c) t = t.slice(0, c - 1).replace(/\s+\S*$/, "") + "…";
+    return t;
+  };
+  const eqi = (a, b) => a.toLowerCase() === b.toLowerCase();
+  const attr = (el, a) => {
+    const v = el.getAttribute(a);
+    return v == null ? "" : v;
+  };
+  const ariaRole = (el) => attr(el, "role").trim().toLowerCase().split(/\s+/)[0] || "";
+  const style = (el) => getComputedStyle(el);
+  const classOf = (el) => {
+    const c = el.getAttribute("class");
+    return c == null ? "" : c;
+  };
+  // jsdom has no layout: every box is 0x0 and elementFromPoint is missing.
+  const hasLayout = () => {
+    const de = doc.documentElement;
+    if (!de || typeof doc.elementFromPoint !== "function") return false;
+    const r = de.getBoundingClientRect();
+    return r.width > 0 || r.height > 0;
+  };
+  const viewport = () => {
+    const de = doc.documentElement;
+    return {
+      w: (de && de.clientWidth) || globalThis.innerWidth || 0,
+      h: (de && de.clientHeight) || globalThis.innerHeight || 0,
+    };
+  };
+
+  // ---------------------------------------------------------------- identity (B-4 #4)
+  function idOf(el) {
+    if (!el || el.nodeType !== 1) return null;
+    let id = S.ids.get(el);
+    if (id === undefined) {
+      id = S.next++;
+      S.ids.set(el, id);
+      S.refs.set(id, new WeakRef(el));
+    }
+    return id;
   }
-  Object.defineProperty(globalThis, "__sb", { value: Object.freeze(api), configurable: false });
+
+  function resolve(id) {
+    const n = typeof id === "string" ? Number(id.replace(/^#/, "").replace(/^f\d+\./, "")) : id;
+    if (!Number.isInteger(n)) return { why: "gone" };
+    if (n < S.base) return { why: "stale" };
+    const ref = S.refs.get(n);
+    const el = ref && ref.deref();
+    if (!el || !el.isConnected) return { why: "gone" };
+    return el;
+  }
+
+  function formId(f) {
+    let id = S.forms.get(f);
+    if (!id) {
+      id = "f" + ++S.formN;
+      S.forms.set(f, id);
+      S.formEls.set(id, new WeakRef(f));
+    }
+    return id;
+  }
+
+  function formOf(el) {
+    const f = el.form && el.form.nodeType === 1 ? el.form : closestComposed(el, "form");
+    return f || null;
+  }
+
+  // ---------------------------------------------------------------- challenge (D-5, D-55)
+  function challengeFrameEl(fr) {
+    return CHALLENGE_FRAME_RE.test(
+      attr(fr, "src") + " " + attr(fr, "title") + " " + attr(fr, "name") + " " + attr(fr, "aria-label"),
+    );
+  }
+  function challengeBox(el) {
+    const tag = el.localName;
+    if (tag === "iframe" || tag === "frame") return challengeFrameEl(el);
+    if (tag === "html" || tag === "body" || tag === "form" || tag === "main") return false;
+    const s = classOf(el) + " " + el.id;
+    const named = CHALLENGE_BOX_RE.test(s) || el.hasAttribute("data-sitekey") ||
+      el.hasAttribute("data-hcaptcha-widget-id");
+    if (!named) return false;
+    // A wrapper with real controls is not the widget (the controls stay rows).
+    return !el.querySelector(VISIBLE_CONTROL_SEL);
+  }
+  function inChallenge(el) {
+    for (let n = el; n && n.nodeType === 1; n = parentOf(n)) {
+      const r = S.rec.get(n);
+      if (r && r.challenge) return true;
+      if (challengeBox(n)) return true;
+    }
+    return false;
+  }
+  function selfChallenge() {
+    try {
+      if (CHALLENGE_URL_RE.test(String(globalThis.location && globalThis.location.href))) return true;
+      const fe = globalThis.frameElement;
+      if (fe && (challengeFrameEl(fe) || inChallenge(fe))) return true;
+    } catch (e) {
+      // frameElement across origins throws in some engines: not a challenge signal.
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------- role (B-5 role)
+  function clickable(el, cs) {
+    const tag = el.localName;
+    if (tag === "html" || tag === "body" || tag === "label" || tag === "option") return false;
+    const handler = el.hasAttribute("onclick") || typeof el.onclick === "function";
+    if (!handler) {
+      if (cs.cursor !== "pointer") return false;
+      const p = parentOf(el);
+      if (p && p.nodeType === 1 && style(p).cursor === "pointer") return false;
+    }
+    if (el.querySelector(INTERACTIVE_SEL)) return false;
+    if (!/\S/.test(el.textContent) && !el.querySelector("img,svg") && tag !== "img" && tag !== "svg" &&
+      !el.getAttribute("aria-label") && !el.getAttribute("title")) return false;
+    return true;
+  }
+
+  function roleOf(el, cs) {
+    const aria = ariaRole(el);
+    if (aria && aria !== "none" && aria !== "presentation" && aria !== "generic") return aria;
+    const tag = el.localName;
+    switch (tag) {
+      case "a":
+      case "area":
+        if (el.hasAttribute("href")) return "link";
+        break;
+      case "button":
+        return "button";
+      case "input": {
+        const t = String(el.type || "text").toLowerCase();
+        if (t === "hidden") return "";
+        return INPUT_ROLE[t] || "textbox";
+      }
+      case "select":
+        return el.multiple || el.size > 1 ? "listbox" : "combobox";
+      case "textarea":
+        return "textbox";
+      case "iframe":
+      case "frame":
+        return "iframe";
+      case "summary":
+        return "button";
+      case "dialog":
+        return el.open ? "dialog" : "";
+      case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
+        return "heading";
+      case "nav":
+        return "navigation";
+      case "main":
+        return "main";
+      case "aside":
+        return "complementary";
+      case "form":
+        return "form";
+      case "img":
+        if (clickable(el, cs || style(el))) return "button";
+        return "img";
+      default:
+        break;
+    }
+    const ce = attr(el, "contenteditable").toLowerCase();
+    if (el.hasAttribute("contenteditable") && (ce === "" || ce === "true" || ce === "plaintext-only")) {
+      const p = parentOf(el);
+      if (!(p && p.nodeType === 1 && p.isContentEditable)) return "textbox";
+    }
+    if (clickable(el, cs || style(el))) return tag === "tr" ? "row" : "button";
+    return "";
+  }
+
+  // A role=combobox/textbox wrapper around a real field: the field is the row, not the wrapper.
+  function wrapsField(el, role) {
+    if (role !== "combobox" && role !== "textbox" && role !== "searchbox") return false;
+    const tag = el.localName;
+    if (tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable) return false;
+    return !!el.querySelector("input:not([type=hidden]),textarea,select");
+  }
+
+  // ---------------------------------------------------------------- names (B-5 name ladder)
+  // Visible text of a subtree for names. Never reads a field's value (passwords, H-2).
+  function textOf(root, skip, cap) {
+    const out = [];
+    let len = 0;
+    const max = cap || NAME_CAP * 2;
+    const visit = (n, top) => {
+      if (len > max) return;
+      if (n.nodeType === 3) {
+        out.push(n.data);
+        len += n.data.length;
+        return;
+      }
+      if (n.nodeType !== 1 || n === skip) return;
+      const tag = n.localName;
+      if (SKIP_TAGS.has(tag)) return;
+      if (attr(n, "aria-hidden") === "true") return;
+      if (n.hidden) return;
+      if (!top) {
+        const al = attr(n, "aria-label").trim();
+        if (al) {
+          out.push(" " + al + " ");
+          len += al.length;
+          return;
+        }
+      }
+      if (tag === "img" || tag === "area") {
+        out.push(" " + attr(n, "alt") + " ");
+        return;
+      }
+      if (tag === "input" || tag === "select" || tag === "textarea") return;
+      if (tag === "svg") {
+        const t = n.querySelector("title");
+        if (t) out.push(" " + t.textContent + " ");
+        return;
+      }
+      if (tag === "br") {
+        out.push(" ");
+        return;
+      }
+      if (S.layout && !top && n.nodeType === 1) {
+        const cs = style(n);
+        if (cs.display === "none" || cs.visibility === "hidden") return;
+      }
+      const kids = n.shadowRoot ? n.shadowRoot.childNodes : n.childNodes;
+      const blk = BLOCK_TAGS.has(tag);
+      if (blk) out.push(" ");
+      for (const k of kids) visit(k, false);
+      if (blk) out.push(" ");
+    };
+    visit(root, true);
+    return clean(out.join(""), cap || NAME_CAP);
+  }
+
+  // Labels of a control: from the per-walk map, else the DOM (single-element API calls).
+  function labelsOf(el) {
+    if (S.labelMap) return S.labelMap.get(el) || null;
+    if (!el.labels || !el.labels.length) return null;
+    const all = Array.from(el.labels);
+    const forL = all.filter((l) => l.htmlFor && l.htmlFor === el.id);
+    return { forL, wrapL: all.filter((l) => !forL.includes(l)) };
+  }
+  function buildLabelMap() {
+    const m = new Map();
+    for (const l of S.labels) {
+      let c = null;
+      try {
+        c = l.control;
+      } catch (e) {
+        c = null;
+      }
+      if (!c) continue;
+      let e = m.get(c);
+      if (!e) m.set(c, (e = { forL: [], wrapL: [] }));
+      if (l.htmlFor && l.htmlFor === c.id) e.forL.push(l);
+      else e.wrapL.push(l);
+    }
+    S.labelMap = m;
+  }
+
+  function labelText(label, control) {
+    return textOf(label, control);
+  }
+
+  function ownText(el, role) {
+    const tag = el.localName;
+    if (tag === "input") {
+      const t = String(el.type).toLowerCase();
+      if (t === "submit") return clean(attr(el, "value")) || "Submit";
+      if (t === "reset") return clean(attr(el, "value")) || "Reset";
+      if (t === "button") return clean(attr(el, "value"));
+      if (t === "image") return clean(attr(el, "alt")) || clean(attr(el, "value")) || "Submit";
+      return "";
+    }
+    if (tag === "select" || tag === "textarea") return "";
+    if (role === "row") {
+      const cells = cellsOf(el);
+      return clean(cells.map((c) => textOf(c)).filter(Boolean).join(" | "), NAME_CAP * 2);
+    }
+    if (!NAME_FROM_CONTENT.has(role)) return "";
+    return textOf(el);
+  }
+
+  function wordsRight(el) {
+    let out = "";
+    let n = el.nextSibling;
+    let steps = 0;
+    const used = [];
+    while (n && steps++ < 8 && out.length < NEARBY_CAP) {
+      if (n.nodeType === 3) {
+        if (/\S/.test(n.data)) {
+          out += " " + n.data;
+          used.push(n);
+        }
+      } else if (n.nodeType === 1) {
+        const t = n.localName;
+        if (/^(input|select|textarea|button|br|div|p|li|tr|td|ul|ol|table|form|fieldset|section|h[1-6])$/.test(t)) break;
+        out += " " + textOf(n);
+        // A link inside the phrase stays its own row; its text is still emitted by text().
+        if (!(t === "a" && n.hasAttribute("href"))) used.push(n);
+      }
+      n = n.nextSibling;
+    }
+    const s = clean(out);
+    if (s) for (const u of used) S.consumed.add(u);
+    return s;
+  }
+
+  function overlayName(el) {
+    return clean(attr(el, "aria-label")) || clean(attr(el, "title")) ||
+      (() => {
+        const h = el.querySelector("h1,h2,h3,h4,[role=heading]");
+        return h ? textOf(h) : "";
+      })() || textOf(el, null, 60);
+  }
+
+  // Rungs 1..7. Nearby (rung 8) and the name attribute are applied in the post pass.
+  function ladder(el, role) {
+    let v;
+    const lb = attr(el, "aria-labelledby").trim();
+    if (lb) {
+      const root = el.getRootNode();
+      v = clean(lb.split(/\s+/).map((id) => {
+        const r = root.getElementById ? root.getElementById(id) : doc.getElementById(id);
+        if (!r) return "";
+        const t = textOf(r, el);
+        // A short non-heading referenced label is consumed like a <label> (D-412).
+        if (t.length <= NEARBY_CAP && !/^h[1-6]$/.test(r.localName) && ariaRole(r) !== "heading" && !contains(r, el)) {
+          S.consumed.add(r);
+        }
+        return t;
+      }).join(" "));
+      if (v) return v;
+    }
+    v = clean(attr(el, "aria-label"));
+    if (v) return v;
+    const tag = el.localName;
+    const lab = LABELABLE.has(tag) ? labelsOf(el) : null;
+    if (lab) {
+      for (const set of [lab.forL, lab.wrapL]) {
+        if (!set.length) continue;
+        const t = clean(set.map((l) => labelText(l, el)).join(" "));
+        if (t) {
+          for (const l of set) S.consumed.add(l);
+          return t;
+        }
+      }
+    }
+    const fromContent = NAME_FROM_CONTENT.has(role) || tag === "input";
+    if (fromContent) {
+      // accname: content before title for name-from-content roles (D-412).
+      v = ownText(el, role);
+      if (v) return v;
+    }
+    v = clean(attr(el, "placeholder")) || clean(attr(el, "title"));
+    if (v) return v;
+    if (tag === "img" || tag === "area" || (tag === "input" && el.type === "image")) {
+      v = clean(attr(el, "alt"));
+      if (v) return v;
+    }
+    if (role === "iframe") {
+      return clean(attr(el, "name")) || hostOf(attr(el, "src")) || "frame";
+    }
+    if (role === "dialog" || role === "alertdialog" || role === "region") return overlayName(el);
+    // Rung 7: words to the right of a checkbox or radio.
+    const t = tag === "input" ? String(el.type).toLowerCase() : "";
+    if (t === "checkbox" || t === "radio" || (CHECKABLE.has(role) && tag !== "input")) {
+      v = wordsRight(el);
+      if (v) return v;
+    }
+    return "";
+  }
+
+  function hostOf(src) {
+    if (!src) return "";
+    try {
+      return new URL(src, doc.baseURI).hostname;
+    } catch (e) {
+      return "";
+    }
+  }
+
+  // Last resort for an icon-only link: its last path segment ("/account/cart?x" -> "cart").
+  function hrefName(href) {
+    try {
+      const u = new URL(href, doc.baseURI);
+      const seg = u.pathname.split("/").filter(Boolean).pop() || u.hostname;
+      return clean(decodeURIComponent(seg).replace(/\.[a-z0-9]+$/i, "").replace(/[-_+]+/g, " "), 60);
+    } catch (e) {
+      return "";
+    }
+  }
+
+  // Text near the element (<= 200 px above or left) that is not consumed by a name.
+  function nearbyOf(el, name) {
+    const root = el.getRootNode();
+    if (!root || !root.nodeType) return undefined;
+    const tw = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    tw.currentNode = el;
+    const r = S.layout ? el.getBoundingClientRect() : null;
+    if (S.layout && (!r || (!r.width && !r.height))) return undefined;
+    let t;
+    let seen = 0;
+    while ((t = tw.previousNode()) && seen++ < 40) {
+      if (!/\S/.test(t.data) || S.consumed.has(t)) continue;
+      const p = t.parentElement;
+      if (!p || SKIP_TAGS.has(p.localName)) continue;
+      if (blockedText(p)) continue;
+      const txt = clean(t.data, NEARBY_CAP);
+      if (!/[\p{L}\p{N}]/u.test(txt) || (name && eqi(txt, name))) continue;
+      if (!S.layout) {
+        // No layout (jsdom): the nearest preceding text inside the same parent.
+        const par = el.parentElement;
+        if (!par || !par.contains(t)) return undefined;
+        return { text: txt, node: t };
+      }
+      const rg = doc.createRange();
+      rg.selectNodeContents(t);
+      const tr = rg.getBoundingClientRect();
+      if (!tr || (!tr.width && !tr.height)) continue;
+      const left = tr.right <= r.left + 2 && r.left - tr.right <= NEARBY_PX &&
+        tr.bottom > r.top - 4 && tr.top < r.bottom + 4;
+      const above = tr.bottom <= r.top + 2 && r.top - tr.bottom <= NEARBY_PX &&
+        tr.left < r.right && tr.right > r.left - NEARBY_PX;
+      if (left || above) return { text: txt, node: t };
+      if (r.top - tr.bottom > NEARBY_PX * 2) break;
+    }
+    return undefined;
+  }
+
+  // Text inside another row, a consumed label, or a hidden subtree is not nearby text.
+  function blockedText(p) {
+    let depth = 0;
+    for (let n = p; n && n.nodeType === 1 && depth++ < 14; n = parentOf(n)) {
+      if (S.consumed.has(n)) return true;
+      const rec = S.rec.get(n);
+      if (rec) {
+        if (rec.kind === HIDDEN) return true;
+        if (rec.row && rec.skipKids) return true;
+        if (n === p && !rec.vis) return true;
+      }
+      if (attr(n, "aria-hidden") === "true") return true;
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------- state (B-5 state)
+  function isDisabled(el) {
+    try {
+      if (el.matches(":disabled")) return true;
+    } catch (e) {
+      // :disabled unsupported on this node type
+    }
+    return !!el.closest('[aria-disabled="true"]');
+  }
+
+  function sensitive(el) {
+    if (String(el.type).toLowerCase() === "password") return true;
+    if (SENSITIVE_AC_RE.test(attr(el, "autocomplete").toLowerCase())) return true;
+    return SENSITIVE_NAME_RE.test(attr(el, "name") + " " + el.id);
+  }
+
+  // empty|filled without calling the value getter (H-2: passwords are never read from the DOM).
+  // Evidence, in order: required + validity.valueMissing (exact); a caret or selection past 0
+  // (insertText and programmatic sets leave it at the end); :placeholder-shown (exact when a
+  // placeholder exists); validity flags that only a value can raise. No evidence: empty.
+  function filledNoRead(el) {
+    try {
+      if (el.required && el.validity) return el.validity.valueMissing ? "empty" : "filled";
+    } catch (e) { /* no validity */ }
+    try {
+      if (typeof el.selectionEnd === "number" && el.selectionEnd > 0) return "filled";
+    } catch (e) { /* type without selection API */ }
+    try {
+      if (el.hasAttribute("placeholder") && attr(el, "placeholder")) {
+        return el.matches(":placeholder-shown") ? "empty" : "filled";
+      }
+    } catch (e) { /* selector unsupported */ }
+    try {
+      const v = el.validity;
+      if (v && (v.tooShort || v.tooLong || v.patternMismatch || v.typeMismatch || v.badInput)) return "filled";
+    } catch (e) { /* no validity */ }
+    return "empty";
+  }
+
+  function fieldValue(el, role) {
+    const tag = el.localName;
+    if (tag === "input") {
+      const t = String(el.type).toLowerCase();
+      if (NOVALUE_INPUT.has(t)) return undefined;
+      if (t === "file") return { kind: el.files && el.files.length ? "filled" : "empty" };
+      if (sensitive(el)) return { kind: filledNoRead(el) };
+      const v = el.value;
+      return v ? { kind: "text", text: v.slice(0, VALUE_CAP) } : { kind: "empty" };
+    }
+    if (tag === "textarea") {
+      if (sensitive(el)) return { kind: filledNoRead(el) };
+      const v = el.value;
+      return v ? { kind: "text", text: v.slice(0, VALUE_CAP) } : { kind: "empty" };
+    }
+    if (tag === "select") {
+      const sel = Array.from(el.selectedOptions || []).map((o) => clean(o.label || o.text));
+      const s = sel.filter(Boolean).join(", ");
+      return s ? { kind: "text", text: s.slice(0, VALUE_CAP) } : { kind: "empty" };
+    }
+    if (role === "textbox" && el.isContentEditable) {
+      const s = textOf(el, null, VALUE_CAP);
+      return s ? { kind: "text", text: s } : { kind: "empty" };
+    }
+    if (role === "slider" || role === "spinbutton") {
+      const s = clean(attr(el, "aria-valuetext") || attr(el, "aria-valuenow"), VALUE_CAP);
+      return s ? { kind: "text", text: s } : undefined;
+    }
+    return undefined;
+  }
+
+  function checkedOf(el, role) {
+    if (el.localName === "input" && (el.type === "checkbox" || el.type === "radio")) return !!el.checked;
+    const ac = el.getAttribute("aria-checked") != null ? attr(el, "aria-checked") : attr(el, "aria-pressed");
+    if (ac === "true" || ac === "mixed") return true;
+    if (ac === "false") return false;
+    if (CHECKABLE.has(role)) return false;
+    return undefined;
+  }
+
+  function nativeSubmit(el) {
+    const tag = el.localName;
+    if (tag === "button") return String(el.type).toLowerCase() === "submit" && !!el.form;
+    if (tag === "input") {
+      const t = String(el.type).toLowerCase();
+      return (t === "submit" || t === "image") && !!el.form;
+    }
+    return false;
+  }
+
+  function opensNewTab(el, submit) {
+    const tag = el.localName;
+    let tgt = "";
+    if (tag === "a" || tag === "area") tgt = attr(el, "target");
+    else if (submit) tgt = attr(el, "formtarget") || (el.form ? attr(el.form, "target") : "");
+    if (tgt && !/^_(self|parent|top)$/i.test(tgt)) return true;
+    const oc = attr(el, "onclick");
+    return !!oc && /\bopen\s*\(/.test(oc);
+  }
+
+  // ---------------------------------------------------------------- landmarks
+  function landmarkName(n) {
+    const role = ariaRole(n);
+    if (role) {
+      if (LANDMARK_ROLE[role]) return LANDMARK_ROLE[role];
+      if (role !== "none" && role !== "presentation") return "";
+    }
+    switch (n.localName) {
+      case "main": return "main";
+      case "nav": return "nav";
+      case "aside": return "aside";
+      case "dialog": return n.open ? "dialog" : "";
+      case "header":
+      case "footer": {
+        const p = parentOf(n);
+        if (p && p.nodeType === 1 && closestComposed(p, "article,aside,main,nav,section")) return "";
+        return n.localName;
+      }
+      case "section":
+        return n.hasAttribute("aria-label") || n.hasAttribute("aria-labelledby") ? "region" : "";
+      default:
+        return "";
+    }
+  }
+  // Nearest enclosing landmark. <form> is not one here: rows carry it in `form` (D-414).
+  function landmarkOf(el) {
+    const path = [];
+    let res = null;
+    for (let n = el; n && n.nodeType === 1; n = parentOf(n)) {
+      const m = S.lm.get(n);
+      if (m !== undefined) {
+        res = m;
+        break;
+      }
+      path.push(n);
+      const name = landmarkName(n);
+      if (name) {
+        res = { name, el: n };
+        break;
+      }
+    }
+    for (const p of path) S.lm.set(p, res);
+    return res;
+  }
+
+  // ---------------------------------------------------------------- walk decisions
+  const HIDDEN_REC = Object.freeze({ kind: HIDDEN, skipKids: true, vis: false, row: null });
+
+  function newRow(el, role, rec, opts) {
+    const row = {
+      id: idOf(el),
+      el,
+      role,
+      name: "",
+      nearby: undefined,
+      formEl: null,
+      landmark: undefined,
+      always: true,
+      cand: false,
+      isHeading: role === "heading",
+      level: 0,
+      challenge: false,
+      submit: false,
+      submitish: false,
+      newTab: false,
+      options: undefined,
+      inputType: undefined,
+      autocomplete: undefined,
+      named: false,
+    };
+    Object.assign(row, opts || {});
+    rec.row = row;
+    S.fresh.push(rec);
+    return row;
+  }
+
+  function compute(el) {
+    const tag = el.localName;
+    if (SKIP_TAGS.has(tag)) return HIDDEN_REC;
+    if (tag === "input" && String(el.type).toLowerCase() === "hidden") return HIDDEN_REC;
+    const cs = style(el);
+    if (cs.display === "none" || cs.contentVisibility === "hidden" || (!S.layout && el.hidden)) {
+      return HIDDEN_REC;
+    }
+    const vis = cs.visibility !== "hidden" && cs.visibility !== "collapse";
+    const rec = {
+      kind: CONT, skipKids: LEAF_TAGS.has(tag), vis, disp: cs.display, pos: cs.position,
+      row: null, challenge: false,
+    };
+
+    // A CHALLENGE container owns its subtree and is one row, carried on its iframe (D-55).
+    if (challengeBox(el)) {
+      rec.challenge = true;
+      rec.skipKids = true;
+      const fr = tag === "iframe" || tag === "frame" ? el : el.querySelector("iframe,frame");
+      if (fr) {
+        const row = newRow(fr, "iframe", rec, { challenge: true });
+        row.name = ladder(fr, "iframe");
+        row.named = true;
+      } else {
+        const row = newRow(el, ariaRole(el) || "group", rec, { challenge: true });
+        row.name = clean(attr(el, "aria-label")) || clean(attr(el, "title")) || "captcha";
+        row.named = true;
+      }
+      return rec;
+    }
+
+    const role = roleOf(el, cs);
+    if (role === "iframe") {
+      rec.skipKids = true;
+      newRow(el, "iframe", rec);
+      return rec;
+    }
+    if (vis && ROW_ROLES.has(role) && !wrapsField(el, role) && !(role === "listbox" && tag !== "select")) {
+      const row = newRow(el, role, rec);
+      if (role === "heading") {
+        row.level = /^h[1-6]$/.test(tag) ? Number(tag[1]) : Number(attr(el, "aria-level")) || 2;
+        // A heading that holds links keeps them as rows.
+        rec.skipKids = !el.querySelector(INTERACTIVE_SEL);
+      } else {
+        rec.skipKids = true;
+      }
+    } else if (vis && (role === "dialog" || role === "alertdialog" || attr(el, "aria-modal") === "true")) {
+      newRow(el, role === "alertdialog" ? "alertdialog" : "dialog", rec);
+    }
+    if (vis && (cs.position === "fixed" || cs.position === "sticky")) {
+      if (rec.row) rec.row.cand = true;
+      else newRow(el, ariaRole(el) || "region", rec, { cand: true, always: false });
+      rec.sticky = cs.position === "sticky";
+    }
+    return rec;
+  }
+
+  // Post pass for rows computed in this walk: name rungs, nearby, the name attribute fallback,
+  // semantic state. Runs after the whole tree so label consumption is known.
+  function finishRow(rec) {
+    const row = rec.row;
+    const el = row.el;
+    if (!row.named) row.name = ladder(el, row.role);
+    const container = row.role === "dialog" || row.role === "alertdialog" || !row.always;
+    if (!row.isHeading && row.role !== "iframe" && !row.challenge && !container) {
+      const nb = nearbyOf(el, row.name);
+      if (nb) {
+        if (!row.name) {
+          // Rung 8: nearby text names a field that has nothing else; it is consumed like a label.
+          row.name = nb.text;
+          S.consumed.add(nb.node);
+        } else {
+          row.nearby = nb.text;
+        }
+      }
+    }
+    if (!row.name && el.localName !== "a") row.name = clean(attr(el, "name"));
+    if (!row.name && row.role === "link") row.name = hrefName(attr(el, "href"));
+    if (!row.name && (container || row.cand)) row.name = overlayName(el);
+    const tag = el.localName;
+    row.formEl = formOf(el);
+    const lm = landmarkOf(el);
+    row.landmark = lm ? lm.name : undefined;
+    row.lmEl = lm ? lm.el : null;
+    row.submit = nativeSubmit(el);
+    row.submitish = row.submit || (BUTTONISH.has(row.role) && SUBMIT_WORDS_RE.test(row.name));
+    row.newTab = opensNewTab(el, row.submit);
+    if (tag === "select") {
+      row.options = Array.from(el.options).slice(0, OPTIONS_CAP).map((o) => clean(o.label || o.text, 60));
+    }
+    if (tag === "input") row.inputType = String(el.type).toLowerCase();
+    const ac = attr(el, "autocomplete").trim().toLowerCase();
+    if (ac && ac !== "on" && ac !== "off") row.autocomplete = ac;
+    if (!row.challenge) {
+      if ((row.isHeading || row.role === "dialog" || row.role === "alertdialog") && CHALLENGE_TEXT_RE.test(row.name)) {
+        row.challenge = true;
+      } else if (/captcha/i.test(attr(el, "name") + " " + el.id) && tag !== "form") {
+        row.challenge = true;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- walk (B-5 walk)
+  function nextSkip(tw) {
+    for (;;) {
+      const s = tw.nextSibling();
+      if (s) return s;
+      if (!tw.parentNode()) return null;
+    }
+  }
+
+  function decide(n, dirty) {
+    let rec = S.rec.get(n);
+    if (!rec || dirty) {
+      rec = compute(n);
+      S.rec.set(n, rec);
+    }
+    if (rec.row) S.rows.push(rec);
+    if (n.localName === "form" && rec.kind !== HIDDEN) formId(n);
+    else if (n.localName === "label" && rec.kind !== HIDDEN) S.labels.push(n);
+    return rec;
+  }
+
+  function observeShadow(sr) {
+    if (S.observed.has(sr)) return;
+    S.observed.add(sr);
+    try {
+      mo.observe(sr, MO_OPTS);
+    } catch (e) { /* closed or detached root */ }
+  }
+
+  // Visit el and its flat-tree subtree in document order. TreeWalker over the light tree;
+  // shadow roots and slots recurse (they are separate trees).
+  function visitEl(el, dirtyIn) {
+    const tw = doc.createTreeWalker(el, NodeFilter.SHOW_ELEMENT);
+    let n = el;
+    let dirtyRoot = null;
+    while (n) {
+      if (dirtyRoot && !contains(dirtyRoot, n)) dirtyRoot = null;
+      if (!dirtyIn && !dirtyRoot && S.dirty.has(n)) dirtyRoot = n;
+      const d = dirtyIn || !!dirtyRoot;
+      const rec = decide(n, d);
+      let skip = rec.skipKids;
+      if (!skip) {
+        const sr = n.shadowRoot;
+        if (sr) {
+          observeShadow(sr);
+          for (const k of Array.from(sr.children)) visitEl(k, d);
+          skip = true;
+        } else if (n.localName === "slot" && typeof n.assignedElements === "function") {
+          const as = n.assignedElements();
+          if (as.length) {
+            for (const k of as) visitEl(k, d);
+            skip = true;
+          }
+        }
+      }
+      n = skip ? nextSkip(tw) : tw.nextNode();
+    }
+  }
+
+  function doWalk(incremental) {
+    S.layout = hasLayout();
+    S.lm = new Map();
+    S.rows = [];
+    S.fresh = [];
+    S.labels = [];
+    S.labelMap = null;
+    if (!incremental) S.consumed = new WeakSet();
+    if (incremental) {
+      // A change inside a row that owns its subtree re-walks that row (its name may change).
+      for (const d of Array.from(S.dirty)) {
+        for (let a = parentOf(d); a && a.nodeType === 1; a = parentOf(a)) {
+          const r = S.rec.get(a);
+          if (r && (r.row && r.skipKids || r.challenge)) S.dirty.add(a);
+        }
+      }
+    }
+    const root = doc.documentElement;
+    if (root && !selfChallenge()) visitEl(root, !incremental);
+    buildLabelMap();
+    for (const rec of S.fresh) finishRow(rec);
+    S.fresh = [];
+    S.dirty.clear();
+    S.full = false;
+    S.walked = true;
+    if (!incremental) {
+      for (const [id, ref] of S.refs) if (!ref.deref()) S.refs.delete(id);
+    }
+  }
+
+  function walk(opts) {
+    if (typeof opts === "boolean") opts = { dirty: opts };
+    opts = opts || {};
+    if (!S.walked) {
+      const b = Number(opts.base);
+      if (Number.isInteger(b) && b > 0) {
+        S.base = b;
+        S.next = Math.max(S.next, b);
+      }
+    }
+    let incremental = !!opts.dirty && S.walked && !S.full;
+    if (Array.isArray(opts.dirty)) {
+      for (const id of opts.dirty) {
+        const el = resolve(id);
+        if (el && el.nodeType === 1) S.dirty.add(el);
+      }
+      incremental = S.walked && !S.full;
+    }
+    doWalk(incremental);
+    return { count: S.rows.length };
+  }
+
+  function ensure() {
+    if (!S.walked) doWalk(false);
+    else if (S.full) doWalk(false);
+    else if (S.dirty.size) doWalk(true);
+  }
+
+  // ---------------------------------------------------------------- geometry
+  // Centre of the first client rect that intersects the viewport, clipped to it.
+  function centre(el, vpIn) {
+    const vp = vpIn || viewport();
+    const rects = el.getClientRects();
+    for (const r of rects) {
+      if (r.width <= 0 || r.height <= 0) continue;
+      const x0 = Math.max(r.left, 0);
+      const y0 = Math.max(r.top, 0);
+      const x1 = Math.min(r.right, vp.w);
+      const y1 = Math.min(r.bottom, vp.h);
+      if (x1 - x0 < 1 || y1 - y0 < 1) continue;
+      return { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+    }
+    return null;
+  }
+
+  function deepHit(x, y) {
+    let hit = doc.elementFromPoint(x, y);
+    while (hit && hit.shadowRoot) {
+      const inner = hit.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    return hit;
+  }
+
+  function hitsSelf(el, hit) {
+    if (!hit) return false;
+    if (hit === el || contains(el, hit)) return true;
+    const lab = labelsOf(el);
+    if (lab) for (const l of lab.forL.concat(lab.wrapL)) if (contains(l, hit)) return true;
+    return false;
+  }
+
+  // The fixed/sticky container a hit belongs to, if any.
+  function coverOf(hit) {
+    for (let n = hit; n && n.nodeType === 1; n = parentOf(n)) {
+      const r = S.rec.get(n);
+      if (r && r.row && r.row.cand) return n;
+      if (!r && n !== doc.body && n !== doc.documentElement) {
+        const p = style(n).position;
+        if (p === "fixed" || p === "sticky") return n;
+      }
+    }
+    return null;
+  }
+
+  function describe(n) {
+    if (!n) return "nothing";
+    let d = n.localName;
+    if (n.id) d += "#" + n.id;
+    else {
+      const c = classOf(n).trim().split(/\s+/)[0];
+      if (c) d += "." + c;
+    }
+    return d;
+  }
+
+  function coverWhy(el, hit) {
+    if (!hit) return "covered by nothing (outside the viewport)";
+    if (contains(hit, el)) return "does not receive pointer events (hit " + describe(hit) + ")";
+    const cov = coverOf(hit);
+    if (cov) return "covered by " + describe(cov) + " (OVERLAY #" + idOf(cov) + ")";
+    for (let n = hit, i = 0; n && n.nodeType === 1 && i < 6; n = parentOf(n), i++) {
+      const id = S.ids.get(n);
+      if (id !== undefined) return "covered by " + describe(hit) + " (#" + id + ")";
+    }
+    return "covered by " + describe(hit);
+  }
+
+  // ---------------------------------------------------------------- index (I-5 rows)
+  function index() {
+    ensure();
+    S.layout = hasLayout();
+    const L = S.layout;
+    const vp = viewport();
+    const vpArea = Math.max(1, vp.w * vp.h);
+    const live = [];
+    const coverers = new Set();
+    for (const rec of S.rows) {
+      const row = rec.row;
+      const el = row.el;
+      if (!el.isConnected) continue;
+      let box;
+      let visible = rec.vis;
+      let covered = false;
+      if (L) {
+        const r = el.getBoundingClientRect();
+        box = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+        visible = visible && r.width > 0 && r.height > 0;
+        if (visible && typeof el.checkVisibility === "function") {
+          visible = el.checkVisibility({ visibilityProperty: true });
+        }
+        const inVp = r.right > 0 && r.bottom > 0 && r.left < vp.w && r.top < vp.h;
+        if (visible && !row.cand && inVp) {
+          const p = centre(el, vp);
+          if (p) {
+            const hit = deepHit(p.x, p.y);
+            if (!hitsSelf(el, hit)) {
+              covered = true;
+              const cov = hit && coverOf(hit);
+              if (cov) coverers.add(cov);
+            }
+          }
+        }
+      }
+      live.push({ rec, row, el, box, visible, covered });
+    }
+    const out = [];
+    const headings = [];
+    for (const l of live) {
+      const { row, el, box, visible } = l;
+      let overlay = false;
+      if (row.cand && L && visible && box) {
+        const ix = Math.max(0, Math.min(box.x + box.w, vp.w) - Math.max(box.x, 0));
+        const iy = Math.max(0, Math.min(box.y + box.h, vp.h) - Math.max(box.y, 0));
+        const area = ix * iy;
+        if (area > 0) {
+          if (coverers.has(el)) overlay = true;
+          else if (!l.rec.sticky) {
+            overlay = area >= 0.25 * vpArea ||
+              (area >= 0.02 * vpArea &&
+                (OVERLAY_RE.test(classOf(el) + " " + el.id + " " + attr(el, "aria-label")) ||
+                  row.role === "dialog" || row.role === "alertdialog" || attr(el, "aria-modal") === "true"));
+          }
+        }
+      }
+      if (!row.always && !overlay) continue;
+      if (row.isHeading) headings.push({ name: row.name, lmEl: row.lmEl });
+      // Fields equal to sb_sheet::State::default() are omitted (serde(default) fills them):
+      // visible and enabled default to true, the other booleans to false.
+      const st = {};
+      if (!visible) st.visible = false;
+      if (isDisabled(el)) st.enabled = false;
+      if (row.submitish) st.submitish = true;
+      if (row.newTab) st.opens_new_tab = true;
+      if (l.covered) st.covered = true;
+      const ck = checkedOf(el, row.role);
+      if (ck !== undefined) st.checked = ck;
+      if (!row.challenge) {
+        const v = fieldValue(el, row.role);
+        if (v) st.value = v;
+      }
+      if (row.options && row.options.length) st.options = row.options;
+      if (row.inputType) st.input_type = row.inputType;
+      if (row.autocomplete) st.autocomplete = row.autocomplete;
+      const o = { id: row.id, frame: 0, role: row.role, name: row.name };
+      if (row.nearby) o.nearby = row.nearby;
+      if (!row.isHeading) {
+        for (let i = headings.length - 1; i >= 0; i--) {
+          const h = headings[i];
+          if (!h.lmEl || contains(h.lmEl, el)) {
+            if (h.name) o.heading = h.name;
+            break;
+          }
+        }
+      }
+      o.state = st;
+      const fl = {};
+      if (row.submit) fl.submit = true;
+      if (row.challenge) fl.challenge = true;
+      if (overlay) fl.overlay = true;
+      if (row.role === "iframe") {
+        let opaque = false;
+        try {
+          opaque = el.contentDocument == null;
+        } catch (e) {
+          opaque = true;
+        }
+        if (opaque) fl.opaque = true;
+      }
+      o.flags = fl;
+      if (row.formEl && row.formEl.isConnected) o.form = formId(row.formEl);
+      if (row.landmark) o.landmark = row.landmark;
+      if (box) o.box = box;
+      out.push(o);
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- text (I-6 TextBlock)
+  function cellsOf(tr) {
+    return Array.from(tr.children).filter((c) => {
+      const t = c.localName;
+      const r = ariaRole(c);
+      return t === "td" || t === "th" || r === "cell" || r === "gridcell" || r === "columnheader" || r === "rowheader";
+    });
+  }
+
+  function tableId(t) {
+    if (!t) return undefined;
+    let id = S.tables.get(t);
+    if (id === undefined) {
+      id = ++S.tableN;
+      S.tables.set(t, id);
+    }
+    return id;
+  }
+
+  function blockKind(el) {
+    const tag = el.localName;
+    if (/^h[1-6]$/.test(tag)) return ["heading", Number(tag[1])];
+    if (tag === "p") return ["paragraph", 0];
+    if (tag === "li") return ["list_item", 0];
+    if (tag === "pre") return ["code", 0];
+    if (tag === "blockquote") return ["quote", 0];
+    if (tag === "dt" || tag === "dd" || tag === "figcaption" || tag === "caption" || tag === "legend") {
+      return ["other", 0];
+    }
+    return ["paragraph", 0];
+  }
+
+  function isBlock(el, rec) {
+    const tag = el.localName;
+    if (BLOCK_TAGS.has(tag)) return true;
+    if (INLINE_TAGS.has(tag)) return false;
+    const d = rec && rec.disp;
+    return !!d && !d.startsWith("inline") && d !== "contents" && d !== "none";
+  }
+
+  function text(region) {
+    ensure();
+    S.lm = new Map();
+    const blocks = [];
+    if (selfChallenge()) return blocks;
+    let order = 0;
+    const headings = [];
+    const stack = []; // {kind, level, el}
+    let cur = null; // {spans, el, kind, level, pre}
+
+    const open = (el, kind, level, pre) => {
+      cur = { spans: [], el, kind, level, pre };
+    };
+    const flush = () => {
+      if (!cur) return;
+      const spans = [];
+      for (const s of cur.spans) {
+        let t = cur.pre ? s.text : s.text.replace(/\s+/g, " ");
+        const last = spans[spans.length - 1];
+        if (s.elem) {
+          // A linked span holds just its words; the space around it goes to plain text.
+          const lead = /^\s/.test(t) || (last && last.elem);
+          t = t.trim();
+          if (lead && last) {
+            if (last.elem) spans.push({ text: " " });
+            else if (!/\s$/.test(last.text)) last.text += " ";
+          }
+          spans.push({ text: t, elem: s.elem, trail: /\s$/.test(s.text) });
+        } else if (last && !last.elem) {
+          last.text += t;
+        } else {
+          spans.push({ text: last && last.trail && !/^\s/.test(t) ? " " + t : t });
+        }
+      }
+      if (spans.length && !cur.pre) {
+        if (!spans[0].elem) spans[0].text = spans[0].text.replace(/^\s+/, "");
+        const l = spans[spans.length - 1];
+        if (!l.elem) l.text = l.text.replace(/\s+$/, "");
+      }
+      for (const s of spans) delete s.trail;
+      while (spans.length && !spans[0].elem && !/\S/.test(spans[0].text)) spans.shift();
+      while (spans.length && !spans[spans.length - 1].elem && !/\S/.test(spans[spans.length - 1].text)) spans.pop();
+      const real = spans;
+      if (real.length) emit(cur.el, cur.kind, cur.level, real);
+      const top = stack[stack.length - 1];
+      cur = top ? { spans: [], el: top.el, kind: top.kind, level: top.level, pre: top.pre } : null;
+    };
+    const emit = (el, kind, level, spans, extra) => {
+      const b = { order: order++, frame: 0, kind };
+      if (level) b.level = level;
+      const lm = landmarkOf(el);
+      if (lm) b.landmark = lm.name;
+      if (kind === "heading") {
+        headings.push({ name: spans.map((s) => s.text).join(""), lmEl: lm ? lm.el : null });
+      } else {
+        for (let i = headings.length - 1; i >= 0; i--) {
+          const h = headings[i];
+          if (!h.lmEl || contains(h.lmEl, el)) {
+            if (h.name) b.heading = h.name;
+            break;
+          }
+        }
+      }
+      if (extra) Object.assign(b, extra);
+      b.spans = spans.map((s) => (s.elem ? { text: s.text, elem: s.elem } : { text: s.text }));
+      b._el = el;
+      blocks.push(b);
+    };
+    const add = (t, elem) => {
+      if (!cur) open(doc.body || doc.documentElement, "paragraph", 0, false);
+      cur.spans.push(elem ? { text: t, elem } : { text: t });
+    };
+    const listDepth = () => stack.filter((s) => s.list).length;
+
+    const kids = (n) => {
+      if (n.nodeType === 1) {
+        if (n.shadowRoot) return n.shadowRoot.childNodes;
+        if (n.localName === "slot" && typeof n.assignedNodes === "function") {
+          const as = n.assignedNodes();
+          if (as.length) return as;
+        }
+      }
+      return n.childNodes;
+    };
+
+    const cellSpans = (cell) => {
+      // Flatten a cell into one span; keep a link when the cell holds exactly one.
+      const parts = [];
+      const elems = [];
+      const v = (n) => {
+        if (n.nodeType === 3) {
+          if (!S.consumed.has(n)) parts.push(n.data);
+          return;
+        }
+        if (n.nodeType !== 1) return;
+        const rec = S.rec.get(n);
+        if (!rec || rec.kind === HIDDEN || rec.challenge || S.consumed.has(n)) return;
+        if (attr(n, "aria-hidden") === "true") return;
+        if (rec.row && rec.skipKids) {
+          const t = rec.row.role === "heading" ? rec.row.name : textOf(n) || rec.row.name;
+          if (t) parts.push(" " + t + " ");
+          if (rec.row.role !== "heading" && rec.row.role !== "textbox") elems.push("#" + rec.row.id);
+          return;
+        }
+        for (const k of kids(n)) v(k);
+        if (isBlock(n, rec)) parts.push(" ");
+      };
+      for (const k of kids(cell)) v(k);
+      const t = clean(parts.join(""), 400);
+      return elems.length === 1 ? { text: t, elem: elems[0] } : { text: t };
+    };
+
+    const tableRow = (tr, rec) => {
+      flush();
+      const cells = cellsOf(tr);
+      if (!cells.length) return false;
+      const spans = cells.map(cellSpans);
+      if (rec.row && !spans[0].elem) spans[0].elem = "#" + rec.row.id;
+      if (!spans.some((s) => s.text || s.elem)) return true;
+      const header = cells.every((c) => c.localName === "th" || ariaRole(c) === "columnheader") ||
+        (tr.parentElement && tr.parentElement.localName === "thead");
+      const extra = { table: tableId(tr.closest("table")) };
+      if (header) extra.header = true;
+      emit(tr, "table_row", 0, spans, extra);
+      return true;
+    };
+
+    const visit = (n) => {
+      if (n.nodeType === 3) {
+        if (S.consumed.has(n)) return;
+        const p = n.parentNode;
+        const pr = p && p.nodeType === 1 ? S.rec.get(p) : null;
+        if (pr && !pr.vis) return;
+        add(n.data);
+        return;
+      }
+      if (n.nodeType !== 1) return;
+      const rec = S.rec.get(n);
+      if (!rec || rec.kind === HIDDEN || rec.challenge) return;
+      if (S.consumed.has(n) || attr(n, "aria-hidden") === "true") return;
+      const tag = n.localName;
+      const row = rec.row;
+      if (tag === "tr" || ariaRole(n) === "row") {
+        if (tableRow(n, rec)) return;
+      }
+      if (row && rec.skipKids) {
+        if (row.isHeading) {
+          flush();
+          const ht = textOf(n) || row.name;
+          if (ht) emit(n, "heading", row.level, [{ text: ht }]);
+          return;
+        }
+        if (row.role === "iframe") {
+          // Placeholder where a child frame's blocks belong (sb-driver interleaves frames).
+          flush();
+          emit(n, "other", 0, [{ text: row.name || "frame", elem: "#" + row.id }]);
+          return;
+        }
+        if (FIELD_ROLES.has(row.role) || row.role === "checkbox" || row.role === "radio" || row.role === "switch") return;
+        const t = textOf(n) || row.name;
+        if (t) add(" " + t + " ", "#" + row.id);
+        return;
+      }
+      if (rec.skipKids) return;
+      const block = isBlock(n, rec) || (row && row.isHeading);
+      if (block) {
+        flush();
+        let [kind, level] = row && row.isHeading ? ["heading", row.level] : blockKind(n);
+        const isList = tag === "ul" || tag === "ol";
+        if (kind === "list_item") level = Math.max(1, listDepth());
+        const pre = kind === "code" || (stack.length && stack[stack.length - 1].pre);
+        if (stack.length && stack[stack.length - 1].kind === "code") kind = "code";
+        stack.push({ el: n, kind, level, pre, list: isList });
+        open(n, kind, level, pre);
+        for (const k of kids(n)) visit(k);
+        flush();
+        stack.pop();
+        const top = stack[stack.length - 1];
+        cur = top ? { spans: [], el: top.el, kind: top.kind, level: top.level, pre: top.pre } : null;
+        return;
+      }
+      if (tag === "br") {
+        add(cur && cur.pre ? "\n" : " ");
+        return;
+      }
+      for (const k of kids(n)) visit(k);
+    };
+    if (doc.body) visit(doc.body);
+    flush();
+
+    let out = blocks;
+    if (region !== undefined && region !== null && region !== "") {
+      const pred = regionPred(region);
+      out = blocks.filter((b) => pred(b));
+    }
+    for (const b of out) delete b._el;
+    return out;
+  }
+
+  function regionPred(region) {
+    const r = String(region).trim();
+    const LMS = new Set(["main", "nav", "header", "footer", "aside", "form", "region", "dialog"]);
+    if (LMS.has(r.toLowerCase())) return (b) => b.landmark === r.toLowerCase();
+    if (/^f\d+$/.test(r)) {
+      const ref = S.formEls.get(r);
+      const f = ref && ref.deref();
+      return (b) => !!f && contains(f, b._el);
+    }
+    if (/^#?\d+$/.test(r)) {
+      const el = resolve(Number(r.replace("#", "")));
+      return (b) => el && el.nodeType === 1 && contains(el, b._el);
+    }
+    const want = r.toLowerCase();
+    return (b) => (b.heading && b.heading.toLowerCase() === want) ||
+      (b.kind === "heading" && b.spans.map((s) => s.text).join("").toLowerCase() === want);
+  }
+
+  // ---------------------------------------------------------------- act(id) (B-4 #6)
+  // One animation frame, capped: rAF never fires in a hidden or background tab, so the cap
+  // is the condition's deadline, not a sleep.
+  function nextFrame() {
+    return new Promise((res) => {
+      let done = false;
+      const f = () => {
+        if (!done) {
+          done = true;
+          res();
+        }
+      };
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(f);
+      setTimeout(f, 100);
+    });
+  }
+  const sameBox = (a, b) => Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 &&
+    Math.abs(a.width - b.width) < 0.5 && Math.abs(a.height - b.height) < 0.5;
+
+  function inViewport(el) {
+    const r = el.getBoundingClientRect();
+    const vp = viewport();
+    return r.top >= 0 && r.left >= 0 && r.bottom <= vp.h && r.right <= vp.w;
+  }
+
+  async function act(id) {
+    const el = resolve(id);
+    if (!el || el.why) return el || { why: "gone" };
+    if (!el.isConnected) return { why: "gone" };
+    if (selfChallenge() || inChallenge(el)) return { why: "challenge" };
+    if (!inViewport(el)) {
+      if (typeof el.scrollIntoViewIfNeeded === "function") el.scrollIntoViewIfNeeded(true);
+      else el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+    }
+    const cs = style(el);
+    const r0 = el.getBoundingClientRect();
+    if (r0.width <= 0 || r0.height <= 0 || cs.visibility !== "visible" ||
+      (typeof el.checkVisibility === "function" && !el.checkVisibility({ visibilityProperty: true }))) {
+      return { why: "hidden" };
+    }
+    await nextFrame();
+    if (!el.isConnected) return { why: "gone" };
+    const r1 = el.getBoundingClientRect();
+    await nextFrame();
+    if (!el.isConnected) return { why: "gone" };
+    const r2 = el.getBoundingClientRect();
+    if (!sameBox(r1, r2)) return { why: "not stable (moving)" };
+    if (r2.width <= 0 || r2.height <= 0) return { why: "hidden" };
+    if (isDisabled(el)) return { why: "disabled" };
+    const p = centre(el);
+    if (!p) return { why: "outside the viewport" };
+    const hit = deepHit(p.x, p.y);
+    if (!hitsSelf(el, hit)) return { why: coverWhy(el, hit) };
+    return { x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 };
+  }
+
+  // ---------------------------------------------------------------- settle() (B-4 #8)
+  const MO_OPTS = { subtree: true, childList: true, attributes: true, characterData: true };
+
+  function markDirty(node) {
+    let el = null;
+    if (node.nodeType === 1) el = node;
+    else if (node.nodeType === 11 && node.host) el = node.host;
+    else if (node.parentNode) {
+      const p = node.parentNode;
+      el = p.nodeType === 1 ? p : p.host || null;
+    }
+    if (!el || el === doc.head || (el.closest && el.closest("head")) ||
+      el.localName === "style" || el.localName === "link") {
+      S.full = true;
+      return;
+    }
+    S.dirty.add(el);
+    const lab = el.closest && el.closest("label");
+    if (lab && lab.control) S.dirty.add(lab.control);
+    if (S.dirty.size > DIRTY_MAX) S.full = true;
+  }
+
+  function remember(t, n) {
+    if (!n) return;
+    const el = n.nodeType === 1 ? n : n.parentElement;
+    if (!el) return;
+    S.recent.push([t, el]);
+    if (S.recent.length > 300) S.recent.splice(0, S.recent.length - 300);
+  }
+
+  function onMut(recs) {
+    const t = now();
+    S.lastMut = t;
+    S.mutCount += recs.length;
+    for (const m of recs) {
+      if (S.walked && !S.full) markDirty(m.target);
+      if (m.type === "childList") for (const a of m.addedNodes) remember(t, a);
+      else remember(t, m.target);
+    }
+    for (const w of Array.from(S.waiters)) w();
+  }
+
+  const mo = new MutationObserver(onMut);
+  mo.observe(doc, MO_OPTS);
+  doc.addEventListener("readystatechange", () => {
+    for (const w of Array.from(S.waiters)) w();
+  });
+
+  function runningAnims(since) {
+    if (typeof doc.getAnimations !== "function") return [];
+    const changed = [];
+    for (const [t, el] of S.recent) if (t >= since && el.isConnected) changed.push(el);
+    if (!changed.length) return [];
+    return doc.getAnimations().filter((a) => {
+      if (a.playState !== "running" || !a.effect || !a.effect.target) return false;
+      const tg = a.effect.target;
+      return changed.some((c) => contains(c, tg));
+    });
+  }
+
+  // Something a reader can use: a control, media, or a visible text node in the body.
+  function hasContent() {
+    const b = doc.body;
+    if (!b) return false;
+    if (b.querySelector("input:not([type=hidden]),button,select,textarea,img,iframe,video,canvas,svg,a[href]")) {
+      return true;
+    }
+    const tw = doc.createTreeWalker(b, NodeFilter.SHOW_TEXT);
+    let t;
+    while ((t = tw.nextNode())) {
+      if (/\S/.test(t.data) && t.parentNode && !SKIP_TAGS.has(t.parentNode.localName)) return true;
+    }
+    let i = 0;
+    for (const el of b.querySelectorAll("*")) {
+      if (i++ > 500) break;
+      if (el.shadowRoot && el.shadowRoot.childElementCount) return true;
+    }
+    return false;
+  }
+
+  // Resolves when the DOM has had no mutation for `quiet` ms (counted from the call), no
+  // running animation on recently changed nodes, the document is past loading and has
+  // content (D-416); or when `cap` ms pass. Every wait below is on a condition with that cap.
+  function settle(opts) {
+    opts = opts || {};
+    const quiet = Number(opts.quiet ?? opts.quiet_ms ?? QUIET_MS);
+    const cap = Number(opts.cap ?? opts.cap_ms ?? CAP_MS);
+    const t0 = now();
+    const c0 = S.mutCount;
+    return new Promise((resolveP) => {
+      let done = false;
+      let timer = 0;
+      let animWait = false;
+      const finish = (settled) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        clearTimeout(capTimer);
+        S.waiters.delete(wake);
+        resolveP({ settled, changed: S.mutCount - c0 });
+      };
+      // The cap is the deadline of the condition below.
+      const capTimer = setTimeout(() => finish(false), Math.max(0, cap));
+      const arm = () => {
+        if (done || animWait) return;
+        clearTimeout(timer);
+        const due = Math.max(S.lastMut, t0) + quiet - now();
+        // Timer to the instant the quiet condition can first hold, re-armed on each mutation.
+        timer = setTimeout(check, Math.max(0, due));
+      };
+      const wake = () => arm();
+      const check = () => {
+        timer = 0;
+        if (done) return;
+        if (now() - t0 >= cap) return finish(false);
+        if (doc.readyState === "loading") return; // readystatechange wakes us
+        if (now() - Math.max(S.lastMut, t0) < quiet) return arm();
+        const anims = runningAnims(t0 - 1000);
+        if (anims.length) {
+          animWait = true;
+          Promise.race(anims.map((a) => a.finished.catch(() => undefined))).then(() => {
+            animWait = false;
+            if (!done) check();
+          });
+          return;
+        }
+        if (!hasContent()) return; // the next mutation wakes us
+        finish(true);
+      };
+      S.waiters.add(wake);
+      arm();
+    });
+  }
+
+  // ---------------------------------------------------------------- fingerprint (T-4)
+  function parseSpec(spec) {
+    const items = [];
+    const s = String(spec || "");
+    let i = 0;
+    while (i < s.length) {
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (i >= s.length) break;
+      const start = i;
+      let role = "";
+      while (i < s.length && /[A-Za-z0-9_-]/.test(s[i])) role += s[i++];
+      let id = null;
+      if (s[i] === "#") {
+        i++;
+        id = "";
+        while (i < s.length && !/[\s"]/.test(s[i])) id += s[i++];
+      }
+      let name = null;
+      if (s[i] === '"') {
+        i++;
+        name = "";
+        while (i < s.length && s[i] !== '"') {
+          if (s[i] === "\\" && i + 1 < s.length) i++;
+          name += s[i++];
+        }
+        i++;
+      }
+      if (start === i) {
+        i++;
+        continue;
+      }
+      const raw = s.slice(start, i);
+      if (role && /^[A-Z]+$/.test(role) && id === null && name === null && items.length) {
+        items[items.length - 1].flags.push(role.toLowerCase());
+        items[items.length - 1].raw += " " + raw;
+        continue;
+      }
+      items.push({ role: role.toLowerCase(), id, name, flags: [], raw });
+    }
+    return items;
+  }
+
+  function nameMatch(have, want) {
+    if (!have) return false;
+    const h = clean(have).toLowerCase();
+    const w = clean(want).toLowerCase();
+    return h === w || h.includes(w);
+  }
+
+  function fingerprint(spec) {
+    const items = parseSpec(spec);
+    if (!items.length) return "match";
+    const rows = index();
+    const missing = [];
+    for (const it of items) {
+      let ok;
+      if (it.role === "form") {
+        if (it.id) {
+          const ref = S.formEls.get(it.id);
+          const f = ref && ref.deref();
+          ok = !!f && f.isConnected;
+        } else {
+          ok = rows.some((r) => r.form);
+        }
+      } else {
+        const roles = it.role ? ALIASES[it.role] || [it.role] : null;
+        ok = rows.some((r) => {
+          if (roles && !roles.includes(r.role)) return false;
+          if (it.id) {
+            if (/^\d+$/.test(it.id)) {
+              if (r.id !== Number(it.id)) return false;
+            } else {
+              const el = resolve(r.id);
+              if (!el || el.why || el.id !== it.id) return false;
+            }
+          }
+          if (it.name !== null && !nameMatch(r.name, it.name)) return false;
+          for (const f of it.flags) if (!r.flags[f]) return false;
+          return true;
+        });
+      }
+      if (!ok) missing.push(it.raw);
+    }
+    if (!missing.length) return "match";
+    if (missing.length === items.length) return "miss";
+    return { partial: missing };
+  }
+
+  // ---------------------------------------------------------------- frames()
+  function frames() {
+    ensure();
+    const out = [{
+      frame: 0, parent: null, url: String(globalThis.location && globalThis.location.href),
+      opaque: false, challenge: selfChallenge(),
+    }];
+    for (const rec of S.rows) {
+      const row = rec.row;
+      if (row.role !== "iframe" || !row.el.isConnected) continue;
+      const el = row.el;
+      let opaque = false;
+      try {
+        opaque = el.contentDocument == null;
+      } catch (e) {
+        opaque = true;
+      }
+      const src = attr(el, "src");
+      let url = el.hasAttribute("srcdoc") ? "about:srcdoc" : "about:blank";
+      if (src) {
+        try {
+          url = new URL(src, doc.baseURI).href;
+        } catch (e) {
+          url = src;
+        }
+      }
+      out.push({ frame: null, id: row.id, parent: 0, url, opaque, challenge: row.challenge, name: row.name });
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- single-element API
+  function rowFor(el) {
+    if (!el || el.nodeType !== 1) return null;
+    ensure();
+    let rec = S.rec.get(el);
+    if (!rec || !rec.row) {
+      S.layout = hasLayout();
+      S.fresh = [];
+      rec = compute(el);
+      for (const r of S.fresh) finishRow(r);
+      S.fresh = [];
+      if (!rec.row) return null;
+    }
+    return rec.row;
+  }
+  function nameApi(el) {
+    const row = rowFor(el);
+    return row ? row.name : el && el.nodeType === 1 ? ladder(el, roleOf(el)) : "";
+  }
+  function roleApi(el) {
+    return el && el.nodeType === 1 ? roleOf(el) : "";
+  }
+  function stateApi(el) {
+    const row = rowFor(el);
+    if (!row) return null;
+    const id = row.id;
+    const r = index().find((o) => o.id === id);
+    return r ? r.state : null;
+  }
+
+  const api = {
+    walk,
+    id: idOf,
+    resolve,
+    name: nameApi,
+    role: roleApi,
+    state: stateApi,
+    index,
+    text,
+    act,
+    settle,
+    fingerprint,
+    frames,
+  };
+  Object.defineProperty(globalThis, "__sb", {
+    value: Object.freeze(api),
+    configurable: false,
+    enumerable: false,
+    writable: false,
+  });
 })();

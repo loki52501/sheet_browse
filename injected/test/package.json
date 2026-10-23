@@ -1,0 +1,13 @@
+{
+  "name": "sb-injected-tests",
+  "private": true,
+  "description": "Test tooling for injected/ (D-401). Runtime code in injected/ has no dependencies.",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test jsdom.test.js browser.test.js media.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0",
+    "playwright-core": "1.59.1"
+  }
+}
