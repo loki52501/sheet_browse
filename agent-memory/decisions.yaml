@@ -159,3 +159,6 @@ decisions:
   - id: D-307
     text: "Repairs come in two kinds. Relocate may change only @fingerprint (any other header change is rejected). Re-forge may change the body and raise @gate (status ask until the user confirms) but may not lower @gate, reduce the planner's `?s` count or fail sb-act's ?s rule, add an @vault key the old file did not use, rename the tool, or put a scheme, host, `//` or `..` in @match. Violations return StoreError::Invariant and are written to tools.health.why."
     why: "T-9 and G-4 list the invariants; T-5 lets a re-forge raise the floor while T-9 forbids a repair changing @gate, so the two kinds are separated."
+  - id: D-308
+    text: "Runner sandbox detail (refines D-305): `Function` stays as a global that throws on call (so `instanceof Function` works) and every function constructor reachable through prototypes is replaced by it; rquickjs's Eval intrinsic stays loaded because module loading needs it, but no JS-reachable eval exists. ApiFetch::api receives the run's remaining wall time and must return within it; reader output is capped by RunOpts.max_output."
+    why: "Deleting Function outright breaks ordinary instanceof checks in tool code; module eval is how rquickjs loads ES modules. A host call with no deadline would let a hung fetch outlive the T-9 cap (review-T-11-runner should-fix 2, 3)."
