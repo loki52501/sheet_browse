@@ -13,6 +13,8 @@ pub mod mcp;
 pub mod memory;
 pub mod run;
 pub mod sched;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod vault;
 
 pub use class::{Class, Mode};

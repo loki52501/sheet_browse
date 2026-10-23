@@ -14,6 +14,11 @@
 # proposals item:         reflect writes forge proposals, _generic merges, pinned-tool retirements
 
 blockers:
+  - id: B-100
+    task: T-04
+    question: "H-1.3 names timeout behaviour only for Send(new), Account (proceed) and Pay, Delete (skip). What does an ask on another class time out to, e.g. the seeded ('*','Submit:job_application','ask') rule or a ('bank.com','Submit','ask') override?"
+    default_taken: "Skip. Gate::on_timeout returns Proceed only for Send and Account with strict off; every other class skips. A job application or signature that times out to proceed would be the harness acting as the user on exactly what the user reserved for themselves (H-1.2)."
+    needs_user: false
 
 interface_changes:
 
