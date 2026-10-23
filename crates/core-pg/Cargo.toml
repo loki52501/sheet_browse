@@ -8,4 +8,14 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
+fastembed.workspace = true
 harness-core.workspace = true
+pgvector.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
