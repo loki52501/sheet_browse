@@ -14,6 +14,21 @@
 # proposals item:         reflect writes forge proposals, _generic merges, pinned-tool retirements
 
 blockers:
+  - id: B-402
+    task: T-19
+    question: "Is an invisible reCAPTCHA v3 badge a challenge (D-5 stop) or not? Flagging it CHALLENGE makes every v3-protected login a stop although there is nothing for the user to solve."
+    default_taken: "Not CHALLENGE (D-405 (5)); a visible challenge frame (bframe) or v2 checkbox is. If v3 blocks a submit server-side the site shows a visible challenge, which is flagged."
+    needs_user: false
+  - id: B-403
+    task: T-19
+    question: "B-5's name ladder puts placeholder/title/alt/name before own text. D-412 gives buttons and links their visible text before title, and the name attribute last for all elements. Amend B-5 so srv-web (area servers) builds the same names from fetched HTML?"
+    default_taken: "D-412 order in injected.js; proposal for supreme to amend docs/05 B-5 and tell area servers."
+    needs_user: false
+  - id: B-404
+    task: T-19
+    question: "data/roles.txt (D-49, area sheet) does not exist yet; injected.js fingerprint() carries its own copy of the role aliases. Who syncs it?"
+    default_taken: "Keep the in-page copy, marked as mirroring data/roles.txt; page re-syncs it when sheet merges the file. A drift test in injected/test reads data/roles.txt when present."
+    needs_user: false
   - id: B-430
     task: T-19
     question: "D-402 takes Pay only from card/IBAN fields in the form. A checkout with a saved card (button 'Place order', 'Pay now', 'Confirm order', 'Buy now', no card field) classifies as Submit and runs under the lenient gate without an ask. Should button text raise to Pay as H-1's table ('checkout, confirm order') suggests?"
