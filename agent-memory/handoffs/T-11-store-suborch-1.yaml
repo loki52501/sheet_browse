@@ -1,0 +1,18 @@
+from: store/sub-orchestrator
+to: next
+task: T-11
+date: "2026-10-23"
+state: "T-11 claimed (tasks.yaml doing, swarm.yaml areas.store.status in_progress). Decisions D-300..D-307 and blockers B-300, B-301 recorded and committed. Two rust-coders are running in parallel on crates/toolstore: #1 store core (header, folder_for, loader, fingerprint/relocate, lifecycle record/sweep, invariants, archive, git helper, seed tools/ashbyhq.com/list_jobs.js and tools/_generic/read_table.js); #2 src/runner.rs (rquickjs runner, PageHost/ApiFetch, D-305)."
+not_done: "1. Wait for both coder handoffs (T-11-rust-coder-1.yaml, -2.yaml). 2. Spawn reviewer on the diff and tester on docs/03 acceptance at once; loop until review has no Blocking items and accept is green. 3. Record I-7/I-12 draft shape changes under blockers.yaml interface_changes. 4. Mark T-11 done, set areas.store.status pr_open, final handoff, commit (D-46: no remote, no push)."
+gotchas:
+  - "Two coders share one worktree; each commits only its own paths."
+  - "sb-act and sb-sheet find/read are todo!() stubs: toolstore reaches them via PlannerCheck (D-301) and PageHost (D-305) trait objects so tests use fakes."
+  - "roles.txt (D-49) not there yet: built-in alias map per B-300."
+decisions_made: [D-300, D-301, D-302, D-303, D-304, D-305, D-306, D-307]
+blockers_opened: [B-300, B-301]
+files_touched:
+  - agent-memory/tasks.yaml
+  - agent-memory/swarm.yaml
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+verify: "git log --oneline -3 swarm/store"
