@@ -1,0 +1,16 @@
+from: tester (T-10 round 2)
+to: sheet sub-orchestrator
+task: T-10
+date: "2026-10-23"
+state: "Round-2 acceptance for docs/05 B-6 (acc. 6, pure half of 7, B-6.1, B-6.3) and docs/04 W-5 (pure half) on dd00fd6. All 13 round-1 tests pass, including the earlier D-211 heading-only chunk failure, which D-216 fixed. Three r2_* tests were added for the review fixes: an autocomplete-only password span with values scrubbed before chunking, OPAQUE-hosted frame content sealed, and a hidden CHALLENGE still reported (D-215). acceptance_t10 16/16 and cargo test -p sb-sheet all green. clippy --all-targets -D warnings and fmt are clean. The skeleton CLI exits 0. SB_VAULT_CANARY had 0 hits. Report: bench/results/accept-T-10.md, Verdict: green."
+not_done: "Live-index halves of docs/05 acc. 6/7 and docs/04 live fetch belong to the sb-driver / srv-web waves."
+gotchas:
+  - "Use --no-fail-fast so every test binary reports."
+  - "Canary tests read SB_VAULT_CANARY at runtime (else a runtime-unique string), so no canary literal is ever written to a file."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/tests/acceptance_t10.rs
+  - bench/results/accept-T-10.md
+  - agent-memory/handoffs/T-10-tester-2.yaml
+verify: "cargo test -p sb-sheet --no-fail-fast"

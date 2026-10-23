@@ -1,4 +1,4 @@
-//! T-10 acceptance (tester, round 1): docs/05 B-6 (acceptance 6, pure half of 7, B-6.1, B-6.3)
+//! T-10 acceptance (tester, rounds 1 and 2): docs/05 B-6 (acceptance 6, pure half of 7, B-6.1, B-6.3)
 //! and docs/04 W-5 (pure half). Fixtures here are built by hand from bench/pages/register.html
 //! and an invented article page, independently of the coders' tests and of
 //! examples/register.index.json.
@@ -1242,4 +1242,235 @@ fn a7_no_chunk_ends_on_a_heading_when_content_follows() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------- round 2 (after review fixes)
+
+/// Every read output (markdown, outline, cursor) for one region and chunk size, following
+/// cursors to the end.
+fn read_texts(
+    rows: &[IndexRow],
+    blocks: &[TextBlock],
+    region: Option<&str>,
+    ct: usize,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = None;
+    for _ in 0..300 {
+        let r = read(
+            rows,
+            blocks,
+            &ReadOpts {
+                region: region.map(Into::into),
+                cursor: cur.clone(),
+                max_tokens: None,
+                chunk_tokens: ct,
+            },
+        );
+        out.push(r.markdown.clone());
+        out.push(format!("{:?}", r.remaining));
+        if let Some(Cursor(s)) = &r.cursor {
+            out.push(s.clone());
+        }
+        cur = r.cursor;
+        if cur.is_none() {
+            return out;
+        }
+    }
+    panic!("read cursor never ends for {region:?}/{ct}");
+}
+
+/// W5-b round 2: a span linked to a password row known only by autocomplete (D-206/D-216)
+/// renders as the field, never its text; a password value that sits in plain text of a long
+/// paragraph is scrubbed before chunking, so no chunk split can leak it across two reads; the
+/// whitespace-collapsed spelling of a value is scrubbed too.
+#[test]
+fn r2_w5b_autocomplete_password_span_and_scrub_before_chunking() {
+    use BlockKind::*;
+    let c = canary();
+    let mut rows = register_rows();
+    rows.insert(
+        7,
+        row(31, "textbox", "Current password")
+            .lm("main")
+            .hd("Create your account")
+            .fm("f1")
+            .auto("current-password")
+            .val(FieldValue::Text(format!("{c}A"))),
+    );
+    for r in rows.iter_mut().filter(|r| r.id == 7) {
+        r.state.value = Some(FieldValue::Text(format!("{c}B  {c}C")));
+    }
+    let mut blocks = register_blocks();
+    let filler: String = (0..120).map(|i| format!("word{i} ")).collect();
+    blocks.insert(
+        3,
+        blk(
+            3,
+            Paragraph,
+            None,
+            Some("main"),
+            Some("Create your account"),
+            vec![
+                span("Current password "),
+                Span {
+                    text: format!("{c}Z"),
+                    elem: Some(sb_sheet::ElemRef::main(31)),
+                },
+            ],
+        ),
+    );
+    blocks.insert(
+        4,
+        blk(
+            4,
+            Paragraph,
+            None,
+            Some("main"),
+            Some("Create your account"),
+            vec![span(&format!(
+                "{filler}pasted {c}A here. {filler}and {c}B {c}C there. {filler}"
+            ))],
+        ),
+    );
+    for (i, b) in blocks.iter_mut().enumerate() {
+        b.order = i as u32;
+    }
+    let mut leaks = Vec::new();
+    for ct in [4000usize, 40, 25] {
+        for region in [None, Some("main"), Some("Create your account")] {
+            let texts = read_texts(&rows, &blocks, region, ct);
+            // joined with nothing between chunks: a value cut over a chunk boundary would show
+            let joined: String = texts.concat();
+            if texts.iter().any(|t| t.contains(c.as_str())) || joined.contains(c.as_str()) {
+                leaks.push(format!("read {region:?}/{ct}"));
+            }
+        }
+    }
+    let full = read(&rows, &blocks, &ropts(4000, None)).markdown;
+    assert!(
+        full.contains("(#31)"),
+        "the autocomplete password field is still linked as a field"
+    );
+    // not vacuous: the paragraph holding the values is read, with the values scrubbed
+    assert!(
+        full.contains("pasted") && full.contains("there."),
+        "paragraph with password values was not read"
+    );
+    for region in [None, Some("f1"), Some("main")] {
+        if sheet_of(&rows, region).contains(c.as_str()) {
+            leaks.push(format!("sheet {region:?}"));
+        }
+    }
+    for q in ["current password", "password", "pasted"] {
+        let hits = find(&rows, &blocks, &fopts(q, 50));
+        if find_lines(&rows, &hits).contains(c.as_str()) {
+            leaks.push(format!("find_lines {q}"));
+        }
+    }
+    if skeleton(&rows, &blocks, &register_meta(None)).contains(c.as_str()) {
+        leaks.push("skeleton".into());
+    }
+    assert!(leaks.is_empty(), "password canary emitted by: {leaks:?}");
+}
+
+/// W5-c round 2: content of a frame hosted by an OPAQUE (non-challenge) row is never read
+/// (B-5 "OPAQUE ... never read inside", D-216), nor listed by sheet or found by find.
+#[test]
+fn r2_w5c_opaque_frame_content_never_emitted() {
+    use BlockKind::*;
+    let mut rows = register_rows();
+    let pos = rows.iter().position(|r| r.id == 12).unwrap();
+    let mut host = row(40, "iframe", "Payment widget")
+        .lm("main")
+        .hd("Create your account")
+        .fm("f1");
+    host.flags.opaque = true;
+    host.child_frame = Some(3);
+    rows.splice(
+        pos..pos,
+        [
+            host,
+            row(1, "textbox", "Opqcardnumber").frame(3).lm("main"),
+            row(2, "button", "Opqpaybutton").frame(3).lm("main"),
+        ],
+    );
+    let mut blocks = register_blocks();
+    let mut b = blk(
+        0,
+        Paragraph,
+        None,
+        Some("main"),
+        Some("Create your account"),
+        vec![span("Opqframetext enter your card details below")],
+    );
+    b.frame = 3;
+    blocks.insert(4, b);
+    for (i, b) in blocks.iter_mut().enumerate() {
+        b.order = i as u32;
+    }
+    let markers = ["Opqframetext", "Opqcardnumber", "Opqpaybutton"];
+    let mut outs = Vec::new();
+    for region in [None, Some("main"), Some("Create your account")] {
+        for ct in [4000usize, 25] {
+            outs.extend(read_texts(&rows, &blocks, region, ct));
+        }
+    }
+    for region in [None, Some("main"), Some("f1")] {
+        outs.push(sheet_of(&rows, region));
+    }
+    for q in ["card details", "pay", "card number"] {
+        let hits = find(&rows, &blocks, &fopts(q, 5));
+        assert!(
+            hits.iter().all(|h| h.elem.frame == 0),
+            "{q}: hit inside the opaque frame {hits:?}"
+        );
+        outs.push(find_lines(&rows, &hits));
+    }
+    outs.push(skeleton(&rows, &blocks, &register_meta(None)));
+    for o in &outs {
+        for m in markers {
+            assert!(!o.contains(m), "{m}\n{o}");
+        }
+    }
+    // the main-frame text is still read
+    let r = read(&rows, &blocks, &ropts(4000, None));
+    assert!(
+        r.markdown.contains("Start your free trial"),
+        "{}",
+        r.markdown
+    );
+}
+
+/// CLAUDE.md rule 3 / D-5 / D-215: a CHALLENGE row whose producer marked it not visible is
+/// still appended by find and still warned about by the skeleton.
+#[test]
+fn r2_hidden_challenge_still_reported_by_find_and_skeleton() {
+    let mut rows = register_rows();
+    for r in rows.iter_mut().filter(|r| r.id == 11) {
+        r.state.visible = false;
+    }
+    let hits = find(&rows, &[], &fopts("email, password, agree, register", 1));
+    let got: Vec<String> = hits.iter().map(|h| h.elem.to_string()).collect();
+    assert_eq!(got, ids(&[6, 7, 10, 11, 12, 17]));
+    assert_eq!(
+        hits.iter().find(|h| h.elem.id == 11).unwrap().reason,
+        HitReason::Challenge
+    );
+    let lines = find_lines(&rows, &hits);
+    assert!(
+        lines
+            .lines()
+            .any(|l| l.contains("#11") && l.contains("CHALLENGE")),
+        "{lines}"
+    );
+    // an unrelated query still carries the challenge
+    let hits = find(&rows, &[], &fopts("pricing", 1));
+    assert!(hits.iter().any(|h| h.elem.id == 11), "{hits:?}");
+    let s = skeleton(&rows, &register_blocks(), &register_meta(None));
+    assert!(
+        s.lines()
+            .any(|l| l.contains("CHALLENGE") && l.contains("#11")),
+        "{s}"
+    );
 }
