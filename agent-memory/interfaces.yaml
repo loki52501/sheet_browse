@@ -47,10 +47,10 @@ interfaces:
     name: "sb_sheet::{skeleton, find, sheet, read}(index, text_blocks, opts)"
     tier: draft
     crate: sb-sheet
-    rust: "sb_sheet::{skeleton, find, sheet, read, TextBlock, Span, BlockKind, PageMeta, *Opts, FindHit, HitReason, ReadOutput, Cursor}"
-    consumers: [srv-web, sb-mcp]
+    rust: "sb_sheet::{skeleton, find, sheet, read, sheet_line, find_lines, TextBlock, Span, BlockKind, PageMeta, *Opts, FindHit, HitReason, ReadOutput, Cursor}; sb_sheet::data::{aria_roles, alias_for, role_prior, synonyms}; sb_sheet::tokens::estimate"
+    consumers: [srv-web, sb-mcp, toolstore]
     spec: docs/05-BROWSER.md#B-6
-    notes: "The only scorer, live and fetched (D-51); `?` threshold and acceptance k=1 per D-54. TextBlock is produced by page (injected.js text()) and servers (srv-web walk): changes to it need interface_changes even while draft."
+    notes: "The only scorer, live and fetched (D-51); `?` threshold and acceptance k=1 per D-54. TextBlock is produced by page (injected.js text()) and servers (srv-web walk): changes to it need interface_changes even while draft. Line rendering (sheet_line, find_lines; format D-203), the role alias and prior tables (sb_sheet::data, D-49, D-201) and the token estimate (D-200) are public so servers and toolstore::fingerprint never re-implement them (D-59). Smoke test without a browser: cargo run -p sb-sheet --example skeleton -- <index.json>."
   - id: I-7
     name: "toolstore::{load(domain, path) -> Vec<Tool>, fingerprint(tool, index), record(result)}"
     tier: draft

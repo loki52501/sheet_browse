@@ -138,3 +138,6 @@ decisions:
   - id: D-58
     text: "B-430 decided (supersedes the Pay clause of D-402): Submit is raised to Pay when the submit button's name, or the form's heading or name, says checkout, place order, confirm order, pay or pay now, buy now, complete purchase, or add card, in addition to D-402's card/IBAN field evidence. The text rule only raises the class, never lowers it; class order stays max() (D-36)."
     why: "docs/01 H-1's table lists checkout, add card and confirm order as Pay. Under D-402 a saved-card checkout has no card field, classifies as Submit, and runs under the lenient gate without an ask, which is the one path the gate exists to stop. A false Pay costs one ask; a missed Pay costs money."
+  - id: D-59
+    text: "B-200 accepted: I-6 (draft) gains sb_sheet::sheet_line, sb_sheet::find_lines, sb_sheet::data::{aria_roles, alias_for, role_prior, synonyms}, sb_sheet::tokens::estimate and the `skeleton` example binary; toolstore joins I-6's consumers. No existing signature changes. toolstore drops its built-in alias map (B-300) for sb_sheet::data once both areas are merged."
+    why: "Additive and within D-38 (toolstore -> sb-sheet is already an edge). D-49 needs one alias table for find, sheets and fingerprints, and D-51's single-scorer rule extends to a single line renderer; two copies would drift and acceptance would test one of them."
