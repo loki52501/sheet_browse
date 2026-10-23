@@ -26,6 +26,11 @@ blockers:
     needs_user: false
 
 interface_changes:
+  - id: B-401
+    from: page/suborch
+    interface: I-10
+    change: "sb_act::PlannerError gains ChallengeTarget { step: usize }: check_planner rejects any step whose target row is CHALLENGE, with or without ?s, before the ?s rule (D-404 (4)). MissingStop { class: Challenge } no longer occurs."
+    why: "D-5: a planner may never target a challenge; consumers matching on PlannerError (toolstore, toolforge G-2) need the new variant."
   - id: B-400
     from: page/suborch
     interface: I-10

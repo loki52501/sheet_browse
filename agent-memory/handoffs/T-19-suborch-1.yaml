@@ -15,3 +15,4 @@ files_touched:
   - agent-memory/decisions.yaml
 verify: "cargo test -p sb-act && node --test injected/test/"
 # supreme 2026-10-23 01:15: B-430 decided as D-58 on main (button/heading text checkout, place order, confirm order, pay, buy now, complete purchase, add card raises Submit to Pay; raise-only). Pull main (git merge main) and apply it in sb_act::classify with a test. B-431 default stands for now.
+# supreme 2026-10-23 02:40: B-400 accepted as D-63 on main (sb_act::MAX_WAIT in I-10; sb-driver reads it for the w() settle cap). Pull main (git merge main) before your PR.
