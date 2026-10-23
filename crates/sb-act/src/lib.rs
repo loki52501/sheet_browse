@@ -12,8 +12,10 @@
 //! D-403 (key steps, implicit submission, wider Pay/Account/Delete evidence), D-404 (2FA
 //! only with a set-up verb, delete dialogs, the Delete key, planner challenge rejection)
 //! and D-406 (control-character keys, Enter takes the form max on every row, challenge
-//! targets before `?s`, per-form evidence cache, more words) and D-407 (final word lists:
-//! more Pay words, `create` as a 2FA set-up verb).
+//! targets before `?s`, per-form evidence cache, more words), D-407 (final word lists:
+//! more Pay words, `create` as a 2FA set-up verb) and D-408 (non-submit buttons in a form
+//! take a submit's Pay and Account name checks, Enter anywhere in a chord, leave group and
+//! wipe device are Delete).
 //!
 //! Every refinement only raises a class (D-36). The one sanctioned lowering is D-404 (1):
 //! second-factor text is Account only with a set-up verb, so a bare "Two-step
@@ -105,7 +107,7 @@ pub struct ActClass {
 }
 
 /// One step's class from its target's row and form context (B-7, D-402, D-433, D-434,
-/// D-58, D-403, D-404, D-406).
+/// D-58, D-403, D-404, D-406, D-407, D-408).
 ///
 /// CHALLENGE target: Challenge. Target missing from the index: Submit. A click on a
 /// SUBMIT/submitish row is Submit raised by the form (max wins): Pay for card/IBAN/CVC/
@@ -119,12 +121,15 @@ pub struct ActClass {
 /// unsubscribe/trash/close account/clear history, data or all/`cancel <x>` on the button,
 /// form heading or form name. Other clicks: Delete by the same text rule, or for an
 /// affirmative button (confirm/yes/ok/continue/proceed) whose own heading, form or dialog
-/// carries Delete evidence; Pay for an "Upgrade" button (not a link); Fill on
+/// carries Delete evidence; Pay for an "Upgrade" button (not a link); for a button or
+/// menuitem (not a link) in a form or sharing a heading with one, the submit's own-name Pay
+/// and Account checks, and Pay for any single Pay word when the form has Pay evidence
+/// (D-408 (1)); Fill on
 /// checkbox/radio/switch/option/tab, else Navigate (a bare Cancel or Close is Navigate).
 ///
 /// Key steps (D-403 (1), D-406 (1)): Tab, Escape, arrows, Home/End/PageUp/PageDown,
 /// modifiers alone and typing into a text field (not a file input) are Fill; Delete on a
-/// non-text row is Delete; Enter, or a raw `\r`/`\n` in the key value, on any row in a form
+/// non-text row is Delete; Enter (in any chord segment, D-408 (2)), or a raw `\r`/`\n` in the key value, on any row in a form
 /// is the max of a click on the row and the form's implicit submission (at least Submit,
 /// with the form's evidence even without a submit row, and the max over every submit of
 /// the form), and in a formless text field it is Submit raised by its headings; any other
