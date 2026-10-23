@@ -7,86 +7,8 @@ use harness_core::Class;
 use sb_act::{check_planner, classify, classify_step, parse, PlannerError};
 use sb_sheet::IndexRow;
 
-/// bench/pages/register.html as the live walk would ship it (B-5): nav links, #signup (f1)
-/// with email, new-password, full name, plan select, agree checkbox, the reCAPTCHA
-/// container/iframe as one CHALLENGE + OPAQUE row (D-55) and the Register submit; the
-/// newsletter form (f2); the cookie banner (OVERLAY). The hidden promo is skipped.
-const REGISTER: &str = r#"[
-  {"id":1,"frame":0,"role":"link","name":"Home","landmark":"nav"},
-  {"id":2,"frame":0,"role":"link","name":"Pricing","landmark":"nav"},
-  {"id":3,"frame":0,"role":"link","name":"Sign in","landmark":"nav"},
-  {"id":4,"frame":0,"role":"textbox","name":"Email","heading":"Create your account",
-   "state":{"value":{"kind":"empty"},"input_type":"email","autocomplete":"email"},
-   "form":"f1","landmark":"main","box":{"x":16,"y":180,"w":608,"h":40}},
-  {"id":5,"frame":0,"role":"textbox","name":"Password","heading":"Create your account",
-   "state":{"value":{"kind":"empty"},"input_type":"password","autocomplete":"new-password"},
-   "form":"f1","landmark":"main"},
-  {"id":6,"frame":0,"role":"textbox","name":"Full name","heading":"Create your account",
-   "state":{"value":{"kind":"empty"},"input_type":"text"},"form":"f1","landmark":"main"},
-  {"id":7,"frame":0,"role":"combobox","name":"Plan","heading":"Create your account",
-   "state":{"value":{"kind":"text","text":"Basic"},"options":["Basic","Plus","Pro"]},
-   "form":"f1","landmark":"main"},
-  {"id":8,"frame":0,"role":"checkbox","name":"I agree to the Terms of Service",
-   "heading":"Create your account","state":{"checked":false,"input_type":"checkbox"},
-   "form":"f1","landmark":"main"},
-  {"id":9,"frame":0,"role":"iframe","name":"reCAPTCHA","heading":"Create your account",
-   "flags":{"challenge":true,"opaque":true},"form":"f1","landmark":"main","child_frame":1},
-  {"id":10,"frame":0,"role":"button","name":"Register","heading":"Create your account",
-   "state":{"submitish":true},"flags":{"submit":true},"form":"f1","landmark":"main"},
-  {"id":11,"frame":0,"role":"textbox","name":"Email","heading":"Stay in the loop",
-   "state":{"input_type":"email"},"form":"f2","landmark":"footer"},
-  {"id":12,"frame":0,"role":"button","name":"Subscribe","heading":"Stay in the loop",
-   "state":{"submitish":true},"flags":{"submit":true},"form":"f2","landmark":"footer"},
-  {"id":13,"frame":0,"role":"button","name":"Accept all","flags":{"overlay":true},"landmark":"region"},
-  {"id":14,"frame":0,"role":"button","name":"Reject","flags":{"overlay":true},"landmark":"region"}
-]"#;
-
-/// A login page whose heading mentions create account (D-433: still a login, Submit).
-const LOGIN: &str = r#"[
-  {"id":20,"frame":0,"role":"textbox","name":"Email","heading":"Sign in or create an account",
-   "state":{"input_type":"email","autocomplete":"username"},"form":"f4"},
-  {"id":21,"frame":0,"role":"textbox","name":"Password","heading":"Sign in or create an account",
-   "state":{"value":{"kind":"filled"},"input_type":"password","autocomplete":"current-password"},"form":"f4"},
-  {"id":22,"frame":0,"role":"button","name":"Sign in","heading":"Sign in or create an account",
-   "state":{"submitish":true},"flags":{"submit":true},"form":"f4"}
-]"#;
-
-/// Saved-card checkout (D-58): no card field, only a saved-card radio and "Place order".
-const CHECKOUT: &str = r#"[
-  {"id":30,"frame":0,"role":"radio","name":"Visa ending 4242","heading":"Payment method",
-   "state":{"checked":true,"input_type":"radio"},"form":"f5"},
-  {"id":31,"frame":0,"role":"button","name":"Place order","heading":"Review your order",
-   "state":{"submitish":true},"flags":{"submit":true},"form":"f5"},
-  {"id":32,"frame":0,"role":"link","name":"Return to cart"}
-]"#;
-
-/// Unsubscribe form, a cancel-something button, a bare Cancel and a bare Close.
-const MANAGE: &str = r#"[
-  {"id":40,"frame":0,"role":"textbox","name":"Email","heading":"Email preferences",
-   "state":{"input_type":"email"},"form":"f6"},
-  {"id":41,"frame":0,"role":"button","name":"Unsubscribe","heading":"Email preferences",
-   "state":{"submitish":true},"flags":{"submit":true},"form":"f6"},
-  {"id":42,"frame":0,"role":"button","name":"Cancel","heading":"Email preferences","form":"f6"},
-  {"id":43,"frame":0,"role":"button","name":"Close","landmark":"dialog"},
-  {"id":44,"frame":0,"role":"button","name":"Cancel subscription","heading":"Your plan"},
-  {"id":45,"frame":0,"role":"link","name":"Unsubscribe from all mail","landmark":"footer"}
-]"#;
-
-/// Job application with a CV upload, an e-sign form, and a frame-scoped submit.
-const HINTS: &str = r#"[
-  {"id":50,"frame":0,"role":"textbox","name":"Full name","heading":"Apply for Senior Engineer",
-   "state":{"input_type":"text"},"form":"f7"},
-  {"id":51,"frame":0,"role":"textbox","name":"Resume","heading":"Apply for Senior Engineer",
-   "state":{"input_type":"file"},"form":"f7"},
-  {"id":52,"frame":0,"role":"button","name":"Submit","heading":"Apply for Senior Engineer",
-   "state":{"submitish":true},"flags":{"submit":true},"form":"f7"},
-  {"id":60,"frame":0,"role":"textbox","name":"Type your full name","heading":"Lease agreement",
-   "state":{"input_type":"text"},"form":"f8"},
-  {"id":61,"frame":0,"role":"button","name":"Sign document","heading":"Lease agreement",
-   "state":{"submitish":true},"flags":{"submit":true},"form":"f8"},
-  {"id":15,"frame":2,"role":"textbox","name":"Comment","state":{"input_type":"text"},"form":"f1"},
-  {"id":16,"frame":2,"role":"button","name":"Post","state":{"submitish":true},"flags":{"submit":true},"form":"f1"}
-]"#;
+mod common;
+use common::{CHECKOUT, HINTS, LOGIN, MANAGE, REGISTER};
 
 fn rows(json: &str) -> Vec<IndexRow> {
     serde_json::from_str(json).expect("I-5 wire JSON")
