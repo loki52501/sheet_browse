@@ -9,6 +9,9 @@ publish.workspace = true
 [dependencies]
 chrono.workspace = true
 harness-core.workspace = true
+# Tool runner (D-305): embedded JS engine, default features only (no loader, no dyn-load).
+rquickjs = "0.14"
 sb-act.workspace = true
 sb-sheet.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true

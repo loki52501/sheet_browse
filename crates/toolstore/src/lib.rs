@@ -8,6 +8,12 @@
 //! `text(region)`, `table(id)`, `url`, `title`, `q(s)` (act value quoting, D-52), and for
 //! `@phase 1` readers `api(url)`, which goes through srv-web's `api` tool and the gate as Read.
 
+pub mod runner;
+pub use runner::{
+    run_planner, run_planner_with, run_reader, run_reader_with, ApiFetch, PageHost, RunError,
+    RunOpts, SheetPage,
+};
+
 use harness_core::memory::{MemoryStore, ToolHealth, Ts};
 use harness_core::Class;
 use sb_sheet::IndexRow;

@@ -24,6 +24,26 @@ blockers:
     question: "docs/03 acceptance says an unused ephemeral tool 'is deleted by reflect', but T-7 says deletion is always retire -> archive -> delete. Which?"
     default_taken: "D-303: retire and archive at 14 days (ledger event), delete the archived file at 90 days."
     needs_user: false
+  - id: B-320
+    task: T-11
+    question: "T-2/D-53 name page.table(id) but no return shape or id syntax."
+    default_taken: "id is `3` or `f2.3` (table number within a frame, leading # ignored). Returns {header: [cells], rows: [[cells]]}, plus refs: [[ref|null]] (refs without #) only when some cell links an element; null when the table has no rows. Cells are trimmed span text. Built directly from TextBlock TableRow blocks in toolstore::runner::table_json."
+    needs_user: false
+  - id: B-321
+    task: T-11
+    question: "T-2 lists `url` and `title` without parentheses; the brief for the runner wrote url() and title(). Properties or methods on page?"
+    default_taken: "Properties (strings read once from PageHost at run start; a run is synchronous so they cannot change). PageHost itself has url() and title() methods."
+    needs_user: false
+  - id: B-322
+    task: T-11
+    question: "PageHost and ApiFetch are synchronous (JS host calls are synchronous); srv-web's api tool and sb-mcp are async (tokio). How do callers bridge?"
+    default_taken: "Callers run run_reader/run_planner inside tokio::task::spawn_blocking and implement ApiFetch with Handle::block_on on the gated api call. The runner is !Send internally (fresh Runtime per call), so nothing crosses threads."
+    needs_user: false
+  - id: B-323
+    task: T-11
+    question: "The 2 s wall cap includes time spent inside page.api() host calls. A @phase 1 reader making several network calls can hit it."
+    default_taken: "Keep 2 s as RunOpts::default(); srv-web passes a larger RunOpts.timeout for @phase 1 readers if acceptance shows it is needed. The cap is checked by the interrupt handler, so a slow api call is only detected when JS resumes."
+    needs_user: false
 
 interface_changes:
 
