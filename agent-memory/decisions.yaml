@@ -171,3 +171,6 @@ decisions:
   - id: D-111
     text: "harness-core's integration tests get the `testing` feature through a self dev-dependency (`[dev-dependencies] harness-core = { path = \".\", features = [\"testing\"] }`), not `required-features`, so `cargo test --workspace` (the S-8 merge gate) compiles and runs them."
     why: "required-features silently skips the test binary when the feature is off, which would let the merge gate pass without running the acceptance tests."
+  - id: D-112
+    text: "Workspace rust-version is 1.94 (was 1.85). core-pg uses sqlx 0.9 (pgvector 0.4 requires it; one sqlx in the tree) with fixed-literal SQL, and fastembed 7; core-pg writes every timestamp from the Rust process (ts_now), never the database's now()."
+    why: "sqlx 0.9 needs rustc 1.94 and fastembed 7 needs 1.88, so 1.85 was a false promise; two sqlx majors would double compile time and split types. The compose container's clock ran ~37 s ahead of the host and made due-time tests flaky."
