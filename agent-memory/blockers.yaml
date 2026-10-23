@@ -31,5 +31,15 @@ interface_changes:
     interface: I-1
     change: "harness_core::memory::contact_key: normalise with trim() + to_ascii_lowercase() instead of Unicode to_lowercase(); signature unchanged."
     why: "Unicode lowercasing folds compatibility characters (U+212A KELVIN SIGN -> k), so a Send to a different, look-alike address would match a known contact and be allowed without an ask (H-1.1). Mail domains are case-insensitive ASCII after IDNA; local parts beyond ASCII must stay distinct. Default until supreme answers: unchanged (contract), gate behaviour as is."
+  - id: B-103
+    from: core
+    interface: I-3
+    change: "Additive: pub fn harness_core::gate::clean_card(card: AskCard) -> AskCard (the D-110 (5) control-strip + caps the gate already applies, today the private card_text/ask_card helpers)."
+    why: "ToolCtx::ask (I-2, mid-call asks) must sanitise handler-built cards like the gate does; with the helpers private, T-07 carries a copy of card_text in mcp.rs (card_line), and two copies can drift. Default until supreme answers: keep the copy in mcp.rs, tested by mcp::tests::card_lines_are_clean."
+  - id: B-104
+    from: core
+    interface: I-2
+    change: "Additive pub items in harness_core::mcp: serve_io(server, registry, harness, reader, writer), PROTOCOL_VERSION, scrub_value(vault, &Value); new module harness_core::ask (FileAsker, answer, asks_dir, card_path, answer_path). Behaviour: tools/call for a name not in the registry answers JSON-RPC error -32602 (MCP 2025-06-18 'Unknown tool'), not isError; dispatch() still returns ToolError::Args for it."
+    why: "Listed so the contract file can name them; serve_io is the test seam for the stdio transport, answer() is what T-08's `harness ask` calls. Default: as implemented in T-07."
 
 proposals:

@@ -16,7 +16,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+
+# MCP wrapper, FileAsker (T-07, D-104, D-105)
+notify = "8"
 
 # Memory store (T-03, D-32, D-103)
 fastembed = { version = "7", default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }

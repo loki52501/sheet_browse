@@ -968,11 +968,84 @@ impl MemoryStore for PgStore {
     }
 }
 
-/// Builds the [`Harness`] a tool server's `main` hands to `harness_core::serve`: the store at
-/// `DATABASE_URL` (default [`DEFAULT_DATABASE_URL`]), the vault, the asker, the run from the
-/// launching session. Which variables and files it reads is T-07's call (never a key, D-1).
+/// Builds the [`Harness`] a tool server's `main` hands to `harness_core::serve`. Reads:
+///
+/// * `DATABASE_URL` (default [`DEFAULT_DATABASE_URL`]): the store, migrated on connect;
+/// * the vault at `harness_core::vault::default_path()` (`SB_VAULT_PATH` or the config dir)
+///   with the OS keychain key; a missing file is an empty vault. It is installed as the
+///   process-wide scrubber before anything else is written;
+/// * `SB_RUNS_ROOT` (default `runs` in the current directory);
+/// * `SB_RUN_ID`: the run the launching session created (its folder must exist). Without it
+///   the server starts its own run: folder `<ts>-<executable name>` and a `runs` row with
+///   status `running`.
+///
+/// The asker is a [`harness_core::FileAsker`] on that run (D-105). No API key is read or
+/// required (rule 1).
 pub async fn bootstrap() -> Result<Harness> {
-    todo!("T-07: server bootstrap")
+    use harness_core::run::RunFolder;
+    use harness_core::vault::{default_key, default_path, Vault};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+
+    let path = default_path().map_err(|e| MemoryError::Invalid(format!("vault: {e}")))?;
+    let vault = Vault::open(&path, &default_key())
+        .map_err(|e| MemoryError::Invalid(format!("vault {}: {e}", path.display())))?;
+    vault.install_global();
+    let vault = Arc::new(vault);
+
+    let url = env("DATABASE_URL").unwrap_or_else(|| DEFAULT_DATABASE_URL.to_string());
+    let store: Arc<dyn MemoryStore> = Arc::new(PgStore::connect(&url).await?);
+
+    let runs_root = env("SB_RUNS_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("runs"));
+    let run = match env("SB_RUN_ID") {
+        Some(id) => {
+            let id = RunId(id.trim().to_string());
+            RunFolder::open(&runs_root, &id).map_err(|e| {
+                MemoryError::Invalid(harness_core::scrub(&format!("SB_RUN_ID: {e}")))
+            })?;
+            id
+        }
+        None => {
+            let slug = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "server".to_string());
+            let prompt = format!("tool server {slug} started without SB_RUN_ID\n");
+            let folder = RunFolder::create(&runs_root, &slug, &prompt)
+                .map_err(|e| MemoryError::Invalid(format!("run folder: {e}")))?;
+            let started = ts_now();
+            store
+                .run_start(Run {
+                    id: folder.id.clone(),
+                    started,
+                    ended: None,
+                    prompt,
+                    status: RunStatus::Running,
+                    folder: folder.dir.to_string_lossy().replace('\\', "/"),
+                    parent_run: None,
+                    strict: false,
+                })
+                .await?;
+            folder.id
+        }
+    };
+
+    let asker = Arc::new(harness_core::FileAsker::new(
+        &runs_root,
+        run.clone(),
+        vault.clone(),
+    ));
+    Ok(Harness {
+        store,
+        vault,
+        asker,
+        runs_root,
+        run: Some(run),
+    })
 }
 
 #[cfg(test)]
