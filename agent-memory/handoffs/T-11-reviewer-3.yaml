@@ -1,0 +1,16 @@
+from: reviewer-3 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-23"
+state: "Combined re-review of T-11 at 37ab7b0 (fix commits f67a09f, 4a61935) in bench/results/review-T-11.md. Verdict: approve, Blocking none. All 4 core blocking items and all runner and core should-fix items are fixed, each with a test that fails on the old code. Out-of-repo probes confirm the fixes for pathspec magic, traversal, the vault concat bypass, the 3 ask escapes, ?s, @match, the api deadline, the output cap and OOM. fmt, clippy -D warnings, cargo test -p toolstore (91 lib + 23 accept) and cargo test --workspace are all exit 0."
+not_done: "Should fix, in order: 1. runner.rs:417: RunOpts.memory_limit below about 45 KB, including 0 (which meant no cap before), segfaults in rquickjs Runtime::new_with_alloc. Admit allocations until the context and prelude exist, or clamp the limit and map 0 to the default; add a test. 2. read_table.js:49: the 200-char cut splits surrogate pairs, giving BadReturn 'unexpected end of hex escape'. 3. lifecycle.rs:389-396: reforge undo deletes the archived copy even when restoring the old file failed. 4. stop_count can be gamed with a dead '?s' string. 5. Record the full pub surface in IC-300..303. 6. Narrow the claimed spec ids in tasks.yaml."
+gotchas:
+  - "The Bash tool collapses every \\\\ to \\ in the command text, heredocs included. Write a doubled backslash as four backslashes, or use [\\] in sed and \\x5c in Rust strings."
+  - "Probing rquickjs OOM: exit 139 is a segfault and exit 127 is another native crash under MSYS. Run each limit in its own process."
+  - "The pre-fix tree for comparison: git archive 41ec965 Cargo.toml Cargo.lock crates | tar -x into scratch, then point a probe crate at it with C:/ paths, not /c/ paths."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-11.md
+  - agent-memory/handoffs/T-11-reviewer-3.yaml
+verify: "cargo test -p toolstore && cargo clippy -p toolstore --all-targets -- -D warnings"
