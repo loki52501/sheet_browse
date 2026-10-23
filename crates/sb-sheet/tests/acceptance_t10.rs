@@ -1,4 +1,4 @@
-//! T-10 acceptance (tester, rounds 1 and 2): docs/05 B-6 (acceptance 6, pure half of 7, B-6.1, B-6.3)
+//! T-10 acceptance (tester, rounds 1 to 3): docs/05 B-6 (acceptance 6, pure half of 7, B-6.1, B-6.3)
 //! and docs/04 W-5 (pure half). Fixtures here are built by hand from bench/pages/register.html
 //! and an invented article page, independently of the coders' tests and of
 //! examples/register.index.json.
@@ -1473,4 +1473,324 @@ fn r2_hidden_challenge_still_reported_by_find_and_skeleton() {
             .any(|l| l.contains("CHALLENGE") && l.contains("#11")),
         "{s}"
     );
+}
+
+// ---------------------------------------------------------------- round 3 (after review fixes 2)
+
+/// A6 round 3 (D-217): the respelled query `e-mail` does not flip the group-bonus form or the
+/// four hits; output stays in document order.
+#[test]
+fn r3_a6_respelled_query_keeps_the_four_and_document_order() {
+    let rows = register_rows();
+    let blocks = register_blocks();
+    for q in [
+        "email, password, agree, register",
+        "e-mail, password, agree, register",
+        "E-mail, Password, agree, Register",
+    ] {
+        for b in [&blocks[..], &[][..]] {
+            let hits = find(&rows, b, &fopts(q, 1));
+            let got: Vec<String> = hits.iter().map(|h| h.elem.to_string()).collect();
+            assert_eq!(got, ids(&[6, 7, 10, 11, 12, 17]), "{q}: {hits:?}");
+            for (id, part) in [(6u32, 0usize), (7, 1), (10, 2), (12, 3)] {
+                let h = hits.iter().find(|h| h.elem.id == id).unwrap();
+                assert_eq!(h.reason, HitReason::Match { part }, "{q}: #{id}");
+                assert!(!h.weak, "{q}: #{id} weak");
+            }
+            let lines = find_lines(&rows, &hits);
+            assert_eq!(line_ids(&lines), ids(&[6, 7, 10, 11, 12, 17]), "{lines}");
+        }
+    }
+}
+
+/// W5-b round 3 (D-218): password values holding the characters the renderer escapes
+/// (pipe, square brackets, double quote) are never emitted in any spelling: in a table cell, a
+/// paragraph, a list item, a quote, a code block, and as text of a span linked to a NON-password
+/// row (span text scrubbed before escaping). The canary sits before the escaped characters, so
+/// any escaped spelling of a value still contains it.
+#[test]
+fn r3_w5b_escaped_password_spellings_never_emitted() {
+    use BlockKind::*;
+    let c = canary();
+    let v1 = format!("{c}|p[1]\"q");
+    let v2 = format!("{c}x | y");
+    let mut rows = register_rows();
+    for r in rows.iter_mut().filter(|r| r.id == 7) {
+        r.state.value = Some(FieldValue::Text(v1.clone()));
+    }
+    rows.insert(
+        8,
+        row(32, "textbox", "Old password")
+            .lm("main")
+            .hd("Create your account")
+            .fm("f1")
+            .auto("current-password")
+            .val(FieldValue::Text(v2.clone())),
+    );
+    let mut blocks = register_blocks();
+    let mut extra = Vec::new();
+    let mut th = blk(
+        0,
+        TableRow,
+        None,
+        Some("main"),
+        Some("Create your account"),
+        vec![span("Field"), span("Value")],
+    );
+    th.table = Some(0);
+    th.header = true;
+    extra.push(th);
+    for (k, v) in [("Tblpw", &v1), ("Tblold", &v2)] {
+        let mut tr = blk(
+            0,
+            TableRow,
+            None,
+            Some("main"),
+            Some("Create your account"),
+            vec![span(k), span(v)],
+        );
+        tr.table = Some(0);
+        extra.push(tr);
+    }
+    extra.push(blk(
+        0,
+        Paragraph,
+        None,
+        Some("main"),
+        Some("Create your account"),
+        vec![
+            span(&format!("Parapw see {v1} and {v2} end ")),
+            Span {
+                text: format!("Linkpw {v1}"),
+                elem: Some(sb_sheet::ElemRef::main(8)),
+            },
+        ],
+    ));
+    extra.push(blk(
+        0,
+        ListItem,
+        Some(1),
+        Some("main"),
+        Some("Create your account"),
+        vec![span(&format!("Itempw {v2}"))],
+    ));
+    extra.push(blk(
+        0,
+        Quote,
+        None,
+        Some("main"),
+        Some("Create your account"),
+        vec![span(&format!("Quotepw {v1}"))],
+    ));
+    extra.push(blk(
+        0,
+        Code,
+        None,
+        Some("main"),
+        Some("Create your account"),
+        vec![span(&format!(
+            "let a = 1;\n    let pw = \"{v1}\";\n    let b = 2;"
+        ))],
+    ));
+    blocks.splice(3..3, extra);
+    for (i, b) in blocks.iter_mut().enumerate() {
+        b.order = i as u32;
+    }
+    let mut leaks = Vec::new();
+    let mut all_read = String::new();
+    for ct in [4000usize, 40, 20] {
+        for region in [None, Some("main"), Some("Create your account")] {
+            let texts = read_texts(&rows, &blocks, region, ct);
+            let joined: String = texts.concat();
+            if texts.iter().any(|t| t.contains(c.as_str())) || joined.contains(c.as_str()) {
+                leaks.push(format!("read {region:?}/{ct}"));
+            }
+            all_read.push_str(&joined);
+        }
+    }
+    // not vacuous: every block holding a value was read
+    for m in [
+        "Tblpw", "Tblold", "Parapw", "Linkpw", "Itempw", "Quotepw", "let b",
+    ] {
+        assert!(all_read.contains(m), "{m} not read");
+    }
+    for region in [None, Some("f1"), Some("main")] {
+        if sheet_of(&rows, region).contains(c.as_str()) {
+            leaks.push(format!("sheet {region:?}"));
+        }
+    }
+    for r in &rows {
+        if sheet_line(r).contains(c.as_str()) {
+            leaks.push(format!("sheet_line #{}", r.id));
+        }
+    }
+    for q in ["password", "old password", "parapw", "tblpw"] {
+        let hits = find(&rows, &blocks, &fopts(q, 50));
+        if find_lines(&rows, &hits).contains(c.as_str()) {
+            leaks.push(format!("find_lines {q}"));
+        }
+    }
+    if skeleton(&rows, &blocks, &register_meta(None)).contains(c.as_str()) {
+        leaks.push("skeleton".into());
+    }
+    assert!(leaks.is_empty(), "password canary emitted by: {leaks:?}");
+}
+
+/// W5-c round 3 (D-218): a top-frame span that links a row INSIDE the challenge frame (or a
+/// frame nested in it) never carries the frame's text or its `#f1.x` ref into read; sheet never
+/// selects a region named only inside the sealed frame, and its unknown-region list never names
+/// one.
+#[test]
+fn r3_w5c_spans_into_challenge_frame_and_sealed_regions() {
+    use BlockKind::*;
+    let (mut rows, mut blocks) = challenge_page();
+    for r in rows.iter_mut().filter(|r| r.frame == 1 || r.frame == 2) {
+        r.heading = Some("Chalheading".into());
+        r.form = Some("Chalform".into());
+        r.landmark = Some("dialog".into());
+    }
+    for b in blocks.iter_mut().filter(|b| b.frame == 1 || b.frame == 2) {
+        b.heading = Some("Chalheading".into());
+        b.landmark = Some("dialog".into());
+    }
+    let pos = blocks
+        .iter()
+        .position(|b| b.spans.iter().any(|s| s.text.contains("Start your free")))
+        .unwrap()
+        + 1;
+    blocks.insert(
+        pos,
+        blk(
+            0,
+            Paragraph,
+            None,
+            Some("main"),
+            Some("Create your account"),
+            vec![
+                span("Before the check "),
+                Span {
+                    text: "Chalspanlink tick the box".into(),
+                    elem: Some(sb_sheet::ElemRef { frame: 1, id: 1 }),
+                },
+                span(" then "),
+                Span {
+                    text: "Chalnestspan press verify".into(),
+                    elem: Some(sb_sheet::ElemRef { frame: 2, id: 1 }),
+                },
+                span(" after the check."),
+            ],
+        ),
+    );
+    for (i, b) in blocks.iter_mut().enumerate() {
+        b.order = i as u32;
+    }
+    let markers = [
+        "Chalframetext",
+        "Chalnestedtext",
+        "Chalrobot",
+        "Chalverify",
+        "Chalnestframe",
+        "Chalspanlink",
+        "Chalnestspan",
+        "Chalheading",
+        "Chalform",
+        "#f1.",
+        "#f2.",
+    ];
+    let mut outs = Vec::new();
+    for region in [None, Some("main"), Some("Create your account")] {
+        for ct in [4000usize, 25] {
+            outs.extend(read_texts(&rows, &blocks, region, ct));
+        }
+    }
+    let full = read(&rows, &blocks, &ropts(4000, None)).markdown;
+    assert!(full.contains("Start your free trial"), "{full}");
+    for o in &outs {
+        for m in markers {
+            assert!(!o.contains(m), "read emitted {m}\n{o}");
+        }
+    }
+    // sheet: a region named only inside the sealed frame is unknown; the echo of the asked
+    // name is the caller's own text, so only the part after it is checked
+    for region in ["Chalheading", "Chalform", "dialog"] {
+        let s = sheet_of(&rows, Some(region));
+        let prefix = format!("no region \"{region}\"");
+        assert!(s.starts_with(&prefix), "sheet({region}) selected:\n{s}");
+        let rest = &s[prefix.len()..];
+        for m in markers {
+            assert!(!rest.contains(m), "sheet({region}) names {m}: {s}");
+        }
+        assert!(
+            !rest.contains("dialog"),
+            "sheet({region}) lists dialog: {s}"
+        );
+    }
+    for region in [None, Some("main"), Some("f1"), Some("nosuchregion")] {
+        let s = sheet_of(&rows, region);
+        for m in markers {
+            assert!(!s.contains(m), "sheet({region:?}) emitted {m}\n{s}");
+        }
+    }
+}
+
+/// B61 round 3 (D-218): the skeleton's content hint uses only a top-frame `main`. A `<main>`
+/// inside an iframe neither renames the hint to `main:` nor narrows the word count to the
+/// iframe's blocks.
+#[test]
+fn r3_b61_skeleton_content_hint_ignores_main_inside_iframe() {
+    use BlockKind::*;
+    let words: String = (0..300).map(|i| format!("w{i} ")).collect();
+    let mut host = row(1, "iframe", "Embedded widget");
+    host.child_frame = Some(4);
+    let rows = vec![
+        row(2, "link", "Top").lm("nav"),
+        host,
+        row(1, "button", "Inner").frame(4).lm("main"),
+    ];
+    let mut inner = blk(
+        2,
+        Paragraph,
+        None,
+        Some("main"),
+        None,
+        vec![span("tiny inner main text")],
+    );
+    inner.frame = 4;
+    let blocks = vec![
+        blk(0, Heading, Some(1), None, None, vec![span("Top story")]),
+        blk(
+            1,
+            Paragraph,
+            None,
+            None,
+            Some("Top story"),
+            vec![span(&words)],
+        ),
+        inner,
+    ];
+    let s = skeleton(
+        &rows,
+        &blocks,
+        &SkeletonOpts {
+            meta: PageMeta {
+                url: "http://localhost/story".into(),
+                title: "Top story".into(),
+                site_tools: None,
+                dialog: None,
+            },
+        },
+    );
+    assert!(
+        !s.lines().any(|l| l.trim_start().starts_with("main:")),
+        "iframe main renamed the hint:\n{s}"
+    );
+    let hint = s
+        .lines()
+        .find(|l| l.contains("article"))
+        .unwrap_or_else(|| panic!("no article hint:\n{s}"));
+    let n: usize = hint
+        .split_whitespace()
+        .find_map(|w| w.parse().ok())
+        .unwrap_or(0);
+    assert!(n >= 300, "hint counts only the iframe's main: {hint}");
 }
