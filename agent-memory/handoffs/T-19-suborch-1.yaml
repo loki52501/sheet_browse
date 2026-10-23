@@ -1,0 +1,16 @@
+from: page/suborch
+to: next
+task: T-19
+date: "2026-10-23"
+state: "T-19 claimed (doing, page/suborch). D-400..D-402 committed. Two coders running in background: js-coder on injected/injected.js + media.js + bench/pages fixtures + injected/test; rust-coder on crates/sb-act parse/classify/check_planner. No implementation committed by this handoff."
+not_done: "1) wait for both coder handoffs (T-19-js-coder-1, T-19-rust-coder-1); 2) reviewer + tester on each diff, loop until no Blocking and accept green; 3) mark T-19 done; 4) set swarm.yaml areas.page.status pr_open with final handoff (local-only repo, D-46)."
+gotchas:
+  - "Both coders share one worktree: each stages only its own paths."
+  - "No git remote: skip push/PR per D-46."
+decisions_made: [D-400, D-401, D-402]
+blockers_opened: []
+files_touched:
+  - agent-memory/tasks.yaml
+  - agent-memory/swarm.yaml
+  - agent-memory/decisions.yaml
+verify: "cargo test -p sb-act && node --test injected/test/"
