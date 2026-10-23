@@ -12,7 +12,7 @@ interfaces:
     rust: "harness_core::memory::MemoryStore (+ Fact, Source, Node, Filter, Hit, Why, Contact, Review, Baseline, LedgerEvent, LedgerId, LedgerMode, ToolHealth, ToolStatus, GateRule, Run, RunStatus, Schedule, ScheduleKind, FactId, NodeId, ReviewId, Ts, ts_now, contact_key)"
     consumers: [core-pg, srv-web, srv-files, srv-cli, sb-mcp, toolforge, toolstore]
     spec: docs/02-MEMORY.md#M-2
-    notes: "M-2 under #[async_trait] (D-40), plus D-48: append -> LedgerId, gate_rule -> Option<GateRule{mode, strict}> with a `Class` or `Class:hint` key (D-39), and run/schedule/rule-write/review-add/ledger-read methods for the M-3 tables M-2 omits. Hit carries id; Why adds exact|trigram."
+    notes: "M-2 under #[async_trait] (D-40), plus D-48: append -> LedgerId, gate_rule -> Option<GateRule{mode, strict}> with a `Class` or `Class:hint` key (D-39), and run/schedule/rule-write/review-add/ledger-read methods for the M-3 tables M-2 omits. Hit carries id; Why adds exact|trigram. contact_key normalises with trim() + to_ascii_lowercase(), never Unicode lowercasing, so look-alike addresses stay distinct contacts (D-62)."
   - id: I-2
     name: "core::mcp::serve(server, tools, harness), dispatch(), ToolSpec { name, description, class, args, handler }"
     tier: contract
@@ -79,10 +79,10 @@ interfaces:
     name: "sb_act::parse(program) -> Vec<Step>, classify(steps, index) -> ActClass"
     tier: draft
     crate: sb-act
-    rust: "sb_act::{parse, quote, classify, classify_step, check_planner, ActClass, Step, Scroll, ParseError, PlannerError}"
+    rust: "sb_act::{parse, quote, classify, classify_step, check_planner, ActClass, Step, Scroll, ParseError, PlannerError, MAX_WAIT}"
     consumers: [sb-driver, toolstore, toolforge]
     spec: docs/05-BROWSER.md#B-7
-    notes: "Value quoting D-52; ?s rule D-50; classify returns hints for D-39 rules."
+    notes: "Value quoting D-52; ?s rule D-50; classify returns hints for D-39 rules. w(n) needs a unit (ms or s) and is clamped to MAX_WAIT = 30 s (D-431); sb-driver's settle cap for w() reads MAX_WAIT (D-63)."
   - id: I-11
     name: "__sb in-page API: walk, id, resolve, name, role, state, index, text, act, settle, fingerprint, frames"
     tier: draft

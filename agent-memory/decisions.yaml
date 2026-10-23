@@ -147,3 +147,9 @@ decisions:
   - id: D-61
     text: "IC-301 accepted: I-12 (draft) gains toolstore::runner::{PageHost, ApiFetch, run_reader, run_planner, *_with, RunOpts, RunError, SheetPage} per D-305 and D-308, with B-320 (table shape), B-321 (url/title are properties) and B-322 (sync traits, callers use spawn_blocking and Handle::block_on) taken as the contract; B-323's 2 s default stays and srv-web may pass a larger RunOpts.timeout for @phase 1 readers."
     why: "D-53 defined the page API in prose only; srv-web (T-12/T-13) and sb-mcp need one exact shape before wave 2 starts. Synchronous host traits match how JS host calls work, and a fresh !Send runtime per run means nothing crosses threads."
+  - id: D-62
+    text: "B-101 accepted (I-1 contract, behaviour only): harness_core::memory::contact_key normalises with trim() + to_ascii_lowercase() instead of Unicode to_lowercase(); signature unchanged. Non-ASCII characters are compared as written."
+    why: "Unicode lowercasing folds compatibility characters (U+212A KELVIN SIGN -> k), so a look-alike address would match a known contact and a Send would be allowed without an ask (H-1.1). ASCII folding can only make an address look new, which costs one ask; nothing is stored yet, so no migration is needed."
+  - id: D-63
+    text: "B-400 accepted: I-10 (draft) gains pub const sb_act::MAX_WAIT: Duration = 30 s; w(n) is clamped to it (D-431). sb-driver's settle cap for w() reads MAX_WAIT instead of its own constant."
+    why: "Additive; one constant keeps the parser's clamp and the driver's settle cap from drifting."
