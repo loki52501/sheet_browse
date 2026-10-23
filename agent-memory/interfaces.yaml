@@ -17,17 +17,17 @@ interfaces:
     name: "core::mcp::serve(server, tools, harness), dispatch(), ToolSpec { name, description, class, args, handler }"
     tier: contract
     crate: core
-    rust: "harness_core::mcp::{serve, dispatch, Harness, ToolRegistry, ToolSpec, ToolHandler, Classified, ToolCtx, ToolOutput, ToolError}"
+    rust: "harness_core::mcp::{serve, dispatch, Harness, ToolRegistry, ToolSpec, ToolHandler, Classified, ToolCtx, ToolOutput, ToolError} + harness_core::mcp::{serve_io, PROTOCOL_VERSION, scrub_value}; harness_core::ask::{FileAsker, answer, asks_dir, card_path, answer_path} (D-71)"
     consumers: [srv-web, srv-files, srv-cli, sb-mcp]
     spec: docs/01-HARNESS-CORE.md#H-6
-    notes: "D-48: deps arrive as a Harness (built by core_pg::bootstrap in each server main); dispatch() is the H-6 pipeline without transport, for tests; site tools join through ToolCtx::registry(). classify(ctx, args) is async and side-effect free; handlers reach the vault only via ToolCtx::resolve_into and never call MemoryStore::append."
+    notes: "D-48: deps arrive as a Harness (built by core_pg::bootstrap in each server main); dispatch() is the H-6 pipeline without transport, for tests; site tools join through ToolCtx::registry(). classify(ctx, args) is async and side-effect free; handlers reach the vault only via ToolCtx::resolve_into and never call MemoryStore::append. tools/call for a name not in the registry answers JSON-RPC error -32602 (MCP 2025-06-18 Unknown tool), not an isError result; dispatch() still returns ToolError::Args for it. serve_io is the stdio test seam; harness ask (T-08) calls ask::answer (D-71)."
   - id: I-3
     name: "Gate::check(call) -> Allow | Ask(card) | Stop(reason)"
     tier: contract
     crate: core
-    rust: "harness_core::gate::{Gate, Call, Decision, AskCard, OnTimeout, StopReason, AskOutcome, Asker, HINT_JOB_APPLICATION, HINT_SIGNATURE}; harness_core::class::{Class, Mode}"
+    rust: "harness_core::gate::{Gate, Call, Decision, AskCard, OnTimeout, StopReason, AskOutcome, Asker, HINT_JOB_APPLICATION, HINT_SIGNATURE}; harness_core::class::{Class, Mode} + harness_core::gate::clean_card(AskCard) -> AskCard (D-70)"
     spec: docs/01-HARNESS-CORE.md#H-1
-    notes: "Class order D-36; rule lookup D-39; Challenge stops before any rule; empty Send recipients = Send(new); strict = run OR rule (D-48). check is async."
+    notes: "Class order D-36; rule lookup D-39; Challenge stops before any rule; empty Send recipients = Send(new); strict = run OR rule (D-48). check is async. Every ask card, from the gate or from ToolCtx::ask, goes through gate::clean_card (D-110 (5) control strip and caps); there is no second sanitiser (D-70)."
   - id: I-4
     name: "Vault::resolve_into(sink), scrub(&str)"
     tier: contract
