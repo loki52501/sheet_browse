@@ -1,0 +1,13 @@
+[package]
+name = "srv-cli"
+description = "Phase 1 CLI tool server: gh, dns, flags, allowlisted cli (docs/04 C-1..C-4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+core-pg.workspace = true
+anyhow.workspace = true
+harness-core.workspace = true
+tokio.workspace = true

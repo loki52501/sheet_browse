@@ -1,59 +1,99 @@
 # Interfaces between crates. Change here first, then in code, then note the id in the commit.
+# Only the supreme edits this file. Tiers (D-47):
+#   contract: change only via blockers.yaml interface_changes + a supreme decision.
+#   draft:    owning area may reshape before its first merge; record each change under
+#             interface_changes so consumers see it; supreme rewrites this file at merge.
+# `rust:` is where the interface lives in the wave-0 code (crate `core` = harness_core, D-35).
 interfaces:
   - id: I-1
     name: MemoryStore
+    tier: contract
     crate: core
+    rust: "harness_core::memory::MemoryStore (+ Fact, Source, Node, Filter, Hit, Why, Contact, Review, Baseline, LedgerEvent, LedgerId, LedgerMode, ToolHealth, ToolStatus, GateRule, Run, RunStatus, Schedule, ScheduleKind, FactId, NodeId, ReviewId, Ts, ts_now, contact_key)"
     consumers: [core-pg, srv-web, srv-files, srv-cli, sb-mcp, toolforge, toolstore]
     spec: docs/02-MEMORY.md#M-2
+    notes: "M-2 under #[async_trait] (D-40), plus D-48: append -> LedgerId, gate_rule -> Option<GateRule{mode, strict}> with a `Class` or `Class:hint` key (D-39), and run/schedule/rule-write/review-add/ledger-read methods for the M-3 tables M-2 omits. Hit carries id; Why adds exact|trigram."
   - id: I-2
-    name: "core::mcp::serve(server, tools) and ToolSpec { name, class, args, handler }"
+    name: "core::mcp::serve(server, tools, harness), dispatch(), ToolSpec { name, description, class, args, handler }"
+    tier: contract
     crate: core
+    rust: "harness_core::mcp::{serve, dispatch, Harness, ToolRegistry, ToolSpec, ToolHandler, Classified, ToolCtx, ToolOutput, ToolError}"
     consumers: [srv-web, srv-files, srv-cli, sb-mcp]
     spec: docs/01-HARNESS-CORE.md#H-6
+    notes: "D-48: deps arrive as a Harness (built by core_pg::bootstrap in each server main); dispatch() is the H-6 pipeline without transport, for tests; site tools join through ToolCtx::registry(). classify(ctx, args) is async and side-effect free; handlers reach the vault only via ToolCtx::resolve_into and never call MemoryStore::append."
   - id: I-3
     name: "Gate::check(call) -> Allow | Ask(card) | Stop(reason)"
+    tier: contract
     crate: core
+    rust: "harness_core::gate::{Gate, Call, Decision, AskCard, OnTimeout, StopReason, AskOutcome, Asker, HINT_JOB_APPLICATION, HINT_SIGNATURE}; harness_core::class::{Class, Mode}"
     spec: docs/01-HARNESS-CORE.md#H-1
+    notes: "Class order D-36; rule lookup D-39; Challenge stops before any rule; empty Send recipients = Send(new); strict = run OR rule (D-48). check is async."
   - id: I-4
     name: "Vault::resolve_into(sink), scrub(&str)"
+    tier: contract
     crate: core
+    rust: "harness_core::vault::{Vault, Resolved, KeySource, EntryKind, VaultError, scrub, vault_refs, vault_literal}"
     spec: docs/01-HARNESS-CORE.md#H-2
+    notes: "resolve_into(template, |r: &Resolved| -> R): the value exists only inside the sink closure; the sink stays synchronous (D-55). Process-wide scrub() uses the vault installed by install_global()."
   - id: I-5
-    name: "IndexRow { id, frame, role, name, nearby, heading, state, flags, form, box }"
+    name: "IndexRow { id, frame, role, name, nearby, heading, state, flags, form, box } (+ landmark, child_frame)"
+    tier: contract
     crate: sb-sheet
-    consumers: [srv-web, sb-mcp, toolstore]
+    rust: "sb_sheet::index::{IndexRow, ElemRef, State, FieldValue, Flags, Rect, FrameId}"
+    consumers: [srv-web, sb-mcp, toolstore, sb-act, sb-driver]
     spec: docs/05-BROWSER.md#B-5
+    notes: "serde JSON is the wire format from injected.js (D-37); test sb_sheet::index::tests::index_row_wire_shape pins it. role is ARIA, aliases via data/roles.txt (D-49). State has covered, input_type, autocomplete (D-55)."
   - id: I-6
     name: "sb_sheet::{skeleton, find, sheet, read}(index, text_blocks, opts)"
+    tier: draft
     crate: sb-sheet
+    rust: "sb_sheet::{skeleton, find, sheet, read, TextBlock, Span, BlockKind, PageMeta, *Opts, FindHit, HitReason, ReadOutput, Cursor}"
     consumers: [srv-web, sb-mcp]
     spec: docs/05-BROWSER.md#B-6
+    notes: "The only scorer, live and fetched (D-51); `?` threshold and acceptance k=1 per D-54. TextBlock is produced by page (injected.js text()) and servers (srv-web walk): changes to it need interface_changes even while draft."
   - id: I-7
     name: "toolstore::{load(domain, path) -> Vec<Tool>, fingerprint(tool, index), record(result)}"
+    tier: draft
     crate: toolstore
+    rust: "toolstore::{ToolStore::load, ToolStore::record, ToolStore::folder_for, fingerprint, skeleton_line, Tool, FingerprintResult, ToolRunResult, RunOutcome}"
     consumers: [srv-web, sb-mcp, toolforge]
     spec: docs/03-TOOL-STORE.md#T-3
+    notes: "Tool runtime and page API per D-53."
   - id: I-8
     name: "Transport trait (send, recv)"
+    tier: draft
     crate: sb-cdp
+    rust: "sb_cdp::{Transport, TransportError, Pipe, WebSocket, ElectronNapi, ExtensionRelay}"
     consumers: [sb-driver]
     spec: docs/05-BROWSER.md#B-3
+    notes: "send returns Result; recv hands out the inbound stream once."
   - id: I-9
-    name: "sb_driver::{open, act(tab, program) -> ActResult, settle, screenshot, frames}"
+    name: "sb_driver::{open, act(tab, program, ctx) -> ActResult, settle, screenshot, frames, index, text, tabs, close, dialog, download}"
+    tier: draft
     crate: sb-driver
+    rust: "sb_driver::Driver::{launch, open, act, settle, screenshot, frames, index, text, tabs, close, dialog, download}; ActResult, StepResult, Consequence, Settled, FrameInfo"
     consumers: [sb-mcp, sb-media]
     spec: docs/05-BROWSER.md#B-4
+    notes: "act takes &ToolCtx so @vault resolves only into Input.insertText (D-55)."
   - id: I-10
-    name: "sb_act::parse(program) -> Vec<Step>, classify(steps, index) -> Class"
+    name: "sb_act::parse(program) -> Vec<Step>, classify(steps, index) -> ActClass"
+    tier: draft
     crate: sb-act
+    rust: "sb_act::{parse, quote, classify, classify_step, check_planner, ActClass, Step, Scroll, ParseError, PlannerError}"
     consumers: [sb-driver, toolstore, toolforge]
     spec: docs/05-BROWSER.md#B-7
+    notes: "Value quoting D-52; ?s rule D-50; classify returns hints for D-39 rules."
   - id: I-11
-    name: "__sb in-page API: walk, resolve, index, skeleton, find, sheet, text, act, settle, fingerprint, frames"
+    name: "__sb in-page API: walk, id, resolve, name, role, state, index, text, act, settle, fingerprint, frames"
+    tier: draft
     crate: injected
+    rust: "injected/injected.js (stub lists names and return shapes; index() returns I-5 JSON)"
     consumers: [sb-driver]
     spec: docs/05-BROWSER.md#B-5
+    notes: "No in-page skeleton/find/sheet (D-51). walk({base}) so ids are never reused in a tab frame; resolve -> {why: gone|stale} (D-55)."
   - id: I-12
     name: "Tool file header and page API for readers/planners"
+    tier: draft
     crate: toolstore
+    rust: "toolstore::{parse_header, ToolHeader, ToolKind, ArgSpec, FpItem}; page API per D-53"
     spec: docs/03-TOOL-STORE.md#T-2

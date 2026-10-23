@@ -1,0 +1,41 @@
+# Memory database (docs/02, D-21, D-33): Postgres 16 + pgvector + pg_trgm.
+#   docker compose up -d --wait postgres
+#   DATABASE_URL=postgres://sb@127.0.0.1:5433/sb   (core_pg::DEFAULT_DATABASE_URL)
+# Host port 5433 because a native PostgreSQL 17 (no pgvector) already owns 5432 on this machine.
+# Trust auth: the image writes `host all all all trust`, so ANY container on the `db` network is
+# superuser. Only postgres is on `db`; nothing else may join it (D-48). The host side is
+# bound to loopback. No password exists, so none is committed (D-1).
+# The schema is applied by `harness db migrate` (sqlx), never by the image's init scripts,
+# so migration history stays in one place.
+name: sheetbrowse
+
+services:
+  postgres:
+    # Versioned tag, not the moving `pg16`: recall relies on pgvector >= 0.8 (hnsw.iterative_scan).
+    image: pgvector/pgvector:0.8.1-pg16
+    environment:
+      POSTGRES_USER: sb
+      POSTGRES_DB: sb
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:5433:5432"
+    networks: [db]
+    volumes:
+      - sb-pg:/var/lib/postgresql/data
+    healthcheck:
+      # TCP, not the socket: the entrypoint's temporary init server listens on the socket only.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U sb -d sb"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  # D-31: SearXNG for srv-web search() is added here by area servers in T-12, under
+  # `profiles: [search]` on 127.0.0.1:8888, on its own network (never `db`), with its secret
+  # generated locally into a git-ignored file.
+
+networks:
+  db:
+
+volumes:
+  sb-pg:

@@ -1,0 +1,10 @@
+[package]
+name = "sb-media"
+description = "Video frames, contact sheets, screenshots (docs/05 B-9)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sb-driver.workspace = true

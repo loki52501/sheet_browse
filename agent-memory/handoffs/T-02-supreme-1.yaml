@@ -1,0 +1,36 @@
+from: supreme
+to: next
+task: T-02
+date: "2026-10-22"
+state: "Wave 0 done (T-01, T-02). 14-crate Cargo workspace builds; clippy -D warnings clean; contract tests pass. CONTRACT types are real code: harness_core::{class, memory (I-1), gate (I-3), vault (I-4), mcp (I-2), run::RunId} and sb_sheet::index (I-5, with a JSON wire-shape test). DRAFT signatures with todo!() bodies: I-6 sb-sheet fns, I-7/I-12 toolstore, I-8 sb-cdp, I-9 sb-driver, I-10 sb-act, I-11 injected/injected.js stub. core-pg::PgStore implements every MemoryStore method as todo!(), which proves the trait is implementable as Arc<dyn MemoryStore>. docker-compose.yml (pgvector/pgvector:0.8.1-pg16 on 127.0.0.1:5433), migrations/0001_init.sql (verified on PG 16.12, D-56), bench/pages/register.html. A five-lens adversarial review confirmed 59 of 64 findings; all contract-tier ones and the cheap tooling and draft ones are fixed (D-48..D-57). D-31..D-57 recorded; B-1 and B-2 resolved."
+not_done: "1. The hooks in .claude/settings.json were not live during the wave-0 session (it started before .claude/ existed); every wave-0 file was checked by replaying guard_write.py and post_write.py by hand. Sessions launched from now on load them. 2. Open review notes the owning areas should read (draft tier, not fixed in wave 0): sheet: roles.txt alias table (D-49), JS-vs-Rust find golden test no longer needed (D-51); store: runner + page API (D-53), relocate write-back; driver: dialog/download continuation flow, Pipe on Windows needs CRT fd 3/4 inheritance or --remote-debugging-io-pipes (sb-cdp doc)."
+gotchas:
+  - "The docs' crate `core` is the package harness-core, lib harness_core (D-35). `use harness_core::...`."
+  - "Class order is a contract (D-36): Pay and Delete outrank Account and Send. Use max(), never compare by hand."
+  - "IndexRow.bbox is `box` on the wire and Option (srv-web has no layout). ElemRef serializes as \"#12\" or \"#f2.15\" (D-37)."
+  - "Hint-scoped gate rules use the class key `Submit:job_application` (D-39); the lookup order puts hint rules first."
+  - "Decision and blocker ids are ranged per area (D-42); decisions.yaml and blockers.yaml merge with the union driver, so add items under a key and never rewrite the key line."
+  - "No remote (D-46): your PR is `areas.<area>.status: pr_open` committed on your branch plus a final handoff."
+  - "Port 5432 is a native PostgreSQL 17 without pgvector. Use 5433 (compose: docker compose up -d --wait postgres)."
+  - "Docker lives in E:/apps/Docker/resources/bin; a shell started before the reinstall lacks it on PATH (refresh PATH from the machine environment)."
+  - "Tool servers' main: harness_core::serve(name, tools, core_pg::bootstrap().await?). Tests: harness_core::dispatch with a fake MemoryStore and a scripted Asker (D-48)."
+  - "Worktrees are at F:/sb-swarm/wt/<area>, not wt/ in the repo (D-57)."
+  - "Windows: PowerShell 5.1. In scripts, don't use 2> redirects on native commands under EAP=Stop; wt treats ';' as a separator."
+decisions_made: [D-31, D-32, D-33, D-34, D-35, D-36, D-37, D-38, D-39, D-40, D-41, D-42, D-43, D-44, D-45, D-46, D-47, D-48, D-49, D-50, D-51, D-52, D-53, D-54, D-55, D-56, D-57]
+blockers_opened: [B-1, B-2]  # both resolved before commit: D-50, D-56
+files_touched:
+  - Cargo.toml
+  - crates/*
+  - docker-compose.yml
+  - migrations/0001_init.sql
+  - bench/pages/register.html
+  - injected/injected.js
+  - agent-memory/{decisions,blockers,interfaces,tasks,swarm}.yaml
+  - docs/00-OVERVIEW.md
+  - scripts/swarm/{launch.ps1,merge.ps1,merge_gate.py,install-claude-config.ps1,install-claude-config.sh}
+  - scripts/hooks/guard_bash.py
+  - claude-config/commands/{status,wave}.md
+  - prompts/suborch/*.md
+  - .gitignore
+  - .gitattributes
+verify: "cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"

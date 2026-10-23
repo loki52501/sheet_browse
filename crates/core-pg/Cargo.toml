@@ -1,0 +1,11 @@
+[package]
+name = "core-pg"
+description = "Postgres 16 + pgvector + pg_trgm backend for MemoryStore (docs/02 M-3..M-5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+harness-core.workspace = true

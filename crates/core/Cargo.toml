@@ -1,0 +1,18 @@
+[package]
+name = "harness-core"
+description = "Harness core: gate, vault, ledger, run folder, scheduler, MCP wrapper, MemoryStore trait (docs/01, docs/02)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "harness_core"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

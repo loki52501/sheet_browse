@@ -1,0 +1,15 @@
+[package]
+name = "sb-driver"
+description = "Browser driver: registry, act + retry, input, consequences, settle, scheduling, recovery (I-9; docs/05 B-4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+harness-core.workspace = true
+sb-act.workspace = true
+sb-cdp.workspace = true
+sb-sheet.workspace = true
+serde.workspace = true
+thiserror.workspace = true

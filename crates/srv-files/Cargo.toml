@@ -1,0 +1,13 @@
+[package]
+name = "srv-files"
+description = "Phase 1 files tool server: fs, shell, docs, csv.clean, diff, history.search (docs/04 F-1..F-6)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+core-pg.workspace = true
+anyhow.workspace = true
+harness-core.workspace = true
+tokio.workspace = true

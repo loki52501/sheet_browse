@@ -1,0 +1,18 @@
+[package]
+name = "sb-mcp"
+description = "Browser MCP server: open find sheet read act tabs screenshot video.* eval cdp network (docs/05 B-1, B-10)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+core-pg.workspace = true
+anyhow.workspace = true
+harness-core.workspace = true
+sb-act.workspace = true
+sb-driver.workspace = true
+sb-media.workspace = true
+sb-sheet.workspace = true
+tokio.workspace = true
+toolstore.workspace = true

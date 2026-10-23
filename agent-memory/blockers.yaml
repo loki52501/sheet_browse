@@ -1,10 +1,20 @@
-# Open questions, taken defaults, and reflect proposals. Add; resolve by moving to decisions.yaml.
-blockers: []
-# format:
-#   - id: B-1
-#     task: T-12
-#     question: "..."
-#     default_taken: "..."
-#     needs_user: false
-proposals: []
-# reflect writes here: forge proposals, _generic merges, retirements awaiting a pinned-tool decision
+# Open questions, taken defaults, interface change requests, and reflect proposals.
+# Id ranges per author (D-42): supreme B-1..B-99, core B-100+, sheet B-200+, store B-300+,
+# page B-400+, servers B-500+, driver B-600+.
+#
+# APPEND-ONLY. This file merges with git's union driver, so:
+#   * add new list items directly under their key; never rewrite a key line (no `key: []`);
+#   * never edit or delete an existing entry: resolve a blocker or an interface change by
+#     appending a decision to decisions.yaml that names its id ("resolves B-201");
+#   * merge_gate.py rejects duplicate keys or ids after a merge.
+# Resolved in wave 0, before any commit: B-1 by D-50, B-2 by D-56.
+#
+# blockers item:          {id, task, question, default_taken, needs_user}
+# interface_changes item: {id, from, interface, change, why}   (only supreme edits interfaces.yaml)
+# proposals item:         reflect writes forge proposals, _generic merges, pinned-tool retirements
+
+blockers:
+
+interface_changes:
+
+proposals:

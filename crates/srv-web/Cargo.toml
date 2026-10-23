@@ -1,0 +1,15 @@
+[package]
+name = "srv-web"
+description = "Phase 1 web tool server: search, fetch, api, feed, read renderer (docs/04 W-1..W-7)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+core-pg.workspace = true
+anyhow.workspace = true
+harness-core.workspace = true
+sb-sheet.workspace = true
+tokio.workspace = true
+toolstore.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "toolforge"
+description = "Decision ladder, forge pipeline, reflect (docs/06)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+harness-core.workspace = true
+sb-act.workspace = true
+sb-sheet.workspace = true
+toolstore.workspace = true

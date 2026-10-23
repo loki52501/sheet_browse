@@ -1,0 +1,14 @@
+[package]
+name = "toolstore"
+description = "Site-scoped tool store: tools/<site>/ layout, header parser, loader, fingerprints, lifecycle (I-7, I-12; docs/03)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono.workspace = true
+harness-core.workspace = true
+sb-act.workspace = true
+sb-sheet.workspace = true
+thiserror.workspace = true

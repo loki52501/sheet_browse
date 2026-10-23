@@ -4,12 +4,18 @@ tasks:
     step: 1
     title: "Workspace, Cargo.toml, docker-compose for Postgres 16 + pgvector + pg_trgm, migrations/0001"
     docs: [docs/02-MEMORY.md]
-    status: todo
+    status: done
+    owner: supreme
+    done_at: "2026-10-22"
+    note: "0001 verified on PostgreSQL 16.12 + pgvector 0.8.1 + pg_trgm 1.6 (D-56); sb DB left empty for harness db migrate"
   - id: T-02
     step: 1
     title: "core: MemoryStore trait, types (Fact, Node, Edge, Contact, Review, Baseline, LedgerEvent, ToolHealth)"
     docs: [docs/02-MEMORY.md]
-    status: todo
+    status: done
+    owner: supreme
+    done_at: "2026-10-22"
+    note: "also I-2 ToolSpec/serve, I-3 Gate, I-4 Vault, I-5 IndexRow; I-6..I-12 as draft signatures (D-47)"
   - id: T-03
     step: 1
     title: "core-pg: implement MemoryStore with sqlx; recall fusion; recursive neighbors; append-only trigger"
@@ -98,12 +104,13 @@ tasks:
     title: "sb-cdp Pipe transport, launch, flattened sessions, pipelining; registry skeleton"
     docs: [docs/05-BROWSER.md]
     status: todo
-    blocked_by: [T-17]
+    note: "gated by swarm.yaml (area driver needs page merged), not by T-17 (D-43)"
   - id: T-19
     step: 6
     title: "injected.js: identity, walk, names, roles, states, flags, collapse, dirty re-walk; acceptance 1"
+    docs: [docs/05-BROWSER.md]
     status: todo
-    blocked_by: [T-17]
+    note: "area page, wave 1; includes the sb-act half of B-7 (I-10). Not gated by T-17 (D-43)"
   - id: T-20
     step: 6
     title: "act(id) in page + Rust retry/backoff/5 s cap; acceptance 2"

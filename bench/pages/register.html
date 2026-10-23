@@ -1,0 +1,109 @@
+<!doctype html>
+<!--
+  bench/pages/register.html: signup fixture for docs/05 B-5 (walk, names, flags) and
+  B-6 acceptance 6. Self-contained: no network, no scripts, no real captcha.
+
+  What each part exercises
+    #signup email      label[for]            name ladder rung 3
+    #signup password   aria-label            rung 2; value is only empty|filled
+    #signup full name  placeholder           rung 5
+    #signup plan       <select> + label[for] options captured
+    #signup agree      wrapping <label>      rung 4; label text consumed, not re-emitted as text
+    .g-recaptcha       fake reCAPTCHA        CHALLENGE (container class + iframe title);
+                                             the iframe is sandboxed without allow-same-origin,
+                                             so its origin is opaque: OPAQUE, never read inside
+    .promo             display:none subtree  skipped with its subtree (nextSkippingChildren);
+                                             its "Register" button and email field are distractors
+    #cookie-banner     position:fixed        OVERLAY (covers the bottom of the viewport)
+    #newsletter        footer form           second "Email" field; the group bonus must prefer #signup
+
+  Acceptance 6 (run with k = 1, D-54): find("email, password, agree, register") returns, in
+    document order, signup Email, signup Password, I agree checkbox, the reCAPTCHA row
+    (CHALLENGE), the Register submit, and the cookie banner row (OVERLAY). Not the
+    newsletter Email (the #signup group bonus outranks it), never the hidden promo's rows.
+    The CHALLENGE container owns its subtree: .g-recaptcha and its iframe are ONE row,
+    flagged CHALLENGE + OPAQUE (D-55). With the default k = 3 the newsletter Email may
+    appear, ranked below the signup Email.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create your account · Fixture Co</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 0; color: #1d1d1f; }
+  header, main, footer { max-width: 640px; margin: 0 auto; padding: 16px; }
+  nav a { margin-right: 12px; }
+  form#signup { display: grid; gap: 12px; margin-top: 16px; }
+  form#signup input[type=email], form#signup input[type=password],
+  form#signup input[type=text], form#signup select { padding: 8px; font: inherit; width: 100%; box-sizing: border-box; }
+  .g-recaptcha { width: 304px; height: 78px; border: 1px solid #d3d3d3; }
+  .g-recaptcha iframe { width: 304px; height: 78px; border: 0; }
+  button { padding: 10px 16px; font: inherit; }
+  .spacer { height: 480px; }
+  #cookie-banner { position: fixed; left: 0; right: 0; bottom: 0; height: 140px; z-index: 1000;
+    background: #222; color: #fff; padding: 16px; box-sizing: border-box; }
+</style>
+</head>
+<body>
+<header>
+  <nav aria-label="Primary">
+    <a href="/">Home</a><a href="/pricing">Pricing</a><a href="/login">Sign in</a>
+  </nav>
+</header>
+
+<main>
+  <h1>Create your account</h1>
+  <p>Start your free trial. No card required.</p>
+
+  <div class="promo" style="display:none">
+    <h2>Limited offer</h2>
+    <p>Register now and get 50% off your first year.</p>
+    <input type="email" name="promo-email" placeholder="Email for the offer">
+    <button type="button">Register for the offer</button>
+  </div>
+
+  <form id="signup" action="/welcome" method="post">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="email" required>
+
+    <input name="password" type="password" aria-label="Password" autocomplete="new-password" required>
+
+    <input name="fullname" type="text" placeholder="Full name">
+
+    <label for="plan">Plan</label>
+    <select id="plan" name="plan">
+      <option value="basic">Basic</option>
+      <option value="plus">Plus</option>
+      <option value="pro">Pro</option>
+    </select>
+
+    <label><input type="checkbox" name="agree" required> I agree to the Terms of Service</label>
+
+    <div class="g-recaptcha" data-sitekey="fixture-only">
+      <iframe title="reCAPTCHA" sandbox srcdoc="<p>I'm not a robot</p>"></iframe>
+    </div>
+
+    <button type="submit">Register</button>
+  </form>
+
+  <div class="spacer" aria-hidden="true"></div>
+</main>
+
+<footer>
+  <h2>Stay in the loop</h2>
+  <form id="newsletter" action="/subscribe" method="post">
+    <label for="nl-email">Email</label>
+    <input id="nl-email" name="nl-email" type="email">
+    <button type="submit">Subscribe</button>
+  </form>
+  <p><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p>
+</footer>
+
+<div id="cookie-banner" role="region" aria-label="Cookie consent">
+  <p>We use cookies to run this site.</p>
+  <button type="button">Accept all</button>
+  <button type="button">Reject</button>
+</div>
+</body>
+</html>

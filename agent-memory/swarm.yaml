@@ -55,10 +55,11 @@ areas:
     merged: false
 
 waves:
-  "0": "todo: supreme writes workspace, core trait + types, stub crates, compose, migration 0001 (T-01, T-02)"
-  "1": "not started"
+  "0": done
+  "1": open
   "2": "not started"
   "3": "not started"
   "4": "not started: Phase 1 baseline T-17, then T-27 T-28 T-29"
 
+pr_rule: "local-only repo (D-46): an area PR is its branch with areas.<area>.status pr_open on that branch plus a final handoff"
 merge_rule: "review report has no Blocking items AND accept report green for claimed tasks AND no leak hook fired AND cargo test --workspace passes on the merge commit"

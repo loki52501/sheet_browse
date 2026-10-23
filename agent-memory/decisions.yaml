@@ -1,4 +1,7 @@
 # One line per decision. Add, never delete. Reference ids in commits.
+# Id ranges (D-42), so parallel branches never collide: supreme D-31..D-99, core D-100+,
+# sheet D-200+, store D-300+, page D-400+, servers D-500+, driver D-600+. Append at the end
+# of the list; this file merges with git union driver (.gitattributes).
 decisions:
   - id: D-1
     text: "Claude Code is the only model path. No API keys, no .env, no other SDKs."
@@ -51,8 +54,84 @@ decisions:
   - id: D-30
     text: "Headless is never used with the 'me' profile; mail/calendar run headed (hidden window if scheduled)."
     why: "Login challenges and ToS; headless was blocked in 18/60 bench runs."
-# Open decisions a coding agent must make and record here with a why:
-#   D-31 search backend: SearXNG (Docker) or Brave free tier (vault token)
-#   D-32 embedding model: fastembed bge-small (384) or other local; fix the vector column size
-#   D-33 Postgres hosting: Docker compose vs system install on Windows
-#   D-34 Chromium acquisition: pinned revision download vs system Chrome for 'me' profile
+  - id: D-31
+    text: "Search backend for srv-web W-1 is a local SearXNG container (compose profile `search`, 127.0.0.1:8888, JSON output on, limiter off), added by area servers in T-12. Brave free tier is not used."
+    why: "No account, no token, no monthly quota for ~90 ladder runs; one compose file already exists. Cost: upstream engines can rate-limit SearXNG, so search() must report degraded results honestly; switching to Brave would be a new decision."
+  - id: D-32
+    text: "Embeddings: fastembed-rs with BAAI/bge-small-en-v1.5, 384 dims, computed locally in core-pg; memory.facts.embedding is vector(384)."
+    why: "No keys (D-1); CPU ONNX is ms per fact at personal scale; 384 dims is a quarter of the HNSW memory of 1536. Cost: ~130 MB model download from huggingface.co on first use and an ort build on MSVC. Changing the model means a migration plus re-embedding."
+  - id: D-33
+    text: "Postgres runs from docker-compose.yml (pgvector/pgvector:pg16) on 127.0.0.1:5433 with trust auth on loopback; schema only via `harness db migrate` (sqlx). DATABASE_URL postgres://sb@127.0.0.1:5433/sb."
+    why: "This machine's native PostgreSQL 17 on :5432 has no pgvector, and building it on Windows needs MSVC + nmake; the spec says 16; an image tag is reproducible. Trust on loopback means no password exists to commit."
+  - id: D-34
+    text: "Chromium is one pinned Chrome for Testing build for both profiles (bench, me), downloaded on first run into a git-ignored dir; exact version pinned in T-18. `profile login me` opens it headed with no debugging switch so the hand login is a plain browser session; agent runs reuse the profile over the pipe. The pin is bumped deliberately, at least every 4 weeks, each bump a decision."
+    why: "One engine makes CDP behaviour and bench numbers reproducible; system Chrome auto-updates under the bench, and branded Chrome 136+ refuses remote debugging on its default profile. The bump cadence bounds how stale a browser holding live Google sessions can get. Unverified, check in T-18/T-27: H.264 support in CfT (B-9 mp4) and Google accepting the login."
+  - id: D-35
+    text: "The docs' crate `core` is packaged as `harness-core` (lib `harness_core`) in crates/core; read `core::x` in the docs as `harness_core::x`. Other crate names are as in docs/00."
+    why: "A package named `core` shadows Rust's built-in core crate and makes `core::` paths ambiguous."
+  - id: D-36
+    text: "Class total order (derive Ord, used by max() for programs and floors): Read < Fill < Navigate < Submit < Send < Account < Delete < Pay < Challenge."
+    why: "Classes whose ask times out to skip (Delete, Pay) must outrank those that time out to proceed (Send, Account), so taking the max never turns a skip into a proceed."
+  - id: D-37
+    text: "Element refs are `#12` (main frame) and `#f2.15` (frame 2), serialized as that string. IndexRow's serde JSON is the wire format from injected.js: snake_case fields, `bbox` named `box` on the wire and optional (fetched HTML has no layout), FieldValue as {kind: empty|filled|text, text}, flags as an object of booleans."
+    why: "One shape for the live index, the fetched index and fixtures; `box` is a Rust keyword; srv-web cannot produce geometry."
+  - id: D-38
+    text: "Crate DAG (supersedes the docs/00 drawing, now updated): core <- core-pg; sb-sheet is a leaf; sb-act -> core, sb-sheet; toolstore -> core, sb-sheet, sb-act; sb-cdp is a leaf; sb-driver -> core, sb-cdp, sb-sheet, sb-act; sb-media -> sb-driver; srv-web -> core, sb-sheet, toolstore; srv-files, srv-cli -> core; sb-mcp -> core, sb-driver, sb-sheet, sb-act, sb-media, toolstore; toolforge -> core, toolstore, sb-act, sb-sheet; harness -> core, core-pg, toolstore."
+    why: "The original drawing put the pure crates sb-sheet and sb-act above sb-driver, but I-10 makes sb-driver consume sb-act and every reviewer would have flagged that as a layering break."
+  - id: D-39
+    text: "Classifier hints select gate rules through the class key `Class:hint` (e.g. `Submit:job_application`) in gate.rules and MemoryStore::gate_rule. Lookup, first hit wins: (domain, Class:hint), then ('*', Class:hint), then (domain, Class), then ('*', Class), then the H-1.1 default. Migration 0001 seeds ('*', 'Submit:job_application', 'ask')."
+    why: "H-1.2 wants the job-application rule scoped by a hint, but the table key is (domain, class) and I-1's gate_rule takes (domain, class: &str); encoding the hint in the class key needs no schema or trait change. Hint rules go first because they are the user's standing semantic rules and must not be undone by a broad domain allow."
+  - id: D-40
+    text: "Traits used as trait objects (MemoryStore, ToolHandler, Asker, Transport) use #[async_trait]."
+    why: "M-2 requires Arc<dyn MemoryStore>; native async fn in traits is not dyn-compatible."
+  - id: D-41
+    text: "ledger.events.mode is a gate decision (allow, ask, stop) or how an ask ended (answered_proceed, answered_skip, timeout_proceed, timeout_skip): LedgerMode in harness_core::memory."
+    why: "docs/01 acceptance expects to read `timeout_proceed` from the ledger, and the table has no separate outcome column."
+  - id: D-42
+    text: "Decision and blocker ids are allocated in ranges per author (supreme 31-99, core 100+, sheet 200+, store 300+, page 400+, servers 500+, driver 600+). agent-memory/decisions.yaml and blockers.yaml use git's union merge driver."
+    why: "Four branches append to the same two files in parallel; ranges prevent id collisions and union merge turns guaranteed append conflicts into clean merges."
+  - id: D-43
+    text: "T-18 and T-19 no longer depend on T-17. Driver and page gate on swarm.yaml (page in wave 1, driver after page merges), not on the Phase 1 baseline."
+    why: "docs/10 S-2 schedules page in wave 1 and driver in wave 2; blocked_by T-17 contradicted that. The supreme still keeps sb-driver out of the Phase 1 baseline run."
+  - id: D-44
+    text: "ToolStatus is ephemeral | saved | repaired | needs_repair | retired | ask; `pinned` is the tools.health.pinned flag, not a status."
+    why: "M-3 stores pinned as a boolean, and T-5 introduces an `ask` status (floor raised, awaiting the user) that T-7's table omits."
+  - id: D-45
+    text: "migrations/0001_init.sql is M-3 plus: extensions created in the migration, vector(384) (D-32), a statement trigger that also blocks TRUNCATE on ledger.events, and the D-39 job-application seed rule. ledger.events keeps M-3's column name `args` (scrubbed), not H-3's `args_scrubbed`."
+    why: "Append-only has to cover TRUNCATE; M-3 is the schema of record, so the name follows it and a column comment records the invariant."
+  - id: D-46
+    text: "The repo is local-only (no remote). An area's PR is its branch with `areas.<area>.status: pr_open` in its own swarm.yaml plus a final handoff; the supreme reads `swarm/<area>` directly and merges with scripts/swarm/merge.ps1. If a remote is added later, push + PR resume."
+    why: "Worktrees share one object store, so pushing is unnecessary; creating a GitHub repo is an outward-facing step the user has not asked for."
+  - id: D-47
+    text: "Interface tiers: I-1..I-5 are CONTRACT (change only through interface_changes and a supreme decision); I-6..I-12 are DRAFT signatures the owning area may reshape before its first merge, recording each change under interface_changes so consumers see it. The supreme rewrites interfaces.yaml at merge."
+    why: "Wave 0 fixes only what all areas code against today; the drafts were written ahead of their owners and should not freeze guesses."
+  - id: D-48
+    text: "Wave-0 contract corrections after a five-lens adversarial review (59 of 64 findings confirmed). I-1 gains run_start/run_end/run_get, schedule_add/list/rm/fired, gate_rule_set, review_add and ledger_events; append returns LedgerId; gate_rule returns GateRule{mode, strict}; duration_ms is i32; LedgerEvent.ts is microsecond-truncated (ts_now); contact keys are normalised (contact_key); neighbors walks both edge directions. I-2 is serve(server, tools, Harness) plus dispatch() for in-process tests, a live ToolRegistry for site tools, ToolSpec.description, async classify(ctx, args), Classified.what/values, ToolCtx::store/ask/registry and ToolOutput.stopped. I-3: Challenge stops before any rule lookup, a Send with no recipients is Send(new), strict = run OR rule, HINT_SIGNATURE. D-38 is amended: srv-web, srv-files, srv-cli and sb-mcp also depend on core-pg, whose bootstrap() builds the Harness. Migration 0001: NOT NULL wherever the Rust field is not an Option, gate.rules.strict, runs.strict, schedules.run_id, one statement-level append-only trigger, the signature rule. Compose: pinned pgvector/pgvector:0.8.1-pg16, postgres alone on network `db`, TCP healthcheck. D-33's 'trust on loopback' was wrong: trust covers every container on `db`, which is why nothing else may join it."
+    why: "Without these, docs/01's scheduler acceptance, H-7, H-1.3's strict rules and the T-09 test seam could not be built against the contract, serve() had no way to get a store, and every later contract change would have broken four parallel areas at once. Cheaper to fix before anyone codes against it."
+  - id: D-49
+    text: "IndexRow.role is the lowercase ARIA role (textbox, button, checkbox, combobox, link, iframe). Sheet lines, @fingerprint items and `name:role` queries use short aliases (input, button, select, checkbox, link...) mapped to ARIA roles by sb-sheet's data/roles.txt, which both sb-sheet and toolstore::fingerprint read. Sheet lines print the alias."
+    why: "The docs write `input \"Email\"` everywhere while B-5 says the role is the ARIA role; one alias table is the only way find, sheets and fingerprints agree."
+  - id: D-50
+    text: "Planner ?s rule (resolves B-1): every step classified Submit or higher must be immediately followed by `?s`; T-2's `...; c#btn; ?s` is the canonical shape. Permission comes from the gate's up-front check of the whole program's class; ?s guarantees nothing runs past a submit before the model sees the state. Enforced by sb_act::check_planner, the T-9 invariant, the G-2 static check and the guard_write/post_write hooks."
+    why: "Read as 'before', ?s would make the submit in every Submit planner dead code, and the lenient gate (D-19) would need an extra model turn per registration (D-7: efficiency first). Read as 'right after', T-2's example, E-3's draft planner and D-29 ('a repair cannot remove ?s') all stay coherent."
+  - id: D-51
+    text: "sb-sheet in Rust is the only find/skeleton/sheet/read implementation, for the live and the fetched index. injected.js ships IndexRow[] and TextBlock[] (incrementally, via the dirty set) and does not score. This overrides B-6.2's 'Scoring runs in the page; only winners cross the wire'."
+    why: "Two scorers (JS in the page, Rust for srv-web) would drift, and acceptance 6 would test one of them. The cost is moving the index over a local pipe (sub-ms to a few ms); the model's tokens are unchanged because only winners reach it either way."
+  - id: D-52
+    text: "Act DSL values: a bare value runs to the next `;` or the end of the program; a quoted value `t#7=\"a; b\"` may contain anything, with \\\" \\\\ and \\n escapes. sb_act::quote() and the tool page API's q(s) produce quoted values; planners must use q() for any argument."
+    why: "Without quoting a value cannot contain `;`, and a planner interpolating a user-supplied argument could inject extra steps (`x; c#99`)."
+  - id: D-53
+    text: "Tool files run in an embedded JS engine (default rquickjs) in a toolstore `runner` module shared by srv-web and sb-mcp, without document, window, fetch, eval, import or require. Page API: find(q) and findAll(q) return refs without `#` (`12`, `f2.15`, so planners write `c#${id}`); text(region), table(id), url, title, q(s); and api(url) for @phase 1 readers, executed through srv-web's api tool and the gate as Read. sb-mcp evaluates @expects against the act's Consequences and reports RunOutcome::ExpectsMiss to toolstore."
+    why: "I-12 named a page API and a runtime that nothing defined; T-3's acceptance needs a @phase 1 reader that calls api; toolstore cannot see sb-driver's Consequence type under D-38."
+  - id: D-54
+    text: "find(): the `?` weak mark compares the lexical part of the score (3*BM25 name + 1.5*nearby + 0.5*heading) with 3, not the total. docs/05 acceptance 6 runs with k = 1: the four top hits plus the always-appended CHALLENGE, OVERLAY and winning-submit rows, in document order."
+    why: "With the total, role prior +2 and visible +1 reach 3 with no text match, so `?` could never fire. With the default k = 3 the newsletter Email legitimately appears, so the acceptance would be untestable as written."
+  - id: D-55
+    text: "A CHALLENGE container owns its subtree: a captcha container and its iframe are one row, flagged CHALLENGE (and OPAQUE when the frame is cross-origin), carried on the iframe row when there is one. Draft additions from the same review: State gains covered, input_type and autocomplete; IndexRow gains landmark and child_frame; TextBlock gains table and header (each TableRow span is one cell); element ids are never reused within a tab frame (walk({base}) per document generation, resolve -> {why: stale}); Driver::act takes &ToolCtx so @vault is resolved only into Input.insertText, and Driver gains index, text, tabs, close, dialog and download; Consequence and StepResult are serde; sb_act::classify returns ActClass{class, hints} so job_application/signature rules can fire for browser submits; FingerprintResult::Partial carries FpItems and RunOutcome::Relocated exists. The vault sink stays synchronous: the CDP payload bytes it returns exist only to be written to the pipe."
+    why: "Each was a confirmed gap: B-6.2's covered term, B-7's Pay/Account evidence, sheet(region=landmark), W-5 tables, stale ids after navigation (B-4 #2), the vault reaching the driver's sink (H-2), D-39 hints for act, and T-4's relocate path."
+  - id: D-56
+    text: "B-2 resolved: Docker Desktop runs (reinstalled to E:\\apps\\Docker). migrations/0001_init.sql was applied to PostgreSQL 16.12 with pgvector 0.8.1 and pg_trgm 1.6, both standalone and inside one transaction (as sqlx does), in throwaway databases. Verified: zero-row UPDATE, UPDATE, DELETE and TRUNCATE on ledger.events all fail; vector(384) is enforced; the tsv, trigram and cosine paths return hits; hnsw.iterative_scan is available; NOT NULL holds; six gate rules are seeded. The `sb` database is left empty for `harness db migrate`."
+    why: "The migration had been written blind; four parallel areas now rely on it."
+  - id: D-57
+    text: "Swarm mechanics after review. Worktrees live at <drive>:\\sb-swarm\\wt\\<area> (supersedes S-7's wt/<area>). Hooks run `python \"${CLAUDE_PROJECT_DIR}/scripts/hooks/<x>.py\"`; project settings exclude F:/aside_mcp for claude/CLAUDE.md through claudeMdExcludes. The merge gate takes an area's tasks from swarm.yaml, requires `Verdict: approve` and `Verdict: green` lines plus all-pass result cells, rejects duplicate YAML keys or ids after the union merge, and fails when the worktree's .claude/state/leaks.log is non-empty (canary hits are logged there). Reviewers get the Write tool for their report."
+    why: "Claude Code loads CLAUDE.md from every ancestor directory, so worktrees inside the repo would also have loaded the enclosing browser-use instructions and main's working copy. Hooks run under Git Bash from the session's cwd, so relative script paths break after a cd. The original gate passed reports it could not read, and S-8's 'no leak fired' had no record to check."

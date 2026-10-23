@@ -75,17 +75,28 @@ The browser reuses the core unchanged. Its own new work is the Chromium column.
 
 ## Crate dependency order (a crate depends only on crates below it)
 
+Corrected in wave 0 (D-38): the pure crates `sb-sheet` and `sb-act` sit *under* `sb-driver`,
+because the driver parses and classifies act programs (I-10). `core` is packaged as
+`harness-core` (D-35).
+
 ```
-sb-mcp  srv-web  srv-files  srv-cli  toolforge
-        │
-toolstore   sb-sheet   sb-act   sb-media
-        │
-     sb-driver
-        │
-      sb-cdp
-        │
-   core-pg ─► core
+sb-mcp   srv-web   srv-files   srv-cli   toolforge   harness
+   │        │          │          │          │          │
+sb-media  toolstore ───┴──────────┴──────────┘       core-pg
+   │        │                                           │
+sb-driver   │                                           │
+   │   \    │                                           │
+sb-cdp  sb-act ─► sb-sheet (leaf)                       │
+          │                                             │
+          └────────────────────► core ◄─────────────────┘
 ```
+
+Exact edges: core-pg → core · sb-act → core, sb-sheet · toolstore → core, sb-sheet, sb-act ·
+sb-driver → core, sb-cdp, sb-sheet, sb-act · sb-media → sb-driver · srv-web → core, sb-sheet,
+toolstore · srv-files, srv-cli → core · sb-mcp → core, sb-driver, sb-sheet, sb-act, sb-media,
+toolstore · srv-web, srv-files, srv-cli, sb-mcp → core-pg too (their `main` builds the
+Harness with `core_pg::bootstrap`, D-48) · toolforge → core, toolstore, sb-act, sb-sheet · harness → core, core-pg, toolstore.
+`sb-sheet` and `sb-cdp` depend on no workspace crate.
 
 `sb-sheet` and `sb-act` are pure. `srv-web` uses `sb-sheet`'s read renderer on fetched
 HTML; `sb-mcp` uses it on the live index. Same code, two inputs.
