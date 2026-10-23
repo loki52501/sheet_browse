@@ -14,3 +14,4 @@ files_touched:
   - agent-memory/swarm.yaml
   - agent-memory/decisions.yaml
 verify: "cargo test -p sb-act && node --test injected/test/"
+# supreme 2026-10-23 01:15: B-430 decided as D-58 on main (button/heading text checkout, place order, confirm order, pay, buy now, complete purchase, add card raises Submit to Pay; raise-only). Pull main (git merge main) and apply it in sb_act::classify with a test. B-431 default stands for now.
