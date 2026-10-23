@@ -55,10 +55,10 @@ interfaces:
     name: "toolstore::{load(domain, path) -> Vec<Tool>, fingerprint(tool, index), record(result)}"
     tier: draft
     crate: toolstore
-    rust: "toolstore::{ToolStore::load, ToolStore::record, ToolStore::folder_for, fingerprint, skeleton_line, Tool, FingerprintResult, ToolRunResult, RunOutcome}"
-    consumers: [srv-web, sb-mcp, toolforge]
+    rust: "toolstore::{ToolStore::{load, scan, record, folder_for, tool_path, archive_path, archive, git_commit, health, register_forged, reforge, confirm, set_pinned, log_invariant, sweep}, fingerprint, relocate, planner_class, planner_act_class, check_repair, skeleton_line, Tool, LoadReport, SweepAction, RepairKind, PlannerCheck, FingerprintResult, ToolRunResult, RunOutcome, StoreError}; pub modules header, domain, loader, fingerprint, invariants, lifecycle, archive, runner (wave-0 names re-exported at the root)"
+    consumers: [srv-web, sb-mcp, toolforge, harness]
     spec: docs/03-TOOL-STORE.md#T-3
-    notes: "Tool runtime and page API per D-53."
+    notes: "Tool runtime and page API per D-53 and I-12. load/scan take a host or folder and a path or full URL; scan reports skipped files (D-306). sb-act is reached through the object-safe PlannerCheck trait (D-301). record, reforge and sweep change files but never commit; the caller commits with git_commit and a message carrying its task id (StoreError::Git). sweep is retire -> archive -> delete at 90 days (D-303). Accepted as IC-300 (D-60)."
   - id: I-8
     name: "Transport trait (send, recv)"
     tier: draft
@@ -95,5 +95,7 @@ interfaces:
     name: "Tool file header and page API for readers/planners"
     tier: draft
     crate: toolstore
-    rust: "toolstore::{parse_header, ToolHeader, ToolKind, ArgSpec, FpItem}; page API per D-53"
+    rust: "toolstore::{parse_header, ToolHeader, ToolKind, ArgSpec, FpItem}; toolstore::runner::{PageHost, ApiFetch, run_reader, run_planner, run_reader_with, run_planner_with, RunOpts, RunError, SheetPage}; page API per D-53"
+    consumers: [srv-web, sb-mcp]
     spec: docs/03-TOOL-STORE.md#T-2
+    notes: "Runner per D-305 and D-308: PageHost {find, find_all, text(Option<&str>), table, url, title} and ApiFetch {api(url)} are synchronous; callers run the runner inside spawn_blocking and bridge ApiFetch with Handle::block_on (B-322). In JS page.url and page.title are properties (B-321); page.api exists only for @phase 1 readers; page.table returns {header, rows, refs?} (B-320). RunOpts defaults: 2 s wall cap including api time (B-323), 32 MiB memory. SheetPage implements PageHost over (&[IndexRow], &[TextBlock], url, title). Accepted as IC-301 (D-61)."
