@@ -189,6 +189,8 @@ pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpt
 
 struct Ctx<'a> {
     rows: HashMap<ElemRef, &'a IndexRow>,
+    /// The row hosting each child frame.
+    hosts: HashMap<FrameId, &'a IndexRow>,
     /// Frames hosted by CHALLENGE or OPAQUE rows and frames nested in them (shared with
     /// sheet, find and skeleton).
     sealed: HashSet<FrameId>,
@@ -200,6 +202,12 @@ impl<'a> Ctx<'a> {
         let rows: HashMap<ElemRef, &IndexRow> = index.iter().map(|r| (r.elem(), r)).collect();
 
         let sealed = sealed_frames(index);
+        let mut hosts: HashMap<FrameId, &IndexRow> = HashMap::new();
+        for r in index {
+            if let Some(c) = r.child_frame.filter(|c| *c != r.frame) {
+                hosts.entry(c).or_insert(r);
+            }
+        }
 
         // A password value should never reach the index (B-5), but if one does, it is
         // scrubbed from everything the reader returns.
@@ -210,18 +218,20 @@ impl<'a> Ctx<'a> {
                 Some(FieldValue::Text(t)) if !t.trim().is_empty() => Some(t.clone()),
                 _ => None,
             })
-            // Rendered text is whitespace-collapsed: scrub that spelling too.
+            // Rendered text is whitespace-collapsed and escaped: scrub those spellings too.
             .flat_map(|t| {
                 let c = collapse(&t);
                 [t, c]
             })
+            .flat_map(|t| escaped_spellings(&t))
             .filter(|t| !t.is_empty())
             .collect();
-        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         secrets.dedup();
 
         Ctx {
             rows,
+            hosts,
             sealed,
             secrets,
         }
@@ -229,6 +239,27 @@ impl<'a> Ctx<'a> {
 
     fn row(&self, e: &ElemRef) -> Option<&'a IndexRow> {
         self.rows.get(e).copied()
+    }
+
+    /// What a span linking `e` may show. A row inside a sealed frame (hosted by a CHALLENGE
+    /// or OPAQUE row) is that frame's content, so it stands in for the outermost host row,
+    /// or for nothing when the host is not in the index (D-55, D-212).
+    fn linked(&self, e: &ElemRef) -> Linked<'a> {
+        let Some(mut r) = self.row(e) else {
+            return Linked::Unknown;
+        };
+        if !self.sealed.contains(&r.frame) {
+            return Linked::Row(r);
+        }
+        // Walk up to the host that sits outside every sealed frame; bounded against cycles.
+        for _ in 0..=self.hosts.len() {
+            match self.hosts.get(&r.frame) {
+                Some(h) if self.sealed.contains(&h.frame) => r = h,
+                Some(h) => return Linked::Sealed(Some(h)),
+                None => break,
+            }
+        }
+        Linked::Sealed(None)
     }
 
     fn scrub(&self, s: &str) -> String {
@@ -240,6 +271,50 @@ impl<'a> Ctx<'a> {
         }
         out
     }
+}
+
+/// The row a span links, as the reader may show it.
+enum Linked<'a> {
+    /// Not in the index.
+    Unknown,
+    /// A row outside every sealed frame.
+    Row(&'a IndexRow),
+    /// A row inside a sealed frame: its outermost host row, if known.
+    Sealed(Option<&'a IndexRow>),
+}
+
+impl<'a> Linked<'a> {
+    /// The row whose CHALLENGE flag decides the block (the host for a sealed row).
+    fn challenge(&self) -> Option<&'a IndexRow> {
+        match self {
+            Linked::Row(r) | Linked::Sealed(Some(r)) if r.flags.challenge => Some(r),
+            _ => None,
+        }
+    }
+}
+
+/// `t` as the renderers may escape it: table cells turn `|` into `\|`, link labels turn `[`
+/// `]` into `(` `)`, and quoted labels turn `"` into `'`. The escapes touch different
+/// characters, so every combination is listed and a scrub catches the value however it was
+/// rendered (D-212).
+fn escaped_spellings(t: &str) -> Vec<String> {
+    let mut out = vec![t.to_string()];
+    for mask in 1u8..8 {
+        let mut v = t.to_string();
+        if mask & 1 != 0 {
+            v = link_text(&v);
+        }
+        if mask & 2 != 0 {
+            v = v.replace('"', "'");
+        }
+        if mask & 4 != 0 {
+            v = v.replace('|', "\\|");
+        }
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -443,15 +518,17 @@ struct Unit {
 }
 
 fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
-    // A block that links a CHALLENGE row shows only the link form (D-55).
-    let challenge: Vec<String> = b
-        .spans
-        .iter()
-        .filter_map(|s| s.elem.as_ref())
-        .filter_map(|e| ctx.row(e))
-        .filter(|r| r.flags.challenge)
-        .map(|r| elem_form(r, ""))
-        .collect();
+    // A block that links a CHALLENGE row, or a row inside a challenge's frame, shows only the
+    // challenge's link form (D-55, D-212).
+    let mut challenge: Vec<String> = Vec::new();
+    for e in b.spans.iter().filter_map(|s| s.elem.as_ref()) {
+        if let Some(r) = ctx.linked(e).challenge() {
+            let form = elem_form(r, "");
+            if !challenge.contains(&form) {
+                challenge.push(form);
+            }
+        }
+    }
     let mut unit = Unit {
         order: b.order,
         kind: b.kind,
@@ -543,13 +620,16 @@ fn heading_level(b: &TextBlock) -> u8 {
 /// other actionable things. Password fields never show span text.
 fn span_form(s: &Span, ctx: &Ctx<'_>) -> (String, bool) {
     let Some(e) = &s.elem else {
-        return (s.text.clone(), false);
+        return (ctx.scrub(&s.text), false);
     };
-    let text = collapse(&s.text);
-    let form = match ctx.row(e) {
-        None => format!("[{}]({e})", link_text(&text)),
-        Some(r) if r.flags.challenge || is_password(r) => elem_form(r, ""),
-        Some(r) if r.role == "link" => {
+    let text = collapse(&ctx.scrub(&s.text));
+    let form = match ctx.linked(e) {
+        Linked::Unknown => format!("[{}]({e})", link_text(&text)),
+        // Nothing from inside a sealed frame: the host's link form, or nothing at all.
+        Linked::Sealed(Some(h)) => elem_form(h, ""),
+        Linked::Sealed(None) => return (String::new(), false),
+        Linked::Row(r) if r.flags.challenge || is_password(r) => elem_form(r, ""),
+        Linked::Row(r) if r.role == "link" => {
             let t = if text.is_empty() {
                 collapse(&r.name)
             } else {
@@ -557,7 +637,7 @@ fn span_form(s: &Span, ctx: &Ctx<'_>) -> (String, bool) {
             };
             format!("[{}]({e})", link_text(&t))
         }
-        Some(r) => elem_form(r, &text),
+        Linked::Row(r) => elem_form(r, &text),
     };
     (form, true)
 }
@@ -628,9 +708,11 @@ fn code_text(spans: &[Span], ctx: &Ctx<'_>) -> String {
 fn plain_text(b: &TextBlock, ctx: &Ctx<'_>) -> String {
     let mut out = String::new();
     for s in &b.spans {
-        let t = match s.elem.as_ref().and_then(|e| ctx.row(e)) {
-            Some(r) if r.flags.challenge || is_password(r) => collapse(&r.name),
-            _ => s.text.clone(),
+        let t = match s.elem.as_ref().map(|e| ctx.linked(e)) {
+            Some(Linked::Sealed(Some(h))) => collapse(&h.name),
+            Some(Linked::Sealed(None)) => String::new(),
+            Some(Linked::Row(r)) if r.flags.challenge || is_password(r) => collapse(&r.name),
+            _ => ctx.scrub(&s.text),
         };
         if !out.is_empty() && !out.ends_with(char::is_whitespace) {
             out.push(' ');
@@ -719,13 +801,14 @@ fn join_pieces(units: &[Unit], pieces: &[Piece]) -> String {
 /// A chunk that holds only headings never ends there: the next unit is cut into the room
 /// left, at least a quarter of the chunk (D-211, D-216). Always makes progress.
 fn next_chunk(units: &[Unit], pos: Pos, budget: usize) -> (Vec<Piece>, Pos) {
-    let cap = budget.max(1) * CHARS_PER_TOKEN;
+    // `budget` is a caller option: a huge value saturates instead of overflowing.
+    let cap = budget.max(1).saturating_mul(CHARS_PER_TOKEN);
     let mut used = 0usize;
     let mut pieces: Vec<Piece> = Vec::new();
     let mut cur = pos;
     while cur.unit < units.len() {
         let u = &units[cur.unit];
-        let start = skip_ws(&u.body, cur.off);
+        let start = skip_lead(u, cur.off);
         if start >= u.body.len() {
             cur = Pos {
                 unit: cur.unit + 1,
@@ -783,13 +866,18 @@ fn next_chunk(units: &[Unit], pos: Pos, budget: usize) -> (Vec<Piece>, Pos) {
             };
             break;
         }
-        let cut = start + cut_point(rest, avail);
+        let cut = start
+            + if u.kind == BlockKind::Code {
+                code_cut_point(rest, avail)
+            } else {
+                cut_point(rest, avail)
+            };
         pieces.push(Piece {
             unit: cur.unit,
             start,
             end: cut,
         });
-        let next_off = skip_ws(&u.body, cut);
+        let next_off = skip_lead(u, cut);
         cur = if next_off >= u.body.len() {
             Pos {
                 unit: cur.unit + 1,
@@ -823,6 +911,48 @@ fn skip_ws(s: &str, off: usize) -> usize {
     match s.get(off..) {
         Some(rest) => off + (rest.len() - rest.trim_start().len()),
         None => s.len(),
+    }
+}
+
+/// Where a piece of `u` starting at `off` really starts. Prose drops the whitespace at a cut.
+/// Code keeps its indentation: the first line is taken as is, a cut at a line break resumes at
+/// the next line with its leading spaces, and only a cut inside an over-long line drops the
+/// spaces at the cut (W-5: a cursor continues with no gap).
+fn skip_lead(u: &Unit, off: usize) -> usize {
+    if u.kind != BlockKind::Code {
+        return skip_ws(&u.body, off);
+    }
+    let Some(rest) = u.body.get(off..) else {
+        return u.body.len();
+    };
+    if rest.trim().is_empty() {
+        return u.body.len();
+    }
+    if off == 0 || u.body[..off].ends_with('\n') {
+        return off;
+    }
+    if rest.starts_with('\n') {
+        return off + 1;
+    }
+    let t = rest.trim_start_matches([' ', '\t']);
+    let t = t.strip_prefix('\n').unwrap_or(t);
+    off + (rest.len() - t.len())
+}
+
+/// Like [`cut_point`], but code is cut at the last line break that fits, so every line keeps
+/// its indentation; a line longer than the room falls back to a word cut.
+fn code_cut_point(s: &str, max_chars: usize) -> usize {
+    let limit = s
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    if s[limit..].starts_with('\n') && limit > 0 {
+        return limit;
+    }
+    match s[..limit].rfind('\n') {
+        Some(i) if i > 0 => i,
+        _ => cut_point(s, max_chars),
     }
 }
 
@@ -1294,5 +1424,209 @@ let x"
             },
         );
         assert!(out.markdown.contains("word"));
+    }
+
+    fn link(t: &str, e: ElemRef) -> Span {
+        Span {
+            text: t.into(),
+            elem: Some(e),
+        }
+    }
+
+    #[test]
+    fn span_into_a_challenge_frame_shows_only_the_host() {
+        // audit round 2 item 5: a span linking a row inside the captcha frame
+        let mut host = row(3, "iframe", "reCAPTCHA");
+        host.flags.challenge = true;
+        host.child_frame = Some(5);
+        let mut inner = row(1, "checkbox", "I'm not a robot, select all traffic lights");
+        inner.frame = 5;
+        let inner_ref = inner.elem();
+        let rows = vec![host, inner];
+        let blocks = vec![
+            block(
+                1,
+                0,
+                BlockKind::Paragraph,
+                vec![
+                    text("Please confirm: "),
+                    link("", inner_ref),
+                    text(" before you continue with the signup form below."),
+                ],
+            ),
+            block(
+                2,
+                0,
+                BlockKind::Heading,
+                vec![link("Select all traffic lights", inner_ref)],
+            ),
+            para(
+                3,
+                "Welcome to the signup page, fill in the form below to continue.",
+            ),
+        ];
+        for o in [opts(0), opts(8)] {
+            for out in read_all(&rows, &blocks, o) {
+                let md = &out.markdown;
+                assert!(!md.contains("robot"), "{md}");
+                assert!(!md.to_lowercase().contains("traffic"), "{md}");
+                assert!(!md.contains("#f5.1"), "{md}");
+                for e in &out.remaining {
+                    assert!(!e.heading.to_lowercase().contains("traffic"), "{e:?}");
+                }
+            }
+        }
+        let md = read(&rows, &blocks, &opts(0)).markdown;
+        assert!(md.contains("[iframe \"reCAPTCHA\"](#3)"), "{md}");
+
+        // an OPAQUE (non-challenge) host stands in for the rows of its frames, nested ones
+        // included
+        let mut video = row(4, "iframe", "Video player");
+        video.flags.opaque = true;
+        video.child_frame = Some(7);
+        let mut play = row(1, "button", "Play secret preview");
+        play.frame = 7;
+        let mut nested = row(9, "iframe", "nested");
+        nested.frame = 7;
+        nested.child_frame = Some(8);
+        let mut deep = row(2, "button", "Deep inner");
+        deep.frame = 8;
+        let rows = vec![video, play.clone(), nested, deep.clone()];
+        let blocks = vec![block(
+            1,
+            0,
+            BlockKind::Paragraph,
+            vec![
+                text("Watch "),
+                link("Play secret preview", play.elem()),
+                text(" or "),
+                link("Deep inner", deep.elem()),
+                text(" now."),
+            ],
+        )];
+        let md = read(&rows, &blocks, &opts(0)).markdown;
+        assert!(!md.contains("secret") && !md.contains("Deep"), "{md}");
+        assert_eq!(
+            md,
+            "Watch [iframe \"Video player\"](#4) or [iframe \"Video player\"](#4) now."
+        );
+    }
+
+    #[test]
+    fn escaped_password_values_are_scrubbed() {
+        // audit round 2 item 6: values holding | [ ] " survive table, link and label escapes
+        let mut rows = Vec::new();
+        for (id, v) in [(1, "ab|cd"), (2, "q[w]e"), (3, "ab\"cd"), (4, "x[y|z\"w]")] {
+            let mut pw = row(id, "textbox", "Password");
+            pw.state.input_type = Some("password".into());
+            pw.state.value = Some(FieldValue::Text(v.into()));
+            rows.push(pw);
+        }
+        let l = row(9, "link", "Docs");
+        let b = row(8, "button", "Go");
+        let mut cell = block(1, 0, BlockKind::TableRow, vec![text("ab|cd"), text("x")]);
+        cell.table = Some(0);
+        let mut cell2 = block(
+            2,
+            0,
+            BlockKind::TableRow,
+            vec![link("x[y|z\"w]", b.elem()), text("y")],
+        );
+        cell2.table = Some(0);
+        let blocks = vec![
+            cell,
+            cell2,
+            block(
+                3,
+                0,
+                BlockKind::Paragraph,
+                vec![
+                    text("see "),
+                    link("q[w]e", l.elem()),
+                    text(" and "),
+                    link("ab\"cd", b.elem()),
+                    text(" plus some more words here to keep it"),
+                ],
+            ),
+            block(4, 0, BlockKind::Heading, vec![link("q[w]e", l.elem())]),
+            para(
+                5,
+                "a closing paragraph with enough words to be read as content",
+            ),
+        ];
+        rows.push(l);
+        rows.push(b);
+        let leaks = [
+            "ab|cd", "ab\\|cd", "q[w]e", "q(w)e", "ab\"cd", "ab'cd", "y\\|z", "y|z",
+        ];
+        for o in [opts(0), opts(6)] {
+            for out in read_all(&rows, &blocks, o) {
+                let md = &out.markdown;
+                for leak in leaks {
+                    assert!(!md.contains(leak), "{leak} in {md}");
+                }
+                for e in &out.remaining {
+                    assert!(!e.heading.contains("q(w)e") && !e.heading.contains("q[w]e"));
+                }
+            }
+        }
+        let md = read(&rows, &blocks, &opts(0)).markdown;
+        assert!(md.contains("| *** | x |"), "{md}");
+        assert!(
+            md.contains("[***](#9)") && md.contains("[button \"***\"](#8)"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn split_code_keeps_indentation() {
+        // audit round 2 item 7
+        let src = "def f():\n    if x:\n        return 1\n    return 2\n".repeat(4);
+        let blocks = vec![block(1, 0, BlockKind::Code, vec![text(&src)])];
+        let whole = read(&[], &blocks, &opts(0)).markdown;
+        assert_eq!(whole, format!("```\n{}\n```", src.trim_end()));
+        let chunks = read_all(&[], &blocks, opts(12));
+        assert!(chunks.len() > 2, "{}", chunks.len());
+        let mut pieces: Vec<String> = Vec::new();
+        for c in &chunks {
+            let body = c.markdown.split("\n\nremaining:").next().unwrap_or("");
+            let body = match body.strip_prefix("chunk ") {
+                Some(_) => body.split_once('\n').map(|x| x.1).unwrap_or(body),
+                None => body,
+            };
+            let piece = body
+                .strip_prefix("```\n")
+                .and_then(|b| b.strip_suffix("\n```"))
+                .unwrap_or_else(|| panic!("not a fenced piece: {:?}", c.markdown));
+            pieces.push(piece.to_string());
+        }
+        assert_eq!(pieces.join("\n"), src.trim_end());
+        // the first line's indentation is kept too
+        let blocks = vec![block(
+            1,
+            0,
+            BlockKind::Code,
+            vec![text("    x = 1\n    y = 2")],
+        )];
+        assert_eq!(
+            read(&[], &blocks, &opts(0)).markdown,
+            "```\n    x = 1\n    y = 2\n```"
+        );
+    }
+
+    #[test]
+    fn huge_chunk_tokens_do_not_overflow() {
+        // audit round 2 item 9
+        let blocks = vec![para(1, "one short paragraph of plain words for the reader")];
+        for chunk_tokens in [usize::MAX, usize::MAX / 2, 1 << 62] {
+            let out = read(&[], &blocks, &opts(chunk_tokens));
+            assert_eq!((out.chunk, out.chunks), (1, 1));
+            assert!(
+                out.markdown.starts_with("one short paragraph"),
+                "{}",
+                out.markdown
+            );
+            assert!(out.cursor.is_none());
+        }
     }
 }

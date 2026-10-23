@@ -67,24 +67,30 @@ impl Field {
         Field { docs, df, avgdl }
     }
 
-    /// Document frequency; a phrase term (words joined by one space) counts the docs that
-    /// hold the phrase as consecutive words (D-213).
-    fn df(&self, term: &str) -> usize {
-        if !term.contains(' ') {
-            return self.df.get(term).copied().unwrap_or(0);
+    /// Document frequency; a phrase term counts the docs that hold its words consecutively
+    /// (D-213).
+    fn df(&self, term: &[String]) -> usize {
+        match term {
+            [w] => self.df.get(w).copied().unwrap_or(0),
+            _ => self.docs.iter().filter(|d| tf(d, term) > 0).count(),
         }
-        let ws: Vec<&str> = term.split(' ').collect();
-        self.docs.iter().filter(|d| tf(d, &ws) > 0).count()
     }
 
-    fn idf(&self, term: &str) -> f32 {
+    fn idf(&self, term: &[String]) -> f32 {
         let n = self.docs.len() as f32;
         let df = self.df(term) as f32;
         (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
     }
 
-    /// BM25 of row `i` against weighted query terms.
-    pub(crate) fn score(&self, i: usize, terms: &[(String, f32)]) -> f32 {
+    /// IDF of every query term, computed once per part and field so a phrase's df scan is not
+    /// repeated per row.
+    pub(crate) fn idfs(&self, q: &Query) -> Vec<f32> {
+        q.words.iter().map(|t| self.idf(t)).collect()
+    }
+
+    /// BM25 of row `i` against the weighted query terms. Terms of one synonym group are
+    /// alternatives: the row keeps the best of them, and groups add (D-217).
+    pub(crate) fn score(&self, i: usize, q: &Query, idfs: &[f32]) -> f32 {
         let Some(doc) = self.docs.get(i) else {
             return 0.0;
         };
@@ -93,37 +99,66 @@ impl Field {
         }
         let dl = doc.len() as f32;
         let norm = K1 * (1.0 - B + B * dl / self.avgdl);
-        terms
-            .iter()
-            .map(|(t, w)| {
-                let ws: Vec<&str> = t.split(' ').collect();
-                let tf = tf(doc, &ws) as f32;
-                if tf == 0.0 {
-                    0.0
-                } else {
-                    w * self.idf(t) * tf * (K1 + 1.0) / (tf + norm)
-                }
-            })
-            .sum()
+        let mut best = vec![0.0f32; q.groups];
+        for (t, ws) in q.words.iter().enumerate() {
+            let tf = tf(doc, ws) as f32;
+            if tf == 0.0 {
+                continue;
+            }
+            let (Some(w), Some(idf), Some(g)) = (q.weights.get(t), idfs.get(t), q.group.get(t))
+            else {
+                continue;
+            };
+            let c = w * idf * tf * (K1 + 1.0) / (tf + norm);
+            if let Some(b) = best.get_mut(*g) {
+                *b = b.max(c);
+            }
+        }
+        best.iter().sum()
     }
 }
 
 /// Occurrences of `term` (one word, or a phrase as consecutive words) in `doc`.
-fn tf(doc: &[String], term: &[&str]) -> usize {
+fn tf(doc: &[String], term: &[String]) -> usize {
     if term.is_empty() || term.len() > doc.len() {
         return 0;
     }
-    doc.windows(term.len())
-        .filter(|win| win.iter().zip(term).all(|(a, b)| a == b))
-        .count()
+    doc.windows(term.len()).filter(|win| *win == term).count()
+}
+
+/// A part's terms in scoring form: split words, weights and synonym groups (D-217).
+pub(crate) struct Query {
+    words: Vec<Vec<String>>,
+    weights: Vec<f32>,
+    group: Vec<usize>,
+    groups: usize,
+}
+
+impl Query {
+    pub(crate) fn new(part: &Part) -> Query {
+        Query {
+            words: part
+                .terms
+                .iter()
+                .map(|(t, _)| t.split(' ').map(str::to_string).collect())
+                .collect(),
+            weights: part.terms.iter().map(|(_, w)| *w).collect(),
+            group: part.groups.clone(),
+            groups: part.groups.iter().map(|g| g + 1).max().unwrap_or(0),
+        }
+    }
 }
 
 /// A parsed query part.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Part {
     /// Weighted terms after synonym expansion: typed words 1.0, synonym words 0.5, a synonym
-    /// phrase (words joined by one space, matched as consecutive words) 0.5 per word (D-213).
+    /// phrase (words joined by one space, matched as consecutive words) 0.5 per word (D-213),
+    /// a spelling variant of the typed n-gram it expands 1.0 (D-217).
     pub(crate) terms: Vec<(String, f32)>,
+    /// Group of each term, parallel to `terms`: each typed word is its own group; the
+    /// synonyms of one typed n-gram share a group and do not add up (D-217).
+    pub(crate) groups: Vec<usize>,
     /// ARIA roles that get the +2 prior.
     pub(crate) prior: HashSet<String>,
     /// `name:role`: only rows with one of these roles are candidates.
@@ -171,16 +206,26 @@ pub(crate) fn parse_part(raw: &str) -> Part {
     };
     let typed = words(text);
     let mut terms: Vec<(String, f32)> = Vec::new();
-    let mut add = |t: String, w: f32| match terms.iter_mut().find(|(x, _)| *x == t) {
+    let mut groups: Vec<usize> = Vec::new();
+    let mut next_group = 0usize;
+    // A term already present keeps its group and the higher weight.
+    let mut add = |t: String, w: f32, g: usize| match terms.iter_mut().find(|(x, _)| *x == t) {
         Some((_, old)) => *old = old.max(w),
-        None => terms.push((t, w)),
+        None => {
+            terms.push((t, w));
+            groups.push(g);
+        }
     };
     for w in &typed {
-        add(w.clone(), 1.0);
+        add(w.clone(), 1.0, next_group);
+        next_group += 1;
     }
     let grams = ngrams(&typed, synonym_max_words().max(1));
     let typed_grams: HashSet<&str> = grams.iter().map(String::as_str).collect();
     for phrase in &grams {
+        let group = next_group;
+        next_group += 1;
+        let squashed = phrase.replace(' ', "");
         for syn in synonyms(phrase) {
             let ws = words(syn);
             let n = ws.len();
@@ -189,7 +234,13 @@ pub(crate) fn parse_part(raw: &str) -> Part {
             if n == 0 || (n > 1 && typed_grams.contains(term.as_str())) {
                 continue;
             }
-            add(term, SYNONYM_WEIGHT * n as f32);
+            // `e mail` for `email` (or the reverse) is the typed word respelled (D-217).
+            let weight = if term.replace(' ', "") == squashed {
+                1.0
+            } else {
+                SYNONYM_WEIGHT * n as f32
+            };
+            add(term, weight, group);
         }
     }
     // A role the caller named (`help button`) replaces the task-word priors (D-214).
@@ -204,6 +255,7 @@ pub(crate) fn parse_part(raw: &str) -> Part {
     };
     Part {
         terms,
+        groups,
         prior,
         forced,
     }
@@ -234,15 +286,21 @@ impl<'a> Scorer<'a> {
         }
     }
 
-    fn lexical(&self, i: usize, part: &Part) -> f32 {
-        W_NAME * self.name.score(i, &part.terms)
-            + W_NEARBY * self.nearby.score(i, &part.terms)
-            + W_HEADING * self.heading.score(i, &part.terms)
-    }
-
     /// `(row, lexical, score without group bonus)` for every eligible row of `part`.
     fn scored(&self, part: &Part) -> Vec<(usize, f32, f32)> {
         let bare_role = part.terms.is_empty() && part.forced.is_some();
+        let query = Query::new(part);
+        let fields = [
+            (W_NAME, &self.name, self.name.idfs(&query)),
+            (W_NEARBY, &self.nearby, self.nearby.idfs(&query)),
+            (W_HEADING, &self.heading, self.heading.idfs(&query)),
+        ];
+        let lexical = |i: usize| -> f32 {
+            fields
+                .iter()
+                .map(|(w, f, idfs)| w * f.score(i, &query, idfs))
+                .sum()
+        };
         let mut out = Vec::new();
         for (i, row) in self.index.iter().enumerate() {
             if !self.candidate[i] {
@@ -254,7 +312,7 @@ impl<'a> Scorer<'a> {
                     continue;
                 }
             }
-            let lex = self.lexical(i, part);
+            let lex = lexical(i);
             let prior = part.prior.contains(&role);
             // Query evidence (D-214): text, or the role the query names. The state term alone
             // says nothing about the query.
@@ -457,22 +515,110 @@ mod tests {
     ///        bm25 = 0.470004 * 2.2 / 1.975 = 0.523549
     /// row 1: dl = 2, norm = 1.2*(0.25 + 0.75*2/(4/3)) = 1.65
     ///        bm25 = 0.470004 * 2.2 / 2.65 = 0.390192
+    /// Scores `terms` on row `i`, each term its own group.
+    fn bm25(f: &Field, i: usize, terms: &[(&str, f32)]) -> f32 {
+        let part = Part {
+            terms: terms.iter().map(|(t, w)| (t.to_string(), *w)).collect(),
+            groups: (0..terms.len()).collect(),
+            prior: HashSet::new(),
+            forced: None,
+        };
+        let q = Query::new(&part);
+        f.score(i, &q, &f.idfs(&q))
+    }
+
+    fn idf(f: &Field, t: &str) -> f32 {
+        f.idf(&words(t))
+    }
+
     #[test]
     fn bm25_hand_computed() {
         let f = Field::new(["apple", "apple pie", "cherry"].into_iter().map(Some));
-        let t = vec![("apple".to_string(), 1.0)];
-        assert!(close(f.idf("apple"), 0.470004), "{}", f.idf("apple"));
-        assert!(close(f.score(0, &t), 0.523549), "{}", f.score(0, &t));
-        assert!(close(f.score(1, &t), 0.390192), "{}", f.score(1, &t));
-        assert_eq!(f.score(2, &t), 0.0);
+        let t = [("apple", 1.0)];
+        assert!(close(idf(&f, "apple"), 0.470004), "{}", idf(&f, "apple"));
+        assert!(close(bm25(&f, 0, &t), 0.523549), "{}", bm25(&f, 0, &t));
+        assert!(close(bm25(&f, 1, &t), 0.390192), "{}", bm25(&f, 1, &t));
+        assert_eq!(bm25(&f, 2, &t), 0.0);
         // weight scales linearly; unknown terms add nothing
-        let half = vec![("apple".to_string(), 0.5), ("zzz".to_string(), 1.0)];
-        assert!(close(f.score(0, &half), 0.523549 / 2.0));
+        let half = [("apple", 0.5), ("zzz", 1.0)];
+        assert!(close(bm25(&f, 0, &half), 0.523549 / 2.0));
         // idf(cherry) = ln(1 + 2.5/1.5) = ln(8/3)
-        let c = vec![("cherry".to_string(), 1.0)];
-        assert!(close(f.idf("cherry"), (8.0f32 / 3.0).ln()));
+        let c = [("cherry", 1.0)];
+        assert!(close(idf(&f, "cherry"), (8.0f32 / 3.0).ln()));
         // row 2: dl = 1 => same norm as row 0
-        assert!(close(f.score(2, &c), (8.0f32 / 3.0).ln() * 2.2 / 1.975));
+        assert!(close(bm25(&f, 2, &c), (8.0f32 / 3.0).ln() * 2.2 / 1.975));
+        // phrase df counts docs holding the words consecutively
+        assert!(close(idf(&f, "apple pie"), (8.0f32 / 3.0).ln()));
+        assert_eq!(f.df(&words("pie apple")), 0);
+    }
+
+    #[test]
+    fn synonym_group_is_alternatives_not_a_sum() {
+        let f = Field::new(["e mail", "email"].into_iter().map(Some));
+        let one = Part {
+            terms: vec![("e mail".into(), 1.0), ("mail".into(), 0.5)],
+            groups: vec![0, 0],
+            prior: HashSet::new(),
+            forced: None,
+        };
+        let q = Query::new(&one);
+        let only_phrase = bm25(&f, 0, &[("e mail", 1.0)]);
+        assert!(close(f.score(0, &q, &f.idfs(&q)), only_phrase));
+        // separate groups add
+        let two = bm25(&f, 0, &[("e mail", 1.0), ("mail", 0.5)]);
+        assert!(two > only_phrase);
+    }
+
+    #[test]
+    fn phrase_df_is_not_rescanned_per_row() {
+        // audit round 2 item 10: 5000 rows holding a synonym phrase. With the df scan per
+        // row this was quadratic (seconds in release); now it is one scan per term and field.
+        let idx: Vec<IndexRow> = (1..=5000)
+            .map(|i| row(i, "textbox", &format!("item {i} postal code area label")))
+            .collect();
+        let h = q(&idx, "zip", 1);
+        assert_eq!(ids(&h), [1]);
+    }
+
+    #[test]
+    fn exact_typed_name_beats_synonym_spelling() {
+        // audit round 2 item 4: `email` must pick `Email`, not the newsletter `E-mail`
+        let mut idx = vec![
+            row(1, "textbox", "Email"),
+            row(2, "textbox", "Password"),
+            row(3, "button", "Sign in"),
+        ];
+        for r in &mut idx {
+            r.form = Some("f1".into());
+        }
+        idx[2].flags.submit = true;
+        for (i, name) in [
+            "Home", "About", "Pricing", "Blog", "Careers", "Press", "Terms", "Privacy", "Help",
+            "Status", "Docs", "Contact",
+        ]
+        .iter()
+        .enumerate()
+        {
+            idx.push(row(10 + i as u32, "link", name));
+        }
+        let mut e = row(40, "textbox", "E-mail");
+        e.form = Some("f2".into());
+        idx.push(e);
+        let mut s = row(41, "button", "Subscribe");
+        s.form = Some("f2".into());
+        s.flags.submit = true;
+        idx.push(s);
+        for query in ["email", "Email"] {
+            let h = q(&idx, query, 1);
+            assert_eq!(ids(&h), [1, 3], "{query}: {}", find_lines(&idx, &h));
+            assert!(!h[0].weak);
+        }
+        // the respelled query still finds the other spelling strongly
+        let h = q(&idx, "e-mail", 2);
+        assert_eq!(ids(&h)[..2], [1, 40], "{}", find_lines(&idx, &h));
+        assert!(h.iter().take(2).all(|x| !x.weak), "{h:?}");
+        let top = q(&idx, "e-mail", 1);
+        assert!(ids(&top).contains(&40), "{}", find_lines(&idx, &top));
     }
 
     #[test]
@@ -497,7 +643,9 @@ mod tests {
     fn synonyms_expand_at_half_weight() {
         let p = parse_part("e-mail");
         assert!(p.terms.contains(&("e".into(), 1.0)));
-        assert!(p.terms.contains(&("email".into(), 0.5)));
+        // a respelling of the typed n-gram weighs as typed (D-217)
+        assert!(p.terms.contains(&("email".into(), 1.0)));
+        assert!(p.terms.contains(&("email address".into(), 1.0)));
         let p = parse_part("email");
         assert!(p.terms.contains(&("email".into(), 1.0)));
         assert!(p.terms.contains(&("mail".into(), 0.5)));

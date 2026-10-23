@@ -21,7 +21,7 @@
 
 use crate::data::alias_for;
 use crate::sheet::{clean, sealed_frames};
-use crate::{BlockKind, IndexRow, SkeletonOpts, TextBlock};
+use crate::{BlockKind, FrameId, IndexRow, SkeletonOpts, TextBlock};
 
 /// ARIA roles counted as fields (things a user types into or picks).
 const FIELD_ROLES: &[&str] = &[
@@ -95,22 +95,27 @@ fn warn_lines(out: &mut Vec<String>, kind: &str, rows: &[&IndexRow]) {
     }
 }
 
-/// `main: form` or `main: article N words, M tables` (B-6.1).
+/// `main: form` or `main: article N words, M tables` (B-6.1). Only a `main` landmark in the
+/// top frame makes the page main-only, as in the reader (D-216); an iframe's `<main>` is that
+/// document's landmark and counts with the rest of the page.
 fn content_hint(rows: &[&IndexRow], text_blocks: &[TextBlock]) -> Option<String> {
+    let top_main = |frame: FrameId, l: Option<&str>| frame == 0 && l == Some("main");
     let has_main = text_blocks
         .iter()
-        .any(|b| b.landmark.as_deref() == Some("main"))
-        || rows.iter().any(|r| r.landmark.as_deref() == Some("main"));
-    let in_content = |l: Option<&str>| -> bool {
+        .any(|b| top_main(b.frame, b.landmark.as_deref()))
+        || rows
+            .iter()
+            .any(|r| top_main(r.frame, r.landmark.as_deref()));
+    let in_content = |frame: FrameId, l: Option<&str>| -> bool {
         if has_main {
-            l == Some("main")
+            top_main(frame, l)
         } else {
             !l.is_some_and(|l| CHROME.contains(&l))
         }
     };
     let blocks: Vec<&TextBlock> = text_blocks
         .iter()
-        .filter(|b| in_content(b.landmark.as_deref()))
+        .filter(|b| in_content(b.frame, b.landmark.as_deref()))
         .collect();
     let words: usize = blocks
         .iter()
@@ -126,7 +131,7 @@ fn content_hint(rows: &[&IndexRow], text_blocks: &[TextBlock]) -> Option<String>
     tables.dedup();
     let form = rows
         .iter()
-        .any(|r| r.form.is_some() && is_field(r) && in_content(r.landmark.as_deref()));
+        .any(|r| r.form.is_some() && is_field(r) && in_content(r.frame, r.landmark.as_deref()));
     let label = if has_main { "main" } else { "page" };
     if form && words < FORM_PAGE_WORDS {
         return Some(format!("{label}: form"));
@@ -352,6 +357,45 @@ mod tests {
         assert!(s.ends_with("main: article 7 words, 2 tables"), "{s}");
         assert!(s.contains("h1 Big news"), "{s}");
         assert!(s.contains("landmarks: main, nav"), "{s}");
+    }
+
+    #[test]
+    fn iframe_main_does_not_drive_the_hint() {
+        // review round 2 item 1: an iframe's <main> is not the page's main (D-216)
+        let mut inner = block(
+            0,
+            BlockKind::Paragraph,
+            None,
+            "main",
+            "embedded widget text",
+        );
+        inner.frame = 2;
+        let blocks = vec![
+            inner,
+            block(
+                1,
+                BlockKind::Paragraph,
+                None,
+                "region",
+                "one two three four five six",
+            ),
+            block(2, BlockKind::Paragraph, None, "nav", "skip these words"),
+        ];
+        let s = skeleton(&[], &blocks, &SkeletonOpts::default());
+        assert!(s.ends_with("page: article 9 words"), "{s}");
+        // a row with landmark main in an iframe does not switch to main mode either
+        let mut r = row(1, "textbox", "Search");
+        r.frame = 2;
+        r.landmark = Some("main".into());
+        let s = skeleton(&[r], &blocks[1..], &SkeletonOpts::default());
+        assert!(s.ends_with("page: article 6 words"), "{s}");
+        // a top-frame main still does
+        let blocks = vec![
+            block(0, BlockKind::Paragraph, None, "main", "alpha beta"),
+            block(1, BlockKind::Paragraph, None, "region", "one two three"),
+        ];
+        let s = skeleton(&[], &blocks, &SkeletonOpts::default());
+        assert!(s.ends_with("main: article 2 words"), "{s}");
     }
 
     #[test]

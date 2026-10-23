@@ -149,8 +149,9 @@ fn contains_ci(hay: &str, needle: &str) -> bool {
 
 /// Picks the rows of `region` (B-6.3) as a mask over `index`: a landmark, a form id, or a
 /// heading (`## Heading` forces heading mode). Matching order: landmark, form id, `form` =
-/// every form row, exact heading, heading substring. `None` when nothing matches.
-fn region_mask(index: &[IndexRow], region: &str) -> Option<Vec<bool>> {
+/// every form row, exact heading, heading substring. Rows in sealed frames never match, so a
+/// region named only inside a captcha is unknown (D-206). `None` when nothing matches.
+fn region_mask(index: &[IndexRow], sealed: &HashSet<FrameId>, region: &str) -> Option<Vec<bool>> {
     let raw = region.trim();
     let heading_only = raw.starts_with('#');
     let r = raw.trim_start_matches('#').trim();
@@ -158,7 +159,10 @@ fn region_mask(index: &[IndexRow], region: &str) -> Option<Vec<bool>> {
         return None;
     }
     let pick = |pred: &dyn Fn(&IndexRow) -> bool| -> Option<Vec<bool>> {
-        let m: Vec<bool> = index.iter().map(pred).collect();
+        let m: Vec<bool> = index
+            .iter()
+            .map(|row| !sealed.contains(&row.frame) && pred(row))
+            .collect();
         m.contains(&true).then_some(m)
     };
     let by_heading_eq = |row: &IndexRow| row.heading.as_deref().is_some_and(|h| eq_ci(h, r));
@@ -201,30 +205,40 @@ fn with_hosted_frames(index: &[IndexRow], mut mask: Vec<bool>) -> Vec<bool> {
     }
 }
 
-/// The regions a caller can ask for, for the "no such region" line.
-fn known_regions(index: &[IndexRow], text_blocks: &[TextBlock]) -> Vec<String> {
+/// The regions a caller can ask for, for the "no such region" line. Rows and blocks in frames
+/// hosted by CHALLENGE or OPAQUE rows are skipped: their headings and form ids are that
+/// frame's content (D-55, D-206).
+fn known_regions(
+    index: &[IndexRow],
+    text_blocks: &[TextBlock],
+    sealed: &HashSet<FrameId>,
+) -> Vec<String> {
+    let index: Vec<&IndexRow> = index
+        .iter()
+        .filter(|r| !sealed.contains(&r.frame))
+        .collect();
     let mut out: Vec<String> = Vec::new();
     let mut add = |s: String| {
         if !s.is_empty() && !out.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
             out.push(s);
         }
     };
-    for row in index {
+    for row in &index {
         if let Some(l) = &row.landmark {
             add(l.clone());
         }
     }
-    for row in index {
+    for row in &index {
         if let Some(f) = &row.form {
             add(f.clone());
         }
     }
-    for row in index {
+    for row in &index {
         if let Some(h) = &row.heading {
             add(format!("## {}", clean(h, 60)));
         }
     }
-    for b in text_blocks {
+    for b in text_blocks.iter().filter(|b| !sealed.contains(&b.frame)) {
         if let Some(l) = &b.landmark {
             add(l.clone());
         }
@@ -236,10 +250,10 @@ pub(crate) fn sheet(index: &[IndexRow], text_blocks: &[TextBlock], opts: &SheetO
     let sealed = sealed_frames(index);
     let mask: Vec<bool> = match opts.region.as_deref().map(str::trim) {
         None | Some("") => vec![true; index.len()],
-        Some(region) => match region_mask(index, region) {
+        Some(region) => match region_mask(index, &sealed, region) {
             Some(mask) => with_hosted_frames(index, mask),
             None => {
-                let known = known_regions(index, text_blocks);
+                let known = known_regions(index, text_blocks, &sealed);
                 return if known.is_empty() {
                     format!("no region \"{}\"", clean(region, 60))
                 } else {
@@ -435,5 +449,65 @@ mod tests {
             },
         );
         assert!(none.starts_with("no region \"pricing table\". regions: nav, main, f1"));
+    }
+
+    #[test]
+    fn unknown_region_lists_nothing_from_sealed_frames() {
+        // audit round 2 item 8: headings, forms and landmarks inside a captcha frame are
+        // that frame's content (D-55, D-206)
+        let mut a = row(1, "link", "Home");
+        a.landmark = Some("nav".into());
+        let mut cap = row(2, "iframe", "reCAPTCHA");
+        cap.flags.challenge = true;
+        cap.flags.opaque = true;
+        cap.child_frame = Some(4);
+        let mut inside = row(1, "checkbox", "I'm not a robot");
+        inside.frame = 4;
+        inside.heading = Some("Select all images with traffic lights".into());
+        inside.form = Some("challenge-form".into());
+        inside.landmark = Some("dialog".into());
+        let idx = vec![a, cap, inside];
+        let mut b = TextBlock {
+            order: 0,
+            frame: 4,
+            kind: crate::BlockKind::Paragraph,
+            level: None,
+            landmark: Some("complementary-captcha".into()),
+            heading: None,
+            table: None,
+            header: false,
+            spans: vec![],
+        };
+        let blocks = vec![b.clone()];
+        let region = |r: &str| {
+            sheet(
+                &idx,
+                &blocks,
+                &SheetOpts {
+                    region: Some(r.into()),
+                },
+            )
+        };
+        assert_eq!(region("pricing"), "no region \"pricing\". regions: nav");
+        // a region named only inside the sealed frame is unknown, not an empty selection
+        for r in [
+            "challenge-form",
+            "## Select all images",
+            "traffic lights",
+            "dialog",
+        ] {
+            assert_eq!(region(r), format!("no region \"{r}\". regions: nav"));
+        }
+        // top-frame blocks still name their landmark
+        b.frame = 0;
+        b.landmark = Some("main".into());
+        let s = sheet(
+            &idx,
+            &[b],
+            &SheetOpts {
+                region: Some("pricing".into()),
+            },
+        );
+        assert_eq!(s, "no region \"pricing\". regions: nav, main");
     }
 }
