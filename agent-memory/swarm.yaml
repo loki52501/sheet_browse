@@ -12,7 +12,7 @@ areas:
     tasks: [T-03, T-04, T-05, T-06, T-07, T-08, T-09]
     later: {wave: 3, tasks: [T-16]}
     docs: [docs/01-HARNESS-CORE.md, docs/02-MEMORY.md]
-    status: not_started
+    status: in_progress
     merged: false
   sheet:
     wave: 1
