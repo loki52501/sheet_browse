@@ -12,13 +12,18 @@
 //! D-403 (key steps, implicit submission, wider Pay/Account/Delete evidence), D-404 (2FA
 //! only with a set-up verb, delete dialogs, the Delete key, planner challenge rejection)
 //! and D-406 (control-character keys, Enter takes the form max on every row, challenge
-//! targets before `?s`, per-form evidence cache, more words).
+//! targets before `?s`, per-form evidence cache, more words) and D-407 (final word lists:
+//! more Pay words, `create` as a 2FA set-up verb).
 //!
 //! Every refinement only raises a class (D-36). The one sanctioned lowering is D-404 (1):
 //! second-factor text is Account only with a set-up verb, so a bare "Two-step
 //! verification" code prompt is Submit again. D-406 (3) bounds the one-time-code
 //! exemption: only the phrase "security code" on a one-time-code field is not card
 //! evidence; its other card words still are.
+//!
+//! D-407 sanctions two behaviours as coded (not lowerings): "Cancel and ..." / "Cancel or
+//! ..." is Navigate like a bare Cancel, and Backspace on a non-text row is a click on the
+//! row, not Delete. From D-407 on, a missing word in a list is a Should item, not Blocking.
 
 mod classify;
 mod parse;

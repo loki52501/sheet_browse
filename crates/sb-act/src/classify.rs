@@ -1,7 +1,8 @@
 //! B-7 step classification: D-402, refined by D-433 (Enter, form context), D-434 (hints),
 //! D-58 (Pay from checkout text), D-403 (keys, implicit submission, more evidence),
 //! D-404 (2FA set-up verbs, delete dialogs, the Delete key) and D-406 (control-character
-//! keys, Enter takes the form max on every row, per-form evidence cache, more words).
+//! keys, Enter takes the form max on every row, per-form evidence cache, more words) and
+//! D-407 (final word lists).
 //!
 //! Every refinement only raises a class (D-36 max). The one sanctioned lowering is
 //! D-404 (1): second-factor text (2FA, 2-step, MFA, TOTP, security key, passkey,
@@ -10,6 +11,12 @@
 //! one-time-code exemption: a one-time-code field whose only card evidence is the phrase
 //! "security code" is not a card field; CVC, CVV, CSC, cardholder, MM/YY, expiry and card
 //! number on it still are.
+//!
+//! Sanctioned as coded by D-407, not lowerings: "Cancel and ..." / "Cancel or ..."
+//! ("Cancel and close", "Cancel or go back") is Navigate like a bare Cancel, and Backspace
+//! on a non-text row stays a click on the row. From D-407 on, a missing word in a list is a
+//! Should item; Blocking is for structural paths (step kind, key, role, form shape) that
+//! come out below their target's class.
 
 use crate::{ActClass, Scroll, Step};
 use harness_core::gate::{HINT_JOB_APPLICATION, HINT_SIGNATURE};
@@ -187,7 +194,8 @@ impl<'a> Ctx<'a> {
     /// - Delete (any modifiers) on a non-text row is at least Delete (D-404 (3)).
     /// - Every other key, unknown keys included, is a click on its row (Space on a button,
     ///   a letter on a link, `F13`...), so a key step is never below a `c#` on the same
-    ///   target except for the Fill cases above.
+    ///   target except for the Fill cases above. Backspace on a non-text row is such a
+    ///   click, not Delete (sanctioned as coded by D-407).
     fn key_press(&self, row: &'a IndexRow, key: &str) -> ActClass {
         if key.contains(['\r', '\n']) {
             return self.enter(row);
@@ -437,8 +445,9 @@ impl FormEvidence {
 fn submit_class(ev: &FormEvidence, name: &str) -> ActClass {
     let toks = tokens(name);
     let mut class = Class::Submit;
-    // D-406 (7): "Upgrade" on a submit changes a paid plan.
-    if ev.pay || pay_words(&toks, name) || has_any(&toks, &["upgrade"]) {
+    // D-406 (7): "Upgrade" on a submit changes a paid plan. D-407: so does "Renew", on the
+    // submit only ("Renewal date" or "Renew" in a heading is not checkout text).
+    if ev.pay || pay_words(&toks, name) || has_any(&toks, &["upgrade", "renew"]) {
         class = class.max(Class::Pay);
     }
     // A set-up verb on the button over a second-factor heading counts ("Two-factor
@@ -555,9 +564,11 @@ fn card_label(toks: &[String], security_code: bool) -> bool {
         || near(toks, &["mm"], &["yy"], 1)
 }
 
-/// Checkout wording (D-58, D-403 (5), D-406 (7)): checkout / check out, pay, payment,
-/// purchase, buy, donate / donation, place, confirm or submit order, add card, and
-/// paid-subscription phrases. Small fillers between two words are allowed ("Place your
+/// Checkout wording (D-58, D-403 (5), D-406 (7), D-407): checkout / check out, pay,
+/// payment, purchase, buy, donate / donation, place, confirm, submit or complete order,
+/// order now, place bid, top up, send money, transfer money / funds, add card, and
+/// paid-subscription phrases. "Book now" and "Reserve" stay Submit (D-407: free bookings
+/// are H-1's own Submit example); "Order history" and "Transfer ownership" do not match. Small fillers between two words are allowed ("Place your
 /// order", "Add a new card"). `raw` is the text `toks` came from (for currency signs).
 ///
 /// Matching is on whole words from `tokens()`, never substrings, so "Repay later",
@@ -568,10 +579,19 @@ fn pay_words(toks: &[String], raw: &str) -> bool {
     has_any(
         toks,
         &[
-            "checkout", "pay", "payment", "purchase", "buy", "donate", "donation",
+            "checkout", "pay", "payment", "purchase", "buy", "donate", "donation", "topup",
         ],
     ) || near(toks, &["check"], &["out"], 1)
-        || near(toks, &["place", "confirm", "submit"], &["order"], 2)
+        || near(
+            toks,
+            &["place", "confirm", "submit", "complete"],
+            &["order"],
+            2,
+        )
+        || near(toks, &["order"], &["now"], 1)
+        || near(toks, &["place"], &["bid"], 2)
+        || near(toks, &["top"], &["up"], 1)
+        || near(toks, &["send", "transfer"], &["money", "funds"], 2)
         || near(toks, &["add"], &["card"], 3)
         || paid_subscription(toks, raw)
 }
@@ -636,15 +656,17 @@ fn twofa_spans(toks: &[String]) -> Vec<(usize, usize)> {
     spans
 }
 
-/// Start positions of a set-up verb, ascending (D-404 (1)): enable, set up, turn on, turn
-/// off, disable, add, remove, manage, change, reset.
+/// Start positions of a set-up verb, ascending (D-404 (1), D-407): enable, set up, turn on,
+/// turn off, disable, add, create, remove, manage, change, reset. "Create a passkey" is
+/// Account; "Sign in with a passkey" has no verb and is not.
 fn setup_verbs(toks: &[String]) -> Vec<usize> {
     toks.iter()
         .enumerate()
         .filter(|(i, t)| {
             let next = toks.get(i + 1).map(String::as_str);
             match t.as_str() {
-                "enable" | "disable" | "add" | "remove" | "manage" | "change" | "reset" => true,
+                "enable" | "disable" | "add" | "create" | "remove" | "manage" | "change"
+                | "reset" => true,
                 "set" => next == Some("up"),
                 "setup" => true,
                 "turn" => matches!(next, Some("on" | "off")),
@@ -676,7 +698,7 @@ fn twofa_setup(toks: &[String]) -> bool {
 /// - a bare "Cancel" (D-402), or a bare "Clear" (clears a search box);
 /// - "cancel and ..." / "cancel or ..." ("Cancel and close", "Cancel or go back"): these
 ///   dismiss a dialog like a bare Cancel, so they are read as D-402's bare-Cancel case
-///   rather than "cancel <something>";
+///   rather than "cancel <something>" (sanctioned as coded by D-407);
 /// - in heading text only (`heading`), "cancel anytime" / "cancel any time" / "cancel at
 ///   any time", which is subscription marketing next to a Subscribe button.
 fn delete_text(toks: &[String], heading: bool) -> bool {
@@ -2359,6 +2381,95 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// D-407: final Pay and Account word lists, with negatives.
+    #[test]
+    fn d407_word_lists() {
+        for name in [
+            "Complete order",
+            "Complete your order",
+            "Order now",
+            "Place bid",
+            "Place your bid",
+            "Renew",
+            "Renew subscription",
+            "Top up",
+            "Top-up",
+            "Topup",
+            "Send money",
+            "Transfer money",
+            "Transfer funds",
+            "Transfer the funds",
+        ] {
+            let idx = saved_card(name, None);
+            assert_eq!(cls("c#2", &idx), Class::Pay, "{name}");
+            assert_eq!(cls("k#1=Enter", &idx), Class::Pay, "Enter: {name}");
+        }
+        // Heading text counts for every new word except Renew (on a submit only).
+        for h in ["Complete your order", "Top up your balance", "Send money"] {
+            let idx = saved_card("Continue", Some(h));
+            assert_eq!(cls("c#2", &idx), Class::Pay, "{h}");
+        }
+        for (name, h) in [
+            ("Save", "Renewal date"),
+            ("Save", "Renew your subscription"),
+            ("Save", "Order history"),
+            ("Book now", "Your table"),
+            ("Reserve", "Your table"),
+            ("Transfer ownership", "Repository settings"),
+            ("Send message", "Contact"),
+            ("Continue", "Back to top"),
+        ] {
+            let idx = saved_card(name, Some(h));
+            assert_eq!(cls("c#2", &idx), Class::Submit, "{name} / {h}");
+        }
+        assert_eq!(cls("c#2", &saved_card("Book now", None)), Class::Submit);
+        for (role, name) in [
+            ("link", "Order history"),
+            ("link", "Renew"),
+            ("button", "Renewal date"),
+            ("button", "Transfer ownership"),
+        ] {
+            assert_eq!(
+                cls("c#1", &[row(1, role, name)]),
+                Class::Navigate,
+                "{role} {name}"
+            );
+        }
+        // Account: create is a set-up verb.
+        let code = || input(row(1, "textbox", "Code"), "text", Some("one-time-code"));
+        for (h, button) in [("Create a passkey", "Continue"), ("Passkeys", "Create")] {
+            let idx = vec![
+                heading(form(code(), "f1"), h),
+                heading(form(submit(row(2, "button", button)), "f1"), h),
+            ];
+            assert_eq!(cls("c#2", &idx), Class::Account, "{h} / {button}");
+            assert_eq!(cls("k#1=Enter", &idx), Class::Account, "Enter: {h}");
+        }
+        let idx = vec![form(submit(row(2, "button", "Create a passkey")), "f1")];
+        assert_eq!(cls("c#2", &idx), Class::Account);
+        let idx = vec![
+            heading(form(code(), "f1"), "Sign in with a passkey"),
+            heading(
+                form(submit(row(2, "button", "Continue")), "f1"),
+                "Sign in with a passkey",
+            ),
+        ];
+        assert_eq!(cls("c#2", &idx), Class::Submit);
+        // Sanctioned as coded (D-407): Cancel and/or ... is Navigate, Backspace on a
+        // non-text row is a click on it.
+        for name in ["Cancel and close", "Cancel or go back"] {
+            assert_eq!(
+                cls("c#1", &[row(1, "button", name)]),
+                Class::Navigate,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            cls("k#1=Backspace", &[row(1, "row", "Invoice from ACME")]),
+            Class::Navigate
+        );
     }
 
     /// A page-wide form: `submits` SUBMIT rows, then text fields, `rows` in all.
