@@ -91,5 +91,15 @@ blockers:
     needs_user: false
 
 interface_changes:
+  - id: IC-300
+    from: store
+    interface: I-7
+    change: "toolstore is split into pub modules header, domain, loader, fingerprint, invariants, lifecycle, archive, runner; every wave-0 name stays re-exported at the root. ToolStore gains scan(domain, path) -> LoadReport{tools, skipped} (D-306), tool_path, archive_path, archive, git_commit(paths, msg) -> hash (msg must carry a task id), health, register_forged, reforge, confirm, set_pinned, log_invariant, sweep(store, now, visits) -> Vec<SweepAction> (D-303). load() and scan() accept a host or folder and a path or full URL. Free fns relocate(tool, index), planner_class / planner_act_class(tool, program, index, &dyn PlannerCheck) (D-301), check_repair(old_src, new_src, RepairKind) (D-307). StoreError gains Git(String). record/reforge/sweep change files but never commit: the caller commits with its task id."
+    why: "T-4 relocate, T-7 sweep, T-9/G-4 invariants and T-1 git commits need entry points the wave-0 draft did not name; consumers srv-web, sb-mcp, toolforge and harness (reflect) call them."
+  - id: IC-301
+    from: store
+    interface: I-12
+    change: "toolstore::runner (D-305): traits PageHost {find, find_all, text(Option<&str>), table, url, title} and ApiFetch {api(url)}, both synchronous; run_reader(tool, host, args, Option<&dyn ApiFetch>) and run_planner(tool, host, args) plus *_with(&RunOpts); RunOpts{timeout 2 s, memory_limit 32 MiB, max_stack}; RunError; SheetPage over (&[IndexRow], &[TextBlock], url, title). In JS `page.url` and `page.title` are properties (B-321); `page.api` exists only for @phase 1 readers. Callers run it inside spawn_blocking (B-322)."
+    why: "D-53 named a page API and runtime that no interface defined; srv-web (T-12/T-13) and sb-mcp need the exact shape."
 
 proposals:
