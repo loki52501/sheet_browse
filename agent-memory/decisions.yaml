@@ -153,3 +153,21 @@ decisions:
   - id: D-63
     text: "B-400 accepted: I-10 (draft) gains pub const sb_act::MAX_WAIT: Duration = 30 s; w(n) is clamped to it (D-431). sb-driver's settle cap for w() reads MAX_WAIT instead of its own constant."
     why: "Additive; one constant keeps the parser's clamp and the driver's settle cap from drifting."
+  - id: D-64
+    text: "IC-302 accepted (amends D-61, I-12): ApiFetch::api(&self, url: &str, remaining: Duration) must return within the run's remaining wall time, and a late return (Ok or Err) makes the run RunError::Timeout; RunOpts gains max_output (default 64 KiB) with RunError::OutputTooLarge{max, got}; q(undefined|null) throws TypeError. srv-web's and sb-mcp's ApiFetch impls must honour `remaining`."
+    why: "A hung host fetch outlived T-9's wall cap because the interrupt handler only runs when JS resumes (B-323), and reader output had no size bound (CLAUDE.md rule 5). Changing the trait now costs nothing; wave 2 has not written an impl yet."
+  - id: D-65
+    text: "IC-303 accepted (amends D-60, I-7): StoreError::BadPath; public try_tool_path, try_archive_path, valid_domain, valid_name, check_tool_id; folder_for returns \"\" for hosts that cannot be a folder and every mutator refuses it; planner_class and planner_act_class reject an @vault(k) the tool source does not contain literally (D-309)."
+    why: "review-T-11-core blocking 1-3: path traversal through domain or tool names, git pathspec magic, and a re-forge reaching a vault key by string concatenation (G-4). Consumers need the validators to reject bad input before calling a mutator."
+  - id: D-66
+    text: "B-401 accepted (I-10): PlannerError gains ChallengeTarget{step}; check_planner rejects any step whose target row is CHALLENGE, with or without ?s, before the ?s rule. MissingStop{class: Challenge} no longer occurs. toolstore's and toolforge's matches on PlannerError must handle the new variant."
+    why: "D-5: a planner never targets a challenge. A named variant lets toolstore and toolforge (G-2) report it instead of folding it into a missing-?s error."
+  - id: D-67
+    text: "B-410 accepted (I-11): injected/media.js installs globalThis.__sbMedia {list, cues, frames, frame} in world sb, beside __sb; shapes live in its header and D-420; video ids are __sb ids. sb-media becomes an I-11 consumer. It ships with the page area but is Phase 2 code (swarm.yaml page note) and is not part of the Phase 1 baseline."
+    why: "B-9's in-page seek and canvas path needs a page API that I-11 did not name; keeping it a separate global leaves __sb's surface unchanged for sb-driver."
+  - id: D-68
+    text: "B-411 accepted (I-11): act(id) returns a Promise; walk(true) and walk({dirty: [ids]}) are accepted; frames() entries may carry challenge, and child entries with frame:null carry id/name; text() emits an iframe placeholder block (kind other, elem = iframe row); index() omits State fields equal to State::default() (D-421). Every reader of I-5 JSON deserializes State with serde(default); sb-sheet's State already does."
+    why: "Additive, and sb-driver (wave 2) must code against what the page really returns. Omitting default state fields shrinks the index on the pipe; verified that sb_sheet::index::State is #[serde(default)] on swarm/sheet, so I-5 still round-trips."
+  - id: D-69
+    text: "B-102 (Postgres backends exiting with code 2 three times, 08:34-09:19 UTC): no docker-compose.yml change during wave 1. Areas keep throwaway databases (D-100) and re-run a test that hits recovery mode, reporting the Postgres log line. The supreme revisits shm_size (256mb) and log settings at the wave-1 gate, when no area is running tests."
+    why: "The container log shows no shared-memory or out-of-memory error and the crashed backends logged nothing, so shm is a guess, not a diagnosis. Any compose change recreates the one shared container on the next `docker compose up`, which would kill every other area's tests mid-run. No crash since 09:19 UTC."
