@@ -20,7 +20,9 @@ if re.search(r"sheetbrowse[\\/](?!v2_)", cmd, re.I) and re.search(r"\b(rm|mv|cp\
     block("the old sheetbrowse folder is reference only; do not modify it")
 if re.search(r"\b(curl|wget|iwr|invoke-webrequest)\b", low):
     allow = ("github.com", "githubusercontent.com", "crates.io", "static.crates.io", "docs.rs", "registry.npmjs.org",
-             "localhost", "127.0.0.1", "storage.googleapis.com/chromium-browser-snapshots", "huggingface.co")
+             "localhost", "127.0.0.1", "storage.googleapis.com/chromium-browser-snapshots", "huggingface.co",
+             # Chrome for Testing pinned builds and their version JSON (D-34)
+             "storage.googleapis.com/chrome-for-testing-public", "googlechromelabs.github.io")
     if not any(h in low for h in allow):
         block("network fetch from the shell is limited to package registries, GitHub, Chromium snapshots and localhost; use srv-web tools for pages")
 if ("api_key" in low or "anthropic_api_key" in low) and ("export" in low or "set " in low or "$env:" in low):

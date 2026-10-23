@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.png binary
+*.mp4 binary
+# Append-only agent memory: every area appends entries; keep both sides on merge (D-42).
+agent-memory/decisions.yaml merge=union
+agent-memory/blockers.yaml merge=union

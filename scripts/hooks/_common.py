@@ -23,13 +23,14 @@ def session_id(d):
     return d.get("session_id") or os.environ.get("CLAUDE_SESSION_ID") or "unknown"
 
 def area():
-    # worktree folder name wt/<area> or env override; supreme at repo root
+    # env override, else the worktree folder <...>/wt/<area> this script lives in; supreme at
+    # the main checkout. From ROOT, not the cwd, so a `cd` into a subdirectory cannot make a
+    # sub-orchestrator look like the supreme.
     env = os.environ.get("SB_AREA")
     if env:
         return env
-    cwd = Path.cwd().resolve()
-    if cwd.parent.name == "wt":
-        return cwd.name
+    if ROOT.parent.name == "wt":
+        return ROOT.name
     return "supreme"
 
 def git(*args, cwd=None):
@@ -42,6 +43,15 @@ def block(msg):
     # exit 2 = blocking error shown to Claude
     sys.stderr.write(msg.strip() + "\n")
     sys.exit(2)
+
+def leak(msg):
+    # A leak block also leaves a record: merge_gate.py refuses an area whose worktree has one (S-8).
+    try:
+        with open(STATE / "leaks.log", "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {area()} {msg.splitlines()[0]}\n")
+    except Exception:
+        pass
+    block(msg)
 
 def ok(msg=None):
     if msg:

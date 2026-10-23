@@ -22,13 +22,19 @@ if p:
         block(f"writing {s} is not allowed (secrets file or archive); see CLAUDE.md")
     if s == "agent-memory/interfaces.yaml" and area() != "supreme":
         block("only the supreme orchestrator edits interfaces.yaml; propose the change in blockers.yaml under interface_changes")
-    if s.startswith("tools/") and s.endswith(".js") and "@gate" in content:
-        # a planner must keep ?s before any submit-class click; crude but catches the common removal
-        if "@kind planner" in content and "?s" not in content:
-            block("planner tools must contain '?s' before a submit step (D-29)")
+    if s.startswith("tools/") and s.endswith(".js"):
+        # Judge the file as it will be after this call: for an Edit, apply the replacement to the
+        # current text, so an edit that drops ?s from a planner body is caught before it lands.
+        after = content
+        if "new_string" in ti and p.exists():
+            cur = p.read_text(encoding="utf-8", errors="replace")
+            old = ti.get("old_string") or ""
+            after = cur.replace(old, ti.get("new_string") or "", -1 if ti.get("replace_all") else 1) if old else cur
+        if "@kind planner" in after and "?s" not in after:
+            block("planner tools must contain '?s' after each submit step (D-29, D-50)")
 if content and KEY_RE.search(content):
     block("content looks like an API key or private key; the harness has no keys (D-1). Use @vault(name).")
 canary = os.environ.get("SB_VAULT_CANARY")
 if canary and canary in content:
-    block("vault canary found in content being written: this would be a vault leak")
+    leak("vault canary found in content being written: this would be a vault leak")
 ok()

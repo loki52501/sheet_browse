@@ -7,3 +7,7 @@ bench/results/*.jsonl
 profiles/
 node_modules/
 *.log
+wt/
+.claude/state/
+.claude/settings.local.json
+__pycache__/
