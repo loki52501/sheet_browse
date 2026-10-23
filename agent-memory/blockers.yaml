@@ -26,5 +26,10 @@ blockers:
     needs_user: false
 
 interface_changes:
+  - id: B-400
+    from: page/suborch
+    interface: I-10
+    change: "sb_act adds pub const MAX_WAIT: Duration (30 s): w(n) longer than this is clamped (D-431). No I-10 signature changed."
+    why: "Draft-tier addition recorded so consumers (sb-driver, toolforge) see it; sb-driver's settle cap for w() should read it."
 
 proposals:
