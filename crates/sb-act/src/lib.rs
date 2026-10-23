@@ -8,7 +8,9 @@
 //!
 //! Grammar details beyond B-7: empty steps are skipped (D-430), `w()` needs a unit and is
 //! clamped to [`MAX_WAIT`] (D-431), lexing rules (D-432). Classification follows D-402,
-//! refined by D-433 (Enter, form context) and D-434 (hints).
+//! refined by D-433 (Enter, form context), D-434 (hints), D-58 (Pay from checkout text)
+//! and D-403 (key steps, implicit submission, wider Pay/Account/Delete evidence). Every
+//! refinement only raises a class (D-36), never lowers one.
 
 mod classify;
 mod parse;
@@ -89,17 +91,27 @@ pub struct ActClass {
     pub hints: Vec<String>,
 }
 
-/// One step's class from its target's row and form context (B-7, D-402, D-433, D-434).
+/// One step's class from its target's row and form context (B-7, D-402, D-433, D-434,
+/// D-58, D-403).
 ///
 /// CHALLENGE target: Challenge. Target missing from the index: Submit. A click on a
-/// SUBMIT/submitish row, or Enter in a form with a submit, is Submit raised by the form:
-/// Pay for card/IBAN fields, Account for new-password / two password fields /
-/// create-account, sign-up, change-password, change-email text (not for a login),
-/// Delete for delete/remove/unsubscribe/trash/"cancel <x>" button text. Other clicks:
-/// Delete by the same text rule, Fill on checkbox/radio/switch/option/tab, else Navigate
-/// (a bare Cancel or Close is Navigate). Type, select, upload and other keys: Fill;
-/// scroll: Navigate; wait and `?s`: Read. Hints: `job_application` for a submit in a form
-/// with a resume/CV upload or an apply/application heading; `signature` for e-sign submits.
+/// SUBMIT/submitish row is Submit raised by the form (max wins): Pay for card/IBAN/CVC/
+/// expiry/cardholder fields or checkout text (checkout, pay, payment, purchase, buy,
+/// donate, place/confirm order, add card, paid subscriptions) on the button, form heading
+/// or form name; Account for new-password / two password fields / create-account, sign-up
+/// text (not in a login), or change-password, change-email, 2FA, security-key text (even
+/// in a login); Delete for delete/remove/deactivate/discard/erase/revoke/unsubscribe/
+/// trash/close account/`cancel <x>` on the button, form heading or form name. Other
+/// clicks: Delete by the same text rule, Fill on checkbox/radio/switch/option/tab, else
+/// Navigate (a bare Cancel or Close is Navigate).
+///
+/// Key steps: Tab, Escape, arrows, Home/End/PageUp/PageDown, modifiers alone and typing
+/// into a text field are Fill; Enter on a field in a form, or in a formless text field, is
+/// an implicit submission (at least Submit, with the form's evidence even without a
+/// submit row); any other key, unknown keys included, is a click on its row. Type, select
+/// and upload: Fill; scroll: Navigate; wait and `?s`: Read. Hints: `job_application` for
+/// a submit in a form with a resume/CV upload or an apply/application heading;
+/// `signature` for e-sign submits.
 pub fn classify_step(step: &Step, index: &[IndexRow]) -> ActClass {
     classify::classify_step(step, index)
 }
