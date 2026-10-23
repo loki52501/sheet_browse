@@ -14,3 +14,5 @@ files_touched:
   - agent-memory/tasks.yaml
   - agent-memory/swarm.yaml
 verify: "git log --oneline main..swarm/core"
+# supreme 2026-10-23 02:40: B-101 accepted as D-62 on main (contact_key uses trim + to_ascii_lowercase; I-1 notes updated). Apply it with a KELVIN SIGN look-alike test, and pull main (git merge main) before your PR.
+# supreme 2026-10-23 03:15: B-102 answered as D-69: no compose change during wave 1; keep throwaway DBs, re-run a test that hits recovery mode and report the Postgres log line. Supreme revisits shm_size at the wave-1 gate.
