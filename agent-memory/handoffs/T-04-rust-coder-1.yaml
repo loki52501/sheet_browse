@@ -1,0 +1,23 @@
+from: rust-coder-1
+to: next
+task: T-04
+date: "2026-10-23"
+state: "Gate::check, default_mode, on_timeout implemented in crates/core/src/gate.rs per I-3 (H-1, H-1.1..H-1.4, D-39, D-48). harness_core::testing (MemStore, ScriptedAsker) added behind cfg(test) / feature `testing` (D-108). 13 gate tests + 8 testing tests pass; crate total 37 tests green; clippy --all-targets -D warnings clean, also with --features testing."
+not_done: "Nothing in T-04. H-1.5 floors are applied by mcp::dispatch (T-09) before Call is built (class = max(declared, floor, classifier)); the gate trusts call.class."
+gotchas:
+  - "Rule lookup with several hints tries every (domain, Class:hint) before any ('*', Class:hint), then (domain, Class), ('*', Class), default. Empty hints and domain None/''/'*' skip the domain-scoped keys."
+  - "B-100 default taken: on_timeout is Proceed only for Send and Account (strict off); every other class skips, so the seeded job_application/signature asks time out to skip."
+  - "The gate does not re-scrub: Call.args, Call.what and Call.values are scrubbed by contract (dispatch must scrub before building Call). The generated what line is capped at 200 chars, control chars replaced by spaces."
+  - "Contacts are only looked up when no rule hit and class is Send; a Send rule (e.g. ('*','Send','allow')) bypasses the contact check."
+  - "MemStore extras for tests: MemStore::empty() (no seed rules), add_contact, add_rule (validated like gate_rule_set), force_rule (unvalidated, to simulate a hand-edited table), ledger() (all events), rule_note. SEED_RULES mirrors migrations/0001_init.sql."
+  - "ScriptedAsker never waits: queued outcomes first, then card.on_timeout mapped to TimeoutProceed/TimeoutSkip immediately; cards() returns every card shown."
+  - "Shared worktree: the T-05 vault commit 49cce85 carried this task's [features] hunk of crates/core/Cargo.toml, so commit 3cd304a does not touch Cargo.toml."
+decisions_made: []
+blockers_opened: [B-100]
+files_touched:
+  - crates/core/src/gate.rs
+  - crates/core/src/testing.rs
+  - crates/core/src/lib.rs
+  - crates/core/Cargo.toml
+  - agent-memory/blockers.yaml
+verify: "cargo test -p harness-core -- gate:: testing::"
