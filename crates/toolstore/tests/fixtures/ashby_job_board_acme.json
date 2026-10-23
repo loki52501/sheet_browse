@@ -1,0 +1,55 @@
+{
+  "apiVersion": "1",
+  "jobs": [
+    {
+      "id": "0a1b2c3d-0000-4000-8000-000000000001",
+      "title": "Senior Backend Engineer",
+      "department": "Engineering",
+      "team": "Platform",
+      "employmentType": "FullTime",
+      "location": "Berlin",
+      "secondaryLocations": [{"location": "Munich", "address": {"postalAddress": {"addressLocality": "Munich", "addressCountry": "Germany"}}}],
+      "publishedAt": "2026-10-01T09:00:00.000+00:00",
+      "isListed": true,
+      "isRemote": true,
+      "address": {"postalAddress": {"addressLocality": "Berlin", "addressRegion": "Berlin", "addressCountry": "Germany"}},
+      "jobUrl": "https://jobs.ashbyhq.com/acme/0a1b2c3d-0000-4000-8000-000000000001",
+      "applyUrl": "https://jobs.ashbyhq.com/acme/0a1b2c3d-0000-4000-8000-000000000001/application",
+      "descriptionHtml": "<p>We build the <strong>platform</strong>. FIXTURE_HTML_MARKER</p>",
+      "descriptionPlain": "We build the platform. FIXTURE_PLAIN_MARKER"
+    },
+    {
+      "id": "0a1b2c3d-0000-4000-8000-000000000002",
+      "title": "Product Designer",
+      "department": "",
+      "team": "Design",
+      "employmentType": "FullTime",
+      "location": "",
+      "secondaryLocations": [],
+      "publishedAt": "2026-10-05T09:00:00.000+00:00",
+      "isListed": true,
+      "isRemote": false,
+      "address": {"postalAddress": {"addressLocality": "Paris", "addressRegion": "", "addressCountry": "France"}},
+      "jobUrl": "",
+      "applyUrl": "https://jobs.ashbyhq.com/acme/0a1b2c3d-0000-4000-8000-000000000002/application",
+      "descriptionHtml": "<p>Design things. FIXTURE_HTML_MARKER</p>",
+      "descriptionPlain": "Design things. FIXTURE_PLAIN_MARKER"
+    },
+    {
+      "id": "0a1b2c3d-0000-4000-8000-000000000003",
+      "title": "Internal Referral Only",
+      "department": "People",
+      "team": "Recruiting",
+      "employmentType": "PartTime",
+      "location": "Remote",
+      "secondaryLocations": [],
+      "publishedAt": "2026-10-07T09:00:00.000+00:00",
+      "isListed": false,
+      "isRemote": true,
+      "jobUrl": "https://jobs.ashbyhq.com/acme/0a1b2c3d-0000-4000-8000-000000000003",
+      "applyUrl": "https://jobs.ashbyhq.com/acme/0a1b2c3d-0000-4000-8000-000000000003/application",
+      "descriptionHtml": "<p>Unlisted. FIXTURE_HTML_MARKER</p>",
+      "descriptionPlain": "Unlisted. FIXTURE_PLAIN_MARKER"
+    }
+  ]
+}

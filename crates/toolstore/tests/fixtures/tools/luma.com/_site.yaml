@@ -1,0 +1,2 @@
+aliases: [lu.ma, app.luma.com]
+notes: acceptance fixture for T-11 (docs/03); copied into a tempdir before any test mutates it
