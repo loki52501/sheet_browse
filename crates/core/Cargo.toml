@@ -9,10 +9,21 @@ publish.workspace = true
 [lib]
 name = "harness_core"
 
+[features]
+# D-108: harness_core::testing (MemStore, ScriptedAsker) for other crates' tests.
+testing = []
+
 [dependencies]
+age.workspace = true
+aho-corasick.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+dirs.workspace = true
+keyring.workspace = true
+percent-encoding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+toml.workspace = true
+zeroize.workspace = true

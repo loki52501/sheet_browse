@@ -18,6 +18,20 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
+# Memory store (T-03, D-32, D-103)
+fastembed = { version = "7", default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
+pgvector = { version = "0.4", features = ["sqlx"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "json", "migrate", "macros"] }
+
+# Vault (T-05, D-101, D-102)
+age = "0.12"
+aho-corasick = "1"
+dirs = "7"
+keyring = "4"
+percent-encoding = "2"
+toml = "1"
+zeroize = "1"
+
 # Workspace crates. Directory names follow docs/00; `core` is packaged as `harness-core` (D-35).
 harness-core = { path = "crates/core" }
 core-pg = { path = "crates/core-pg" }
