@@ -1,133 +1,117 @@
-# Review: T-19 sb-act half, round 2 (B-7, I-10, D-403, D-404)
+# Review: T-19 sb-act half, round 3 (B-7, I-10, D-406, D-407)
 
-Scope: `git diff 6e52d44 HEAD -- crates/sb-act`, focused on fix commits e0ee962 (D-403) and
-51f1c7e (D-404), plus the tester's 46c92c4 tests. injected/ not reviewed.
+Scope: `crates/sb-act/src` at 3122050, focused on e16f9fc (D-406) and 3122050 (D-407).
+injected/ and `tests/wire_from_injected.rs` were not reviewed (js-coder, in progress).
+Uncommitted tester files (`accept_t19_round2.rs`, `common/mod.rs`, `accept_t19_round3.rs`)
+were not reviewed either.
 
-Gates (unpiped): `cargo fmt -p sb-act --check` clean; `cargo clippy -p sb-act --all-targets
--- -D warnings` clean; `cargo test -p sb-act` 99/99 pass (lib 48, classify 16, forms 11,
-quote_fuzz 6, round2 18). I re-ran the probes as a temporary integration test, then deleted it.
+Gates (unpiped): `cargo fmt -p sb-act --check` is clean. `cargo clippy -p sb-act --all-targets
+-- -D warnings` is clean. `cargo test -p sb-act` passes: lib 58, classify 16, forms 11,
+quote_fuzz 6, round2 18 and wire 3, with 0 failed. I ran the probes as a temporary
+`tests/zzz_reviewer4_tmp_probe.rs` and deleted it.
 
-## Round 1 items
+## Earlier rounds
 
-- Blocking 1, activating keys lowered to Fill: **resolved**. Enter/Space/NumpadEnter on
-  "Delete repository" give Delete, Space/NumpadEnter on SUBMIT "Place order" give Pay, and
-  Enter on a link gives Navigate. Tests are at classify.rs:1131 and 1255, plus round2.
-- Blocking 2, Enter in a form with no submit row: **resolved**. A card-only form gives Pay
-  (classify.rs:1167).
-- Should, change-email in a login-shaped form: **resolved**, now Account.
-- Should, Delete from the heading or form name: **resolved** for submits. For non-submits it
-  is resolved inside a form or dialog only (see Should 4).
-- Should, missing Pay/Account/Delete words: **resolved** for every probed word.
-- Should, card fields CVC/CVV/security code/MM-YY: **resolved**, but see Blocking 3.
-- Should, Enter in a formless textbox: **resolved** (Submit, D-403 (2)).
-- Nit, docs name D-58: resolved. MAX_WAIT is in I-10: resolved (D-63). Duplicate ref takes the
-  max: resolved. CHALLENGE row inside a form: recorded in D-403. Planner targeting a challenge:
-  resolved (D-404 (4)). Positive cross-frame test: resolved (classify.rs:983).
-- Nit, "cancel and/or" exemption: **open**. It is documented at classify.rs:554 but still has
-  no decision.
-- Nit, submitish fields: **open**, and it is worse than I rated it (Should 2).
+- R2 Blocking 1, control-character keys gave Fill: **resolved** (D-406 (1)). In a card form,
+  `\r`, `\n` and `\r\n` give Pay, and `\t`, DEL, BS and ETX give click(row). Test at
+  classify.rs:2020.
+- R2 Blocking 2, Enter on an activator in a form dropped the form max: **resolved** (D-406 (2)).
+  Enter on a switch "Save card" in a checkout gives Pay. Enter on "Show password" in a login
+  gives Submit. Test at classify.rs:2066.
+- R2 Blocking 3, the one-time-code exemption hid CVC: **resolved** (D-406 (3)). A field "CVC"
+  with one-time-code, then Next, gives Pay. Test at classify.rs:2167.
+- R2 Should 1, challenge before MissingStop: **resolved** (lib.rs:186). `c#14; c#42; ?s`,
+  `c#14; k#42=Enter`, `c#99; sc(#42)` and `c#14; ?s; w(1s); u#42=x` each return
+  ChallengeTarget at the challenge step.
+- R2 Should 2, Enter in a submitish field: **resolved**, now Pay. Test at classify.rs:2109.
+- R2 Should 3, Enter perf: **resolved**. Debug builds now take 29 ms for 200 x 1,700 and
+  38 ms for 500 x 2,500. Round 2 took 2.5 s and 8.7 s in release.
+- R2 Should 4, Confirm under a "Delete account?" heading with no form: **resolved**, now
+  Delete (D-406 (6)).
+- R2 Should 5, Backspace and Gmail `#`: **closed by decision**. D-407 sanctions Backspace on a
+  row as click(row). D-406 (7) leaves `#` to T-27.
+- R2 Should 6, word gaps: **mostly resolved** (D-406 (7), D-407). Book now and Reserve are
+  sanctioned as Submit. Leave group, Wipe device and the split-heading 2SV set-up are still
+  open (Should 3).
+- R2 Nits: twofa_setup is a single pass, the "never below a c#" doc is reworded
+  (classify.rs:195-198), and cancel and/or is sanctioned (D-407). All resolved. The nit for a
+  field named "New password" without autocomplete is still open.
+- Interface: B-401 was accepted as D-66, and main's I-10 lists
+  `PlannerError (incl. ChallengeTarget{step})`. The code matches. This worktree's
+  `interfaces.yaml` still has the old line, so merge main before the PR (suborch note).
 
 ## Blocking
 
-- classify.rs:117-121, 158-165: **control characters in a key step classify as Fill (rule 4;
-  D-403 (1) exempts only printable characters).** Any whitespace-only key becomes `"space"`, and
-  any one-char key counts as "editing". Probe (Promo field in a card form with a Pay submit):
-  `k#1="<CR>"`, `k#1="\n"`, `"\t"`, `"\u{7f}"`, `"\u{8}"` and `"\u{3}"` all give Fill. A
-  quoted value can carry a raw CR, and D-432 allows `\n`. Blink submits a form implicitly on a
-  keypress with charCode `\r`, and common key layouts map `"\r"`/`"\n"` to Enter. So this is a
-  Pay that runs as Fill. Fix: send `"\r"`, `"\n"` and `"\r\n"` to `enter()`. Treat only U+0020
-  (and NBSP) as Space. Any key with `char::is_control` is unknown, so it is `click(row)` at
-  least (or reject it in parse). Add tests.
-- classify.rs:270-272 (pinned by the test at 1159-1161): **Enter on an activator row inside a
-  form dropped the D-433 form max, a lowering that no decision sanctions.** Round 1 (70957dd)
-  gave Enter on any non-submit row in a form the max over the form's submits. Now button, link,
-  menuitem, option, switch, tab and treeitem rows return `click(row)` only. Probes: Enter on a
-  native `<input type=checkbox role=switch>` "Save card" in a Checkout form gives **Fill**. The
-  same row with role checkbox gives Pay, and round 1 gave Pay. Enter on "Show password" in a
-  login form gave Submit in round 1 and gives Navigate now. D-403's header says "never lowers a
-  class", and D-404 (1) is the only sanctioned lowering. Fix: keep the form max for activators
-  in a form. At the very least, send every native input (`state.input_type` set and not
-  button/submit/reset/image/file) through implicit submission. Or get a decision that sanctions
-  "Enter on a button or link is only its click" and names exactly which roles.
-- classify.rs:369: **unsanctioned lowering of D-403 (5).** A field with autocomplete
-  `one-time-code` is never a card field, whatever its label says. Probe: a field "CVC" with
-  `one-time-code` under a neutral heading, then Next, gives Submit (it would be Pay without the
-  exemption). The exemption is reasonable for "Security code" SMS prompts. But it appears only
-  in the rust-coder-3 handoff, not in D-403/D-404, and it contradicts the "except D-404 (1)"
-  claim at lib.rs:14-15 and classify.rs:3-4. Fix: limit it to fields whose only card evidence
-  is the "security code" phrase (CVC/CVV/CSC/cardholder/MM-YY/card number still count), and
-  record it in a decision.
+- none
 
 ## Should fix
 
-1. lib.rs:164-172: ChallengeTarget wins over MissingStop only inside one step. Probes:
-   `c#14; c#42; ?s` returns `MissingStop{1}`, and `c#14; k#42=Enter` returns `MissingStop{1}`,
-   though step 2 targets a CHALLENGE row. The planner then "repairs" the `?s` and only learns of
-   the challenge on its next turn. B-401 says "before the ?s rule". Fix: check every step for a
-   challenge first, then apply the `?s` rule (one O(n) pass, saves a turn).
-2. classify.rs:270: Enter on a submitish *field* returns early and skips the form's submit
-   buttons. Probe: Enter in a submitish Email field next to SUBMIT "Place order" gives Submit.
-   The same field when not submitish gives Pay. I-5 documents submitish as "submit button,
-   Enter target", so a conforming producer can mark fields. Today injected marks only buttons.
-   Fix: return early only for non-text rows.
-3. classify.rs:276-281: Enter costs O(submits x rows) with re-tokenising. Release-build
-   probes: a form with 200 submits and 1,700 rows takes **2.5 s** per Enter, and 500 x 2,500
-   takes 8.7 s (debug is about 10x slower). Page-wide forms (ASP.NET, admin tables with a Save
-   per row) are real. Compute the form evidence (card fields, form_texts tokens, password counts,
-   hints) once per form, then fold in each button's own name.
-4. classify.rs:237-246: a non-submit "Confirm" button whose own heading is "Delete account?"
-   is Navigate when it sits in no form and no `dialog` landmark. Div modals without
-   `role=dialog` are common. Raise-only fix: count the row's own heading even without a context.
-5. classify.rs:167-171: only Delete/Del count as Delete. Backspace and Meta+Backspace on a
-   selected file row (Drive, and the macOS delete key) give Navigate, or Fill on an option row.
-   Gmail's `#` shortcut (trash) gives Navigate. Propose a blocker that extends D-404 (3) to
-   Backspace on non-text rows. Printable shortcut keys on a non-text row are at least Submit.
-6. Evidence gaps (each needs a decision, since the lists are spec): Pay misses "Submit order",
-   "Complete order", "Order now", "Book now", "Reserve", "Place bid", "Upgrade to Pro", "Renew",
-   "Top up" and "Send money" (all Submit, and a non-submit "Upgrade" is Navigate). Account
-   misses "Set up authenticator app", "Create a passkey", "Add passkey", and a 2SV phone set-up
-   where the verb is in a different heading from "2-Step Verification" (all Submit). Delete
-   misses "Clear history", "Leave group" and "Wipe device".
+1. classify.rs:239-258 (with injected.js:123-124): **a non-submit button with Pay or Account
+   text is Navigate.** Probes: `type=button` "Complete purchase" inside a form with a cc-number
+   field gives Navigate on `c#`, and also on `k#=Space`. Non-submit "Complete order",
+   "Order now", "Place bid", "Renew", "Top up", "Send money", "Purchase", "Donate",
+   "Create a passkey" and "Add passkey" all give Navigate. D-402 sanctions this ("a non-submit
+   click is Delete by the same text rule ... else Navigate"), so it is not Blocking. But
+   injected's `SUBMIT_WORDS_RE` is anchored at the start and lacks complete, purchase,
+   donate, order now, bid, renew, top up, send and transfer. So the D-407 submit-name words
+   never fire on React-style `type=button` checkouts, which is the common case. D-406 (7)
+   already made this raise for "upgrade". Raise-only fix: run `pay_words`/`create_text`/
+   `change_text` on non-submit button and menuitem rows the way `delete_text` already runs.
+   Or have injected set submitish from the same lists. This needs a suborch ruling. A missed
+   Pay costs money (D-58 why).
+2. classify.rs:203-213: **Enter that is not the last chord segment is click(row).** In the
+   card form, `Enter+Shift`, `Enter+a` and `Enter+` give Navigate on the Promo field. So do
+   `Enter\t`, `\tEnter` and `Enter\0` (the control-char branch). D-433 defines Enter by its
+   last segment, so this is as specified. Whether it is a lowering depends on sb-driver's
+   chord semantics, and sb-driver is a stub today. With Playwright-style press order
+   (segments down in order), or a driver that trims the key, Enter's keydown submits the
+   form, and Pay would run as Navigate. This becomes Blocking once sb-driver behaves that way.
+   Fix it raise-only now: treat any segment, or the trimmed key, equal to
+   enter/return/numpadenter as Enter. Or open a blocker for I-9 so that sb-driver rejects
+   non-modifier segments before the last, and control characters other than CR/LF.
+3. Word gaps, Should per D-407: "Leave group" and "Wipe device" give Submit (submit) and
+   Navigate (non-submit). A 2SV phone set-up gives Submit when the "2-Step Verification"
+   heading and the "Set up your phone" heading are on different rows.
 
 ## Nit
 
-- classify.rs:508-515: `twofa_setup` is O(spans x verbs). Release probes: 16k tokens take
-  0.37 s. Producer names are capped at 150 chars (NAME_CAP), where it takes 150 us, so this
-  is bounded. A one-pass nearest-verb scan would remove it.
-- classify.rs:142-144: the doc line is over 100 columns. "A key step is never below a `c#` on
-  the same target" is false for typing into a text field (Space in a textbox is Fill, `c#` on
-  it is Navigate). Reword it.
-- A "Two-step verification" heading over a single password field labelled "New password" with
-  no autocomplete gives Submit. A "Password" heading over the same field also gives Submit, so
-  D-404 (1) adds nothing here. It is a general gap: a password field named "new ..." could count
-  as new-password.
-- Round 1 nit still open: record the "cancel and/or" exemption (classify.rs:554) in a decision.
+- classify.rs:571: a 146-column doc line. rustfmt does not wrap comments.
+- classify.rs:2503 and 2516: wall-clock bounds of 250 ms and 500 ms in a unit test can flake
+  when swarm agents load the machine. The exact `evidence_builds() == 1` counter already
+  proves the cache, so consider dropping or loosening the time asserts.
+- Formless Enter: a formless "Coupon" textbox next to a formless SUBMIT "Place order" gives
+  Submit (D-403 (2), B-431 synthetic form id still pending in injected). This is noted, not
+  new.
 
 ## Notes
 
-- Hard rules: no keys or .env, no I/O, no sleeps. There is no `unwrap` or slicing on input
-  outside tests (`passwords[0]` at classify.rs:541 is guarded by `len() == 1`). Error text
-  echoes no values. Rules 3, 5 and 7 do not apply.
-- D-404 (1) abuse check: the narrowing touches only the 2FA-text Account evidence. Under a
-  "Two-step verification" heading, a new-password field still gives Account, two password fields
-  give Account, a card number gives Pay, Delete words give Delete and "Change ..." gives
-  Account. It cannot hide a password-change or card form.
-- Regex and word matching: everything works on `tokens()` whole words, with no regex. split_key
-  on a 200k `+` key takes 1 ms and a 50k-modifier chain takes 15 ms. The quote fuzz tests cover
-  parse panics.
-- Spec ids: e0ee962 and 51f1c7e cite D-403 and D-404, and each numbered clause is implemented.
-  Additions beyond the spec are the one-time-code exemption (Blocking 3), the activator early
-  return (Blocking 2) and the 4-word 2FA verb window.
-- Interface: the I-10 `rust:` names all exist, and `MAX_WAIT` is listed (D-63).
-  `PlannerError::ChallengeTarget` is B-401, which supreme has not accepted yet (no decision
-  names it). Supreme needs to accept it before toolstore or toolforge match on it.
-- Tests assert exact classes, steps and hints. The round2 lowering guard compares every fixture
-  submit against a field-only rule.
+- D-406 (5) Ctx cache hunt found no lowering. Two frames each with form `f1` (checkout in
+  frame 0, login in frame 1) give Pay and Submit, and either step order in one `classify()`
+  or `check_planner()` gives the same per-step classes (cache key is `(frame, form id)`).
+  Rows with no form id are their own context and are never cached (classify.rs:138). A
+  duplicate ref takes the max, whether the formless copy comes first or second. A duplicate
+  CHALLENGE copy wins (classify.rs:169). `evidence()` drops its `Ref` before `borrow_mut`, and
+  `FormEvidence::of` does not re-enter Ctx, so there is no RefCell panic path. Ctx is per
+  call, so nothing can go stale across calls. Injected only emits a form id from a real
+  `<form>` (injected.js:1398), so an empty-string id cannot merge formless rows.
+- check_planner (lib.rs:183-196) classifies once, scans for Challenge first, then applies the
+  `?s` rule. `sc(#42)` and `u#42` are rejected too, as D-404 (4) requires for any step.
+- Hard rules: the crate is pure, with no I/O, sleeps, keys or env. The only non-test
+  `unwrap_or` is total (classify.rs:325). `passwords[0]` is guarded (406), and `verbs[from..]`
+  has `from <= len` from `partition_point` (688). Error strings echo no values. Rules 3, 5 and
+  7 do not apply.
+- Spec ids: e16f9fc implements D-406 (1)-(7) as listed, and 3122050 implements D-407. The
+  docs (lib.rs:9-26, classify.rs:1-19) name D-404 (1) as the only lowering and D-406 (3) as
+  its bound. I found nothing beyond the decisions except the `upgrade` Pay on a menuitem,
+  which only raises.
+- Tests assert exact classes and steps, with negatives for every new word list
+  (classify.rs:2271, 2388).
 
 ## Verdict
 
-The round 1 items are fixed and tested. The fixes add three under-classifications: control-char
-keys, Enter on activator rows in a form, and the one-time-code card exemption. Two of them are
-unsanctioned lowerings and the third contradicts D-403 (1). Each has a small fix.
+Every round-2 Blocking and Should item is fixed and tested, or closed by D-406/D-407. The
+cache adds no structural lowering, and gates and tests are green. The open items are a
+D-402-sanctioned gap (non-submit Pay buttons), a key-chord contract that sb-driver must
+match, and word-list synonyms. All three are Should under D-407.
 
-Verdict: changes
+Verdict: approve

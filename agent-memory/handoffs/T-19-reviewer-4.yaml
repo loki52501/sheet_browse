@@ -1,0 +1,15 @@
+from: page/reviewer
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Round 3 review of the sb-act half of T-19 at 3122050 (e16f9fc D-406, 3122050 D-407). fmt and clippy clean, cargo test -p sb-act all green (lib 58, classify 16, forms 11, quote_fuzz 6, round2 18, wire 3). Every round-2 Blocking and Should item is resolved and tested or closed by D-406/D-407. The D-406 (5) Ctx cache gives correct per-frame form evidence in either step order, with no RefCell panic path. Report bench/results/review-T-19-sb-act.md, Blocking: none, Verdict: approve."
+not_done: "Should items for suborch: (1) non-submit buttons with Pay/Account text are Navigate (D-402 sanctions it). type=button 'Complete purchase' in a card form is Navigate, and injected's SUBMIT_WORDS_RE misses the D-407 words, so SPA checkouts never reach Pay. Needs a ruling: raise-only pay_words/create/change on non-submit button rows, or injected submitish from the same lists. (2) Enter as a non-last chord segment ('Enter+Shift', 'Enter+') or with a control char ('Enter\\t') is click(row). Fix it raise-only, or open an I-9 blocker so sb-driver rejects such keys; it becomes Blocking if the driver presses segments in order. (3) Word gaps: Leave group, Wipe device, 2SV set-up with the verb in another heading. Merge main before the PR: this worktree's interfaces.yaml I-10 lacks ChallengeTarget (D-66 on main)."
+gotchas:
+  - "Frame refs in the DSL are #f<frame>.<id> (k#f1.1=Enter), not #1:1."
+  - "Probes ran as crates/sb-act/tests/zzz_reviewer4_tmp_probe.rs and were deleted before the commit. A tester is adding accept_t19_round3.rs and editing round2/common uncommitted; leave those alone."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19-sb-act.md
+  - agent-memory/handoffs/T-19-reviewer-4.yaml
+verify: "cargo test -p sb-act"
