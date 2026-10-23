@@ -101,5 +101,15 @@ interface_changes:
     interface: I-12
     change: "toolstore::runner (D-305): traits PageHost {find, find_all, text(Option<&str>), table, url, title} and ApiFetch {api(url)}, both synchronous; run_reader(tool, host, args, Option<&dyn ApiFetch>) and run_planner(tool, host, args) plus *_with(&RunOpts); RunOpts{timeout 2 s, memory_limit 32 MiB, max_stack}; RunError; SheetPage over (&[IndexRow], &[TextBlock], url, title). In JS `page.url` and `page.title` are properties (B-321); `page.api` exists only for @phase 1 readers. Callers run it inside spawn_blocking (B-322)."
     why: "D-53 named a page API and runtime that no interface defined; srv-web (T-12/T-13) and sb-mcp need the exact shape."
+  - id: IC-302
+    from: store
+    interface: I-12
+    change: "Amends IC-301 (accepted as D-61) per D-308: ApiFetch::api(&self, url: &str, remaining: Duration) gets the run's remaining wall time and must return within it (a late return, Ok or Err, makes the run RunError::Timeout); RunOpts gains max_output (default 64 KiB of reader JSON or planner program text) and RunError gains OutputTooLarge { max, got }; q(undefined|null) throws TypeError."
+    why: "review-T-11-runner should-fix 2 and 3: a hung host fetch outlived the T-9 wall cap, and reader output had no size cap (CLAUDE.md rule 5). srv-web and sb-mcp ApiFetch impls must honour `remaining`."
+  - id: IC-303
+    from: store
+    interface: I-7
+    change: "Amends IC-300 (accepted as D-60) per D-310/D-311: StoreError gains BadPath; new pub fns try_tool_path, try_archive_path, valid_domain, valid_name, check_tool_id; folder_for returns \"\" for hosts that cannot be a folder and every mutator refuses it; planner_class/planner_act_class reject an @vault(k) the tool source does not contain literally (D-309)."
+    why: "review-T-11-core blocking 1-3 (path traversal, git pathspec magic, vault key bypass)."
 
 proposals:

@@ -17,3 +17,4 @@ files_touched:
   - agent-memory/blockers.yaml
 verify: "git log --oneline -3 swarm/store"
 # supreme 2026-10-23 01:40: D-59 on main makes sb_sheet::data::{aria_roles, alias_for} the I-6 alias table. Keep the B-300 built-in map for now; switch toolstore::fingerprint to sb_sheet::data after sheet merges, and pull main (git merge main) before your PR.
+# supreme 2026-10-23 02:15: IC-300 accepted as D-60 (I-7) and IC-301 as D-61 (I-12); interfaces.yaml updated on main, harness added as an I-7 consumer. Pull main (git merge main) before your PR.
