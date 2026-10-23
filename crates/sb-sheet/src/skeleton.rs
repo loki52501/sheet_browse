@@ -260,7 +260,12 @@ pub(crate) fn skeleton(
         plural(fields, "field", "fields"),
     ));
 
-    let challenges: Vec<&IndexRow> = rows.iter().copied().filter(|r| r.flags.challenge).collect();
+    // Every CHALLENGE row outside a sealed frame, hidden or not: producer visibility is
+    // approximate and a challenge means stop (D-5, D-215).
+    let challenges: Vec<&IndexRow> = index
+        .iter()
+        .filter(|r| r.flags.challenge && !sealed.contains(&r.frame))
+        .collect();
     let overlays: Vec<&IndexRow> = rows
         .iter()
         .copied()
@@ -382,5 +387,19 @@ mod tests {
         let s2 = skeleton(&idx, &[], &SkeletonOpts::default());
         assert_eq!(s1, s2);
         assert_eq!(s1, "1 element: 1 link, 0 buttons, 0 fields");
+    }
+
+    #[test]
+    fn hidden_challenge_is_still_warned() {
+        let mut c = row(3, "iframe", "reCAPTCHA");
+        c.state.visible = false;
+        c.flags.challenge = true;
+        let idx = vec![row(2, "link", "Home"), c];
+        let s = skeleton(&idx, &[], &SkeletonOpts::default());
+        assert_eq!(
+            s,
+            "1 element: 1 link, 0 buttons, 0 fields
+! CHALLENGE #3 iframe \"reCAPTCHA\""
+        );
     }
 }

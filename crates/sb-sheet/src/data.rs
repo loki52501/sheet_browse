@@ -20,6 +20,8 @@ struct Roles {
     alias_of: HashMap<String, String>,
     /// normalized word or phrase -> ARIA roles.
     priors: HashMap<String, Vec<String>>,
+    /// normalized role noun (`button`, `dropdown`, `check box`) -> ARIA roles (D-214).
+    nouns: HashMap<String, Vec<String>>,
     /// Longest prior key, in words.
     prior_max_words: usize,
 }
@@ -42,6 +44,7 @@ fn parse_roles(src: &str) -> Roles {
         aliases: HashMap::new(),
         alias_of: HashMap::new(),
         priors: HashMap::new(),
+        nouns: HashMap::new(),
         prior_max_words: 1,
     };
     for line in src.lines() {
@@ -64,7 +67,7 @@ fn parse_roles(src: &str) -> Roles {
                     roles.alias_of.entry(role).or_insert_with(|| alias.clone());
                 }
             }
-            Some("prior") => {
+            Some(kind @ ("prior" | "noun")) => {
                 let targets: Vec<String> = head.map(str::to_lowercase).collect();
                 for word in tail.split(',') {
                     let key = normalize(word);
@@ -72,7 +75,12 @@ fn parse_roles(src: &str) -> Roles {
                         continue;
                     }
                     roles.prior_max_words = roles.prior_max_words.max(key.split(' ').count());
-                    let entry = roles.priors.entry(key).or_default();
+                    let table = if kind == "noun" {
+                        &mut roles.nouns
+                    } else {
+                        &mut roles.priors
+                    };
+                    let entry = table.entry(key).or_default();
                     for t in &targets {
                         push_unique(entry, t);
                     }
@@ -150,6 +158,16 @@ pub fn role_prior(word: &str) -> &'static [String] {
         .unwrap_or(&[])
 }
 
+/// ARIA roles a role noun names (`button`, `dropdown`, `check box`; D-214). Empty if none.
+/// When a query names a role this way, it replaces the task-word priors of that part.
+pub(crate) fn role_noun(word: &str) -> &'static [String] {
+    roles()
+        .nouns
+        .get(&normalize(word))
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
 /// Synonyms of a word or phrase from `synonyms.txt` (lowercased, as written). Empty if none.
 pub fn synonyms(word: &str) -> &'static [String] {
     syn()
@@ -170,7 +188,7 @@ pub(crate) fn forced_roles(word: &str) -> Option<Vec<String>> {
     roles().alias_of.contains_key(&w).then(|| vec![w])
 }
 
-/// Longest phrase (in words) in the prior table.
+/// Longest phrase (in words) in the prior and noun tables.
 pub(crate) fn prior_max_words() -> usize {
     roles().prior_max_words
 }

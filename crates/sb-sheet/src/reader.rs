@@ -1,16 +1,19 @@
 //! W-5 read renderer (`sb-sheet::reader`), B-6.4. Owned by coder B (T-10).
 //!
-//! Pipeline: drop CHALLENGE-frame blocks, pick the content (`main` landmark, else boilerplate
-//! scoring), apply `region`, render each block to light markdown (one [`Unit`] per block),
+//! Pipeline: drop blocks of sealed frames (hosted by CHALLENGE or OPAQUE rows), pick the
+//! content (the top frame's `main` landmark, else boilerplate scoring), apply `region`, render
+//! each block to light markdown (one [`Unit`] per block, password values already scrubbed),
 //! then cut chunks between units (D-204). A unit bigger than a chunk splits at sentence, then
-//! word boundaries; the cursor then carries a byte offset into the unit body (D-205).
+//! word boundaries; the cursor then carries a byte offset into the unit body (D-210).
 //!
-//! Safety rules (H-2, D-5, D-55): a span linking a password field renders as the link form
-//! only, never its text; any password value the index carries is scrubbed from the output;
-//! blocks inside a CHALLENGE frame are never read, and a block linking a CHALLENGE row is
-//! reduced to the `[iframe "reCAPTCHA"](#id)` link form.
+//! Safety rules (H-2, D-5, D-55, D-212): a span linking a password field (D-206: input_type
+//! or autocomplete) renders as the link form only, never its text; any password value the
+//! index carries is scrubbed from every unit before chunking, so a split cannot cut it in two;
+//! blocks inside a CHALLENGE or OPAQUE frame are never read, and a block linking a CHALLENGE
+//! row is reduced to the `[iframe "reCAPTCHA"](#id)` link form.
 
 use crate::index::{ElemRef, FieldValue, FrameId, IndexRow};
+use crate::sheet::{is_password, sealed_frames};
 use crate::text::{BlockKind, Span, TextBlock};
 use crate::{Cursor, OutlineEntry, ReadOpts, ReadOutput};
 use std::collections::{HashMap, HashSet};
@@ -52,10 +55,10 @@ pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpt
             .filter(|r| !r.is_empty()),
     };
 
-    // Document order; drop everything inside a CHALLENGE frame (D-5, D-55).
+    // Document order; drop everything inside a CHALLENGE or OPAQUE frame (D-5, D-55, I-5).
     let mut blocks: Vec<&TextBlock> = text_blocks
         .iter()
-        .filter(|b| !ctx.challenge_frames.contains(&b.frame))
+        .filter(|b| !ctx.sealed.contains(&b.frame))
         .collect();
     blocks.sort_by_key(|b| b.order);
 
@@ -110,8 +113,10 @@ pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpt
         let (pieces, next) = next_chunk(&units, start, budget);
         (join_pieces(&units, &pieces), next)
     };
+    // Units are scrubbed already; this pass is defence in depth.
     let body = ctx.scrub(&body);
-    let used_after = used + estimate(&body);
+    // `used` comes from a caller-supplied cursor: never overflow on a forged value.
+    let used_after = used.saturating_add(estimate(&body));
     let more = next.unit < units.len();
     let truncated = more && opts.max_tokens.is_some_and(|m| used_after >= m);
 
@@ -180,11 +185,13 @@ pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpt
 }
 
 // ---------------------------------------------------------------------------------------------
-// Context: row lookup, CHALLENGE frames, password values to scrub.
+// Context: row lookup, sealed frames, password values to scrub.
 
 struct Ctx<'a> {
     rows: HashMap<ElemRef, &'a IndexRow>,
-    challenge_frames: HashSet<FrameId>,
+    /// Frames hosted by CHALLENGE or OPAQUE rows and frames nested in them (shared with
+    /// sheet, find and skeleton).
+    sealed: HashSet<FrameId>,
     secrets: Vec<String>,
 }
 
@@ -192,24 +199,7 @@ impl<'a> Ctx<'a> {
     fn new(index: &'a [IndexRow]) -> Ctx<'a> {
         let rows: HashMap<ElemRef, &IndexRow> = index.iter().map(|r| (r.elem(), r)).collect();
 
-        // Frames hosted by CHALLENGE rows, plus any frame nested inside one of them.
-        let mut challenge_frames: HashSet<FrameId> = index
-            .iter()
-            .filter(|r| r.flags.challenge)
-            .filter_map(|r| r.child_frame)
-            .collect();
-        loop {
-            let nested: Vec<FrameId> = index
-                .iter()
-                .filter(|r| challenge_frames.contains(&r.frame))
-                .filter_map(|r| r.child_frame)
-                .filter(|f| !challenge_frames.contains(f))
-                .collect();
-            if nested.is_empty() {
-                break;
-            }
-            challenge_frames.extend(nested);
-        }
+        let sealed = sealed_frames(index);
 
         // A password value should never reach the index (B-5), but if one does, it is
         // scrubbed from everything the reader returns.
@@ -220,13 +210,19 @@ impl<'a> Ctx<'a> {
                 Some(FieldValue::Text(t)) if !t.trim().is_empty() => Some(t.clone()),
                 _ => None,
             })
+            // Rendered text is whitespace-collapsed: scrub that spelling too.
+            .flat_map(|t| {
+                let c = collapse(&t);
+                [t, c]
+            })
+            .filter(|t| !t.is_empty())
             .collect();
         secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
         secrets.dedup();
 
         Ctx {
             rows,
-            challenge_frames,
+            sealed,
             secrets,
         }
     }
@@ -244,13 +240,6 @@ impl<'a> Ctx<'a> {
         }
         out
     }
-}
-
-fn is_password(r: &IndexRow) -> bool {
-    r.state
-        .input_type
-        .as_deref()
-        .is_some_and(|t| t.eq_ignore_ascii_case("password"))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -343,9 +332,10 @@ fn heading_section<'b>(
 }
 
 /// Pages with a `main` landmark use it directly; others keep blocks that pass the
-/// boilerplate score.
+/// boilerplate score. The landmark belongs to its document, so only the top frame's `main`
+/// decides (D-216): a `<main>` inside an iframe does not replace a main-less top page.
 fn default_content<'b>(blocks: &[&'b TextBlock], ctx: &Ctx<'_>) -> Vec<&'b TextBlock> {
-    let in_main = |b: &&TextBlock| b.landmark.as_deref() == Some("main");
+    let in_main = |b: &&TextBlock| b.frame == 0 && b.landmark.as_deref() == Some("main");
     if blocks.iter().any(in_main) {
         return blocks.iter().copied().filter(in_main).collect();
     }
@@ -476,7 +466,7 @@ fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
     };
     if !challenge.is_empty() {
         unit.kind = BlockKind::Paragraph;
-        unit.body = challenge.join(" ");
+        unit.body = ctx.scrub(&challenge.join(" "));
         return Some(unit);
     }
 
@@ -535,6 +525,10 @@ fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
             unit.body = inline(&b.spans, ctx);
         }
     }
+    // Scrub before chunking and hashing, so a split can never cut a password value in two
+    // and the hash and outline never see one (D-212).
+    unit.body = ctx.scrub(&unit.body);
+    unit.label = unit.label.map(|l| ctx.scrub(&l));
     if unit.body.is_empty() {
         return None;
     }
@@ -722,7 +716,8 @@ fn join_pieces(units: &[Unit], pieces: &[Piece]) -> String {
 
 /// Fill one chunk from `pos` within `budget` tokens. Breaks between units; a unit that does
 /// not fit an empty chunk is cut at a sentence, else a word, else a char boundary (D-204).
-/// Always makes progress.
+/// A chunk that holds only headings never ends there: the next unit is cut into the room
+/// left, at least a quarter of the chunk (D-211, D-216). Always makes progress.
 fn next_chunk(units: &[Unit], pos: Pos, budget: usize) -> (Vec<Piece>, Pos) {
     let cap = budget.max(1) * CHARS_PER_TOKEN;
     let mut used = 0usize;
@@ -757,17 +752,27 @@ fn next_chunk(units: &[Unit], pos: Pos, budget: usize) -> (Vec<Piece>, Pos) {
             };
             continue;
         }
-        if !pieces.is_empty() {
+        let headings_only = !pieces.is_empty()
+            && u.kind != BlockKind::Heading
+            && pieces
+                .iter()
+                .all(|p| units[p.unit].kind == BlockKind::Heading);
+        if !pieces.is_empty() && !headings_only {
             break;
         }
-        // Too big for an empty chunk: split this unit's body.
+        // Too big for an empty (or headings-only) chunk: split this unit's body.
         let prefix = if start == 0 {
             &u.prefix
         } else {
             &u.cont_prefix
         };
         let overhead = chars(prefix) + chars(&u.close);
-        let avail = cap.saturating_sub(overhead).max(1);
+        let avail = if headings_only {
+            cap.saturating_sub(used + sep + overhead).max(cap / 4)
+        } else {
+            cap.saturating_sub(overhead)
+        }
+        .max(1);
         let rest = &u.body[start..];
         if chars(rest) <= avail {
             // Only the suffix overflowed; take the whole unit.
@@ -935,7 +940,7 @@ fn outline_from(units: &[Unit], from: Pos) -> Vec<OutlineEntry> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Cursor (D-204, D-205): `v1:<region>:<order>[.<offset>][+<used>]:<hash hex>`.
+// Cursor (D-204, D-210): `v1:<region>:<order>[.<offset>][+<used>]:<hash hex>`.
 
 struct ParsedCursor {
     region: String,
@@ -1051,5 +1056,243 @@ mod tests {
         let s = "abcdefghijklmnop";
         assert_eq!(cut_point(s, 5), 5);
         assert_eq!(cut_point("é", 0), 2);
+    }
+
+    use crate::index::{Flags, State};
+
+    fn row(id: u32, role: &str, name: &str) -> IndexRow {
+        IndexRow {
+            id,
+            frame: 0,
+            role: role.into(),
+            name: name.into(),
+            nearby: None,
+            heading: None,
+            state: State::default(),
+            flags: Flags::default(),
+            form: None,
+            landmark: None,
+            child_frame: None,
+            bbox: None,
+        }
+    }
+
+    fn block(order: u32, frame: FrameId, kind: BlockKind, spans: Vec<Span>) -> TextBlock {
+        TextBlock {
+            order,
+            frame,
+            kind,
+            level: (kind == BlockKind::Heading).then_some(2),
+            landmark: None,
+            heading: None,
+            table: None,
+            header: false,
+            spans,
+        }
+    }
+
+    fn text(t: &str) -> Span {
+        Span {
+            text: t.into(),
+            elem: None,
+        }
+    }
+
+    fn para(order: u32, t: &str) -> TextBlock {
+        block(order, 0, BlockKind::Paragraph, vec![text(t)])
+    }
+
+    fn opts(chunk_tokens: usize) -> ReadOpts {
+        ReadOpts {
+            region: None,
+            cursor: None,
+            max_tokens: None,
+            chunk_tokens,
+        }
+    }
+
+    /// Every chunk of a read, following cursors.
+    fn read_all(rows: &[IndexRow], blocks: &[TextBlock], o: ReadOpts) -> Vec<ReadOutput> {
+        let mut out = vec![read(rows, blocks, &o)];
+        while let Some(c) = out.last().and_then(|r| r.cursor.clone()) {
+            assert!(out.len() < 500, "runaway read");
+            let next = ReadOpts {
+                cursor: Some(c),
+                ..o.clone()
+            };
+            out.push(read(rows, blocks, &next));
+        }
+        out
+    }
+
+    #[test]
+    fn autocomplete_password_is_a_password_field() {
+        let mut pw = row(5, "textbox", "Password");
+        pw.state.input_type = Some("text".into());
+        pw.state.autocomplete = Some("current-password".into());
+        pw.state.value = Some(FieldValue::Text("Sekr3tPass".into()));
+        let blocks = vec![
+            block(
+                1,
+                0,
+                BlockKind::Paragraph,
+                vec![
+                    text("Password "),
+                    Span {
+                        text: "Sekr3tPass".into(),
+                        elem: Some(pw.elem()),
+                    },
+                ],
+            ),
+            para(2, "you typed Sekr3tPass"),
+        ];
+        let out = read(&[pw], &blocks, &opts(0));
+        assert!(!out.markdown.contains("Sekr3tPass"), "{}", out.markdown);
+        assert!(
+            out.markdown.contains("[input \"Password\"](#5)"),
+            "{}",
+            out.markdown
+        );
+        assert!(out.markdown.contains("you typed ***"), "{}", out.markdown);
+    }
+
+    #[test]
+    fn split_never_cuts_a_password_in_two() {
+        let mut pw = row(5, "textbox", "Password");
+        pw.state.input_type = Some("password".into());
+        pw.state.value = Some(FieldValue::Text("correct horse battery staple".into()));
+        let body = format!(
+            "{} correct horse battery staple {}",
+            "lorem ipsum dolor sit amet ".repeat(3),
+            "and more words ".repeat(10)
+        );
+        let blocks = vec![para(1, &body)];
+        let all: String = read_all(&[pw], &blocks, opts(25))
+            .iter()
+            .map(|o| o.markdown.clone())
+            .collect();
+        for w in ["correct horse", "horse battery", "battery staple"] {
+            assert!(!all.contains(w), "{w} leaked: {all}");
+        }
+        assert!(all.contains("***"));
+    }
+
+    #[test]
+    fn opaque_frames_are_never_read() {
+        let mut host = row(3, "iframe", "Payments widget");
+        host.flags.opaque = true;
+        host.child_frame = Some(4);
+        let blocks = vec![
+            para(1, "Checkout page text here for you"),
+            block(
+                2,
+                4,
+                BlockKind::Paragraph,
+                vec![text("SECRET cross origin")],
+            ),
+        ];
+        let out = read(&[host], &blocks, &opts(0));
+        assert!(out.markdown.contains("Checkout page"), "{}", out.markdown);
+        assert!(!out.markdown.contains("SECRET"), "{}", out.markdown);
+    }
+
+    #[test]
+    fn iframe_main_does_not_replace_a_mainless_top_page() {
+        let mut host = row(9, "iframe", "Demo");
+        host.child_frame = Some(2);
+        let long = "flour water salt yeast and time make a good loaf of bread at home with care and patience every day";
+        let mut demo = block(
+            4,
+            2,
+            BlockKind::Paragraph,
+            vec![text("Demo widget loaded.")],
+        );
+        demo.landmark = Some("main".into());
+        let blocks = vec![
+            block(1, 0, BlockKind::Heading, vec![text("How to bake bread")]),
+            para(2, long),
+            para(3, long),
+            demo,
+        ];
+        let out = read(&[host], &blocks, &opts(0));
+        assert!(
+            out.markdown.contains("How to bake bread"),
+            "{}",
+            out.markdown
+        );
+        assert!(out.markdown.contains("flour water"), "{}", out.markdown);
+        // a top-frame main still wins
+        let mut b = blocks.clone();
+        b[2].landmark = Some("main".into());
+        let out = read(&[], &b, &opts(0));
+        assert_eq!(out.markdown, long);
+    }
+
+    #[test]
+    fn heading_before_a_big_block_carries_content() {
+        let big = "word ".repeat(200);
+        let blocks = vec![
+            block(1, 0, BlockKind::Heading, vec![text("Top")]),
+            para(2, &big),
+            para(3, "short tail"),
+        ];
+        for chunk_tokens in [10usize, 12, 60] {
+            for o in read_all(&[], &blocks, opts(chunk_tokens)) {
+                let body: Vec<&str> = o
+                    .markdown
+                    .lines()
+                    .take_while(|l| !l.starts_with("remaining:"))
+                    .filter(|l| !l.trim().is_empty() && !l.starts_with("chunk "))
+                    .collect();
+                assert!(
+                    body.iter().any(|l| !l.starts_with('#')),
+                    "{chunk_tokens}: {body:?}"
+                );
+            }
+        }
+        // default chunk size, heading before a block larger than a chunk
+        let listing = "let x = 1;
+"
+        .repeat(2000);
+        let blocks = vec![
+            block(1, 0, BlockKind::Heading, vec![text("Listing")]),
+            block(2, 0, BlockKind::Code, vec![text(&listing)]),
+        ];
+        let first = read(&[], &blocks, &opts(0));
+        assert!(
+            first.markdown.contains(
+                "## Listing
+
+```
+let x"
+            ),
+            "{}",
+            &first.markdown[..80]
+        );
+    }
+
+    #[test]
+    fn forged_cursor_used_does_not_overflow() {
+        let blocks: Vec<TextBlock> = (0..5).map(|i| para(i, &"word ".repeat(50))).collect();
+        let first = read(
+            &[],
+            &blocks,
+            &ReadOpts {
+                max_tokens: Some(100_000),
+                ..opts(60)
+            },
+        );
+        let c = first.cursor.expect("more to read").0;
+        let hash = c.rsplit(':').next().unwrap_or_default().to_string();
+        let forged = format!("v1::1+{}:{hash}", usize::MAX);
+        let out = read(
+            &[],
+            &blocks,
+            &ReadOpts {
+                cursor: Some(Cursor(forged)),
+                ..opts(60)
+            },
+        );
+        assert!(out.markdown.contains("word"));
     }
 }

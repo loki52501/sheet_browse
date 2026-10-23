@@ -10,16 +10,21 @@
 //!
 //! BM25 is k1 = 1.2, b = 0.75 with IDF `ln(1 + (N - n + 0.5) / (n + 0.5))` and the average
 //! field length taken per field over every row of the page's index (D-205). Words the caller
-//! typed weigh 1; words added by synonym expansion weigh 0.5 (D-205). The role prior fires on
-//! the typed words and phrases only, not on synonyms (D-205). A row needs `lexical > 0` to be
-//! a Match unless the part is a bare forced role (`:button`) (D-205). The `?` mark compares
+//! typed weigh 1; words added by synonym expansion weigh 0.5 (D-205). A multi-word synonym is
+//! one phrase term: it matches only where its words appear consecutively, and weighs 0.5 per
+//! word (D-213). The role prior fires on the typed words and phrases only, not on synonyms
+//! (D-205). A row needs query evidence, `lexical > 0` or the role prior, to be a Match; a
+//! bare forced role (`:button`) lists every row of that role (D-214). The `?` mark compares
 //! the lexical part with 3 (D-54). Hidden rows and rows inside CHALLENGE or OPAQUE frames are
-//! never candidates (D-202, D-55); ties break by document order (D-202).
+//! never candidates (D-202, D-55); ties break by document order (D-202). CHALLENGE rows are
+//! always appended, hidden or not (D-215).
 
-use crate::data::{forced_roles, prior_max_words, role_prior, synonym_max_words, synonyms};
+use crate::data::{
+    forced_roles, prior_max_words, role_noun, role_prior, synonym_max_words, synonyms,
+};
 use crate::sheet::{sealed_frames, sheet_line};
 use crate::tokens::words;
-use crate::{ElemRef, FindHit, FindOpts, HitReason, IndexRow, TextBlock};
+use crate::{ElemRef, FindHit, FindOpts, FrameId, HitReason, IndexRow, TextBlock};
 use std::collections::{HashMap, HashSet};
 
 const K1: f32 = 1.2;
@@ -62,9 +67,19 @@ impl Field {
         Field { docs, df, avgdl }
     }
 
+    /// Document frequency; a phrase term (words joined by one space) counts the docs that
+    /// hold the phrase as consecutive words (D-213).
+    fn df(&self, term: &str) -> usize {
+        if !term.contains(' ') {
+            return self.df.get(term).copied().unwrap_or(0);
+        }
+        let ws: Vec<&str> = term.split(' ').collect();
+        self.docs.iter().filter(|d| tf(d, &ws) > 0).count()
+    }
+
     fn idf(&self, term: &str) -> f32 {
         let n = self.docs.len() as f32;
-        let df = self.df.get(term).copied().unwrap_or(0) as f32;
+        let df = self.df(term) as f32;
         (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
     }
 
@@ -81,7 +96,8 @@ impl Field {
         terms
             .iter()
             .map(|(t, w)| {
-                let tf = doc.iter().filter(|d| *d == t).count() as f32;
+                let ws: Vec<&str> = t.split(' ').collect();
+                let tf = tf(doc, &ws) as f32;
                 if tf == 0.0 {
                     0.0
                 } else {
@@ -92,10 +108,21 @@ impl Field {
     }
 }
 
+/// Occurrences of `term` (one word, or a phrase as consecutive words) in `doc`.
+fn tf(doc: &[String], term: &[&str]) -> usize {
+    if term.is_empty() || term.len() > doc.len() {
+        return 0;
+    }
+    doc.windows(term.len())
+        .filter(|win| win.iter().zip(term).all(|(a, b)| a == b))
+        .count()
+}
+
 /// A parsed query part.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Part {
-    /// Weighted terms after synonym expansion: typed words 1.0, synonym words 0.5.
+    /// Weighted terms after synonym expansion: typed words 1.0, synonym words 0.5, a synonym
+    /// phrase (words joined by one space, matched as consecutive words) 0.5 per word (D-213).
     pub(crate) terms: Vec<(String, f32)>,
     /// ARIA roles that get the +2 prior.
     pub(crate) prior: HashSet<String>,
@@ -108,6 +135,26 @@ fn ngrams(ws: &[String], max: usize) -> Vec<String> {
     for n in 1..=max.min(ws.len()) {
         for win in ws.windows(n) {
             out.push(win.join(" "));
+        }
+    }
+    out
+}
+
+/// Roles named by role nouns in the typed words, longest noun first: a word inside a
+/// matched longer noun (`radio button`) does not also count alone (`button`).
+fn noun_roles(ws: &[String], max: usize) -> HashSet<String> {
+    let mut covered = vec![false; ws.len()];
+    let mut out = HashSet::new();
+    for n in (1..=max.min(ws.len())).rev() {
+        for start in 0..=ws.len() - n {
+            if covered[start..start + n].iter().any(|c| *c) {
+                continue;
+            }
+            let roles = role_noun(&ws[start..start + n].join(" "));
+            if !roles.is_empty() {
+                out.extend(roles.iter().cloned());
+                covered[start..start + n].iter_mut().for_each(|c| *c = true);
+            }
         }
     }
     out
@@ -131,17 +178,30 @@ pub(crate) fn parse_part(raw: &str) -> Part {
     for w in &typed {
         add(w.clone(), 1.0);
     }
-    for phrase in ngrams(&typed, synonym_max_words()) {
-        for syn in synonyms(&phrase) {
-            for w in words(syn) {
-                add(w, SYNONYM_WEIGHT);
+    let grams = ngrams(&typed, synonym_max_words().max(1));
+    let typed_grams: HashSet<&str> = grams.iter().map(String::as_str).collect();
+    for phrase in &grams {
+        for syn in synonyms(phrase) {
+            let ws = words(syn);
+            let n = ws.len();
+            let term = ws.join(" ");
+            // A phrase the caller typed is already scored through its typed words.
+            if n == 0 || (n > 1 && typed_grams.contains(term.as_str())) {
+                continue;
             }
+            add(term, SYNONYM_WEIGHT * n as f32);
         }
     }
-    let prior: HashSet<String> = ngrams(&typed, prior_max_words())
-        .iter()
-        .flat_map(|p| role_prior(p).iter().cloned())
-        .collect();
+    // A role the caller named (`help button`) replaces the task-word priors (D-214).
+    let named = noun_roles(&typed, prior_max_words());
+    let prior: HashSet<String> = if named.is_empty() {
+        ngrams(&typed, prior_max_words())
+            .iter()
+            .flat_map(|p| role_prior(p).iter().cloned())
+            .collect()
+    } else {
+        named
+    };
     Part {
         terms,
         prior,
@@ -155,6 +215,7 @@ struct Scorer<'a> {
     nearby: Field,
     heading: Field,
     candidate: Vec<bool>,
+    sealed: HashSet<FrameId>,
 }
 
 impl<'a> Scorer<'a> {
@@ -169,6 +230,7 @@ impl<'a> Scorer<'a> {
                 .iter()
                 .map(|r| r.state.visible && !sealed.contains(&r.frame))
                 .collect(),
+            sealed,
         }
     }
 
@@ -193,11 +255,14 @@ impl<'a> Scorer<'a> {
                 }
             }
             let lex = self.lexical(i, part);
-            if lex <= 0.0 && !bare_role {
+            let prior = part.prior.contains(&role);
+            // Query evidence (D-214): text, or the role the query names. The state term alone
+            // says nothing about the query.
+            if lex <= 0.0 && !prior && !bare_role {
                 continue;
             }
             let mut s = lex;
-            if part.prior.contains(&role) {
+            if prior {
                 s += ROLE_PRIOR;
             }
             s += if row.state.covered || !row.state.enabled {
@@ -304,12 +369,11 @@ pub(crate) fn find(index: &[IndexRow], text_blocks: &[TextBlock], opts: &FindOpt
         }
     };
     for (i, row) in index.iter().enumerate() {
-        if !scorer.candidate[i] {
-            continue;
-        }
-        if row.flags.challenge {
+        // Every CHALLENGE row outside a sealed frame is reported, hidden or not: producer
+        // visibility is approximate and a challenge means stop (D-5, D-215).
+        if row.flags.challenge && !scorer.sealed.contains(&row.frame) {
             append(i, HitReason::Challenge, &mut hits);
-        } else if row.flags.overlay {
+        } else if row.flags.overlay && scorer.candidate[i] {
             append(i, HitReason::Overlay, &mut hits);
         }
     }
@@ -445,7 +509,12 @@ mod tests {
         assert!(p.terms.contains(&("login".into(), 0.5)));
         // a row named only by a synonym is found
         let idx = vec![row(1, "textbox", "Postcode"), row(2, "textbox", "City")];
-        assert_eq!(ids(&q(&idx, "zip", 3)), [1]);
+        let h = q(&idx, "zip", 1);
+        assert_eq!(ids(&h), [1]);
+        // City has only the textbox prior: it ranks below, weak (D-214)
+        let h = q(&idx, "zip", 3);
+        assert_eq!(ids(&h), [1, 2]);
+        assert!(h[1].weak && h[0].score > h[1].score);
     }
 
     #[test]
@@ -493,7 +562,7 @@ mod tests {
             row(4, "textbox", "Phone"),
             row(5, "textbox", "Zip"),
         ];
-        let h = q(&idx, "email", 3);
+        let h = q(&idx, "email", 1);
         assert_eq!(ids(&h), [1]);
         assert!(h[0].weak, "{:?}", h[0]);
         assert!(h[0].score >= 3.0, "{:?}", h[0]);
@@ -511,10 +580,105 @@ mod tests {
     }
 
     #[test]
-    fn no_lexical_match_no_hit() {
-        let idx = vec![row(1, "textbox", "City"), row(2, "textbox", "Street")];
-        assert!(q(&idx, "email", 3).is_empty());
+    fn no_query_evidence_no_hit() {
+        let idx = vec![row(1, "textbox", "City"), row(2, "link", "Street")];
+        // no text match and no role named: the state term alone is not evidence (D-214)
+        assert!(q(&idx, "banana", 3).is_empty());
         assert!(q(&idx, "", 3).is_empty());
+        // `email` names the textbox role: prior + visible = 3, lexical 0, so `?` (D-54)
+        let h = q(&idx, "email", 3);
+        assert_eq!(ids(&h), [1]);
+        assert!(h[0].weak && close(h[0].score, 3.0), "{:?}", h[0]);
+    }
+
+    #[test]
+    fn role_prior_alone_finds_an_unnamed_searchbox() {
+        let idx = vec![
+            row(1, "searchbox", ""),
+            row(2, "link", "Home"),
+            row(3, "link", "About"),
+        ];
+        let h = q(&idx, "search", 1);
+        assert_eq!(ids(&h), [1]);
+        assert_eq!(find_lines(&idx, &h), "?#1 input");
+    }
+
+    #[test]
+    fn role_nouns_pick_the_role() {
+        let idx = vec![
+            row(1, "link", "Help"),
+            row(2, "button", "Help"),
+            row(3, "link", "Home"),
+            row(4, "link", "About"),
+        ];
+        assert_eq!(ids(&q(&idx, "help button", 1)), [2]);
+        assert_eq!(ids(&q(&idx, "help link", 1)), [1]);
+        let idx = vec![row(1, "link", "Details"), row(2, "button", "Details")];
+        assert_eq!(ids(&q(&idx, "details button", 1)), [2]);
+        // the longest noun wins: a radio button is a radio
+        let p = parse_part("yes radio button");
+        assert_eq!(p.prior, HashSet::from(["radio".to_string()]));
+        let p = parse_part("check box");
+        assert_eq!(p.prior, HashSet::from(["checkbox".to_string()]));
+        // no noun: task-word priors as before
+        assert!(parse_part("register").prior.contains("button"));
+    }
+
+    #[test]
+    fn synonym_phrases_match_as_phrases() {
+        let p = parse_part("zip");
+        assert!(p.terms.contains(&("postal code".into(), 1.0)), "{p:?}");
+        assert!(!p.terms.iter().any(|(t, _)| t == "code"));
+        let p = parse_part("subscribe");
+        assert!(!p.terms.iter().any(|(t, _)| t == "sign" || t == "in"));
+        // a phrase the caller typed is not added again as a synonym phrase
+        let p = parse_part("phone number");
+        assert!(!p.terms.iter().any(|(t, _)| t == "phone number"));
+
+        // login form: "subscribe" must not point at the login submit
+        let mut idx = vec![
+            row(1, "textbox", "Email"),
+            row(2, "textbox", "Password"),
+            row(3, "button", "Sign in"),
+            row(4, "checkbox", "Send me product news"),
+            row(5, "link", "Forgot password"),
+            row(6, "link", "Privacy"),
+        ];
+        for r in idx.iter_mut().take(4) {
+            r.form = Some("f1".into());
+        }
+        idx[2].flags.submit = true;
+        let h = q(&idx, "subscribe", 1);
+        assert!(
+            h.iter()
+                .all(|x| x.elem.id != 3 || x.reason == HitReason::WinningSubmit),
+            "{h:?}"
+        );
+
+        let idx = vec![
+            row(1, "textbox", "Card number"),
+            row(2, "textbox", "Promo code"),
+            row(3, "button", "Sign in"),
+            row(4, "textbox", "City"),
+            row(5, "textbox", "Street"),
+        ];
+        for (query, wrong) in [("phone", 1), ("zip", 2), ("register", 3)] {
+            let h = q(&idx, query, 1);
+            let line = find_lines(&idx, &h);
+            assert!(
+                h.iter().all(|x| x.elem.id != wrong || x.weak),
+                "{query}: {line}"
+            );
+            // whatever comes back has no text match, so it is marked weak
+            assert!(h.iter().all(|x| x.weak), "{query}: {line}");
+        }
+
+        // a real phrase match still scores
+        let idx = vec![
+            row(1, "textbox", "Postal code"),
+            row(2, "textbox", "Promo code"),
+        ];
+        assert_eq!(ids(&q(&idx, "zip", 1)), [1]);
     }
 
     #[test]
@@ -530,6 +694,17 @@ mod tests {
         let h = q(&idx, "email", 3);
         assert_eq!(ids(&h), [2, 4]);
         assert_eq!(h[0].reason, HitReason::Challenge);
+    }
+
+    #[test]
+    fn hidden_challenge_is_still_appended() {
+        let mut cap = row(2, "iframe", "reCAPTCHA");
+        cap.flags.challenge = true;
+        cap.state.visible = false;
+        let idx = vec![row(1, "link", "Home"), cap];
+        let h = q(&idx, "home", 1);
+        assert_eq!(ids(&h), [1, 2]);
+        assert_eq!(h[1].reason, HitReason::Challenge);
     }
 
     #[test]

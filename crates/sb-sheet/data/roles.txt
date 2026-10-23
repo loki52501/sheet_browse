@@ -13,6 +13,8 @@
 #       role is on the left. Words are matched in normal form (lowercase, split on
 #       non-alphanumerics, joined by one space), so `sign up` and `sign-up` are the same key.
 #       A word may appear on several prior lines; its roles accumulate.
+#
+#   noun <aria-role> [<aria-role> ...]: <word>, ...      (see the role nouns section)
 
 # ---- aliases (first listing of a role wins for alias_for) ----
 alias input: textbox searchbox
@@ -75,3 +77,18 @@ prior menuitem: menu item, action
 prior slider: volume, range, brightness
 prior iframe: captcha, recaptcha, frame, embed, video
 prior option: option, choice
+
+# ---- role nouns (D-214) ----
+#
+#   noun <aria-role> [<aria-role> ...]: <word>, <multi word>, ...
+#       A query that names a role (`help button`, `country dropdown`) gives +2 to that role
+#       only: when a part holds a role noun, its task-word priors above do not fire. The
+#       longest noun wins (`radio button` is a radio, not a button).
+noun button: button, btn
+noun link: link, hyperlink
+noun textbox searchbox: field, input, input field, text field, text box, textbox, textarea
+noun searchbox: search box, search field, searchbox, search bar
+noun combobox listbox: dropdown, drop down, select, select box, combobox, listbox, picker
+noun checkbox: checkbox, check box, tickbox, tick box
+noun radio: radio, radio button
+noun switch: switch
