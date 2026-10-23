@@ -2,7 +2,7 @@ from: rust-coder-1
 to: next
 task: T-04
 date: "2026-10-23"
-state: "Gate::check, default_mode, on_timeout implemented in crates/core/src/gate.rs per I-3 (H-1, H-1.1..H-1.4, D-39, D-48). harness_core::testing (MemStore, ScriptedAsker) added behind cfg(test) / feature `testing` (D-108). 13 gate tests + 8 testing tests pass; crate total 37 tests green; clippy --all-targets -D warnings clean, also with --features testing."
+state: "Gate::check, default_mode, on_timeout implemented in crates/core/src/gate.rs per I-3 (H-1, H-1.1..H-1.4, D-39, D-48). harness_core::testing (MemStore, ScriptedAsker) added behind cfg(test) / feature `testing` (D-108). 11 gate tests + 8 testing tests pass; crate total 37 tests green; clippy --all-targets -D warnings clean, also with --features testing."
 not_done: "Nothing in T-04. H-1.5 floors are applied by mcp::dispatch (T-09) before Call is built (class = max(declared, floor, classifier)); the gate trusts call.class."
 gotchas:
   - "Rule lookup with several hints tries every (domain, Class:hint) before any ('*', Class:hint), then (domain, Class), ('*', Class), default. Empty hints and domain None/''/'*' skip the domain-scoped keys."
