@@ -159,3 +159,6 @@ decisions:
   - id: D-107
     text: "Cron expressions are 5-field standard cron parsed with the `croner` crate, evaluated in UTC. harnessd wakes at the next due time across enabled schedules (tokio::time::sleep_until on a computed instant, re-read on change), never on a fixed poll interval. `harness schedule add` with no SB_RUN_ID creates its own run row (`<ts>-schedule-add`, status done) and stores it as schedules.run_id, so every firing has parent_run set."
     why: "docs/01 writes `*/1 * * * *` (5 fields; the `cron` crate wants 6+). Sleeping until a computed deadline is a wait on a condition, not a fixed sleep (rule 6). The acceptance needs parent_run set even when the schedule comes from the CLI."
+  - id: D-108
+    text: "harness_core::testing (cfg(test) or cargo feature `testing`) provides MemStore, an in-memory MemoryStore seeded with migration 0001's gate rules, and ScriptedAsker, an Asker that returns queued outcomes or applies card.on_timeout immediately and records every card. Gate, dispatch and echo tests use them; other areas may enable the feature as a dev-dependency."
+    why: "D-48 says tool-server tests run dispatch with a fake store and a scripted asker; one shared fake avoids four diverging copies and keeps core's unit tests free of Postgres."
