@@ -1,0 +1,25 @@
+from: rust-coder-1 (area core)
+to: next
+task: T-06
+date: "2026-10-23"
+state: "harness_core::ledger and run::RunFolder implemented per H-3, H-4, Q-4, D-102 in commit 2e91956. RunFolder::create/create_at (UTC <yyyy-mm-ddThh-mm-ss>-<slug>, create_dir claims the name atomically, -2/-3 on collision, files/ frames/ handoff/, prompt.md scrubbed), RunFolder::open (rejects ids that are not one plain path component), run::slugify. Ledger::new/write/read_back (scrub_event over every string incl. JSON keys, fills run_id None with the ledger's run, rejects another run, insert via MemoryStore::append then one append-mode write of `{\"id\":..,..event}` under a per-Ledger tokio mutex), ledger::read_jsonl, ledger::report (Q-4 shape, scrubbed), ledger::write_report (adds files/ found on disk, writes report.md), ledger::run_status (Stopped > Partial > Done, for runs.status). Tests: 12 new unit tests (9 ledger, 3 run) plus tests/ledger_t06.rs (6, required-features testing); harness-core total 78 with --features testing; fmt and clippy --all-targets -D warnings clean."
+not_done: "Nothing in T-06. T-07 must write events in the shapes documented at the top of crates/core/src/ledger.rs (tool call event with mode allow/answered_proceed/timeout_proceed; one server=core event per ask outcome with why = card.what; mode=stop event with why) or report() will miscount. T-08 should call write_report at run end and run_end(id, run_status(&events), ..)."
+gotchas:
+  - "LedgerError is the ledger's own error type (Memory, Io, WrongRun, Json, Corrupt); Ledger::write returns Result<LedgerId, LedgerError>, not memory::Result as the skeleton had."
+  - "write() truncates ts to microseconds (idempotent for ts_now) so jsonl and table always agree; it never re-stamps."
+  - "If append() succeeds and the jsonl write fails, write returns LedgerError::Io and the row stays; the table is append-only, so there is no rollback."
+  - "report() counts asks only from server=core events with an outcome mode; a non-core event with an outcome mode counts toward Did (proceed) or Result=partial (skip) but not Asked."
+  - "Read kinds come from server+tool names: contains mail -> mails; token files/file/fs -> files; contains web/fetch/page or token sb/browser -> pages; other Read tools are not counted."
+  - "Report words are fixed plurals (`1 pages`, `1 actions`) to keep the Q-4 shape exact and parseable."
+  - "Files: line picks strings anywhere in consequences that contain `<run_id>/files/` (after a path separator) or start with `files/`, normalised to runs/<id>/files/<rel>; `..` is rejected."
+  - "tests/ledger_t06.rs installs the global canary vault (Once); it has its own [[test]] entry with required-features = [\"testing\"] in crates/core/Cargo.toml. Keep install_global out of the lib unit tests (vault.rs owns that)."
+  - "RunFolder::create scrubs the slug too, so a vault value in a prompt-derived slug becomes `vault-<name>`."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/src/ledger.rs
+  - crates/core/src/run.rs
+  - crates/core/src/lib.rs
+  - crates/core/Cargo.toml
+  - crates/core/tests/ledger_t06.rs
+verify: "cargo test -p harness-core --features testing"
