@@ -9,8 +9,10 @@
 //! Grammar details beyond B-7: empty steps are skipped (D-430), `w()` needs a unit and is
 //! clamped to [`MAX_WAIT`] (D-431), lexing rules (D-432). Classification follows D-402,
 //! refined by D-433 (Enter, form context), D-434 (hints), D-58 (Pay from checkout text)
-//! and D-403 (key steps, implicit submission, wider Pay/Account/Delete evidence). Every
-//! refinement only raises a class (D-36), never lowers one.
+//! and D-403 (key steps, implicit submission, wider Pay/Account/Delete evidence), then
+//! D-404 (2FA only with a set-up verb, delete dialogs, the Delete key, planner challenge
+//! rejection). Every refinement only raises a class (D-36), never lowers one, except
+//! D-404 (1), which narrows D-403's 2FA rule.
 
 mod classify;
 mod parse;
@@ -92,26 +94,29 @@ pub struct ActClass {
 }
 
 /// One step's class from its target's row and form context (B-7, D-402, D-433, D-434,
-/// D-58, D-403).
+/// D-58, D-403, D-404).
 ///
 /// CHALLENGE target: Challenge. Target missing from the index: Submit. A click on a
 /// SUBMIT/submitish row is Submit raised by the form (max wins): Pay for card/IBAN/CVC/
 /// expiry/cardholder fields or checkout text (checkout, pay, payment, purchase, buy,
 /// donate, place/confirm order, add card, paid subscriptions) on the button, form heading
 /// or form name; Account for new-password / two password fields / create-account, sign-up
-/// text (not in a login), or change-password, change-email, 2FA, security-key text (even
-/// in a login); Delete for delete/remove/deactivate/discard/erase/revoke/unsubscribe/
-/// trash/close account/`cancel <x>` on the button, form heading or form name. Other
-/// clicks: Delete by the same text rule, Fill on checkbox/radio/switch/option/tab, else
-/// Navigate (a bare Cancel or Close is Navigate).
+/// text (not in a login), or change-password, change-email text and 2FA/security-key text
+/// with a set-up verb such as enable/set up/turn on/manage (even in a login; a bare
+/// "Two-step verification" code prompt is Submit); Delete for delete/remove/deactivate/
+/// discard/erase/revoke/unsubscribe/trash/close account/`cancel <x>` on the button, form
+/// heading or form name. Other clicks: Delete by the same text rule, or for an affirmative
+/// button (confirm/yes/ok/continue/proceed) in a form or dialog with Delete evidence in its
+/// heading or name; Fill on checkbox/radio/switch/option/tab, else Navigate (a bare Cancel
+/// or Close is Navigate).
 ///
 /// Key steps: Tab, Escape, arrows, Home/End/PageUp/PageDown, modifiers alone and typing
-/// into a text field are Fill; Enter on a field in a form, or in a formless text field, is
-/// an implicit submission (at least Submit, with the form's evidence even without a
-/// submit row); any other key, unknown keys included, is a click on its row. Type, select
-/// and upload: Fill; scroll: Navigate; wait and `?s`: Read. Hints: `job_application` for
-/// a submit in a form with a resume/CV upload or an apply/application heading;
-/// `signature` for e-sign submits.
+/// into a text field are Fill; Delete on a non-text row is Delete; Enter on a field in a
+/// form, or in a formless text field, is an implicit submission (at least Submit, with the
+/// form's evidence even without a submit row); any other key, unknown keys included, is a
+/// click on its row. Type, select and upload: Fill; scroll: Navigate; wait and `?s`: Read.
+/// Hints: `job_application` for a submit in a form with a resume/CV upload or an
+/// apply/application heading; `signature` for e-sign submits.
 pub fn classify_step(step: &Step, index: &[IndexRow]) -> ActClass {
     classify::classify_step(step, index)
 }
@@ -139,6 +144,10 @@ pub fn classify(steps: &[Step], index: &[IndexRow]) -> ActClass {
 pub enum PlannerError {
     #[error("step {step} is {class} but the next step is not ?s (D-50)")]
     MissingStop { step: usize, class: Class },
+    /// The step targets a CHALLENGE row. A challenge means stop (D-5), so no planner may
+    /// aim a step at one, `?s` or not (D-404 (4)).
+    #[error("step {step} targets a challenge; stop and hand back to the user (D-5)")]
+    ChallengeTarget { step: usize },
 }
 
 /// The planner `?s` rule (D-50, resolves B-1): every step classified Submit or higher must be
@@ -148,9 +157,15 @@ pub enum PlannerError {
 ///
 /// Classification uses `index`, so a target missing from it counts as Submit (D-402): with
 /// an empty index every targeted step needs a `?s` after it.
+///
+/// A step whose target is a CHALLENGE row is rejected outright with
+/// [`PlannerError::ChallengeTarget`], even when `?s` follows (D-5, D-404 (4)).
 pub fn check_planner(steps: &[Step], index: &[IndexRow]) -> Result<(), PlannerError> {
     for (i, step) in steps.iter().enumerate() {
         let class = classify_step(step, index).class;
+        if class == Class::Challenge {
+            return Err(PlannerError::ChallengeTarget { step: i + 1 });
+        }
         if class >= Class::Submit && steps.get(i + 1) != Some(&Step::StopHere) {
             return Err(PlannerError::MissingStop { step: i + 1, class });
         }
@@ -291,14 +306,30 @@ mod tests {
                 class: Class::Pay
             })
         );
-        let steps = parse("c#42; c#14; ?s").unwrap();
+        // A challenge target is rejected with or without ?s (D-404 (4)).
+        for p in [
+            "c#42; c#14; ?s",
+            "c#42; ?s",
+            "t#7=a; k#42=Enter; ?s",
+            "sc(#42)",
+        ] {
+            assert_eq!(
+                check_planner(&parse(p).unwrap(), &idx),
+                Err(PlannerError::ChallengeTarget {
+                    step: if p.starts_with("t#") { 2 } else { 1 }
+                }),
+                "{p}"
+            );
+        }
+        let err = check_planner(&parse("c#42; ?s").unwrap(), &idx)
+            .unwrap_err()
+            .to_string();
         assert_eq!(
-            check_planner(&steps, &idx),
-            Err(PlannerError::MissingStop {
-                step: 1,
-                class: Class::Challenge
-            })
+            err,
+            "step 1 targets a challenge; stop and hand back to the user (D-5)"
         );
+        // A program that only reads past it is fine.
+        assert_eq!(check_planner(&parse("sc(down); ?s").unwrap(), &idx), Ok(()));
         assert_eq!(
             check_planner(&parse("t#40=4242; c#41; ?s").unwrap(), &idx),
             Ok(())

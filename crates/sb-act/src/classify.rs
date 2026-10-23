@@ -1,6 +1,7 @@
 //! B-7 step classification: D-402, refined by D-433 (Enter, form context), D-434 (hints),
-//! D-58 (Pay from checkout text) and D-403 (keys, implicit submission, more evidence).
-//! Every refinement only raises a class (D-36 max), never lowers one.
+//! D-58 (Pay from checkout text), D-403 (keys, implicit submission, more evidence) and
+//! D-404 (2FA set-up verbs, delete dialogs, the Delete key). Every refinement only raises
+//! a class (D-36 max), never lowers one, except D-404 (1) narrowing D-403's 2FA rule.
 
 use crate::{ActClass, Scroll, Step};
 use harness_core::gate::{HINT_JOB_APPLICATION, HINT_SIGNATURE};
@@ -137,8 +138,8 @@ fn is_text_field(row: &IndexRow) -> bool {
 
 /// A key step (D-403 (1)). Keys known not to activate are Fill: Tab, Escape, arrows,
 /// Home/End/PageUp/PageDown (alone or with Shift), modifiers alone, and printable
-/// characters, Space, Backspace and Delete typed into a text field. Enter in any form
-/// (`Enter`, `NumpadEnter`, `Control+Enter`...) is [`enter`]. Every other key, including
+/// characters, Space, Backspace and Delete typed into a text field. Delete (any modifiers)
+/// on a non-text row is at least Delete (D-404 (3)). Enter in any form (`Enter`, `NumpadEnter`, `Control+Enter`...) is [`enter`]. Every other key, including
 /// any key this list does not know, is a click on its row, so a key step is never below a
 /// `c#` on the same target (Space on a button, a letter on a link, `F13`...).
 fn key_press(row: &IndexRow, index: &[IndexRow], key: &str) -> ActClass {
@@ -162,7 +163,13 @@ fn key_press(row: &IndexRow, index: &[IndexRow], key: &str) -> ActClass {
     if shift_only && editing && is_text_field(row) {
         return plain(Class::Fill);
     }
-    click(row, index)
+    let mut out = click(row, index);
+    // D-404 (3): Delete on a selected mail, file or list row deletes it (Gmail, Drive).
+    // Inside a text field it only edits text (above, or a click on the field with Ctrl).
+    if matches!(k.as_str(), "delete" | "del") && !is_text_field(row) {
+        merge(&mut out, plain(Class::Delete));
+    }
+    out
 }
 
 fn is_submit(row: &IndexRow) -> bool {
@@ -187,11 +194,62 @@ fn form_of<'a>(row: &'a IndexRow, index: &'a [IndexRow]) -> Vec<&'a IndexRow> {
     }
 }
 
+/// The row's form plus, when it sits in a dialog landmark, the dialog's rows (same frame,
+/// landmark `dialog`, same heading). Empty for a row in neither (D-404 (2)).
+fn form_or_dialog<'a>(row: &'a IndexRow, index: &'a [IndexRow]) -> Vec<&'a IndexRow> {
+    let mut rows = if row.form.is_some() {
+        form_of(row, index)
+    } else {
+        Vec::new()
+    };
+    if row.landmark.as_deref() == Some("dialog") {
+        for r in index.iter().filter(|r| {
+            r.frame == row.frame
+                && r.landmark.as_deref() == Some("dialog")
+                && r.heading == row.heading
+        }) {
+            if !rows.iter().any(|x| std::ptr::eq(*x, r)) {
+                rows.push(r);
+            }
+        }
+        if !rows.iter().any(|x| std::ptr::eq(*x, row)) {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+/// A button that goes ahead with what its dialog asks (D-404 (2)): confirm, yes, ok,
+/// continue, proceed, delete, remove. Bare Cancel, Close, No, Back, Keep are not.
+fn affirmative(toks: &[String]) -> bool {
+    has_any(
+        toks,
+        &[
+            "confirm", "yes", "ok", "okay", "continue", "proceed", "delete", "remove",
+        ],
+    )
+}
+
+/// D-404 (2): an affirmative non-submit button in a form or dialog whose heading or name
+/// carries Delete evidence ("Delete account?" + Confirm).
+/// Checkables and text fields are not buttons: a "Yes" checkbox only toggles, a "Type
+/// DELETE to confirm" field only takes text.
+fn confirms_delete(row: &IndexRow, index: &[IndexRow]) -> bool {
+    if FILL_ROLES.contains(&row.role.as_str())
+        || is_text_field(row)
+        || !affirmative(&tokens(&row.name))
+    {
+        return false;
+    }
+    let ctx = form_or_dialog(row, index);
+    !ctx.is_empty() && form_texts(row, &ctx).any(|t| delete_text(&tokens(t), true))
+}
+
 fn click(row: &IndexRow, index: &[IndexRow]) -> ActClass {
     if is_submit(row) {
         return submit(row, &row.name, &form_of(row, index));
     }
-    let class = if delete_text(&tokens(&row.name), false) {
+    let class = if delete_text(&tokens(&row.name), false) || confirms_delete(row, index) {
         Class::Delete
     } else if FILL_ROLES.contains(&row.role.as_str()) {
         Class::Fill
@@ -395,18 +453,65 @@ fn create_text(toks: &[String]) -> bool {
         || near(toks, &["create"], &["account"], 3)
 }
 
-/// Change password or email, two-factor / 2-step / MFA, security keys (H-1 Account). Counts
-/// in headings even in a one-password form, where the password confirms the change
-/// (D-403 (3)).
+/// Change password or email, or setting up two-factor / 2-step / MFA / security keys (H-1
+/// Account). Counts in headings even in a one-password form, where the password confirms
+/// the change (D-403 (3)).
 fn change_text(toks: &[String]) -> bool {
     near(
         toks,
         &["change", "update"],
         &["password", "email", "mail", "passcode"],
         3,
-    ) || has_any(toks, &["2fa", "mfa", "totp"])
-        || near(toks, &["two", "2", "multi"], &["factor", "step"], 1)
-        || near(toks, &["security"], &["key", "keys"], 1)
+    ) || twofa_setup(toks)
+}
+
+/// Token spans `[start, end)` naming a second factor: 2FA, MFA, TOTP, two-factor,
+/// 2-step, multi-factor, security key(s).
+fn twofa_spans(toks: &[String]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        let next = toks.get(i + 1).map(String::as_str);
+        if matches!(t.as_str(), "2fa" | "mfa" | "totp") {
+            spans.push((i, i + 1));
+        } else if matches!(
+            (t.as_str(), next),
+            ("two" | "2" | "multi", Some("factor" | "step")) | ("security", Some("key" | "keys"))
+        ) {
+            spans.push((i, i + 2));
+        }
+    }
+    spans
+}
+
+/// Start positions of a set-up verb (D-404 (1)): enable, set up, turn on, turn off,
+/// disable, add, remove, manage, change, reset.
+fn setup_verbs(toks: &[String]) -> Vec<usize> {
+    toks.iter()
+        .enumerate()
+        .filter(|(i, t)| {
+            let next = toks.get(i + 1).map(String::as_str);
+            match t.as_str() {
+                "enable" | "disable" | "add" | "remove" | "manage" | "change" | "reset" => true,
+                "set" => next == Some("up"),
+                "setup" => true,
+                "turn" => matches!(next, Some("on" | "off")),
+                _ => false,
+            }
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// A second factor named with a set-up verb within four words either side ("Set up 2FA",
+/// "Turn on 2-Step Verification", "Two-factor authentication: manage"). A bare
+/// "Two-step verification" over an "Enter the code" login prompt is not Account (D-404 (1)).
+fn twofa_setup(toks: &[String]) -> bool {
+    let verbs = setup_verbs(toks);
+    twofa_spans(toks).iter().any(|&(start, end)| {
+        verbs
+            .iter()
+            .any(|&v| (v < start && start - v <= 4) || (v >= end && v - end < 4))
+    })
 }
 
 /// Section headings over the anchor and its form, plus the names of `form` rows.
@@ -430,11 +535,16 @@ fn is_account(anchor: &IndexRow, name: &[String], form: &[&IndexRow]) -> bool {
         return true;
     }
     // A login (one current-password field) is Submit; its "Sign in or create an account"
-    // heading is not evidence (D-433), but "Change email" or "Two-factor" is (D-403).
+    // heading is not evidence (D-433), but "Change email" or "Set up 2FA" is (D-403,
+    // D-404). A set-up verb on the button over a second-factor heading counts too
+    // ("Two-factor authentication" + "Enable"); a "Next" or "Verify" under one does not.
     let login = passwords.len() == 1 && has_autocomplete(passwords[0], "current-password");
+    let verb_button = !setup_verbs(name).is_empty();
     form_texts(anchor, form).any(|t| {
         let t = tokens(t);
-        change_text(&t) || (!login && create_text(&t))
+        change_text(&t)
+            || (!login && create_text(&t))
+            || (verb_button && !twofa_spans(&t).is_empty())
     })
 }
 
@@ -1180,10 +1290,10 @@ mod tests {
         for h in [
             "Change email",
             "Change password",
-            "Two-factor authentication",
             "Enable 2FA",
-            "2-Step Verification",
-            "Security keys",
+            "Set up two-factor authentication",
+            "Turn on 2-Step Verification",
+            "Manage security keys",
         ] {
             let idx = vec![
                 heading(form(row(1, "textbox", "New email"), "f1"), h),
@@ -1211,11 +1321,15 @@ mod tests {
             let idx = vec![form(submit(row(6, "button", name)), "f1")];
             assert_eq!(cls("c#6", &idx), Class::Account, "{name}");
         }
-        // Negatives: a login stays Submit; a "Security settings" re-auth is Submit.
+        // Negatives: a login stays Submit; a "Security settings" re-auth is Submit; a bare
+        // second-factor heading is a code prompt, not a set-up (D-404 (1)).
         for h in [
             "Sign in or create an account",
             "Security settings",
             "Sign up for news",
+            "Two-factor authentication",
+            "2-Step Verification",
+            "Security keys",
         ] {
             let idx = vec![
                 heading(form(pw(), "f1"), h),
@@ -1229,6 +1343,202 @@ mod tests {
             "Step two of three",
         )];
         assert_eq!(cls("c#6", &idx), Class::Submit);
+    }
+
+    /// D-404 (1): a second factor is Account only with a set-up verb.
+    #[test]
+    fn twofa_needs_a_setup_verb() {
+        let code = || {
+            input(
+                row(1, "textbox", "Enter the code"),
+                "text",
+                Some("one-time-code"),
+            )
+        };
+        // Login code prompts stay Submit, by click and by Enter.
+        for (h, button) in [
+            ("Two-step verification", "Next"),
+            ("2-Step Verification", "Verify"),
+            ("Two-factor authentication", "Continue"),
+            ("Multi-factor authentication", "Submit"),
+            ("Use your security key", "Try again"),
+            ("Enter your 2FA code", "Sign in"),
+        ] {
+            let idx = vec![
+                heading(form(code(), "f1"), h),
+                heading(form(submit(row(2, "button", button)), "f1"), h),
+            ];
+            assert_eq!(cls("c#2", &idx), Class::Submit, "{h} / {button}");
+            assert_eq!(cls("k#1=Enter", &idx), Class::Submit, "Enter: {h}");
+        }
+        // A 2FA prompt right after a password login is still Submit.
+        let idx = vec![
+            heading(
+                form(
+                    input(
+                        row(1, "textbox", "Password"),
+                        "password",
+                        Some("current-password"),
+                    ),
+                    "f1",
+                ),
+                "2-Step Verification",
+            ),
+            heading(
+                form(submit(row(2, "button", "Next")), "f1"),
+                "2-Step Verification",
+            ),
+        ];
+        assert_eq!(cls("c#2", &idx), Class::Submit);
+        // With a set-up verb in the heading, the form name or the button: Account.
+        for h in [
+            "Set up 2FA",
+            "Turn off two-factor authentication",
+            "Disable MFA",
+            "Reset 2-step verification",
+            "Add a security key",
+            "Change your 2FA method",
+            "Two-factor authentication: enable",
+        ] {
+            let idx = vec![
+                heading(form(code(), "f1"), h),
+                heading(form(submit(row(2, "button", "Next")), "f1"), h),
+            ];
+            assert_eq!(cls("c#2", &idx), Class::Account, "{h}");
+            assert_eq!(cls("k#1=Enter", &idx), Class::Account, "Enter: {h}");
+        }
+        let idx = vec![
+            form(row(3, "form", "Set up two-step verification"), "f1"),
+            form(code(), "f1"),
+            form(submit(row(2, "button", "Verify")), "f1"),
+        ];
+        assert_eq!(cls("c#2", &idx), Class::Account);
+        // Bare second-factor heading, set-up verb on the button.
+        for button in ["Enable", "Turn on", "Set up", "Manage"] {
+            let h = "Two-factor authentication";
+            let idx = vec![
+                heading(form(code(), "f1"), h),
+                heading(form(submit(row(2, "button", button)), "f1"), h),
+            ];
+            assert_eq!(cls("c#2", &idx), Class::Account, "{button}");
+        }
+        // A set-up verb far from the second factor does not count.
+        let idx = vec![heading(
+            form(submit(row(2, "button", "Next")), "f1"),
+            "Two-step verification sent a code to your phone, you can change it in settings",
+        )];
+        assert_eq!(cls("c#2", &idx), Class::Submit);
+    }
+
+    /// D-404 (2): affirmative buttons in a Delete-headed form or dialog are Delete.
+    #[test]
+    fn delete_dialogs() {
+        let dlg = |mut r: IndexRow, h: &str| {
+            r.landmark = Some("dialog".into());
+            r.heading = Some(h.into());
+            r
+        };
+        let h = "Delete account?";
+        let idx = vec![
+            dlg(row(1, "button", "Cancel"), h),
+            dlg(row(2, "button", "Confirm"), h),
+            dlg(row(3, "button", "Close"), h),
+            dlg(row(4, "button", "No"), h),
+            dlg(row(5, "button", "Back"), h),
+            dlg(row(6, "button", "Keep my account"), h),
+            dlg(row(7, "button", "Yes"), h),
+            dlg(row(8, "button", "OK"), h),
+            dlg(row(9, "button", "Continue"), h),
+            dlg(row(10, "button", "Proceed"), h),
+            dlg(row(11, "checkbox", "Yes, I am sure"), h),
+            dlg(row(12, "textbox", "Type OK to confirm"), h),
+        ];
+        for p in ["c#2", "c#7", "c#8", "c#9", "c#10", "k#2=Enter", "k#2=Space"] {
+            assert_eq!(cls(p, &idx), Class::Delete, "{p}");
+        }
+        for p in ["c#1", "c#3", "c#4", "c#5", "c#6", "k#1=Enter"] {
+            assert_eq!(cls(p, &idx), Class::Navigate, "{p}");
+        }
+        // A checkbox only toggles and a field only takes text, even in that dialog.
+        assert_eq!(cls("c#11", &idx), Class::Fill);
+        assert_eq!(cls("t#12=OK", &idx), Class::Fill);
+        // The planner must stop after the dialog's Confirm.
+        assert_eq!(
+            check_planner(&parse("c#2").unwrap(), &idx),
+            Err(PlannerError::MissingStop {
+                step: 1,
+                class: Class::Delete
+            })
+        );
+        // A dialog with another heading (another dialog) is not borrowed.
+        let mut other = idx.clone();
+        other.push(dlg(row(20, "button", "Confirm"), "Save changes?"));
+        assert_eq!(cls("c#20", &other), Class::Navigate);
+        // A form: the heading can sit on any row of the form.
+        let idx = vec![
+            heading(
+                form(row(1, "textbox", "Type the repository name"), "f4"),
+                "Delete this repository",
+            ),
+            form(row(2, "button", "I understand, delete"), "f4"),
+            form(row(3, "button", "Confirm"), "f4"),
+            form(row(4, "button", "Cancel"), "f4"),
+        ];
+        assert_eq!(cls("c#2", &idx), Class::Delete);
+        assert_eq!(cls("c#3", &idx), Class::Delete);
+        assert_eq!(cls("c#4", &idx), Class::Navigate);
+        // The heading on the button itself.
+        let idx = vec![heading(
+            form(row(2, "button", "I understand, delete"), "f4"),
+            "Delete this repository",
+        )];
+        assert_eq!(cls("c#2", &idx), Class::Delete);
+        // Form name as evidence.
+        let idx = vec![
+            form(row(1, "form", "Remove member"), "f4"),
+            form(row(2, "button", "Yes"), "f4"),
+        ];
+        assert_eq!(cls("c#2", &idx), Class::Delete);
+        // Neutral dialogs and forms stay as they were.
+        let idx = vec![
+            dlg(row(1, "button", "Confirm"), "Save changes?"),
+            form(row(2, "button", "Continue"), "f5"),
+        ];
+        assert_eq!(cls("c#1", &idx), Class::Navigate);
+        assert_eq!(cls("c#2", &idx), Class::Navigate);
+    }
+
+    /// D-404 (3): the Delete key deletes a selected row, edits text in a field.
+    #[test]
+    fn delete_key() {
+        let idx = vec![
+            row(1, "row", "Invoice from ACME, unread"),
+            row(2, "option", "report.pdf"),
+            row(3, "checkbox", "Select conversation"),
+            row(4, "textbox", "Search mail"),
+            input(row(5, "textbox", "Subject"), "text", None),
+            row(6, "searchbox", "Search files"),
+        ];
+        for r in [1, 2, 3] {
+            for k in ["Delete", "Shift+Delete", "Del", "delete", "Control+Delete"] {
+                assert_eq!(cls(&format!("k#{r}={k}"), &idx), Class::Delete, "#{r} {k}");
+            }
+        }
+        for r in [4, 5, 6] {
+            for k in ["Delete", "Shift+Delete", "Backspace"] {
+                assert_eq!(cls(&format!("k#{r}={k}"), &idx), Class::Fill, "#{r} {k}");
+            }
+        }
+        // Delete on a pay button keeps the higher class.
+        let pay = saved_card("Place order", None);
+        assert_eq!(cls("k#2=Delete", &pay), Class::Pay);
+        assert_eq!(
+            check_planner(&parse("k#1=Delete").unwrap(), &idx),
+            Err(PlannerError::MissingStop {
+                step: 1,
+                class: Class::Delete
+            })
+        );
     }
 
     #[test]
