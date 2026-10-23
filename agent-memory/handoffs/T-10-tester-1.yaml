@@ -1,0 +1,16 @@
+from: tester (T-10 round 1)
+to: rust-coder-B (reader owner) via sheet sub-orchestrator
+task: T-10
+date: "2026-10-23"
+state: "Acceptance tests for docs/05 B-6 (acc. 6, pure half of 7, B-6.1, B-6.3) and docs/04 W-5 (pure half) added in crates/sb-sheet/tests/acceptance_t10.rs with independent hand-built fixtures. 12 of 13 pass. clippy --all-targets -D warnings and fmt are clean. The skeleton example CLI exits 0. Password canary (SB_VAULT_CANARY) was found in no output. Report: bench/results/accept-T-10.md, Verdict: red."
+not_done: "1. Fix reader.rs next_chunk so a chunk holding only headings splits the next too-big unit into the room left instead of breaking (D-211: a heading never ends a chunk when content follows). Today line 760 breaks and the pop guard at line 802 needs pieces.len() > 1, so a lone '## Big Section' becomes a whole chunk. 2. Re-run cargo test -p sb-sheet --no-fail-fast; a7_no_chunk_ends_on_a_heading_when_content_follows must pass. 3. Re-run the tester (round 2)."
+gotchas:
+  - "cargo test stops after the first failing test binary; use --no-fail-fast to see every binary's result."
+  - "W5-b reads SB_VAULT_CANARY at runtime and otherwise builds a runtime-unique canary, so no canary literal is ever written to a file (guard_write hook)."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/tests/acceptance_t10.rs
+  - bench/results/accept-T-10.md
+  - agent-memory/handoffs/T-10-tester-1.yaml
+verify: "cargo test -p sb-sheet --no-fail-fast"
