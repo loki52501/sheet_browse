@@ -15,8 +15,10 @@
 //! - The tool file is loaded as an ES module named `<namespaced>.js` (no source rewriting);
 //!   its `default` export must be a function. If it returns a promise the runner drives the
 //!   job queue until it settles (still under the wall cap).
-//! - Wall-time cap through the interrupt handler (no sleeps, no threads) and a memory cap,
-//!   both from [`RunOpts`]. The wall cap includes time spent in host calls (`api`).
+//! - Wall-time cap through the interrupt handler (no sleeps, no threads), a memory cap
+//!   enforced by a counting allocator, and an output cap, all from [`RunOpts`]. The wall cap
+//!   includes host calls: `api` gets the remaining budget and a call that returns after the
+//!   deadline turns the run into [`RunError::Timeout`] (D-308).
 //!
 //! Page API (the `page` argument, frozen): `find(q)`, `findAll(q)`, `text(region?)`,
 //! `table(id)`, `url`, `title`, and `api(url)` only for `@phase 1` readers that were given
@@ -24,7 +26,9 @@
 //! as JS `Error`s the tool can catch. The global `q(s)` is `sb_act::quote` (D-52).
 
 use crate::{Tool, ToolKind};
+use rquickjs::allocator::{Allocator, RustAllocator};
 use rquickjs::context::intrinsic;
+use rquickjs::prelude::Opt;
 use rquickjs::{
     Coerced, Context, Ctx, Error as JsError, Exception, Function, Module, Object, Runtime, Value,
 };
@@ -51,7 +55,9 @@ pub trait PageHost {
 /// `page.api(url)` for `@phase 1` readers. srv-web wires this to its `api` tool, which goes
 /// through the gate as Read (D-53). The runner never touches the network itself.
 pub trait ApiFetch {
-    fn api(&self, url: &str) -> Result<serde_json::Value, String>;
+    /// `remaining` is what is left of the run's wall cap (D-308). The call must return within
+    /// it; one that returns later (`Ok` or `Err`) makes the whole run [`RunError::Timeout`].
+    fn api(&self, url: &str, remaining: Duration) -> Result<serde_json::Value, String>;
 }
 
 /// Run limits.
@@ -63,6 +69,9 @@ pub struct RunOpts {
     pub memory_limit: usize,
     /// QuickJS stack cap in bytes (kept well under a 1 MiB native thread stack).
     pub max_stack: usize,
+    /// Output cap in bytes: the JSON text of a reader's result, or a planner's program text.
+    /// Readers return short text (CLAUDE.md rule 5).
+    pub max_output: usize,
 }
 
 impl Default for RunOpts {
@@ -71,6 +80,7 @@ impl Default for RunOpts {
             timeout: Duration::from_secs(2),
             memory_limit: 32 * 1024 * 1024,
             max_stack: 512 * 1024,
+            max_output: 64 * 1024,
         }
     }
 }
@@ -89,8 +99,12 @@ pub enum RunError {
     Threw { msg: String },
     #[error("tool ran past its {0:?} cap")]
     Timeout(Duration),
+    /// The engine refused an allocation past [`RunOpts::memory_limit`] and the run failed.
     #[error("tool ran out of memory")]
     OutOfMemory,
+    /// The result was longer than [`RunOpts::max_output`] bytes.
+    #[error("tool output is {got} bytes, over the {max} byte cap")]
+    OutputTooLarge { max: usize, got: usize },
     /// Reader returned something that is not JSON, or a planner returned a non-string.
     #[error("bad return: {0}")]
     BadReturn(String),
@@ -232,7 +246,11 @@ const PRELUDE: &str = r#"(function (q, keep) {
   const allow = new Set(keep);
   for (const k of Reflect.ownKeys(g)) {
     if (typeof k !== "string" || allow.has(k)) continue;
-    try { delete g[k]; } catch (_) {}
+    let gone = false;
+    try { gone = delete g[k]; } catch (_) {}
+    if (!gone || Reflect.getOwnPropertyDescriptor(g, k) !== undefined) {
+      throw new TypeError("cannot remove global `" + k + "`");
+    }
   }
   const deny = function () {
     throw new EvalError("code generation from strings is disabled in tools");
@@ -284,16 +302,101 @@ impl Drop for SlotGuard {
 }
 
 /// rquickjs host closures must be `'js`, which a caller's `&'a dyn PageHost` cannot prove.
-fn erase<'a>(page: &'a dyn PageHost, api: Option<&'a dyn ApiFetch>) -> Hosts {
-    // SAFETY: the erased references are stored only in a `HostSlot` created by `run`, which
-    // also owns the Runtime and Context. JS (and therefore every host closure) executes only
-    // inside `run`, while `'a` is live; `SlotGuard` clears the slot before `run` returns, and
-    // no JS value escapes `run` (results are converted to serde_json / String inside it).
-    unsafe {
-        Hosts {
-            page: std::mem::transmute::<&'a dyn PageHost, &'static dyn PageHost>(page),
-            api: api.map(|a| std::mem::transmute::<&'a dyn ApiFetch, &'static dyn ApiFetch>(a)),
+///
+/// # Safety
+/// The returned [`Hosts`] must not be dereferenced after `'a` ends. `run` upholds this; see
+/// the SAFETY note at its call site.
+unsafe fn erase<'a>(page: &'a dyn PageHost, api: Option<&'a dyn ApiFetch>) -> Hosts {
+    Hosts {
+        page: std::mem::transmute::<&'a dyn PageHost, &'static dyn PageHost>(page),
+        api: api.map(|a| std::mem::transmute::<&'a dyn ApiFetch, &'static dyn ApiFetch>(a)),
+    }
+}
+
+/// The run's wall clock, shared with host functions that block (`api`).
+#[derive(Clone)]
+struct Clock {
+    deadline: Instant,
+    /// Set by the interrupt handler, or by a host call that came back after `deadline`.
+    fired: Rc<Cell<bool>>,
+}
+
+/// The engine's allocator: Rust's global allocator with a byte cap. A refused allocation
+/// sets `hit`, which is how the runner tells an engine out-of-memory from a tool that throws
+/// an error whose text says "out of memory".
+struct CappedAlloc {
+    used: usize,
+    limit: usize,
+    hit: Rc<Cell<bool>>,
+}
+
+impl CappedAlloc {
+    fn admit(&mut self, extra: usize) -> bool {
+        if self.used.saturating_add(extra) > self.limit {
+            self.hit.set(true);
+            false
+        } else {
+            true
         }
+    }
+}
+
+// SAFETY: every pointer comes from `RustAllocator` and goes back to it, so its contract holds
+// unchanged; this wrapper only refuses (returns null, which QuickJS handles as out of memory)
+// and keeps a byte count.
+unsafe impl Allocator for CappedAlloc {
+    fn alloc(&mut self, size: usize) -> *mut u8 {
+        if !self.admit(size) {
+            return std::ptr::null_mut();
+        }
+        let p = RustAllocator.alloc(size);
+        if !p.is_null() {
+            // SAFETY: `p` was just returned by `RustAllocator`.
+            self.used += unsafe { RustAllocator::usable_size(p) };
+        }
+        p
+    }
+
+    fn calloc(&mut self, count: usize, size: usize) -> *mut u8 {
+        let Some(n) = count.checked_mul(size) else {
+            return std::ptr::null_mut();
+        };
+        if !self.admit(n) {
+            return std::ptr::null_mut();
+        }
+        let p = RustAllocator.calloc(count, size);
+        if !p.is_null() {
+            // SAFETY: `p` was just returned by `RustAllocator`.
+            self.used += unsafe { RustAllocator::usable_size(p) };
+        }
+        p
+    }
+
+    unsafe fn dealloc(&mut self, ptr: *mut u8) {
+        if ptr.is_null() {
+            return;
+        }
+        self.used = self.used.saturating_sub(RustAllocator::usable_size(ptr));
+        RustAllocator.dealloc(ptr);
+    }
+
+    unsafe fn realloc(&mut self, ptr: *mut u8, new_size: usize) -> *mut u8 {
+        if ptr.is_null() {
+            return self.alloc(new_size);
+        }
+        let old = RustAllocator::usable_size(ptr);
+        if new_size > old && !self.admit(new_size - old) {
+            return std::ptr::null_mut();
+        }
+        let p = RustAllocator.realloc(ptr, new_size);
+        if !p.is_null() {
+            self.used = self.used.saturating_sub(old) + RustAllocator::usable_size(p);
+        }
+        p
+    }
+
+    unsafe fn usable_size(ptr: *mut u8) -> usize {
+        RustAllocator::usable_size(ptr)
     }
 }
 
@@ -310,16 +413,23 @@ fn run(
     opts: &RunOpts,
 ) -> Result<Out, RunError> {
     let args = check_args(tool, args)?;
-    let rt = Runtime::new().map_err(engine)?;
-    rt.set_memory_limit(opts.memory_limit);
+    let oom = Rc::new(Cell::new(false));
+    let rt = Runtime::new_with_alloc(CappedAlloc {
+        used: 0,
+        limit: opts.memory_limit,
+        hit: oom.clone(),
+    })
+    .map_err(engine)?;
     rt.set_max_stack_size(opts.max_stack);
-    let fired = Rc::new(Cell::new(false));
-    let deadline = Instant::now() + opts.timeout;
+    let clock = Clock {
+        deadline: Instant::now() + opts.timeout,
+        fired: Rc::new(Cell::new(false)),
+    };
     {
-        let fired = fired.clone();
+        let clock = clock.clone();
         rt.set_interrupt_handler(Some(Box::new(move || {
-            if Instant::now() >= deadline {
-                fired.set(true);
+            if Instant::now() >= clock.deadline {
+                clock.fired.set(true);
                 true
             } else {
                 false
@@ -327,16 +437,26 @@ fn run(
         })));
     }
     let ctx = Context::custom::<Intrinsics>(&rt).map_err(engine)?;
-    let slot: HostSlot = Rc::new(Cell::new(Some(erase(host, api))));
+    // SAFETY: `erase` hands out `'static` views of `host` and `api`, which outlive this call.
+    // They are stored only in `slot`, whose clones live in host closures owned by `ctx`/`rt`.
+    // JS (and so every host closure) runs only inside `ctx.with` below, while the borrows are
+    // live. `_guard` is declared after `rt` and `ctx`, so it drops first and empties the slot
+    // before `ctx`/`rt` free the closures (which hold only `Rc`s); a panic in a host call
+    // unwinds through the guard too. Leftover promise jobs are freed without running,
+    // FinalizationRegistry/WeakRef are not reachable from tool code, and no JS value leaves
+    // this function (results become serde_json / String inside `run_in`).
+    let slot: HostSlot = Rc::new(Cell::new(Some(unsafe { erase(host, api) })));
     let _guard = SlotGuard(slot.clone());
-    let res = ctx.with(|ctx| run_in(ctx, tool, &args, &slot, want));
-    res.map_err(|e| {
-        if fired.get() {
-            RunError::Timeout(opts.timeout)
-        } else {
-            e
-        }
-    })
+    let res = ctx.with(|ctx| run_in(ctx, tool, &args, &slot, &clock, want, opts));
+    if clock.fired.get() {
+        // The wall cap wins even over `Ok`: a host call may have overrun it and the tool
+        // swallowed the error.
+        return Err(RunError::Timeout(opts.timeout));
+    }
+    match res {
+        Err(_) if oom.get() => Err(RunError::OutOfMemory),
+        r => r,
+    }
 }
 
 fn run_in<'js>(
@@ -344,11 +464,13 @@ fn run_in<'js>(
     tool: &Tool,
     args: &serde_json::Value,
     slot: &HostSlot,
+    clock: &Clock,
     want: ToolKind,
+    opts: &RunOpts,
 ) -> Result<Out, RunError> {
     let has_api = slot.get().is_some_and(|h| h.api.is_some());
     install_prelude(&ctx)?;
-    let page = page_object(&ctx, slot, has_api)?;
+    let page = page_object(&ctx, slot, clock, has_api)?;
     let args_js = to_js(&ctx, args)?;
 
     let name = format!("{}.js", tool.namespaced);
@@ -371,9 +493,23 @@ fn run_in<'js>(
         })?;
     }
 
+    let fits = |got: usize| {
+        if got > opts.max_output {
+            Err(RunError::OutputTooLarge {
+                max: opts.max_output,
+                got,
+            })
+        } else {
+            Ok(())
+        }
+    };
     match want {
         ToolKind::Planner => match ret.as_string() {
-            Some(s) => Ok(Out::Program(s.to_string().map_err(engine)?)),
+            Some(s) => {
+                let program = s.to_string().map_err(engine)?;
+                fits(program.len())?;
+                Ok(Out::Program(program))
+            }
             None => Err(RunError::BadReturn(format!(
                 "a planner must return an act program string, got {}",
                 ret.type_name()
@@ -383,12 +519,13 @@ fn run_in<'js>(
             let type_name = ret.type_name();
             let json = ctx
                 .json_stringify(ret)
-                .map_err(|e| RunError::BadReturn(describe(&ctx, e)))?
+                .map_err(|e| js_err(&ctx, e, RunError::BadReturn))?
                 .ok_or_else(|| {
                     RunError::BadReturn(format!("a reader must return JSON, got {type_name}"))
                 })?
                 .to_string()
                 .map_err(engine)?;
+            fits(json.len())?;
             serde_json::from_str(&json)
                 .map(Out::Json)
                 .map_err(|e| RunError::BadReturn(e.to_string()))
@@ -396,18 +533,32 @@ fn run_in<'js>(
     }
 }
 
-fn install_prelude(ctx: &Ctx<'_>) -> Result<(), RunError> {
-    let q = Function::new(ctx.clone(), |s: Coerced<String>| sb_act::quote(&s.0)).map_err(engine)?;
+/// Installs `q` and prunes the globals. A global the prelude cannot remove is a load error:
+/// the tool must not run in a context wider than [`ALLOWED_GLOBALS`].
+fn install_prelude<'js>(ctx: &Ctx<'js>) -> Result<(), RunError> {
+    let q = Function::new(ctx.clone(), |ctx: Ctx<'js>, v: Opt<Value<'js>>| {
+        let v = v.0.unwrap_or_else(|| Value::new_undefined(ctx.clone()));
+        if v.is_undefined() {
+            return Err(Exception::throw_type(&ctx, "q: value is undefined"));
+        }
+        if v.is_null() {
+            return Err(Exception::throw_type(&ctx, "q: value is null"));
+        }
+        let s: Coerced<String> = v.get()?;
+        Ok(sb_act::quote(&s.0))
+    })
+    .map_err(engine)?;
     let prelude: Function = ctx.eval(PRELUDE).map_err(|e| engine_js(ctx, e))?;
     let keep: Vec<String> = ALLOWED_GLOBALS.iter().map(|s| s.to_string()).collect();
     prelude
         .call::<_, ()>((q, keep))
-        .map_err(|e| engine_js(ctx, e))
+        .map_err(|e| RunError::Load(format!("sandbox prelude: {}", describe(ctx, e))))
 }
 
 fn page_object<'js>(
     ctx: &Ctx<'js>,
     slot: &HostSlot,
+    clock: &Clock,
     has_api: bool,
 ) -> Result<Object<'js>, RunError> {
     fn hosts(ctx: &Ctx<'_>, slot: &HostSlot) -> rquickjs::Result<Hosts> {
@@ -441,7 +592,7 @@ fn page_object<'js>(
     let s = slot.clone();
     let text = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, region: rquickjs::prelude::Opt<Coerced<String>>| {
+        move |ctx: Ctx<'js>, region: Opt<Coerced<String>>| {
             let h = hosts(&ctx, &s)?;
             let region = region.0.map(|r| r.0).filter(|r| !r.is_empty());
             Ok::<_, JsError>(h.page.text(region.as_deref()))
@@ -466,12 +617,25 @@ fn page_object<'js>(
 
     if has_api {
         let s = slot.clone();
+        let clock = clock.clone();
         let api = Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: Coerced<String>| {
             let h = hosts(&ctx, &s)?;
             let fetch = h
                 .api
                 .ok_or_else(|| Exception::throw_internal(&ctx, "api is not available"))?;
-            match fetch.api(&url.0) {
+            let overrun = |ctx: &Ctx<'js>| {
+                clock.fired.set(true);
+                Exception::throw_internal(ctx, "api: the run's wall cap is spent")
+            };
+            let remaining = clock.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(overrun(&ctx));
+            }
+            let res = fetch.api(&url.0, remaining);
+            if Instant::now() >= clock.deadline {
+                return Err(overrun(&ctx));
+            }
+            match res {
                 Ok(v) => ctx.json_parse(v.to_string()),
                 Err(m) => Err(Exception::throw_message(&ctx, &m)),
             }
@@ -547,15 +711,14 @@ fn truncate(mut s: String) -> String {
     s
 }
 
-/// Out-of-memory wins over the phase-specific error; anything else is wrapped.
+/// rquickjs's own allocation failure is out of memory; anything else is wrapped. An engine
+/// out-of-memory exception is recognised in `run` by the allocator's flag, never by its text,
+/// so a tool that throws "out of memory" stays [`RunError::Threw`].
 fn js_err(ctx: &Ctx<'_>, e: JsError, wrap: fn(String) -> RunError) -> RunError {
-    let alloc = matches!(e, JsError::Allocation);
-    let msg = describe(ctx, e);
-    if alloc || msg.contains("out of memory") {
-        RunError::OutOfMemory
-    } else {
-        wrap(msg)
+    if matches!(e, JsError::Allocation) {
+        return RunError::OutOfMemory;
     }
+    wrap(describe(ctx, e))
 }
 
 fn load_err(ctx: &Ctx<'_>, e: JsError) -> RunError {

@@ -914,7 +914,11 @@ impl PageHost for SeedPage {
 
 struct Board(Mutex<Vec<String>>);
 impl ApiFetch for Board {
-    fn api(&self, url: &str) -> std::result::Result<serde_json::Value, String> {
+    fn api(
+        &self,
+        url: &str,
+        _remaining: std::time::Duration,
+    ) -> std::result::Result<serde_json::Value, String> {
         self.0.lock().unwrap().push(url.to_string());
         Ok(serde_json::json!({"jobs": [
             {"title": "Engineer", "location": "Berlin", "department": "R&D", "jobUrl": "https://jobs.ashbyhq.com/acme/1", "isListed": true, "isRemote": true},

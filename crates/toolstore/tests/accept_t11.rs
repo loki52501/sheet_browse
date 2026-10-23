@@ -301,7 +301,11 @@ struct Api {
 }
 
 impl ApiFetch for Api {
-    fn api(&self, url: &str) -> std::result::Result<Value, String> {
+    fn api(
+        &self,
+        url: &str,
+        _remaining: std::time::Duration,
+    ) -> std::result::Result<Value, String> {
         self.seen.lock().unwrap().push(url.to_string());
         Ok(self.body.clone())
     }

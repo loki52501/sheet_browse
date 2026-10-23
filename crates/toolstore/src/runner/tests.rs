@@ -60,11 +60,13 @@ impl PageHost for FakePage {
 #[derive(Default)]
 struct FakeApi {
     calls: RefCell<Vec<String>>,
+    budgets: RefCell<Vec<Duration>>,
 }
 
 impl ApiFetch for FakeApi {
-    fn api(&self, url: &str) -> Result<serde_json::Value, String> {
+    fn api(&self, url: &str, remaining: Duration) -> Result<serde_json::Value, String> {
         self.calls.borrow_mut().push(url.to_string());
+        self.budgets.borrow_mut().push(remaining);
         if url.contains("/api/jobs") {
             Ok(json!({"jobs": [{"title": "A"}, {"title": "B"}]}))
         } else {
@@ -151,6 +153,34 @@ fn steps(program: &str) -> Vec<String> {
 }
 
 #[test]
+fn runner_globals_are_exactly_the_allowlist() {
+    let v =
+        read(r#"return Reflect.ownKeys(globalThis).filter(k => typeof k === "string");"#).unwrap();
+    let mut got: Vec<String> = serde_json::from_value(v).unwrap();
+    got.sort();
+    let mut want: Vec<String> = ALLOWED_GLOBALS.iter().map(|s| s.to_string()).collect();
+    want.push("q".into());
+    want.sort();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn runner_prelude_fails_on_a_global_it_cannot_remove() {
+    let rt = Runtime::new().unwrap();
+    let ctx = Context::custom::<Intrinsics>(&rt).unwrap();
+    ctx.with(|ctx| {
+        ctx.eval::<(), _>(
+            "Object.defineProperty(globalThis, 'stuck', { value: 1, configurable: false });",
+        )
+        .unwrap();
+        match install_prelude(&ctx) {
+            Err(RunError::Load(msg)) => assert!(msg.contains("`stuck`"), "{msg}"),
+            r => panic!("{r:?}"),
+        }
+    });
+}
+
+#[test]
 fn runner_globals_absent() {
     let v = read(
         r#"const t = {};
@@ -230,8 +260,10 @@ fn runner_no_import() {
         &[],
         "export default async function () { const m = await import('fs'); return 1; }",
     );
-    let err = run_reader(&t, &FakePage::new(), &json!({}), None).unwrap_err();
-    assert!(matches!(err, RunError::Threw { .. }), "{err:?}");
+    match run_reader(&t, &FakePage::new(), &json!({}), None).unwrap_err() {
+        RunError::Threw { msg } => assert!(msg.contains("could not load module"), "{msg}"),
+        e => panic!("{e:?}"),
+    }
 }
 
 #[test]
@@ -294,6 +326,49 @@ fn runner_quoting_cannot_inject_a_step() {
         assert_eq!(steps(&p).len(), 3, "{evil:?} -> {p}");
         assert!(!steps(&p).iter().any(|s| s == "c#99"), "{evil:?} -> {p}");
     }
+}
+
+#[test]
+fn runner_q_rejects_undefined_and_null() {
+    let v = read(
+        r#"const out = [];
+        for (const f of [() => q(undefined), () => q(null), () => q(), () => q(args.missing)]) {
+          try { out.push(f()); } catch (e) { out.push(e.name + ": " + e.message); }
+        }
+        return out;"#,
+    )
+    .unwrap();
+    assert_eq!(
+        v,
+        json!([
+            "TypeError: q: value is undefined",
+            "TypeError: q: value is null",
+            "TypeError: q: value is undefined",
+            "TypeError: q: value is undefined"
+        ])
+    );
+    // A planner that quotes a missing optional arg fails instead of typing "undefined".
+    let t = tool(
+        ToolKind::Planner,
+        2,
+        &[("email", true)],
+        "export default function (page, args) { return `t#13=${q(args.email)}`; }",
+    );
+    match run_planner(&t, &FakePage::new(), &json!({})).unwrap_err() {
+        RunError::Threw { msg } => {
+            assert!(msg.starts_with("TypeError: q: value is undefined"), "{msg}")
+        }
+        e => panic!("{e:?}"),
+    }
+    // Falsy values that are present still quote.
+    assert_eq!(
+        read("return [q(0), q(false), q('')];").unwrap(),
+        json!([
+            sb_act::quote("0"),
+            sb_act::quote("false"),
+            sb_act::quote("")
+        ])
+    );
 }
 
 #[test]
@@ -362,6 +437,58 @@ fn runner_api_reaches_fetch_for_phase1_reader() {
             "https://jobs.example/nope".to_string()
         ]
     );
+    // Each call is told what is left of the default 2 s cap.
+    for b in api.budgets.borrow().iter() {
+        assert!(*b > Duration::ZERO && *b <= Duration::from_secs(2), "{b:?}");
+    }
+}
+
+/// Overruns whatever budget it is given, then answers.
+#[derive(Default)]
+struct SlowApi {
+    budgets: RefCell<Vec<Duration>>,
+}
+
+impl ApiFetch for SlowApi {
+    fn api(&self, _url: &str, remaining: Duration) -> Result<serde_json::Value, String> {
+        self.budgets.borrow_mut().push(remaining);
+        // Spins on the clock (no sleep): the point of this fake is to come back late.
+        let until = Instant::now() + remaining + Duration::from_millis(20);
+        while Instant::now() < until {
+            std::hint::spin_loop();
+        }
+        Ok(json!({"late": true}))
+    }
+}
+
+#[test]
+fn runner_api_past_the_deadline_is_timeout() {
+    let opts = RunOpts {
+        timeout: Duration::from_millis(150),
+        ..RunOpts::default()
+    };
+    for body in [
+        // The late Ok is used as the result.
+        "return page.api('https://jobs.example/api/jobs');",
+        // The tool swallows the error and returns right away.
+        "try { page.api('https://jobs.example/api/jobs'); } catch (e) {} return 1;",
+        // A second call after the budget is spent never reaches the host.
+        "try { page.api('https://a.example/1'); } catch (e) {}
+         try { page.api('https://a.example/2'); } catch (e) {} return 2;",
+    ] {
+        let api = SlowApi::default();
+        let start = Instant::now();
+        let t = reader(1, body);
+        let err = run_reader_with(&t, &FakePage::new(), &json!({}), Some(&api), &opts).unwrap_err();
+        assert_eq!(err, RunError::Timeout(Duration::from_millis(150)), "{body}");
+        assert!(start.elapsed() < Duration::from_secs(2), "{body}");
+        let budgets = api.budgets.borrow();
+        assert_eq!(budgets.len(), 1, "{body}");
+        assert!(
+            budgets[0] > Duration::ZERO && budgets[0] <= Duration::from_millis(150),
+            "{body}: {budgets:?}"
+        );
+    }
 }
 
 #[test]
@@ -423,8 +550,93 @@ fn runner_memory_and_stack_caps() {
     .unwrap_err();
     assert_eq!(err, RunError::OutOfMemory);
 
-    let err = read("function f(n) { return f(n + 1) + 1; } return f(0);").unwrap_err();
-    assert!(matches!(err, RunError::Threw { .. }), "{err:?}");
+    match read("function f(n) { return f(n + 1) + 1; } return f(0);").unwrap_err() {
+        RunError::Threw { msg } => assert!(msg.starts_with("RangeError"), "{msg}"),
+        e => panic!("{e:?}"),
+    }
+}
+
+#[test]
+fn runner_oom_in_json_stringify_is_out_of_memory() {
+    let opts = RunOpts {
+        memory_limit: 8 * 1024 * 1024,
+        max_output: usize::MAX,
+        ..RunOpts::default()
+    };
+    // 16 references to one 1 MiB string: cheap to build, 16 MiB to serialize.
+    let t = reader(
+        2,
+        "const s = 'x'.repeat(1 << 20); return new Array(16).fill(s);",
+    );
+    let err = run_reader_with(&t, &FakePage::new(), &json!({}), None, &opts).unwrap_err();
+    assert_eq!(err, RunError::OutOfMemory);
+}
+
+#[test]
+fn runner_thrown_out_of_memory_text_stays_threw() {
+    for body in [
+        "throw new Error('out of memory');",
+        "throw new InternalError('out of memory');",
+        "throw 'out of memory';",
+    ] {
+        match read(body).unwrap_err() {
+            RunError::Threw { msg } => assert!(msg.contains("out of memory"), "{msg}"),
+            e => panic!("{body}: {e:?}"),
+        }
+    }
+    // The same text thrown while serializing the result is a bad return, not OutOfMemory.
+    match read("return { toJSON() { throw new InternalError('out of memory'); } };").unwrap_err() {
+        RunError::BadReturn(msg) => assert!(msg.contains("out of memory"), "{msg}"),
+        e => panic!("{e:?}"),
+    }
+}
+
+#[test]
+fn runner_output_cap() {
+    assert_eq!(RunOpts::default().max_output, 64 * 1024);
+    let small = RunOpts {
+        max_output: 12,
+        ..RunOpts::default()
+    };
+    // The JSON text of "0123456789" is 12 bytes: at the cap is fine, one more is not.
+    let at = reader(2, "return '0123456789';");
+    assert_eq!(
+        run_reader_with(&at, &FakePage::new(), &json!({}), None, &small).unwrap(),
+        json!("0123456789")
+    );
+    let over = reader(2, "return '0123456789a';");
+    assert_eq!(
+        run_reader_with(&over, &FakePage::new(), &json!({}), None, &small),
+        Err(RunError::OutputTooLarge { max: 12, got: 13 })
+    );
+    // Default cap: a 70,000-char string is refused, and a bigger cap lets it through.
+    let big = reader(2, "return 'x'.repeat(70000);");
+    assert_eq!(
+        run_reader(&big, &FakePage::new(), &json!({}), None),
+        Err(RunError::OutputTooLarge {
+            max: 64 * 1024,
+            got: 70002
+        })
+    );
+    let roomy = RunOpts {
+        max_output: 1 << 20,
+        ..RunOpts::default()
+    };
+    assert!(run_reader_with(&big, &FakePage::new(), &json!({}), None, &roomy).is_ok());
+    // Planners: the program text.
+    let t = tool(
+        ToolKind::Planner,
+        2,
+        &[],
+        "export default function () { return 'c#1; '.repeat(20000); }",
+    );
+    assert_eq!(
+        run_planner(&t, &FakePage::new(), &json!({})),
+        Err(RunError::OutputTooLarge {
+            max: 64 * 1024,
+            got: 100000
+        })
+    );
 }
 
 #[test]
