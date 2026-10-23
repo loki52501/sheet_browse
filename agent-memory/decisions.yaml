@@ -162,3 +162,6 @@ decisions:
   - id: D-108
     text: "harness_core::testing (cfg(test) or cargo feature `testing`) provides MemStore, an in-memory MemoryStore seeded with migration 0001's gate rules, and ScriptedAsker, an Asker that returns queued outcomes or applies card.on_timeout immediately and records every card. Gate, dispatch and echo tests use them; other areas may enable the feature as a dev-dependency."
     why: "D-48 says tool-server tests run dispatch with a fake store and a scripted asker; one shared fake avoids four diverging copies and keeps core's unit tests free of Postgres."
+  - id: D-109
+    text: "Resolves B-100: an ask times out to proceed only for Send(new) and Account with strict off; every other asked class (Pay, Delete, Submit including Submit:job_application and Submit:signature, and any Read/Fill/Navigate a user rule turns into an ask) times out to skip."
+    why: "H-1.3 names only four classes; the standing rule 'job submissions and signatures are mine' means silence must never submit for the user, and a user who wrote an ask rule for a lenient class wanted to be asked, not overridden after 60 s."
