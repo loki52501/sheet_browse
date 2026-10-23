@@ -9,19 +9,35 @@
 //! `name = { value = "...", kind = "secret" | "personal" }`, decrypted with an identity
 //! from the OS keychain (default) or an identity file outside the repo. A missing vault
 //! file opens as an empty vault; the identity is generated on the first [`Vault::set`].
-//! Scrubbing (D-102): aho-corasick leftmost-longest over every value and its JSON-escaped
-//! and percent-encoded spellings.
+//! `set` holds an exclusive OS lock on `<vault file>.lock` for its whole
+//! read-modify-write, so concurrent sets (threads or processes) never orphan the vault
+//! with a second key or drop each other's entries.
+//!
+//! Scrubbing (D-102): an ASCII-case-insensitive aho-corasick automaton over every value
+//! and its encoded spellings (JSON, Rust Debug, every common percent-encoding including
+//! the browser's WHATWG URL sets, double percent-encoding, and Unicode case forms; see
+//! [`spellings`]). All overlapping matches are found and the union of their spans is
+//! replaced, so two entries that overlap in the text leave no fragment behind.
+//!
+//! Plaintext hygiene: values, decrypted plaintext, the serialized TOML and every
+//! scrub spelling live in `Zeroizing` buffers sized up front so they never reallocate
+//! (a reallocation leaves an unzeroed copy). Not zeroized, and not fixable without
+//! forking dependencies: age's `StreamWriter` plaintext chunk buffer while encrypting,
+//! `toml`'s parser internals while decrypting (strings with escapes are unescaped into
+//! its own buffers before they move into an entry), std's `to_lowercase` growth for
+//! non-ASCII values, and the aho-corasick automaton's pattern store, which holds every
+//! spelling for the scrubber's lifetime.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Once, RwLock};
 
 use age::secrecy::ExposeSecret;
 use aho_corasick::{AhoCorasick, MatchKind};
-use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +61,15 @@ pub enum VaultError {
 pub enum EntryKind {
     Secret,
     Personal,
+}
+
+impl EntryKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            EntryKind::Secret => "secret",
+            EntryKind::Personal => "personal",
+        }
+    }
 }
 
 /// Where the age identity comes from. Never the repo, never an env var (D-1).
@@ -101,6 +126,21 @@ impl fmt::Debug for Resolved<'_> {
 struct Entry {
     value: Zeroizing<String>,
     kind: EntryKind,
+}
+
+fn clone_entries(entries: &BTreeMap<String, Entry>) -> BTreeMap<String, Entry> {
+    entries
+        .iter()
+        .map(|(k, e)| {
+            (
+                k.clone(),
+                Entry {
+                    value: e.value.clone(),
+                    kind: e.kind,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Where a file-backed vault lives; `None` for [`Vault::in_memory`].
@@ -174,38 +214,38 @@ impl Vault {
     ///
     /// `name` must be `[A-Za-z0-9_.-]+` so that `@vault(name)` can reference it; otherwise
     /// `BadReference(byte offset of the first bad char in name)`. For a file-backed vault
-    /// the file is rewritten atomically (temp file + rename); when neither the vault file
-    /// nor the identity exists yet, a fresh identity is generated and stored in the key
-    /// source first. If the vault is the installed global one, the global scrub follows.
+    /// the whole read-modify-write runs under an exclusive lock on `<vault file>.lock`:
+    /// the current file is re-read and decrypted (so entries set by other processes since
+    /// `open` are kept and picked up), the change applied, and the file rewritten
+    /// atomically (temp file + rename). When neither the vault file nor the identity
+    /// exists yet, a fresh identity is generated and stored in the key source first,
+    /// also under the lock. If the vault is the installed global one, the global scrub
+    /// follows.
     pub fn set(&mut self, name: &str, value: &str, kind: EntryKind) -> Result<(), VaultError> {
         if let Some(bad) = invalid_name_at(name) {
             return Err(VaultError::BadReference(bad));
         }
-        let mut next: BTreeMap<String, Entry> = self
-            .entries
-            .iter()
-            .map(|(k, e)| {
-                (
-                    k.clone(),
-                    Entry {
-                        value: e.value.clone(),
-                        kind: e.kind,
-                    },
-                )
-            })
-            .collect();
-        next.insert(
-            name.to_owned(),
-            Entry {
-                value: Zeroizing::new(value.to_owned()),
-                kind,
-            },
-        );
-        if let Some(backing) = &self.backing {
-            let identity = identity_for_write(backing)?;
-            let ciphertext = encrypt_entries(&identity, &next)?;
-            write_atomic(&backing.path, &ciphertext)?;
-        }
+        let entry = Entry {
+            value: Zeroizing::new(value.to_owned()),
+            kind,
+        };
+        let next = match &self.backing {
+            None => {
+                let mut next = clone_entries(&self.entries);
+                next.insert(name.to_owned(), entry);
+                next
+            }
+            Some(backing) => {
+                let lock = lock_exclusive(&backing.path)?;
+                let (identity, mut next) = current_locked(backing, &self.entries)?;
+                next.insert(name.to_owned(), entry);
+                let ciphertext = encrypt_entries(&identity, &next)?;
+                write_atomic(&backing.path, &ciphertext)?;
+                // Closing the handle releases the lock.
+                drop(lock);
+                next
+            }
+        };
         let scrubber = Arc::new(Scrubber::build(&next));
         replace_global_if_installed(&self.scrubber, &scrubber);
         self.entries = next;
@@ -260,6 +300,8 @@ impl Vault {
 
     /// Makes this vault the one the process-wide [`scrub`] uses (logs, panics, ledger).
     /// Also installs (once per process) a panic hook that scrubs the panic message.
+    /// Call it after any other `std::panic::set_hook`: a hook set later replaces this
+    /// one and would print dirty panic messages raw.
     pub fn install_global(&self) {
         *GLOBAL.write().unwrap_or_else(|e| e.into_inner()) = Some(self.scrubber.clone());
         PANIC_HOOK.call_once(install_panic_hook);
@@ -339,11 +381,100 @@ fn parse_refs(s: &str) -> Result<Vec<Ref<'_>>, VaultError> {
 // ---------------------------------------------------------------------------------------
 // Scrubbing (D-102)
 
+/// What [`Scrubber::scrub`] returns when the automaton could not be built: the whole
+/// string is withheld (fail closed) rather than passed through unscrubbed.
+const SCRUB_WITHHELD: &str = "@vault(?) [output withheld: vault scrubber unavailable]";
+
+enum Matcher {
+    /// No non-empty value: nothing to scrub.
+    Empty,
+    Ready(AhoCorasick),
+    /// Building failed (size limits far beyond any vault); scrub fails closed.
+    Failed,
+}
+
 struct Scrubber {
-    /// `None` when there is no non-empty value.
-    ac: Option<AhoCorasick>,
+    matcher: Matcher,
     /// Replacement literal per pattern id.
     literals: Vec<String>,
+}
+
+/// A redacted byte range of the scrubbed text and the match that names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Span {
+    start: usize,
+    end: usize,
+    /// End of the span's leading match (leftmost, then longest, then lowest pattern id).
+    lead_end: usize,
+    pid: usize,
+}
+
+impl Span {
+    fn new(start: usize, end: usize, pid: usize) -> Span {
+        Span {
+            start,
+            end,
+            lead_end: end,
+            pid,
+        }
+    }
+
+    /// Unions `other` into `self` (the caller checked that they overlap or touch).
+    fn absorb(&mut self, other: Span) {
+        let other_leads = other.start < self.start
+            || (other.start == self.start
+                && (other.lead_end > self.lead_end
+                    || (other.lead_end == self.lead_end && other.pid < self.pid)));
+        if other_leads {
+            self.start = other.start;
+            self.lead_end = other.lead_end;
+            self.pid = other.pid;
+        }
+        self.end = self.end.max(other.end);
+    }
+}
+
+/// Merges matches into disjoint, sorted spans: overlapping or adjacent matches become
+/// one span named by its leftmost match.
+///
+/// Overlapping aho-corasick matches arrive in order of end offset, so a new match can
+/// only overlap or touch a suffix of the spans built so far: a stack merge, linear in
+/// the number of matches. A match that breaks that order goes to `late` and is merged by
+/// sorting (not expected; it keeps the result independent of the iterator's order).
+fn merge_spans(matches: impl Iterator<Item = Span>) -> Vec<Span> {
+    let mut spans: Vec<Span> = Vec::new();
+    let mut late: Vec<Span> = Vec::new();
+    let mut last_end = 0;
+    for mut cur in matches {
+        if cur.end < last_end {
+            late.push(cur);
+            continue;
+        }
+        last_end = cur.end;
+        while let Some(&top) = spans.last() {
+            if top.end < cur.start {
+                break;
+            }
+            spans.pop();
+            let mut merged = top;
+            merged.absorb(cur);
+            cur = merged;
+        }
+        spans.push(cur);
+    }
+    if late.is_empty() {
+        return spans;
+    }
+    spans.append(&mut late);
+    spans.sort_unstable_by_key(|sp| sp.start);
+    let mut merged: Vec<Span> = Vec::with_capacity(spans.len());
+    for sp in spans {
+        match merged.last_mut() {
+            Some(top) if sp.start <= top.end => top.absorb(sp),
+            _ => merged.push(sp),
+        }
+    }
+    merged
 }
 
 impl Scrubber {
@@ -355,92 +486,220 @@ impl Scrubber {
                 continue;
             }
             let literal = vault_literal(name);
-            let mut seen: HashSet<&str> = HashSet::new();
-            let spellings = spellings(&e.value);
-            for sp in &spellings {
-                if seen.insert(sp.as_str()) {
-                    patterns.push(sp.clone());
-                    literals.push(literal.clone());
-                }
+            for sp in spellings(&e.value) {
+                patterns.push(sp);
+                literals.push(literal.clone());
             }
         }
         if patterns.is_empty() {
-            return Scrubber { ac: None, literals };
+            return Scrubber {
+                matcher: Matcher::Empty,
+                literals,
+            };
         }
-        let ac = AhoCorasick::builder()
-            .match_kind(MatchKind::LeftmostLongest)
+        // Standard semantics for the overlapping search. ASCII case-insensitive because
+        // sites echo values lower- or upper-cased (over-scrubbing is harmless); this also
+        // makes upper- and lower-hex percent and `\u` escapes the same pattern.
+        let matcher = match AhoCorasick::builder()
+            .match_kind(MatchKind::Standard)
+            .ascii_case_insensitive(true)
             .build(patterns.iter().map(|p| p.as_bytes()))
-            // Building only fails on size limits far beyond any vault.
-            .ok();
-        Scrubber { ac, literals }
+        {
+            Ok(ac) => Matcher::Ready(ac),
+            Err(_) => Matcher::Failed,
+        };
+        Scrubber { matcher, literals }
     }
 
+    /// Redacts the union of all (overlapping) match spans, see [`merge_spans`].
     fn scrub(&self, s: &str) -> String {
-        let Some(ac) = &self.ac else {
-            return s.to_owned();
+        let ac = match &self.matcher {
+            Matcher::Empty => return s.to_owned(),
+            Matcher::Failed => return SCRUB_WITHHELD.to_owned(),
+            Matcher::Ready(ac) => ac,
         };
+        let spans = merge_spans(
+            ac.find_overlapping_iter(s)
+                .map(|m| Span::new(m.start(), m.end(), m.pattern().as_usize())),
+        );
         let mut out = String::with_capacity(s.len());
-        ac.replace_all_with(s, &mut out, |m, _, dst| {
-            dst.push_str(&self.literals[m.pattern().as_usize()]);
-            true
-        });
+        let mut at = 0;
+        for sp in &spans {
+            // Patterns are whole UTF-8 strings and ASCII case folding keeps char
+            // boundaries, so every span starts and ends on one.
+            out.push_str(s.get(at..sp.start).unwrap_or_default());
+            out.push_str(&self.literals[sp.pid]);
+            at = sp.end;
+        }
+        out.push_str(s.get(at..).unwrap_or_default());
         out
     }
 }
 
-/// encodeURIComponent keeps `A-Z a-z 0-9 - _ . ! ~ * ' ( )`.
-const URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'_')
-    .remove(b'.')
-    .remove(b'!')
-    .remove(b'~')
-    .remove(b'*')
-    .remove(b'\'')
-    .remove(b'(')
-    .remove(b')');
+/// A percent-encode set over ASCII bytes; non-ASCII bytes are always encoded.
+#[derive(Clone, Copy)]
+enum PctSet {
+    /// Encode every ASCII byte except alphanumerics and these.
+    Keep(&'static [u8]),
+    /// Encode C0 controls, DEL and these (the WHATWG URL standard's sets).
+    Encode(&'static [u8]),
+}
 
-/// application/x-www-form-urlencoded keeps `A-Z a-z 0-9 * - . _` and writes space as `+`.
-const FORM: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'*')
-    .remove(b'-')
-    .remove(b'.')
-    .remove(b'_');
+impl PctSet {
+    fn encodes(self, b: u8) -> bool {
+        if !b.is_ascii() {
+            return true;
+        }
+        match self {
+            PctSet::Keep(keep) => !(b.is_ascii_alphanumeric() || keep.contains(&b)),
+            PctSet::Encode(enc) => b < 0x20 || b == 0x7f || enc.contains(&b),
+        }
+    }
+}
 
-/// The spellings of `v` that scrub replaces: raw, JSON-escaped (serde style, ASCII-only
-/// style, and escaped twice for JSON inside a JSON string), and percent-encoded
-/// (all non-alphanumerics, encodeURIComponent, form encoding; upper and lower hex).
+/// Every percent-encoding a value is likely to be echoed in.
+const PCT_SETS: &[PctSet] = &[
+    // Every non-alphanumeric byte.
+    PctSet::Keep(b""),
+    // encodeURIComponent.
+    PctSet::Keep(b"-_.!~*'()"),
+    // encodeURI.
+    PctSet::Keep(b";,/?:@&=+$-_.!~*'()#"),
+    // application/x-www-form-urlencoded (URLSearchParams, HTML forms).
+    PctSet::Keep(b"*-._"),
+    // RFC 3986 unreserved (Python quote(safe=''), most HTTP clients).
+    PctSet::Keep(b"-._~"),
+    // Python quote() default.
+    PctSet::Keep(b"-._~/"),
+    // WHATWG fragment.
+    PctSet::Encode(b" \"<>`"),
+    // WHATWG query.
+    PctSet::Encode(b" \"#<>"),
+    // WHATWG special-query.
+    PctSet::Encode(b" \"#<>'"),
+    // WHATWG path, before and after `^` joined it.
+    PctSet::Encode(b" \"#<>?`{}"),
+    PctSet::Encode(b" \"#<>?^`{}"),
+    // WHATWG userinfo. (The WHATWG component set equals encodeURIComponent's.)
+    PctSet::Encode(b" \"#<>?^`{}/:;=@[\\]|"),
+];
+
+/// The second level of double encoding (a URL or query inside a `continue=` parameter):
+/// the encoders that turn `%` into `%25`. The WHATWG sets above leave `%` alone, so they
+/// add nothing at this level.
+const OUTER_PCT_SETS: &[PctSet] = &[
+    PctSet::Keep(b""),
+    PctSet::Keep(b"-_.!~*'()"),
+    PctSet::Keep(b"*-._"),
+    PctSet::Keep(b"-._~"),
+    PctSet::Keep(b"-._~/"),
+];
+
+/// The spellings of `v` that scrub replaces. Base texts: `v`, plus for a value with
+/// non-ASCII characters its lower- and upper-cased forms (ASCII case is handled by the
+/// case-insensitive automaton). For each base text: raw; JSON-escaped (serde style,
+/// with `\/`, ASCII-only, and escaped twice for JSON inside a JSON string); Rust `{:?}`
+/// without quotes, `escape_debug` and `escape_default`; percent-encoded in every
+/// [`PCT_SETS`] set (space as `%20` and as `+`), and each of those percent-encoded once
+/// more in every [`OUTER_PCT_SETS`] set (double encoding, `%25XX`). Duplicates up to ASCII case are dropped,
+/// so upper and lower hex are one pattern.
+///
+/// Not covered (known limit): values a site reformats (input masks for phone, card and
+/// date numbers), base64.
+///
+/// Every temporary is a `Zeroizing<String>` sized up front so it never reallocates.
 fn spellings(v: &str) -> Vec<Zeroizing<String>> {
-    let mut out = vec![Zeroizing::new(v.to_owned())];
-    let json = Zeroizing::new(json_escape(v));
-    out.push(Zeroizing::new(json_escape(&json)));
+    let mut bases = vec![Zeroizing::new(v.to_owned())];
+    if !v.is_ascii() {
+        bases.push(case_map(v, |c, out| out.extend(c.to_lowercase())));
+        bases.push(case_map(v, |c, out| out.extend(c.to_uppercase())));
+        // std's to_lowercase also applies the final-sigma rule. It may reallocate
+        // internally (unzeroed residue); the result itself is zeroized.
+        bases.push(Zeroizing::new(v.to_lowercase()));
+        dedup_ascii_ci(&mut bases);
+    }
+    let mut out = Vec::new();
+    for t in &bases {
+        push_spellings(t, &mut out);
+    }
+    out.extend(bases);
+    dedup_ascii_ci(&mut out);
+    out
+}
+
+fn push_spellings(t: &str, out: &mut Vec<Zeroizing<String>>) {
+    let json = json_escape(t, false);
+    if t.contains('/') {
+        out.push(json_escape_slash(&json));
+    }
+    out.push(json_escape(&json, false));
     out.push(json);
-    out.push(Zeroizing::new(json_escape_ascii(v)));
-    let pct = [
-        Zeroizing::new(utf8_percent_encode(v, NON_ALPHANUMERIC).to_string()),
-        Zeroizing::new(utf8_percent_encode(v, URI_COMPONENT).to_string()),
-        Zeroizing::new(utf8_percent_encode(v, FORM).to_string().replace("%20", "+")),
-    ];
-    for p in pct {
-        out.push(Zeroizing::new(lower_hex_escapes(&p)));
-        out.push(p);
+    out.push(json_escape(t, true));
+    out.push(debug_inner(t));
+    out.push(collect_chars(t, t.escape_debug()));
+    out.push(collect_chars(t, t.escape_default()));
+    let mut single = Vec::new();
+    for &set in PCT_SETS {
+        single.push(pct_encode(t, set, false));
+        if t.contains(' ') {
+            single.push(pct_encode(t, set, true));
+        }
+    }
+    dedup_ascii_ci(&mut single);
+    for p in &single {
+        if !p.contains('%') {
+            continue;
+        }
+        for &outer in OUTER_PCT_SETS {
+            out.push(pct_encode(p, outer, false));
+        }
+    }
+    out.extend(single);
+}
+
+/// Sorts and drops spellings equal up to ASCII case (the automaton ignores it anyway).
+fn dedup_ascii_ci(v: &mut Vec<Zeroizing<String>>) {
+    v.sort_unstable_by(|a, b| {
+        a.bytes()
+            .map(|x| x.to_ascii_lowercase())
+            .cmp(b.bytes().map(|x| x.to_ascii_lowercase()))
+    });
+    v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+}
+
+/// Char-wise case mapping into a buffer sized for the worst expansion (3 bytes per byte).
+fn case_map(v: &str, map: impl Fn(char, &mut String)) -> Zeroizing<String> {
+    let mut out = Zeroizing::new(String::with_capacity(v.len() * 3));
+    for c in v.chars() {
+        map(c, &mut out);
     }
     out
 }
 
-/// `serde_json` string escaping without the surrounding quotes.
-fn json_escape(v: &str) -> String {
-    let quoted = Zeroizing::new(serde_json::to_string(v).unwrap_or_default());
-    quoted
-        .get(1..quoted.len().saturating_sub(1))
-        .unwrap_or_default()
-        .to_owned()
+/// Percent-encodes `t` with upper-case hex. `plus` writes space as `+`.
+fn pct_encode(t: &str, set: PctSet, plus: bool) -> Zeroizing<String> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = Zeroizing::new(String::with_capacity(t.len() * 3));
+    for b in t.bytes() {
+        if plus && b == b' ' {
+            out.push('+');
+        } else if set.encodes(b) {
+            out.push('%');
+            out.push(char::from(HEX[usize::from(b >> 4)]));
+            out.push(char::from(HEX[usize::from(b & 0xf)]));
+        } else {
+            out.push(char::from(b));
+        }
+    }
+    out
 }
 
-/// JSON escaping with every non-ASCII char as `\uXXXX` (Python `ensure_ascii`).
-fn json_escape_ascii(v: &str) -> String {
-    let mut out = String::with_capacity(v.len() * 2);
-    for c in v.chars() {
+/// JSON string escaping without the surrounding quotes. With `ascii`, every non-ASCII
+/// char is `\uXXXX` (Python `ensure_ascii`); without, this is exactly `serde_json`.
+fn json_escape(t: &str, ascii: bool) -> Zeroizing<String> {
+    // Worst case 6 bytes out per byte in (`\u001f`; a 4-byte char is 12 as a pair).
+    let mut out = Zeroizing::new(String::with_capacity(t.len() * 6));
+    for c in t.chars() {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
@@ -449,7 +708,7 @@ fn json_escape_ascii(v: &str) -> String {
             '\t' => out.push_str("\\t"),
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 || !c.is_ascii() => {
+            c if (c as u32) < 0x20 || (ascii && !c.is_ascii()) => {
                 let mut buf = [0u16; 2];
                 for unit in c.encode_utf16(&mut buf) {
                     let _ = write!(out, "\\u{unit:04x}");
@@ -461,21 +720,34 @@ fn json_escape_ascii(v: &str) -> String {
     out
 }
 
-/// `%2F` -> `%2f`.
-fn lower_hex_escapes(p: &str) -> String {
-    let mut out = String::with_capacity(p.len());
-    let mut hex_left = 0;
-    for c in p.chars() {
-        if hex_left > 0 {
-            out.push(c.to_ascii_lowercase());
-            hex_left -= 1;
-        } else {
-            if c == '%' {
-                hex_left = 2;
-            }
-            out.push(c);
+/// A JSON spelling with `/` escaped as `\/` (PHP, some Java encoders).
+fn json_escape_slash(json: &str) -> Zeroizing<String> {
+    let mut out = Zeroizing::new(String::with_capacity(json.len() * 2));
+    for c in json.chars() {
+        if c == '/' {
+            out.push('\\');
         }
+        out.push(c);
     }
+    out
+}
+
+/// `format!("{t:?}")` without the surrounding quotes (assert_eq!, unwrap, tracing `?`).
+fn debug_inner(t: &str) -> Zeroizing<String> {
+    // Worst case 6 bytes out per byte in (`\u{1f}`), plus the quotes.
+    let mut out = Zeroizing::new(String::with_capacity(t.len() * 6 + 2));
+    let _ = write!(out, "{t:?}");
+    out.pop();
+    if !out.is_empty() {
+        out.remove(0);
+    }
+    out
+}
+
+/// Collects `str::escape_debug` / `escape_default` output (at most 6 bytes per byte in).
+fn collect_chars(t: &str, chars: impl Iterator<Item = char>) -> Zeroizing<String> {
+    let mut out = Zeroizing::new(String::with_capacity(t.len() * 6));
+    out.extend(chars);
     out
 }
 
@@ -521,12 +793,14 @@ fn install_panic_hook() {
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_default();
         let bt = std::backtrace::Backtrace::capture();
-        let mut text = format!("\nthread '{name}' panicked at {at}:\n{scrubbed}\n");
+        let mut text = format!("\nthread '{name}' panicked at {at}:\n{scrubbed}");
         if bt.status() == std::backtrace::BacktraceStatus::Captured {
-            let _ = writeln!(text, "stack backtrace:\n{bt}");
+            let _ = write!(text, "\nstack backtrace:\n{bt}");
         }
-        // One `eprint!` (not a raw stderr handle) so test output capture still applies.
-        eprint!("{text}");
+        // A raw, locked stderr write whose error is ignored: `eprint!` panics when
+        // stderr is broken, and a panic inside the panic hook aborts the process. (It
+        // also bypasses libtest's output capture; the text is scrubbed either way.)
+        let _ = writeln!(std::io::stderr().lock(), "{text}");
     }));
 }
 
@@ -539,19 +813,31 @@ struct FileEntry {
     kind: EntryKind,
 }
 
-#[derive(serde::Serialize)]
-struct FileEntryRef<'a> {
-    value: &'a str,
-    kind: EntryKind,
-}
-
 fn decrypt_entries(
     identity: &age::x25519::Identity,
     ciphertext: &[u8],
 ) -> Result<BTreeMap<String, Entry>, VaultError> {
-    let plain =
-        Zeroizing::new(age::decrypt(identity, ciphertext).map_err(|_| VaultError::Decrypt)?);
-    let text = std::str::from_utf8(&plain).map_err(|_| VaultError::Decrypt)?;
+    let decryptor = age::Decryptor::new_buffered(ciphertext).map_err(|_| VaultError::Decrypt)?;
+    let mut reader = decryptor
+        .decrypt(std::iter::once(identity as &dyn age::Identity))
+        .map_err(|_| VaultError::Decrypt)?;
+    // The plaintext is shorter than the ciphertext (header and tags), so a buffer of the
+    // ciphertext's length never has to grow (growth would leave an unzeroed copy).
+    let mut plain = Zeroizing::new(vec![0u8; ciphertext.len()]);
+    let mut len = 0;
+    loop {
+        if len == plain.len() {
+            // Impossible for a well-formed age file; refuse rather than grow.
+            return Err(VaultError::Decrypt);
+        }
+        match reader.read(&mut plain[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(VaultError::Decrypt),
+        }
+    }
+    let text = std::str::from_utf8(&plain[..len]).map_err(|_| VaultError::Decrypt)?;
     // The parse error is dropped unread: its message can quote the offending line.
     let raw: BTreeMap<String, FileEntry> = toml::from_str(text).map_err(|_| VaultError::Decrypt)?;
     Ok(raw
@@ -568,25 +854,106 @@ fn decrypt_entries(
         .collect())
 }
 
+/// Serializes the entries as TOML by hand into one `Zeroizing` buffer sized for the
+/// worst case, so no intermediate copy of a value is left unzeroed. One line per entry:
+/// `"name" = { value = "...", kind = "secret" }` (names quoted: `.` is a TOML dotted key).
+fn encode_toml(entries: &BTreeMap<String, Entry>) -> Zeroizing<String> {
+    // Escapes are at most 6 bytes per byte; the fixed text per line is under 48 bytes.
+    let cap: usize = entries
+        .iter()
+        .map(|(k, e)| 6 * k.len() + 6 * e.value.len() + 48)
+        .sum();
+    let mut out = Zeroizing::new(String::with_capacity(cap));
+    for (name, e) in entries {
+        out.push('"');
+        toml_escape_into(name, &mut out);
+        out.push_str("\" = { value = \"");
+        toml_escape_into(&e.value, &mut out);
+        out.push_str("\", kind = \"");
+        out.push_str(e.kind.as_str());
+        out.push_str("\" }\n");
+    }
+    out
+}
+
+/// TOML basic-string escaping (control characters and DEL must be escaped).
+fn toml_escape_into(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+}
+
 fn encrypt_entries(
     identity: &age::x25519::Identity,
     entries: &BTreeMap<String, Entry>,
 ) -> Result<Vec<u8>, VaultError> {
-    let view: BTreeMap<&str, FileEntryRef<'_>> = entries
-        .iter()
-        .map(|(k, e)| {
-            (
-                k.as_str(),
-                FileEntryRef {
-                    value: &e.value,
-                    kind: e.kind,
-                },
-            )
-        })
-        .collect();
-    let text = Zeroizing::new(toml::to_string(&view).map_err(|_| VaultError::Decrypt)?);
+    let text = encode_toml(entries);
     age::encrypt(&identity.to_public(), text.as_bytes())
         .map_err(|_| VaultError::Key("age encryption failed".into()))
+}
+
+/// Opens (creating if needed) `<path>.lock` and takes an exclusive OS lock on it,
+/// blocking until other `set`s release theirs. Dropping the file releases the lock. The
+/// lock file is left in place: deleting it would let two lockers hold different files.
+// File::lock is stable since 1.89; the toolchain is newer than the workspace
+// rust-version (1.85). A bump is proposed in the T-05 fix handoff.
+#[allow(clippy::incompatible_msrv)]
+fn lock_exclusive(path: &Path) -> Result<std::fs::File, VaultError> {
+    let dir = parent_dir(path);
+    std::fs::create_dir_all(dir)?;
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "vault".into());
+    name.push(".lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(name))?;
+    file.lock()?;
+    Ok(file)
+}
+
+/// Under the `set` lock: the identity and the entries currently on disk. With no vault
+/// file, the entries are `fallback` (this handle's) and the identity is loaded, or
+/// generated and stored when the key source has none.
+fn current_locked(
+    backing: &Backing,
+    fallback: &BTreeMap<String, Entry>,
+) -> Result<(age::x25519::Identity, BTreeMap<String, Entry>), VaultError> {
+    let identity = load_identity(&backing.key)?;
+    match std::fs::read(&backing.path) {
+        Ok(ciphertext) => {
+            // An existing file is never orphaned by a fresh key.
+            let identity = identity.ok_or_else(|| {
+                VaultError::Key("vault file exists but its age identity is missing".into())
+            })?;
+            let entries = decrypt_entries(&identity, &ciphertext)?;
+            Ok((identity, entries))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let identity = match identity {
+                Some(id) => id,
+                None => generate_identity(&backing.key)?,
+            };
+            Ok((identity, clone_entries(fallback)))
+        }
+        Err(e) => Err(VaultError::Io(e)),
+    }
 }
 
 /// The identity, or `None` when the key source holds none yet.
@@ -620,20 +987,12 @@ fn parse_identity(text: &str) -> Result<age::x25519::Identity, VaultError> {
         .map_err(|why| VaultError::Key(format!("identity is not an age x25519 key ({why})")))
 }
 
-/// Identity for re-encrypting. Generates and stores one only when neither the vault file
-/// nor an identity exists, so an existing file is never orphaned by a fresh key.
-fn identity_for_write(backing: &Backing) -> Result<age::x25519::Identity, VaultError> {
-    if let Some(id) = load_identity(&backing.key)? {
-        return Ok(id);
-    }
-    if backing.path.exists() {
-        return Err(VaultError::Key(
-            "vault file exists but its age identity is missing".into(),
-        ));
-    }
+/// Generates a fresh identity and stores it in the key source. Called only under the
+/// `set` lock when neither the vault file nor an identity exists.
+fn generate_identity(key: &KeySource) -> Result<age::x25519::Identity, VaultError> {
     let id = age::x25519::Identity::generate();
     let secret = id.to_string();
-    match &backing.key {
+    match key {
         KeySource::Keychain { service, account } => {
             keyring::Entry::new(service, account)
                 .and_then(|e| e.set_password(secret.expose_secret()))
@@ -666,18 +1025,27 @@ fn keychain_err(e: keyring::Error) -> VaultError {
     VaultError::Key(msg)
 }
 
+fn parent_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 /// Write `bytes` to a temp file next to `path`, fsync, then rename over `path`.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), VaultError> {
-    let dir = path
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    static TMP_SEQ: AtomicUsize = AtomicUsize::new(0);
+    let dir = parent_dir(path);
     std::fs::create_dir_all(dir)?;
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "vault".into());
-    let tmp = dir.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    // Unique per process and call, so two writers never share a temp file.
+    let tmp = dir.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let result = (|| {
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create(true).truncate(true);
@@ -701,7 +1069,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), VaultError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
     /// Every test value is the canary (never a realistic secret).
     fn canary() -> String {
@@ -717,6 +1085,43 @@ mod tests {
                 .iter()
                 .map(|(n, v)| ((*n).to_owned(), v.clone(), EntryKind::Secret)),
         )
+    }
+
+    /// encodeURIComponent keeps `A-Z a-z 0-9 - _ . ! ~ * ' ( )`.
+    const URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'!')
+        .remove(b'~')
+        .remove(b'*')
+        .remove(b'\'')
+        .remove(b'(')
+        .remove(b')');
+
+    /// application/x-www-form-urlencoded keeps `A-Z a-z 0-9 * - . _`.
+    const FORM: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'*')
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_');
+
+    /// `%2F` -> `%2f`.
+    fn lower_hex_escapes(p: &str) -> String {
+        let mut out = String::with_capacity(p.len());
+        let mut hex_left = 0;
+        for c in p.chars() {
+            if hex_left > 0 {
+                out.push(c.to_ascii_lowercase());
+                hex_left -= 1;
+            } else {
+                if c == '%' {
+                    hex_left = 2;
+                }
+                out.push(c);
+            }
+        }
+        out
     }
 
     /// A unique temp dir removed on drop; never the user's real vault path.
@@ -796,7 +1201,7 @@ mod tests {
         let v = vault_with(&[("test", c.clone())]);
         let json = serde_json::to_string(&serde_json::json!({ "v": c })).unwrap();
         let json_twice = serde_json::to_string(&json).unwrap();
-        let ascii = json_escape_ascii(&c);
+        let ascii = json_escape(&c, true);
         let pct = utf8_percent_encode(&c, NON_ALPHANUMERIC).to_string();
         let comp = utf8_percent_encode(&c, URI_COMPONENT).to_string();
         let form = utf8_percent_encode(&c, FORM)
@@ -807,17 +1212,82 @@ mod tests {
             format!("raw {c} end"),
             json,
             json_twice,
-            format!("[{ascii}]"),
+            format!("[{}]", ascii.as_str()),
             format!("https://x.test/?a={pct}"),
             format!("?a={comp}"),
             format!("a={form}&b=1"),
             format!("?a={lower}"),
         ] {
             let out = v.scrub(&s);
-            assert!(!out.contains(&canary()), "value survived in {out}");
-            assert!(out.contains("@vault(test)"), "{out}");
+            assert!(!out.contains(&canary()), "value survived");
+            assert!(out.contains("@vault(test)"));
         }
         assert_eq!(v.scrub("nothing here"), "nothing here");
+    }
+
+    #[test]
+    fn json_escape_matches_serde_json() {
+        let c = canary();
+        let s = format!("{c}\"\\/\n\r\t\u{8}\u{c}\u{1}\u{1f}\u{7f}\u{e9}\u{200b}\u{1f600}");
+        let serde = serde_json::to_string(&s).unwrap();
+        assert!(*json_escape(&s, false) == serde[1..serde.len() - 1]);
+        let ascii = json_escape(&s, true);
+        assert!(ascii.is_ascii());
+        let back: String = serde_json::from_str(&format!("\"{}\"", ascii.as_str())).unwrap();
+        assert!(back == s, "ASCII-only JSON does not decode to the value");
+    }
+
+    #[test]
+    fn debug_inner_is_debug_without_quotes() {
+        let s = format!("{}\u{1}\u{200b}e\u{301}\"'\\", canary());
+        let full = format!("{s:?}");
+        assert!(*debug_inner(&s) == full[1..full.len() - 1]);
+    }
+
+    #[test]
+    fn merge_spans_any_order() {
+        let sp = |s, e, p| Span::new(s, e, p);
+        // In end order: overlap chain, then a separate span, then an adjacent one.
+        let ordered = [sp(0, 5, 1), sp(3, 8, 0), sp(10, 12, 2), sp(12, 14, 3)];
+        let want = vec![
+            Span {
+                start: 0,
+                end: 8,
+                lead_end: 5,
+                pid: 1,
+            },
+            Span {
+                start: 10,
+                end: 14,
+                lead_end: 12,
+                pid: 2,
+            },
+        ];
+        assert_eq!(merge_spans(ordered.into_iter()), want);
+        // Same matches out of order take the `late` path and give the same spans.
+        let shuffled = [sp(12, 14, 3), sp(3, 8, 0), sp(10, 12, 2), sp(0, 5, 1)];
+        assert_eq!(merge_spans(shuffled.into_iter()), want);
+        // A longer match at the same start leads; a long match bridging two spans
+        // merges them.
+        let bridge = [sp(2, 4, 0), sp(6, 7, 1), sp(2, 9, 2)];
+        assert_eq!(
+            merge_spans(bridge.into_iter()),
+            vec![Span {
+                start: 2,
+                end: 9,
+                lead_end: 9,
+                pid: 2
+            }]
+        );
+    }
+
+    #[test]
+    fn failed_build_withholds_output() {
+        let sc = Scrubber {
+            matcher: Matcher::Failed,
+            literals: Vec::new(),
+        };
+        assert_eq!(sc.scrub("anything"), SCRUB_WITHHELD);
     }
 
     #[test]
@@ -834,9 +1304,9 @@ mod tests {
         let v = vault_with(&[("empty", String::new())]);
         assert_eq!(v.scrub("abc"), "abc");
         assert_eq!(
-            v.resolve_into("[@vault(empty)]", |r| r.expose().to_owned())
+            v.resolve_into("[@vault(empty)]", |r| r.expose().len())
                 .unwrap(),
-            "[]"
+            2
         );
     }
 
@@ -853,7 +1323,8 @@ mod tests {
         let other = format!("{c}-second");
         v.set("other", &other, EntryKind::Personal).unwrap();
         assert_eq!(scrub(&other), "@vault(other)");
-        // A panic message carrying the value is scrubbed by the hook (no crash here).
+        // The hook's scrubbed output is checked in a child process by
+        // tests/vault_accept_t05.rs row 7 and tests/vault_scrub_t05_fix.rs.
         let r = std::panic::catch_unwind(|| panic!("boom {}", canary()));
         assert!(r.is_err());
     }
@@ -947,5 +1418,36 @@ mod tests {
             Vault::open(&path, &missing),
             Err(VaultError::Key(_))
         ));
+        let mut stale = Vault::open(&dir.0.join("none.age"), &missing).unwrap();
+        stale.backing = Some(Backing {
+            path: path.clone(),
+            key: missing.clone(),
+        });
+        assert!(matches!(
+            stale.set("y", &c, EntryKind::Secret),
+            Err(VaultError::Key(_))
+        ));
+        assert!(!dir.0.join("absent.key").exists(), "fresh key generated");
+    }
+
+    #[test]
+    fn set_picks_up_entries_written_since_open() {
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+        let c = canary();
+        let mut a = Vault::open(&path, &key).unwrap();
+        let mut b = Vault::open(&path, &key).unwrap();
+        a.set("a", &format!("{c}-a"), EntryKind::Secret).unwrap();
+        b.set("b", &format!("{c}-b"), EntryKind::Secret).unwrap();
+        let names: Vec<String> = Vault::open(&path, &key)
+            .unwrap()
+            .names()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+        // `b` now knows `a` too, and scrubs it.
+        assert_eq!(b.scrub(&format!("{c}-a")), "@vault(a)");
     }
 }
