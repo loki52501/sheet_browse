@@ -1,0 +1,14 @@
+from: rust-coder-integrator
+to: next
+task: T-10
+date: "2026-10-23"
+state: "sb-sheet integrated and committed: skeleton (B-6.1), find (B-6.2), sheet (B-6.3), W-5 reader with chunking (B-6.4). No code changes were needed at integration: reader.rs already uses crate::data::alias_for and crate::tokens::estimate. cargo fmt clean; cargo clippy -p sb-sheet --all-targets -- -D warnings clean; cargo test -p sb-sheet green (lib 37, find_register 8, read_article 11, skeleton_sheet 8, doctests 0); cargo build --workspace green. No std::fs/env/net/time, no todo!/unimplemented!, no em dashes in crates/sb-sheet/src. lib.rs, index.rs (I-5) and interfaces.yaml unchanged. Example skeleton on examples/register.index.json renders 10 lines."
+not_done: "1) Reviewer pass and tester acceptance (different subagents). 2) Acceptance 6 against the live browser walk once sb-driver produces a real index (later wave). 3) Optional bench/pages/article.html for the reader was not written; read_article tests use an in-test fixture."
+gotchas:
+  - "Decision ids are out of numeric order in decisions.yaml (D-210..D-212 appear before D-205..D-208) because the two coders wrote in parallel; ids are unique, order is cosmetic."
+  - "D-205 (synonyms weigh 0.5, role prior only from typed words) is what keeps acceptance 6 stable on register.html."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/handoffs/T-10-rust-coder-integrator-1.yaml
+verify: "cargo clippy -p sb-sheet --all-targets -- -D warnings && cargo test -p sb-sheet"

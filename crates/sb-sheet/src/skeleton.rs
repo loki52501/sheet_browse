@@ -1,12 +1,386 @@
 //! B-6.1 skeleton. Owned by coder A (T-10).
+//!
+//! Shape (one item per line, empty items omitted, deterministic):
+//!
+//! ```text
+//! Create your account · Fixture Co
+//! http://127.0.0.1/register.html
+//! landmarks: nav, main, footer, region
+//! form f1 "Create your account": 5 fields, submit "Register"
+//! form f2 "Stay in the loop": 1 field, submit "Subscribe"
+//! h1 Create your account · h2 Stay in the loop
+//! 17 elements: 5 links, 6 buttons, 6 fields
+//! ! CHALLENGE #11 iframe "reCAPTCHA"
+//! ! OVERLAY #17 region "Cookie consent"
+//! ! dialog: "Leave site?"
+//! tools for this site: ...
+//! main: form
+//! ```
+//!
+//! Counts, forms and warnings cover visible rows outside CHALLENGE/OPAQUE frames only.
 
-use crate::{IndexRow, SkeletonOpts, TextBlock};
+use crate::data::alias_for;
+use crate::sheet::{clean, sealed_frames};
+use crate::{BlockKind, IndexRow, SkeletonOpts, TextBlock};
+
+/// ARIA roles counted as fields (things a user types into or picks).
+const FIELD_ROLES: &[&str] = &[
+    "textbox",
+    "searchbox",
+    "combobox",
+    "listbox",
+    "checkbox",
+    "radio",
+    "switch",
+    "slider",
+    "spinbutton",
+];
+/// At most this many h1/h2 headings, then `+N more`.
+const HEADINGS_CAP: usize = 6;
+/// At most this many warning lines per kind, then `+N more`.
+const WARN_CAP: usize = 3;
+/// At most this many forms listed, then `+N more forms`.
+const FORMS_CAP: usize = 5;
+/// Below this many words, a main region that holds a form is described as `form`.
+const FORM_PAGE_WORDS: usize = 300;
+/// Landmarks whose text is not page content for the content hint.
+const CHROME: &[&str] = &["nav", "header", "footer", "aside"];
+
+fn is_field(row: &IndexRow) -> bool {
+    FIELD_ROLES.contains(&row.role.to_lowercase().as_str())
+}
+
+fn push_unique(v: &mut Vec<String>, s: &str) {
+    let s = s.trim();
+    if !s.is_empty() && !v.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+        v.push(s.to_string());
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+fn block_text(b: &TextBlock) -> String {
+    b.spans
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn word_count(b: &TextBlock) -> usize {
+    b.spans
+        .iter()
+        .map(|s| s.text.split_whitespace().count())
+        .sum()
+}
+
+fn ref_line(kind: &str, row: &IndexRow) -> String {
+    let name = clean(&row.name, 50);
+    let alias = alias_for(&row.role);
+    if name.is_empty() {
+        format!("! {kind} {} {alias}", row.elem())
+    } else {
+        format!("! {kind} {} {alias} \"{name}\"", row.elem())
+    }
+}
+
+fn warn_lines(out: &mut Vec<String>, kind: &str, rows: &[&IndexRow]) {
+    for r in rows.iter().take(WARN_CAP) {
+        out.push(ref_line(kind, r));
+    }
+    if rows.len() > WARN_CAP {
+        out.push(format!("! {kind} +{} more", rows.len() - WARN_CAP));
+    }
+}
+
+/// `main: form` or `main: article N words, M tables` (B-6.1).
+fn content_hint(rows: &[&IndexRow], text_blocks: &[TextBlock]) -> Option<String> {
+    let has_main = text_blocks
+        .iter()
+        .any(|b| b.landmark.as_deref() == Some("main"))
+        || rows.iter().any(|r| r.landmark.as_deref() == Some("main"));
+    let in_content = |l: Option<&str>| -> bool {
+        if has_main {
+            l == Some("main")
+        } else {
+            !l.is_some_and(|l| CHROME.contains(&l))
+        }
+    };
+    let blocks: Vec<&TextBlock> = text_blocks
+        .iter()
+        .filter(|b| in_content(b.landmark.as_deref()))
+        .collect();
+    let words: usize = blocks
+        .iter()
+        .filter(|b| b.kind != BlockKind::Heading)
+        .map(|b| word_count(b))
+        .sum();
+    let mut tables: Vec<(u32, u32)> = blocks
+        .iter()
+        .filter(|b| b.kind == BlockKind::TableRow)
+        .map(|b| (b.frame, b.table.unwrap_or(u32::MAX)))
+        .collect();
+    tables.sort_unstable();
+    tables.dedup();
+    let form = rows
+        .iter()
+        .any(|r| r.form.is_some() && is_field(r) && in_content(r.landmark.as_deref()));
+    let label = if has_main { "main" } else { "page" };
+    if form && words < FORM_PAGE_WORDS {
+        return Some(format!("{label}: form"));
+    }
+    if words == 0 && tables.is_empty() {
+        return None;
+    }
+    let mut s = format!("{label}: article {}", plural(words, "word", "words"));
+    if !tables.is_empty() {
+        s.push_str(&format!(", {}", plural(tables.len(), "table", "tables")));
+    }
+    if form {
+        s.push_str(", form");
+    }
+    Some(s)
+}
 
 pub(crate) fn skeleton(
     index: &[IndexRow],
     text_blocks: &[TextBlock],
     opts: &SkeletonOpts,
 ) -> String {
-    let _ = (index, text_blocks, opts);
-    todo!("T-10: B-6.1 skeleton")
+    let meta = &opts.meta;
+    let sealed = sealed_frames(index);
+    let rows: Vec<&IndexRow> = index
+        .iter()
+        .filter(|r| r.state.visible && !sealed.contains(&r.frame))
+        .collect();
+    let blocks: Vec<TextBlock> = text_blocks
+        .iter()
+        .filter(|b| !sealed.contains(&b.frame))
+        .cloned()
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+
+    let title = clean(&meta.title, 100);
+    if !title.is_empty() {
+        out.push(title);
+    }
+    let url = meta.url.trim();
+    if !url.is_empty() {
+        out.push(clean(url, 200));
+    }
+
+    let mut landmarks: Vec<String> = Vec::new();
+    for r in &rows {
+        if let Some(l) = &r.landmark {
+            push_unique(&mut landmarks, l);
+        }
+    }
+    for b in &blocks {
+        if let Some(l) = &b.landmark {
+            push_unique(&mut landmarks, l);
+        }
+    }
+    if !landmarks.is_empty() {
+        out.push(format!("landmarks: {}", landmarks.join(", ")));
+    }
+
+    let mut forms: Vec<String> = Vec::new();
+    for r in &rows {
+        if let Some(f) = &r.form {
+            push_unique(&mut forms, f);
+        }
+    }
+    for f in forms.iter().take(FORMS_CAP) {
+        let in_form: Vec<&&IndexRow> = rows
+            .iter()
+            .filter(|r| r.form.as_deref() == Some(f.as_str()))
+            .collect();
+        let fields = in_form.iter().filter(|r| is_field(r)).count();
+        let mut line = format!("form {f}");
+        if let Some(h) = in_form.iter().find_map(|r| r.heading.as_deref()) {
+            let h = clean(h, 50);
+            if !h.is_empty() {
+                line.push_str(&format!(" \"{h}\""));
+            }
+        }
+        line.push_str(&format!(": {}", plural(fields, "field", "fields")));
+        if let Some(s) = in_form.iter().find(|r| r.flags.submit || r.state.submitish) {
+            let name = clean(&s.name, 40);
+            if name.is_empty() {
+                line.push_str(&format!(", submit {}", s.elem()));
+            } else {
+                line.push_str(&format!(", submit \"{name}\""));
+            }
+        }
+        out.push(line);
+    }
+    if forms.len() > FORMS_CAP {
+        out.push(format!("+{} more forms", forms.len() - FORMS_CAP));
+    }
+
+    // h1/h2 from text blocks; without blocks, the rows' section headings.
+    let mut heads: Vec<String> = blocks
+        .iter()
+        .filter(|b| b.kind == BlockKind::Heading && matches!(b.level, Some(1) | Some(2)))
+        .map(|b| format!("h{} {}", b.level.unwrap_or(2), clean(&block_text(b), 60)))
+        .filter(|s| s.len() > 3)
+        .collect();
+    if heads.is_empty() && blocks.is_empty() {
+        let mut hs: Vec<String> = Vec::new();
+        for r in &rows {
+            if let Some(h) = &r.heading {
+                push_unique(&mut hs, h);
+            }
+        }
+        heads = hs.iter().map(|h| format!("h {}", clean(h, 60))).collect();
+    }
+    if !heads.is_empty() {
+        let mut line = heads
+            .iter()
+            .take(HEADINGS_CAP)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if heads.len() > HEADINGS_CAP {
+            line.push_str(&format!(" · +{} more", heads.len() - HEADINGS_CAP));
+        }
+        out.push(line);
+    }
+
+    let links = rows.iter().filter(|r| r.role == "link").count();
+    let buttons = rows.iter().filter(|r| r.role == "button").count();
+    let fields = rows.iter().filter(|r| is_field(r)).count();
+    out.push(format!(
+        "{}: {}, {}, {}",
+        plural(rows.len(), "element", "elements"),
+        plural(links, "link", "links"),
+        plural(buttons, "button", "buttons"),
+        plural(fields, "field", "fields"),
+    ));
+
+    let challenges: Vec<&IndexRow> = rows.iter().copied().filter(|r| r.flags.challenge).collect();
+    let overlays: Vec<&IndexRow> = rows
+        .iter()
+        .copied()
+        .filter(|r| r.flags.overlay && !r.flags.challenge)
+        .collect();
+    let dialogs: Vec<&IndexRow> = rows
+        .iter()
+        .copied()
+        .filter(|r| matches!(r.role.as_str(), "dialog" | "alertdialog"))
+        .collect();
+    warn_lines(&mut out, "CHALLENGE", &challenges);
+    warn_lines(&mut out, "OVERLAY", &overlays);
+    if let Some(d) = &meta.dialog {
+        out.push(format!("! dialog: \"{}\"", clean(d, 80)));
+    }
+    warn_lines(&mut out, "dialog", &dialogs);
+
+    if let Some(t) = &meta.site_tools {
+        if !t.trim().is_empty() {
+            out.push(t.trim().to_string());
+        }
+    }
+
+    if let Some(h) = content_hint(&rows, &blocks) {
+        out.push(h);
+    }
+    out.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Flags, PageMeta, Span, State};
+
+    fn row(id: u32, role: &str, name: &str) -> IndexRow {
+        IndexRow {
+            id,
+            frame: 0,
+            role: role.into(),
+            name: name.into(),
+            nearby: None,
+            heading: None,
+            state: State::default(),
+            flags: Flags::default(),
+            form: None,
+            landmark: None,
+            child_frame: None,
+            bbox: None,
+        }
+    }
+
+    fn block(order: u32, kind: BlockKind, level: Option<u8>, lm: &str, text: &str) -> TextBlock {
+        TextBlock {
+            order,
+            frame: 0,
+            kind,
+            level,
+            landmark: Some(lm.into()),
+            heading: None,
+            table: None,
+            header: false,
+            spans: vec![Span {
+                text: text.into(),
+                elem: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn article_hint_counts_words_and_tables() {
+        let mut blocks = vec![
+            block(0, BlockKind::Heading, Some(1), "main", "Big news"),
+            block(1, BlockKind::Paragraph, None, "main", "one two three four"),
+            block(2, BlockKind::Paragraph, None, "nav", "skip these words"),
+        ];
+        let mut t = block(3, BlockKind::TableRow, None, "main", "a");
+        t.table = Some(0);
+        blocks.push(t.clone());
+        t.order = 4;
+        blocks.push(t.clone());
+        t.table = Some(1);
+        blocks.push(t);
+        let s = skeleton(&[], &blocks, &SkeletonOpts::default());
+        assert!(s.ends_with("main: article 7 words, 2 tables"), "{s}");
+        assert!(s.contains("h1 Big news"), "{s}");
+        assert!(s.contains("landmarks: main, nav"), "{s}");
+    }
+
+    #[test]
+    fn warnings_dialog_and_tools() {
+        let mut d = row(4, "dialog", "Confirm");
+        d.landmark = Some("dialog".into());
+        let mut o = row(5, "region", "Promo");
+        o.flags.overlay = true;
+        let opts = SkeletonOpts {
+            meta: PageMeta {
+                url: "https://example.test/".into(),
+                title: "Example".into(),
+                site_tools: Some("tools for this site: ex.search(q)".into()),
+                dialog: Some("Leave site?".into()),
+            },
+        };
+        let s = skeleton(&[d, o], &[], &opts);
+        assert_eq!(
+            s,
+            "Example\nhttps://example.test/\nlandmarks: dialog\n2 elements: 0 links, 0 buttons, 0 fields\n! OVERLAY #5 region \"Promo\"\n! dialog: \"Leave site?\"\n! dialog #4 dialog \"Confirm\"\ntools for this site: ex.search(q)"
+        );
+        assert!(!s.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn deterministic_and_skips_hidden() {
+        let mut a = row(1, "textbox", "Email");
+        a.state.visible = false;
+        a.form = Some("f9".into());
+        let b = row(2, "link", "Home");
+        let idx = vec![a, b];
+        let s1 = skeleton(&idx, &[], &SkeletonOpts::default());
+        let s2 = skeleton(&idx, &[], &SkeletonOpts::default());
+        assert_eq!(s1, s2);
+        assert_eq!(s1, "1 element: 1 link, 0 buttons, 0 fields");
+    }
 }

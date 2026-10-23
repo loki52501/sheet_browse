@@ -1,0 +1,254 @@
+# sb-sheet data/synonyms.txt (B-6.2, D-201). Embedded with include_str!, parsed once.
+#
+# One synonym group per line, entries separated by `|`. Blank lines and lines starting
+# with `#` are ignored. Most lines are pairs. A group is symmetric: every entry expands to
+# every other entry on the same line. Groups are NOT chained across lines (no transitive
+# closure), so a word on two lines expands to the union of those two lines only.
+# Entries are matched in normal form (lowercase, split on non-alphanumerics, joined by one
+# space): `e-mail` and `e mail` are the same entry; multi-word entries are phrases.
+# find() gives expanded terms half the weight of the words the caller typed (D-205).
+
+# ---- identity and accounts ----
+email | e-mail
+email | mail
+email | email address
+e-mail | email address
+username | user name
+username | login
+username | user id
+password | passcode
+password | passphrase
+password | pwd
+password | pass
+confirm password | repeat password
+confirm password | retype password
+new password | create password
+login | log in
+login | sign in
+login | signin
+sign in | log in
+logout | log out
+logout | sign out
+sign out | log out
+register | sign up
+register | signup
+register | create account
+register | join
+register | enroll
+register | create an account
+signup | sign up
+signup | join
+account | profile
+account | my account
+forgot password | reset password
+forgot password | lost password
+verification code | otp
+verification code | one time code
+code | pin
+remember me | keep me signed in
+remember me | stay signed in
+
+# ---- names and contact ----
+name | full name
+full name | your name
+first name | given name
+first name | forename
+last name | surname
+last name | family name
+phone | telephone
+phone | mobile
+phone | cell
+phone | phone number
+telephone | tel
+mobile | cell phone
+address | street address
+address | street
+address | address line
+city | town
+city | locality
+zip | postcode
+zip | postal code
+zip | zip code
+postcode | postal code
+state | province
+state | region
+country | nation
+country | country region
+company | organization
+company | organisation
+company | employer
+company | business
+website | url
+website | homepage
+website | site
+birthday | date of birth
+birthday | dob
+age | years old
+gender | sex
+title | job title
+title | headline
+
+# ---- consent ----
+agree | accept
+agree | consent
+agree | i agree
+agree | confirm
+accept | allow
+accept all | allow all
+reject | decline
+reject | deny
+reject all | decline all
+terms | terms of service
+terms | tos
+terms | terms and conditions
+terms | conditions
+terms of use | terms of service
+privacy | privacy policy
+cookies | cookie
+subscribe | newsletter
+subscribe | sign up for updates
+subscribe | opt in
+unsubscribe | opt out
+
+# ---- actions ----
+submit | send
+submit | continue
+submit | go
+submit | done
+continue | next
+continue | proceed
+next | forward
+back | previous
+back | prev
+save | store
+save | keep
+buy | purchase
+buy | order
+buy | buy now
+checkout | check out
+checkout | pay
+pay | payment
+pay | place order
+add to cart | add to bag
+add to cart | add to basket
+cart | basket
+cart | bag
+delete | remove
+delete | trash
+delete | discard
+remove | clear
+edit | modify
+edit | change
+update | refresh
+cancel | abort
+cancel | nevermind
+close | dismiss
+close | x
+ok | okay
+confirm | yes
+search | find
+search | look up
+search | query
+filter | refine
+sort | order by
+upload | attach
+upload | choose file
+attachment | file
+download | export
+share | send to
+reply | respond
+reply | answer
+forward | fwd
+compose | new message
+compose | write
+send | post
+publish | post
+follow | subscribe to
+like | favorite
+like | favourite
+star | favorite
+open | view
+view | show
+show more | load more
+show more | see more
+more | read more
+more | details
+details | info
+info | information
+help | support
+help | faq
+contact | contact us
+contact | get in touch
+about | about us
+home | homepage
+home | start page
+menu | navigation
+menu | hamburger
+settings | preferences
+settings | options
+logout | exit
+start | begin
+apply | submit application
+book | reserve
+book | schedule
+appointment | booking
+date | day
+time | hour
+quantity | qty
+quantity | amount
+price | cost
+price | amount
+discount | coupon
+coupon | promo code
+coupon | voucher
+gift card | voucher
+card number | credit card
+card number | cc number
+expiry | expiration
+expiry | exp date
+cvv | cvc
+cvv | security code
+
+# ---- mail and calendar ----
+message | text
+message | note
+message | body
+comment | note
+comment | remark
+comment | feedback
+subject | title
+to | recipient
+to | recipients
+inbox | mail
+event | meeting
+event | appointment
+calendar | schedule
+invite | invitation
+attendees | guests
+location | place
+location | venue
+description | details
+description | about
+
+# ---- content ----
+article | post
+article | story
+blog | articles
+news | updates
+docs | documentation
+docs | guide
+download | get
+pricing | plans
+pricing | price
+plan | tier
+plan | subscription
+plan | package
+size | dimensions
+color | colour
+language | locale
+currency | money
+results | matches
+next page | more results
+image | picture
+image | photo
+video | clip
