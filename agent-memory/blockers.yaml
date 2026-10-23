@@ -21,5 +21,10 @@ blockers:
     needs_user: false
 
 interface_changes:
+  - id: B-101
+    from: core
+    interface: I-1
+    change: "harness_core::memory::contact_key: normalise with trim() + to_ascii_lowercase() instead of Unicode to_lowercase(); signature unchanged."
+    why: "Unicode lowercasing folds compatibility characters (U+212A KELVIN SIGN -> k), so a Send to a different, look-alike address would match a known contact and be allowed without an ask (H-1.1). Mail domains are case-insensitive ASCII after IDNA; local parts beyond ASCII must stay distinct. Default until supreme answers: unchanged (contract), gate behaviour as is."
 
 proposals:
