@@ -1,0 +1,20 @@
+from: supreme
+to: next
+task: wave-1
+date: "2026-10-23"
+state: "Wave 1: worktrees F:/sb-swarm/wt/{core,sheet,store,page} on swarm/<area> from main f1f3d06; tabs relaunched 00:52 with Start-Process wt.exe -w swarm because launch.ps1's `wt -w 0` spawned nothing from the VS Code session. Check-in 03:11: core in_progress (18 commits; T-03 core-pg MemoryStore committed; accept-T-04/05/06; T-07..T-09 open; rust-version 1.94, D-112), sheet closest to a PR (accept-T-10 green, review-T-10.md written but uncommitted, status still not_started, D-59 not pulled), store in_progress (12 commits; core and runner review fixes committed after the reports; accept-T-11 red with 4 fail rows, review-T-11-core request changes), page in_progress (25 commits; sb-act half accepted, injected.js reviewed with rulings D-405, accept for it pending). Supreme decisions D-58..D-69: D-64 IC-302, D-65 IC-303, D-66 B-401, D-67 B-410, D-68 B-411, D-69 B-102 (no compose change in wave 1; revisit shm_size at the wave-1 gate). interfaces.yaml updated on main; pull notes appended to the areas' handoffs in their worktrees. No PRs, nothing merged."
+not_done: "1. Re-arm the check-in timer (it lives in the session, not on disk): CronCreate cron '7,32 * * * *', recurring, with the prompt in resume.cron_prompt below. 2. Run the check-in once immediately. 3. Per check-in: /status and /wave from the swarm/<area> branches; act on interface_changes, pr_open, review-*.md + accept-*.md as SUPREME.md says. 4. When core, sheet, store are merged, tell the user to launch servers; when page is merged, tell them to launch driver. 5. Rewrite this file's state line after every merge or decision so the checkpoint stays current."
+resume:
+  how: "From F:\\aside_mcp for claude\\sheetbrowseV2_ start a fresh session: claude \"You are the supreme orchestrator. Read prompts/SUPREME.md, then agent-memory/handoffs/supreme-wave1.yaml, and resume from it.\" Or run claude --resume from F:\\aside_mcp for claude to reopen the old conversation; the timer still has to be re-armed either way."
+  cron_prompt: "Supreme wave-1 check-in for sheetbrowseV2_ (repo root, on main). Follow prompts/SUPREME.md WAVE 1 onward: run the /status and /wave procedures over the swarm/<area> branches for core, sheet, store, page. Read new handoffs on each branch. For any interface_changes in a branch's blockers.yaml: decide yes/no with a why in decisions.yaml, edit interfaces.yaml on main, append a pull note to that area's handoff. If an area's status is pr_open (or it has review-*.md and accept-*.md for all claimed tasks): spawn reviewer on the full branch diff as a second opinion, then scripts\\swarm\\merge.ps1 -Area <area>; on success set areas.<area>.merged: true in swarm.yaml, run memory-keeper, update agent-memory/handoffs/supreme-wave1.yaml, and report which next-wave areas are unblocked. Never push or launch sessions; ask before anything irreversible. If nothing changed, reply with one line."
+gotchas:
+  - "The cron timer is session-only and expires after 7 days; a closed window or a resumed conversation does not bring it back."
+  - "launch.ps1 refuses to run if main has uncommitted or untracked files, so commit supreme edits (this file included) before telling the user to launch wave 2."
+  - "Area state lives on swarm/<area> until merge (D-46): read it with git show swarm/<area>:agent-memory/<file>, not from main's working tree."
+  - "Each sub-orchestrator runs in its own terminal tab; if a branch stays at f1f3d06 for long, that tab is probably stuck on a trust or permission prompt the user has to answer."
+  - "Wave-0 gotchas still apply: see agent-memory/handoffs/T-02-supreme-1.yaml."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/handoffs/supreme-wave1.yaml
+verify: "git log --oneline main..swarm/core; git log --oneline main..swarm/sheet; git log --oneline main..swarm/store; git log --oneline main..swarm/page"
