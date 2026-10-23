@@ -5,10 +5,18 @@
 //! CONTRACT: `index` (I-5). DRAFT signatures (I-6), owned by area sheet: `text`, and the
 //! four functions below with their option and output types.
 
+pub mod data;
+mod find;
 pub mod index;
+mod reader;
+mod sheet;
+mod skeleton;
 pub mod text;
+pub mod tokens;
 
+pub use find::find_lines;
 pub use index::{BadElemRef, ElemRef, FieldValue, Flags, FrameId, IndexRow, Rect, State};
+pub use sheet::sheet_line;
 pub use text::{BlockKind, Span, TextBlock};
 
 /// Page facts the index does not carry.
@@ -29,8 +37,7 @@ pub struct SkeletonOpts {
 
 /// B-6.1: ~80-150 tokens.
 pub fn skeleton(index: &[IndexRow], text_blocks: &[TextBlock], opts: &SkeletonOpts) -> String {
-    let _ = (index, text_blocks, opts);
-    todo!("T-10: B-6.1 skeleton")
+    skeleton::skeleton(index, text_blocks, opts)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,8 +76,7 @@ pub struct FindHit {
 /// the lexical part (3*name + 1.5*nearby + 0.5*heading) with 3, not the total (D-54).
 /// Acceptance 6 runs with `k = 1`: the four top hits plus the always-appended rows (D-54).
 pub fn find(index: &[IndexRow], text_blocks: &[TextBlock], opts: &FindOpts) -> Vec<FindHit> {
-    let _ = (index, text_blocks, opts);
-    todo!("T-10: B-6.2 find")
+    find::find(index, text_blocks, opts)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -81,8 +87,7 @@ pub struct SheetOpts {
 
 /// B-6.3: every element in the region, numbered, document order, no cap.
 pub fn sheet(index: &[IndexRow], text_blocks: &[TextBlock], opts: &SheetOpts) -> String {
-    let _ = (index, text_blocks, opts);
-    todo!("T-10: B-6.3 sheet")
+    sheet::sheet(index, text_blocks, opts)
 }
 
 /// Opaque continuation token for chunked reads.
@@ -120,6 +125,5 @@ pub struct ReadOutput {
 
 /// B-6.4 / W-5 renderer. Never emits a password value or CHALLENGE-frame content.
 pub fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpts) -> ReadOutput {
-    let _ = (index, text_blocks, opts);
-    todo!("T-10: W-5 read renderer")
+    reader::read(index, text_blocks, opts)
 }
