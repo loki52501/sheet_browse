@@ -44,6 +44,51 @@ blockers:
     question: "The 2 s wall cap includes time spent inside page.api() host calls. A @phase 1 reader making several network calls can hit it."
     default_taken: "Keep 2 s as RunOpts::default(); srv-web passes a larger RunOpts.timeout for @phase 1 readers if acceptance shows it is needed. The cap is checked by the interrupt handler, so a slow api call is only detected when JS resumes."
     needs_user: false
+  - id: B-302
+    task: T-11
+    question: "T-2 gives no default when a tool file has no @phase line."
+    default_taken: "@phase defaults to 2 (needs the browser), the safe side: a file only runs on srv-web's fetched index when it says @phase 1. Missing @match defaults to /*; missing @name, @kind or @gate is a header error."
+    needs_user: false
+  - id: B-303
+    task: T-11
+    question: "record() on a tool with no tools.health row: which status does the new row get? T-7 starts forged tools as ephemeral, but G-5 seeds sites with hand-written tools that must not be swept after 14 idle days."
+    default_taken: "ephemeral when the file's header has @forged (or the file is missing), saved otherwise (hand-written). toolforge calls ToolStore::register_forged at G-2 step 5, which always creates an ephemeral row."
+    needs_user: false
+  - id: B-304
+    task: T-11
+    question: "T-1 says folder = eTLD+1, but docs/07 uses tools/mail.google.com/ and tools/calendar.google.com/, whose eTLD+1 is google.com."
+    default_taken: "folder_for picks the most specific existing folder among the host and its parents down to eTLD+1 (mail.google.com/ wins over google.com/), then _site.yaml aliases, then eTLD+1. The namespace is the folder's first label, so mail.google.com tools are mail.<name>."
+    needs_user: false
+  - id: B-305
+    task: T-11
+    question: "T-3's skeleton line example shows luma.register(name,email) although register also takes plan?:string. Are optional args shown?"
+    default_taken: "Shown with a trailing ?: luma.register(name,email,plan?). Two tokens per optional arg buy the model knowledge of the arg without a wasted turn (CLAUDE.md priorities)."
+    needs_user: false
+  - id: B-306
+    task: T-11
+    question: "How are _generic tools namespaced (T-3 shows only site namespaces)?"
+    default_taken: "generic.<name> (bare names could collide with harness tools such as read or find). A site tool of the same name shadows the generic one and the generic one is not loaded."
+    needs_user: false
+  - id: B-307
+    task: T-11
+    question: "@match glob semantics: does * cross / ?"
+    default_taken: "Yes: * matches any run of characters including /, ? matches one character, the rest is literal, matched against the URL path without query or fragment. /* is the whole site. Hand-rolled, no globset dependency."
+    needs_user: false
+  - id: B-308
+    task: T-11
+    question: "D-303 deletes archived files after 90 days, but tools.health has no archived-at column. Where does the archive clock come from?"
+    default_taken: "The archived file's mtime, set to now by ToolStore::archive. A fresh clone resets mtimes, which only delays deletion. Ledger events for file actions use server core and tool tools.relocate | tools.reforge | tools.retire | tools.archive | tools.delete with args {domain, name, version}."
+    needs_user: false
+  - id: B-309
+    task: T-11
+    question: "D-304 compares fingerprint names case- and space-insensitively. Labels like 'Email *' or 'Sign-up' then miss."
+    default_taken: "Names are compared after lowercasing and replacing every non-alphanumeric character with a space (so 'Email *' = 'email', 'Sign-up' = 'sign up'). Relocate uses the same normalisation plus a built-in synonym table and token overlap >= 0.5."
+    needs_user: false
+  - id: B-310
+    task: T-11
+    question: "What if a tool file's @name differs from its file name?"
+    default_taken: "The loader skips it with why '@name x does not match file name y.js' (D-306 report). tools.health, the archive and record() all key on the file name, so the two must agree."
+    needs_user: false
 
 interface_changes:
 

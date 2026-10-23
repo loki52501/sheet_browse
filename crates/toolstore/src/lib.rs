@@ -7,6 +7,10 @@
 //! return element refs without the `#` (`12`, `f2.15`), so planners write `c#${id}`;
 //! `text(region)`, `table(id)`, `url`, `title`, `q(s)` (act value quoting, D-52), and for
 //! `@phase 1` readers `api(url)`, which goes through srv-web's `api` tool and the gate as Read.
+//!
+//! Modules: `header` (T-2, I-12), `domain` (T-1), `loader` (T-3), `fingerprint` (T-4),
+//! `lifecycle` (T-5, T-7, D-302, D-303), `invariants` (T-9, G-4, D-307), `archive` (archive
+//! moves and the git commit helper).
 
 pub mod runner;
 pub use runner::{
@@ -14,54 +18,36 @@ pub use runner::{
     RunOpts, SheetPage,
 };
 
-use harness_core::memory::{MemoryStore, ToolHealth, Ts};
-use harness_core::Class;
-use sb_sheet::IndexRow;
+pub mod archive;
+pub mod domain;
+pub mod fingerprint;
+pub mod header;
+pub mod invariants;
+pub mod lifecycle;
+pub mod loader;
+
+#[cfg(test)]
+mod tests;
+
+pub use archive::has_task_id;
+pub use domain::{normalize_host, registrable, SiteConfig, ARCHIVE, GENERIC, SITE_FILE};
+pub use fingerprint::{fingerprint, fingerprint_items, relocate, role_matches, FingerprintResult};
+pub use header::{
+    parse_fingerprint, parse_header, patch_fingerprint, render_fingerprint, ArgSpec, FpItem,
+    ToolHeader, ToolKind,
+};
+pub use invariants::{
+    check_repair, planner_act_class, planner_class, stop_count, vault_keys, PlannerCheck,
+    RepairKind, SbAct,
+};
+pub use lifecycle::{
+    SweepAction, ARCHIVE_DELETE_DAYS, CLEAN_RUNS_TO_SAVE, EPHEMERAL_IDLE_DAYS,
+    EPHEMERAL_IDLE_VISITS, MISSES_TO_RETIRE,
+};
+pub use loader::{glob_match, namespace, skeleton_line, url_path, LoadReport};
+
+use harness_core::memory::Ts;
 use std::path::{Path, PathBuf};
-
-/// `@kind` (T-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ToolKind {
-    /// Returns JSON; never calls act.
-    Reader,
-    /// Returns an act program; never gets hands.
-    Planner,
-}
-
-/// One `@args` entry: `name:string`, `plan?:string`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArgSpec {
-    pub name: String,
-    pub ty: String,
-    pub optional: bool,
-}
-
-/// One `@fingerprint` item: `form#f2`, `button"Register"`, `input"Email"`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FpItem {
-    pub role: String,
-    pub name: Option<String>,
-    pub id: Option<String>,
-}
-
-/// I-12: the parsed header of a tool file (T-2).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolHeader {
-    pub name: String,
-    pub kind: ToolKind,
-    /// `@match` path globs within the site.
-    pub matches: Vec<String>,
-    pub args: Vec<ArgSpec>,
-    /// `@gate`: the class floor (H-1.5).
-    pub gate: Class,
-    pub fingerprint: Vec<FpItem>,
-    /// `@expects`, unparsed (`navigated:/thanks|/confirm OR text"You're registered"`).
-    pub expects: Option<String>,
-    /// `@forged`, unparsed.
-    pub forged: Option<String>,
-    /// `@phase`: 1 = works on fetched HTML, 2 = needs the browser.
-    pub phase: u8,
-}
 
 /// A loaded tool.
 #[derive(Debug, Clone, PartialEq)]
@@ -86,23 +72,9 @@ pub enum StoreError {
     /// T-9 / G-4: a repair or forge tried to lower `@gate`, drop `?s`, add a vault key or widen `@match`.
     #[error("invariant violated: {0}")]
     Invariant(String),
-}
-
-/// I-12. Parses the `// @key value` header of a tool file.
-pub fn parse_header(src: &str) -> Result<ToolHeader, String> {
-    let _ = src;
-    todo!("T-11: T-2 header parser")
-}
-
-/// T-4 outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FingerprintResult {
-    Match,
-    /// Relocate (T-4, <= 200 ms) re-finds these by role + name synonyms.
-    Partial {
-        missing: Vec<FpItem>,
-    },
-    Miss,
+    /// The git commit helper refused (no task id, path outside the tools root) or git failed.
+    #[error("git: {0}")]
+    Git(String),
 }
 
 /// What `record` stores after a run (T-4, T-5, T-7).
@@ -146,37 +118,17 @@ impl ToolStore {
         }
     }
 
-    /// Host → folder (eTLD+1 via the public suffix list, then `_site.yaml` aliases) (T-1).
+    /// Host → folder (T-1, D-300): the most specific existing folder among the host and its
+    /// parents down to eTLD+1 (so `mail.google.com/` wins over `google.com/`), else a folder
+    /// whose `_site.yaml` lists the host (or a parent) under `aliases`, else eTLD+1.
+    /// Idempotent on folder names, including `_generic`.
     pub fn folder_for(&self, host: &str) -> String {
-        let _ = host;
-        todo!("T-11: T-1 eTLD+1 + aliases")
+        domain::folder_for(&self.root, host)
     }
 
-    /// I-7 `load(domain, path)`: site tools whose `@match` fits `path`, then `_generic/` at lower precedence (T-3).
+    /// I-7 `load(domain, path)`: site tools whose `@match` fits `path`, then `_generic/` at
+    /// lower precedence (T-3). Invalid files are skipped; use [`ToolStore::scan`] to see them.
     pub fn load(&self, domain: &str, path: &str) -> Result<Vec<Tool>, StoreError> {
-        let _ = (domain, path);
-        todo!("T-11: T-3 loader")
+        Ok(self.scan(domain, path).tools)
     }
-
-    /// I-7 `record(result)`: lifecycle transition (T-7) written through `MemoryStore` (I-1).
-    pub async fn record(
-        &self,
-        store: &dyn MemoryStore,
-        result: ToolRunResult,
-    ) -> Result<ToolHealth, StoreError> {
-        let _ = (store, result);
-        todo!("T-11: T-7 lifecycle")
-    }
-}
-
-/// I-7 `fingerprint(tool, index)` (T-4), over a live or fetched index.
-pub fn fingerprint(tool: &Tool, index: &[IndexRow]) -> FingerprintResult {
-    let _ = (tool, index);
-    todo!("T-11: T-4 fingerprint")
-}
-
-/// The T-3 skeleton line: `tools for this site: luma.register(name,email) · luma.list_events(city)`.
-pub fn skeleton_line(tools: &[Tool]) -> Option<String> {
-    let _ = tools;
-    todo!("T-11: T-3 skeleton line")
 }
