@@ -27,3 +27,8 @@ thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 zeroize.workspace = true
+
+# T-06: ledger + report through the global scrub; needs MemStore (D-108).
+[[test]]
+name = "ledger_t06"
+required-features = ["testing"]
