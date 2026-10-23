@@ -4,7 +4,7 @@
   "description": "Test tooling for injected/ (D-401). Runtime code in injected/ has no dependencies.",
   "type": "commonjs",
   "scripts": {
-    "test": "node --test jsdom.test.js browser.test.js media.test.js"
+    "test": "node --test jsdom.test.js browser.test.js media.test.js accept-t19.test.js"
   },
   "devDependencies": {
     "jsdom": "^26.1.0",

@@ -6,13 +6,18 @@
 //
 //   list()                      -> [{id, kind: file|mse|stream|drm, src?, duration, live,
 //                                    captions: [{kind, label, lang, mode, cues}], visible,
-//                                    box, paused, time, width, height, ready}]
+//                                    box, paused, time, width, height, ready}] | {why}
 //   cues(id, track?)            -> [{start, end, text}] | {why}   (loaded text tracks only)
-//   frames(id, times, opts)     -> Promise<[{t, w, h, hash, data?} | {t, why}]>
-//                                  opts: {size=512, type="image/jpeg", quality=0.8,
-//                                  hashOnly=false, seekCapMs=5000}
+//   frames(id, times, opts)     -> Promise<[{t, w, h, hash, data?} | {t, why, truncated?}]>
+//                                  one entry per time, in order. opts: {size=512,
+//                                  type="image/jpeg", quality=0.8, hashOnly=false,
+//                                  seekCapMs=5000, budgetMs=8000}. Entries not reached within
+//                                  budgetMs, or after a seek timed out, are
+//                                  {t, why, truncated: true} (D-405 (9), D-423).
 //   frame(id, t, opts)          -> Promise<{t, w, h, hash, data} | {why}>
-// `id` is the element id from __sb.id(video), so video ids and index ids agree.
+// `id` is the element id from __sb.id(video), so video ids and index ids agree. Ids, element
+// lookup and CHALLENGE all come from __sb (D-405 (2)(9)): before the first __sb.walk({base})
+// every call returns {why: "no base"}, and without __sb {why: "no __sb"}.
 // hash (19 hex chars: mean colour + 64-bit average hash) lets sb-media dedupe frames without
 // moving pixels (B-9 "dedupe"); hashOnly skips the image.
 (() => {
@@ -21,51 +26,53 @@
   const doc = globalThis.document;
   if (!doc) return;
 
-  const CHALLENGE_URL_RE = /recaptcha|hcaptcha\.com|challenges\.cloudflare\.com|\/turnstile\/|captcha/i;
-  const CHALLENGE_BOX_RE = /captcha|turnstile/i;
   const CUES_CAP = 2000;
+  const BUDGET_MS = 8000; // under the 10 s command timeout (B-4 #11)
+  const SEEK_CAP_MS = 5000;
+  const VISIBLE_CONTROL_SEL = 'input:not([type="hidden"]),select,button,a[href]';
 
-  const local = { ids: new WeakMap(), refs: new Map(), next: 1 };
   const sb = () => globalThis.__sb;
-  function idOf(el) {
-    if (sb()) return sb().id(el);
-    let id = local.ids.get(el);
-    if (id === undefined) {
-      id = local.next++;
-      local.ids.set(el, id);
-      local.refs.set(id, new WeakRef(el));
-    }
-    return id;
-  }
-  function byId(id) {
-    let el = null;
-    if (sb()) {
-      const r = sb().resolve(id);
-      el = r && r.nodeType === 1 ? r : null;
-    } else {
-      const ref = local.refs.get(Number(id));
-      el = ref ? ref.deref() || null : null;
-    }
-    if (!el || !el.isConnected) return { why: "gone" };
-    if (el.localName !== "video") return { why: "not a video" };
-    if (challenged(el)) return { why: "challenge" };
-    return el;
-  }
-
-  function selfChallenge() {
-    try {
-      return CHALLENGE_URL_RE.test(String(globalThis.location && globalThis.location.href));
-    } catch (e) {
-      return false;
-    }
-  }
-  function challenged(el) {
-    if (selfChallenge()) return true;
-    for (let n = el; n && n.nodeType === 1; n = n.parentNode && n.parentNode.host ? n.parentNode.host : n.parentNode) {
-      const c = (n.getAttribute("class") || "") + " " + n.id;
-      if (CHALLENGE_BOX_RE.test(c) || n.hasAttribute("data-sitekey")) return true;
-    }
+  const parentOf = (n) => (n.parentNode && n.parentNode.nodeType === 11 && n.parentNode.host ? n.parentNode.host : n.parentNode);
+  const contains = (a, b) => {
+    for (let n = b; n; n = parentOf(n)) if (n === a) return true;
     return false;
+  };
+
+  // Elements covered by __sb's CHALLENGE rows, or a {why} when __sb cannot answer. A
+  // challenge row carried on an iframe stands for its widget container too: the iframe's
+  // ancestors up to the first one holding a real control (or body, form, main).
+  function challengeRoots() {
+    const api = sb();
+    if (!api) return { why: "no __sb" };
+    const rows = api.index();
+    if (!Array.isArray(rows)) return rows; // {why: "no base"}
+    const roots = [];
+    for (const r of rows) {
+      if (!r.flags || !r.flags.challenge) continue;
+      const el = api.resolve(r.id);
+      if (!el || el.nodeType !== 1) continue;
+      let top = el;
+      if (el.localName === "iframe" || el.localName === "frame") {
+        for (let p = parentOf(el); p && p.nodeType === 1; p = parentOf(p)) {
+          if (/^(body|html|form|main)$/.test(p.localName) || p.querySelector(VISIBLE_CONTROL_SEL)) break;
+          top = p;
+        }
+      }
+      roots.push(top);
+    }
+    return roots;
+  }
+  const challenged = (roots, el) => roots.some((c) => contains(c, el));
+
+  function byId(id) {
+    const roots = challengeRoots();
+    if (!Array.isArray(roots)) return roots;
+    const r = sb().resolve(id);
+    const el = r && r.nodeType === 1 ? r : null;
+    if (!el || !el.isConnected) return { why: (r && r.why) || "gone" };
+    if (el.localName !== "video") return { why: "not a video" };
+    if (challenged(roots, el)) return { why: "challenge" };
+    return el;
   }
 
   function videos() {
@@ -95,13 +102,14 @@
   }
 
   function list() {
-    if (selfChallenge()) return [];
-    return videos().filter((v) => !challenged(v)).map((v) => {
+    const roots = challengeRoots();
+    if (!Array.isArray(roots)) return roots;
+    return videos().filter((v) => !challenged(roots, v)).map((v) => {
       const kind = kindOf(v);
       const r = v.getBoundingClientRect();
       const d = v.duration;
       const o = {
-        id: idOf(v),
+        id: sb().id(v),
         kind,
         duration: Number.isFinite(d) ? Math.round(d * 1000) / 1000 : null,
         live: d === Infinity,
@@ -194,19 +202,24 @@
     return false;
   }
 
-  async function grab(v, t, opts) {
-    const cap = opts.seekCapMs || 5000;
-    if (v.readyState < 1) await once(v, ["loadedmetadata"], cap);
+  async function grab(v, t, opts, cap) {
+    // cap() is the time left for the next event: min(seekCapMs, what remains of the budget).
+    if (v.readyState < 1) {
+      const p = once(v, ["loadedmetadata"], cap());
+      // preload=none: nothing loads until asked.
+      if (v.readyState === 0 && v.networkState !== 2) v.load();
+      await p;
+    }
     const dur = Number.isFinite(v.duration) ? v.duration : null;
     const target = dur !== null ? Math.min(Math.max(0, t), Math.max(0, dur - 0.001)) : Math.max(0, t);
     if (Math.abs(v.currentTime - target) > 0.001) {
       if (!seekable(v, target)) return { t: target, why: "not seekable (no byte ranges or live)" };
-      const p = once(v, ["seeked"], cap);
+      const p = once(v, ["seeked"], cap());
       v.currentTime = target;
       await p;
       if (Math.abs(v.currentTime - target) > 0.25) return { t: target, why: "seek did not land" };
     }
-    if (v.readyState < 2) await once(v, ["loadeddata", "canplay"], cap);
+    if (v.readyState < 2) await once(v, ["loadeddata", "canplay"], cap());
     const vw = v.videoWidth;
     const vh = v.videoHeight;
     if (!vw || !vh) return { t: target, why: "no video frame" };
@@ -237,15 +250,28 @@
     const v = byId(id);
     if (v.why) return [{ t: null, why: v.why }];
     if (kindOf(v) === "drm") return [{ t: null, why: "protected (DRM)" }];
+    const deadline = performance.now() + Number(opts.budgetMs || BUDGET_MS);
+    const seekCap = Number(opts.seekCapMs || SEEK_CAP_MS);
     const saved = { time: v.currentTime, paused: v.paused };
     if (!v.paused) v.pause();
     const out = [];
+    const ts = Array.from(times || [], Number);
+    let stop = "";
     try {
-      for (const t of times || []) {
+      for (const t of ts) {
+        const left = deadline - performance.now();
+        if (!stop && left <= 0) stop = "time budget";
+        if (stop) {
+          out.push({ t, why: stop, truncated: true });
+          continue;
+        }
         try {
-          out.push(await grab(v, Number(t), opts));
+          out.push(await grab(v, t, opts, () => Math.max(1, Math.min(seekCap, deadline - performance.now()))));
         } catch (e) {
-          out.push({ t: Number(t), why: e && e.message === "timeout" ? "seek timed out" : "media error" });
+          const timeout = e && e.message === "timeout";
+          out.push({ t, why: timeout ? "seek timed out" : "media error" });
+          // A seek that timed out will time out again: the rest would only burn the budget.
+          if (timeout) stop = "skipped after a seek timed out";
         }
       }
     } finally {

@@ -40,7 +40,10 @@ function serve(extra = {}) {
         body = Buffer.from(extra[u.pathname].body);
         type = extra[u.pathname].type || "text/html; charset=utf-8";
       } else {
-        const file = path.join(PAGES, path.normalize(u.pathname).replace(/^[/\\]+/, ""));
+        // /cdn-cgi/challenge-platform/<page> serves bench/pages/<page>: a challenge path
+        // (D-405 (3)) without a real challenge host.
+        const rel = u.pathname.replace(/^\/cdn-cgi\/challenge-platform\//, "/");
+        const file = path.join(PAGES, path.normalize(rel).replace(/^[/\\]+/, ""));
         if (!file.startsWith(PAGES) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
           res.writeHead(404);
           res.end("not found");

@@ -6,15 +6,32 @@
 
 const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
-const { serve, launch, openSb, byName, fill } = require("./helpers");
+const { serve, launch, openSb, byName, fill, page } = require("./helpers");
 
 let browser;
 let A; // origin 1
 let B; // origin 2 (same site, other port: a real cross-origin frame)
 const opened = [];
 
+// Small in-memory pages for single conditions (no network, no fixed sleeps).
+const html = (head, body) => ({ body: `<!doctype html><html><head><meta charset="utf-8">${head}</head><body>${body}</body></html>` });
+const EXTRA = {
+  "/posts/how-captchas-work": { body: page("how-captchas-work.html") },
+  // a script that renders nothing: settle's content wait ends at content_ms
+  "/scripted-empty.html": html("<title>Empty app</title><script>window.__app = 1;</script>", ""),
+  "/pdf.html": html("<title>PDF</title><script>window.__viewer = 1;</script>",
+    '<embed type="application/pdf" src="/no-such.pdf" width="600" height="400">'),
+  "/anim.html": html("<title>Shimmer</title><style>.sh { animation: sh 800ms linear infinite; }" +
+    " @keyframes sh { from { opacity: .4; } to { opacity: 1; } }</style>",
+    '<p class="sh">Loading the feed</p><button type="button">Refresh</button>'),
+  "/masked.html": html("<title>Masked</title><style>.pin { -webkit-text-security: disc; }</style>",
+    '<form><input id="pin" class="pin" type="text" aria-label="PIN">' +
+    '<input id="pw" type="password" aria-label="Password">' +
+    '<button id="show" type="button" onclick="document.getElementById(\'pw\').type = \'text\'">Show</button></form>'),
+};
+
 before(async () => {
-  [A, B] = await Promise.all([serve(), serve()]);
+  [A, B] = await Promise.all([serve(EXTRA), serve(EXTRA)]);
   browser = await launch();
 });
 after(async () => {
@@ -24,9 +41,13 @@ after(async () => {
   if (B) await B.close();
 });
 
-async function open(name, opts) {
-  const o = await openSb(browser, A.origin + "/" + name, opts);
+// Open a fixture and run the first based walk, as sb-driver does after each navigation
+// (D-405 (2)). opts.base: the base (default 1); null skips the walk.
+async function open(name, opts = {}) {
+  const url = /^[a-z]+:/.test(name) ? name : A.origin + "/" + name;
+  const o = await openSb(browser, url, opts);
   opened.push(o);
+  if (opts.base !== null) await o.ev((b) => globalThis.__sb.walk({ base: b }), opts.base || 1);
   return o;
 }
 
@@ -91,7 +112,7 @@ test("register.html index (acceptance 6, index side): names, flags, one CHALLENG
 });
 
 test("identity (acceptance 1): same ids across 3 walks with unrelated DOM changes; removed -> gone", async () => {
-  const o = await open("register.html");
+  const o = await open("register.html", { base: null });
   await o.ev(() => globalThis.__sb.walk({ base: 1000 }));
   const first = fill(await o.ev(() => globalThis.__sb.index()));
   assert.equal(first[0].id, 1000);
@@ -237,6 +258,118 @@ test("settle on a quiet page resolves after the quiet window, not the cap", asyn
   assert.ok(s.ms >= 145 && s.ms < 400, `quiet settle took ${s.ms.toFixed(0)} ms`);
 });
 
+// settle() timed in the page.
+const timedSettle = (o, opts) => o.ev(async (op) => {
+  const t = performance.now();
+  const r = await globalThis.__sb.settle(op || undefined);
+  return { r, ms: performance.now() - t };
+}, opts);
+
+test("settle skips the content wait (D-405 (8)): about:blank, script-less empty body, PDF embed, infinite animation", async (t) => {
+  // about:blank (a fresh or popup tab before navigation)
+  const blank = await open("about:blank");
+  const b = await timedSettle(blank);
+  t.diagnostic(`settle about:blank: ${b.ms.toFixed(0)} ms`);
+  assert.equal(b.r.settled, true);
+  assert.ok(b.ms < 400, `about:blank settle took ${b.ms.toFixed(0)} ms`);
+  // a loaded page with an empty body and no scripts
+  const empty = await open("accept-blank.html");
+  const e = await timedSettle(empty);
+  t.diagnostic(`settle empty body, no scripts: ${e.ms.toFixed(0)} ms`);
+  assert.equal(e.r.settled, true);
+  assert.ok(e.ms < 400, `empty-body settle took ${e.ms.toFixed(0)} ms`);
+  // a PDF embed is content even with a script on the page
+  const pdf = await open("pdf.html");
+  const p = await timedSettle(pdf);
+  assert.equal(p.r.settled, true);
+  assert.ok(p.ms < 400, `pdf settle took ${p.ms.toFixed(0)} ms`);
+  // a scripted page that never renders: the content wait ends at content_ms, not the cap
+  const sc = await open("scripted-empty.html");
+  const s1 = await timedSettle(sc);
+  t.diagnostic(`settle scripted empty body: ${s1.ms.toFixed(0)} ms`);
+  assert.equal(s1.r.settled, true);
+  assert.ok(s1.ms >= 990 && s1.ms < 1200, `scripted empty settle took ${s1.ms.toFixed(0)} ms`);
+  const s2 = await timedSettle(sc, { content_ms: 300 });
+  assert.ok(s2.ms >= 290 && s2.ms < 450, `content_ms 300 took ${s2.ms.toFixed(0)} ms`);
+  // an infinite shimmer plus a class toggle on <html> does not hold settle to the cap
+  const an = await open("anim.html");
+  await an.page.evaluate(() => document.documentElement.classList.add("scrolled"));
+  const a = await timedSettle(an);
+  assert.equal(a.r.settled, true);
+  assert.ok(a.ms < 500, `infinite animation settle took ${a.ms.toFixed(0)} ms`);
+  assert.ok(await an.page.evaluate(() => document.getAnimations().some((x) => x.playState === "running")));
+});
+
+test("CHALLENGE in Chromium: interstitial with a closed shadow root, widgets, v3 badge not, bframe once visible", async () => {
+  const it = await open("challenge-interstitial.html");
+  const rows = fill(await it.ev(() => globalThis.__sb.index()));
+  const ch = rows.filter((r) => r.flags.challenge);
+  assert.equal(ch.length, 2, JSON.stringify(rows));
+  assert.equal(ch[0].name, "Verify you are human by completing the action below.");
+  assert.ok(byName(rows, "Why am I seeing this page?", "link"));
+  assert.deepEqual((await timedAct(it, ch[1].id)).r, { why: "challenge" });
+
+  const w = await open("challenge-widgets.html");
+  const ids = (sel) => w.ev((s) => globalThis.__sb.id(document.querySelector(s)), sel);
+  const wr = fill(await w.ev(() => globalThis.__sb.index()));
+  const want = [await ids("#arkose iframe"), await ids(".geetest_holder"), await ids("#hc")].sort((x, y) => x - y);
+  assert.deepEqual(wr.filter((r) => r.flags.challenge).map((r) => r.id).sort((x, y) => x - y), want);
+  const bframeId = await ids("#bframe-box iframe");
+  const bf = wr.find((r) => r.id === bframeId);
+  assert.ok(bf && !bf.flags.challenge && bf.state.visible === false, JSON.stringify(bf));
+  const badgeId = await ids(".grecaptcha-badge iframe");
+  const badge = wr.find((r) => r.id === badgeId);
+  assert.ok(badge && !badge.flags.challenge, JSON.stringify(badge));
+  assert.ok(!byName(wr, "Sign in", "button").flags.challenge);
+  // the site shows the challenge: the bframe becomes visible and is CHALLENGE
+  await w.page.evaluate(() => {
+    const b = document.getElementById("bframe-box");
+    b.style.visibility = "visible";
+    b.style.top = "10px";
+  });
+  await w.ev(() => globalThis.__sb.walk({ dirty: true }));
+  const shown = fill(await w.ev(() => globalThis.__sb.index()));
+  const bf2 = shown.find((r) => r.id === bframeId);
+  assert.ok(bf2.flags.challenge && bf2.state.visible, JSON.stringify(bf2));
+
+  // a URL that only mentions captcha is an ordinary article
+  const art = await open("posts/how-captchas-work");
+  const ar = fill(await art.ev(() => globalThis.__sb.index()));
+  assert.ok(!ar.some((r) => r.flags.challenge));
+  assert.ok(byName(ar, "How captchas work", "heading") && byName(ar, "Subscribe", "button"));
+  assert.ok((await art.ev(() => globalThis.__sb.text())).length > 3);
+});
+
+test("masked and toggled password fields stay empty|filled in Chromium (D-405 (1))", async () => {
+  const o = await open("masked.html");
+  await o.page.fill("#pin", "masked-canary-1");
+  await o.page.fill("#pw", "toggled-canary-2");
+  const before = fill(await o.ev(() => globalThis.__sb.index()));
+  assert.deepEqual(byName(before, "PIN").state.value, { kind: "filled" });
+  assert.deepEqual(byName(before, "Password").state.value, { kind: "filled" });
+  await o.page.click("#show"); // the site's own show-password toggle
+  assert.equal(await o.page.evaluate(() => document.getElementById("pw").type), "text");
+  const after = fill(await o.ev(() => globalThis.__sb.index()));
+  assert.deepEqual(byName(after, "Password").state.value, { kind: "filled" });
+  const blob = JSON.stringify(after) + JSON.stringify(await o.ev(() => globalThis.__sb.text())) +
+    JSON.stringify(await o.ev(() => globalThis.__sb.state(document.getElementById("pw"))));
+  assert.ok(!blob.includes("canary"), blob);
+});
+
+test("register fixtures (D-405 (10)) match the live index() and text()", async () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const dir = path.join(__dirname, "fixtures");
+  const o = await open("register.html");
+  const live = await o.ev(() => ({ index: globalThis.__sb.index(), text: globalThis.__sb.text() }));
+  const idx = JSON.parse(fs.readFileSync(path.join(dir, "register.index.json"), "utf8"));
+  const txt = JSON.parse(fs.readFileSync(path.join(dir, "register.text.json"), "utf8"));
+  // boxes depend on the machine's fonts: compare everything else exactly
+  const noBox = (rows) => rows.map((r) => Object.assign({}, r, { box: r.box ? "box" : undefined }));
+  assert.deepEqual(noBox(live.index), noBox(idx), "regenerate with node injected/test/gen-fixtures.js");
+  assert.deepEqual(live.text, txt, "regenerate with node injected/test/gen-fixtures.js");
+});
+
 test("frames: same-origin child has its own __sb; cross-origin and captcha frames are one OPAQUE row", async () => {
   const o = await open("frames.html?xo=" + encodeURIComponent(B.origin), { waitUntil: "load" });
   const rows = fill(await o.ev(() => globalThis.__sb.index()));
@@ -260,16 +393,27 @@ test("frames: same-origin child has its own __sb; cross-origin and captcha frame
   const tree = await o.frames();
   const sameF = tree.find((f) => f.url === A.origin + "/frame-child.html");
   const crossF = tree.find((f) => f.url === B.origin + "/frame-child.html");
-  const capF = tree.find((f) => f.url.includes("widget=hcaptcha"));
+  const capF = tree.find((f) => f.url.includes("/cdn-cgi/challenge-platform/"));
   assert.ok(sameF && crossF && capF, JSON.stringify(tree));
-  const childRows = fill(await o.ev(() => globalThis.__sb.index(), undefined, sameF.id));
+  // sb-driver walks each frame with its own base before reading it (D-405 (2))
+  const walkIndex = (fid) => o.ev(() => {
+    globalThis.__sb.walk({ base: 1 });
+    return globalThis.__sb.index();
+  }, undefined, fid);
+  const childRows = fill(await walkIndex(sameF.id));
   assert.ok(byName(childRows, "Nickname", "textbox"));
   assert.equal(byName(childRows, "Save nickname").form, "f1");
-  const crossRows = fill(await o.ev(() => globalThis.__sb.index(), undefined, crossF.id));
+  const crossRows = fill(await walkIndex(crossF.id));
   assert.ok(byName(crossRows, "Nickname"));
-  // inside a challenge frame the page API reads nothing (D-5)
-  assert.deepEqual(await o.ev(() => globalThis.__sb.index(), undefined, capF.id), []);
-  assert.deepEqual(await o.ev(() => globalThis.__sb.text(), undefined, capF.id), []);
+  // a challenge frame (by its path, D-405 (3)) is one CHALLENGE row; nothing inside is read (D-5)
+  const capRows = fill(await walkIndex(capF.id));
+  assert.equal(capRows.length, 1);
+  assert.equal(capRows[0].flags.challenge, true);
+  assert.ok(!byName(capRows, "Nickname"));
+  const capText = await o.ev(() => globalThis.__sb.text(), undefined, capF.id);
+  assert.equal(capText.length, 1);
+  assert.ok(!JSON.stringify(capText).includes("Nickname"));
+  assert.equal((await o.ev(() => globalThis.__sb.frames(), undefined, capF.id))[0].challenge, true);
 });
 
 test("popup.html: opens_new_tab from target=_blank and onclick window.open", async () => {

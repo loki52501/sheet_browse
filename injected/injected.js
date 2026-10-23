@@ -5,17 +5,23 @@
 //   walk({base, dirty}) -> {count}      ids start at `base` (sb-driver passes one per document
 //                                       generation), so an id is never reused in a tab frame.
 //                                       dirty: true re-walks only the MutationObserver dirty set.
+//                                       The first walk must carry a base (D-405 (2)).
 //   index()            -> IndexRow[]   exactly the serde shape of sb_sheet::IndexRow (I-5, D-37);
 //                                      see crates/sb-sheet/src/index.rs test `index_row_wire_shape`.
 //                                      JS emits frame 0 and frame-local ids; sb-driver rewrites
 //                                      frame, ElemRefs and child_frame when it merges frames.
+//                                      A challenge page is one CHALLENGE row (D-405 (3), D-424).
 //   text(region)       -> TextBlock[]  sb_sheet::TextBlock, frame-local `order`
-//   resolve(id)        -> element | {why: "gone" | "stale"}  ("stale": id below this document's base)
+//   resolve(id)        -> element | {why: "gone" | "stale"}  ("stale": an id this document never
+//                                      issued, below its base or before its first based walk;
+//                                      "gone": issued here and lost)
 //   act(id)            -> Promise<{x, y} | {why}>
-//   settle(opts)       -> Promise<{settled, changed}>
+//   settle(opts)       -> Promise<{settled, changed}>   opts {quiet, cap, content_ms}
 //   fingerprint(spec)  -> "match" | {partial: [missing...]} | "miss"
 //   frames()           -> [{frame, parent, url, opaque, ...}]
 //   id(el), name(el), role(el), state(el): the single-element pieces of a row.
+// Before the first walk({base}), id, index, text, fingerprint, state, name and frames issue no
+// ids and return {why: "no base"} (D-405 (2)); role, resolve, act and settle work.
 // skeleton / find / sheet are NOT in-page (D-51): sb-sheet scores the shipped index in Rust.
 // Never touch window globals the site can see; never read a password value; never read
 // inside a CHALLENGE frame.
@@ -93,13 +99,25 @@
   const VISIBLE_CONTROL_SEL = 'input:not([type="hidden"]),select,button,a[href]';
 
   // D-5: challenges are reported, never solved, never read inside.
-  const CHALLENGE_URL_RE =
-    /recaptcha|hcaptcha\.com|challenges\.cloudflare\.com|\/turnstile\/|captcha/i;
+  // A page or frame is a challenge by its host or path (D-405 (3)), never by a bare substring.
+  const CHALLENGE_HOST_RE =
+    /(^|\.)(challenges\.cloudflare\.com|recaptcha\.net|hcaptcha\.com|arkoselabs\.com|funcaptcha\.com|geetest\.com)$/i;
+  const CHALLENGE_PATH_RE = /^\/cdn-cgi\/challenge-platform(\/|$)/i;
+  const CHALLENGE_TITLE_PAGE_RE = /^just a moment(\.\.\.|…)?$/i;
+  // Frame src / title / name / aria-label in the parent: the widget's own label.
   const CHALLENGE_FRAME_RE =
-    /captcha|turnstile|challenges\.cloudflare\.com|cloudflare security challenge|verify you are human|human verification/i;
-  const CHALLENGE_BOX_RE = /captcha|turnstile/i;
+    /captcha|turnstile|cloudflare security challenge|verify you are human|human verification|verification challenge|arkose|funcaptcha|geetest/i;
+  const CHALLENGE_BOX_RE = /captcha|turnstile|geetest|funcaptcha|arkose/i;
   const CHALLENGE_TEXT_RE =
-    /verify (that )?you('| a)re (a )?human|are you a robot|i'?m not a robot|human verification/i;
+    /verify (that )?you(['’]re| are) (a )?human|verify you are not a (ro)?bot|are you (a robot|a human|human)|i(['’]m| am) not a robot|human verification|press (and|&) hold/i;
+  const CHALLENGE_TEXT_MAX = 200; // a prompt is short; a paragraph about captchas is not
+  const RESPONSE_SEL =
+    '[name="g-recaptcha-response"],[name="h-captcha-response"],[name="cf-turnstile-response"]';
+  // Interactive or structural tags that are never a challenge widget box.
+  const NOT_BOX_TAGS = new Set([
+    "html", "body", "form", "main", "button", "input", "select", "textarea", "a", "label", "option",
+  ]);
+  const CONTENT_MS = 1000;
   const OVERLAY_RE =
     /cookie|consent|gdpr|modal|popup|pop-up|overlay|newsletter|subscribe|paywall|interstitial|lightbox/i;
   const SUBMIT_WORDS_RE =
@@ -145,8 +163,13 @@
   // ---------------------------------------------------------------- frame state
   const S = {
     walked: false,
+    based: false, // a walk({base}) has run: ids may be issued (D-405 (2))
     base: 1,
     next: 1,
+    selfCh: false, // this document is a challenge page (set by each walk)
+    sens: new WeakSet(), // elements ever seen as sensitive: only empty|filled, forever (D-405 (1))
+    respBox: new WeakSet(), // parents of captcha response fields (D-405 (4))
+    lastFill: new WeakMap(), // sensitive element -> last empty|filled evidence (D-426)
     ids: new WeakMap(), // Element -> id
     refs: new Map(), // id -> WeakRef<Element>
     rec: new WeakMap(), // Element -> walk decision (cached between walks)
@@ -224,10 +247,15 @@
   };
 
   // ---------------------------------------------------------------- identity (B-4 #4)
+  // Ids are issued only after the first walk({base}) (D-405 (2)), so every id this document
+  // hands out is in [base, next) and an id outside that range was never issued here.
+  const NO_BASE = () => ({ why: "no base" });
+
   function idOf(el) {
     if (!el || el.nodeType !== 1) return null;
     let id = S.ids.get(el);
     if (id === undefined) {
+      if (!S.based) return null; // unreachable through the API, which checks S.based first
       id = S.next++;
       S.ids.set(el, id);
       S.refs.set(id, new WeakRef(el));
@@ -235,10 +263,17 @@
     return id;
   }
 
+  function idApi(el) {
+    if (!S.based) return NO_BASE();
+    return idOf(el);
+  }
+
   function resolve(id) {
     const n = typeof id === "string" ? Number(id.replace(/^#/, "").replace(/^f\d+\./, "")) : id;
     if (!Number.isInteger(n)) return { why: "gone" };
-    if (n < S.base) return { why: "stale" };
+    // Never issued by this document: from an earlier document generation.
+    if (!S.based || n < S.base) return { why: "stale" };
+    if (n >= S.next) return { why: "gone" };
     const ref = S.refs.get(n);
     const el = ref && ref.deref();
     if (!el || !el.isConnected) return { why: "gone" };
@@ -261,19 +296,46 @@
   }
 
   // ---------------------------------------------------------------- challenge (D-5, D-55)
+  // A known challenge host or path (D-405 (3)).
+  function challengeUrl(href) {
+    let u;
+    try {
+      u = new URL(href, doc.baseURI);
+    } catch (e) {
+      return false;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    if (CHALLENGE_HOST_RE.test(u.hostname)) return true;
+    if (/(^|\.)google\.com$/i.test(u.hostname) && /^\/recaptcha\//i.test(u.pathname)) return true;
+    return CHALLENGE_PATH_RE.test(u.pathname);
+  }
   function challengeFrameEl(fr) {
+    const src = attr(fr, "src");
+    if (src && challengeUrl(src)) return true;
     return CHALLENGE_FRAME_RE.test(
-      attr(fr, "src") + " " + attr(fr, "title") + " " + attr(fr, "name") + " " + attr(fr, "aria-label"),
+      src + " " + attr(fr, "title") + " " + attr(fr, "name") + " " + attr(fr, "aria-label"),
     );
   }
-  function challengeBox(el) {
+  // reCAPTCHA v3 / invisible widgets have nothing for the user to solve (D-405 (5), B-402):
+  // the badge, an invisible-size widget, and a challenge frame that is not visible (the
+  // bframe stays hidden until a challenge is actually shown).
+  function passiveBox(el) {
+    if (/\bgrecaptcha-badge\b/.test(classOf(el))) return true;
+    if (attr(el, "data-size").toLowerCase() === "invisible") return true;
+    return !!closestComposed(el, ".grecaptcha-badge");
+  }
+  function passiveFrame(fr, vis) {
+    if (!vis) return true;
+    if (/[?&]size=invisible\b/i.test(attr(fr, "src"))) return true;
+    return !!closestComposed(fr, '.grecaptcha-badge,[data-size="invisible"]');
+  }
+  function challengeBox(el, vis) {
     const tag = el.localName;
-    if (tag === "iframe" || tag === "frame") return challengeFrameEl(el);
-    if (tag === "html" || tag === "body" || tag === "form" || tag === "main") return false;
-    const s = classOf(el) + " " + el.id;
-    const named = CHALLENGE_BOX_RE.test(s) || el.hasAttribute("data-sitekey") ||
-      el.hasAttribute("data-hcaptcha-widget-id");
-    if (!named) return false;
+    if (tag === "iframe" || tag === "frame") return challengeFrameEl(el) && !passiveFrame(el, vis);
+    if (NOT_BOX_TAGS.has(tag)) return false;
+    const named = CHALLENGE_BOX_RE.test(classOf(el) + " " + el.id) || el.hasAttribute("data-sitekey") ||
+      el.hasAttribute("data-hcaptcha-widget-id") || S.respBox.has(el);
+    if (!named || passiveBox(el)) return false;
     // A wrapper with real controls is not the widget (the controls stay rows).
     return !el.querySelector(VISIBLE_CONTROL_SEL);
   }
@@ -281,19 +343,67 @@
     for (let n = el; n && n.nodeType === 1; n = parentOf(n)) {
       const r = S.rec.get(n);
       if (r && r.challenge) return true;
-      if (challengeBox(n)) return true;
+      if (challengeBox(n, r ? r.vis : true)) return true;
     }
     return false;
   }
+  // Short own text (direct text nodes and leaf inline children) that asks for a human check
+  // (D-405 (4), D-422). Returns the text, or "".
+  function challengeText(el) {
+    let t = "";
+    let any = false;
+    for (let k = el.firstChild; k; k = k.nextSibling) {
+      if (k.nodeType === 3) {
+        t += k.data;
+        if (!any && /\S/.test(k.data)) any = true;
+      } else if (k.nodeType === 1 && INLINE_TAGS.has(k.localName) && k.childElementCount === 0) {
+        t += k.textContent;
+      }
+      if (t.length > CHALLENGE_TEXT_MAX * 2) return "";
+    }
+    if (!any) return "";
+    t = t.replace(/\s+/g, " ").trim();
+    if (t.length < 8 || t.length > CHALLENGE_TEXT_MAX) return "";
+    return CHALLENGE_TEXT_RE.test(t) ? t : "";
+  }
+  // This document is a challenge page: a challenge host or path, the Cloudflare interstitial
+  // title, or a frame whose owner element (same origin) is a challenge widget.
   function selfChallenge() {
     try {
-      if (CHALLENGE_URL_RE.test(String(globalThis.location && globalThis.location.href))) return true;
+      if (challengeUrl(String(globalThis.location && globalThis.location.href))) return true;
+      if (CHALLENGE_TITLE_PAGE_RE.test(clean(doc.title))) return true;
       const fe = globalThis.frameElement;
-      if (fe && (challengeFrameEl(fe) || inChallenge(fe))) return true;
+      if (fe && (challengeBox(fe, true) || inChallenge(fe))) return true;
     } catch (e) {
       // frameElement across origins throws in some engines: not a challenge signal.
     }
     return false;
+  }
+  function scanResponseFields() {
+    S.respBox = new WeakSet();
+    for (const f of doc.querySelectorAll(RESPONSE_SEL)) {
+      const p = parentOf(f);
+      if (p && p.nodeType === 1) S.respBox.add(p);
+    }
+  }
+  // The page's single row when it is itself a challenge (D-424). Nothing inside is read.
+  function selfRow() {
+    const de = doc.documentElement;
+    let host = "";
+    try {
+      host = String(globalThis.location.hostname || "");
+    } catch (e) {
+      host = "";
+    }
+    const o = {
+      id: idOf(de), frame: 0, role: "document", name: "challenge page" + (host ? " (" + host + ")" : ""),
+      state: {}, flags: { challenge: true },
+    };
+    if (hasLayout()) {
+      const vp = viewport();
+      o.box = { x: 0, y: 0, w: vp.w, h: vp.h };
+    }
+    return o;
   }
 
   // ---------------------------------------------------------------- role (B-5 role)
@@ -645,20 +755,48 @@
     } catch (e) {
       // :disabled unsupported on this node type
     }
-    return !!el.closest('[aria-disabled="true"]');
+    return !!closestComposed(el, '[aria-disabled="true"]');
   }
 
+  // Computed -webkit-text-security other than none: a text field masked like a password.
+  function masked(el) {
+    try {
+      const v = style(el).getPropertyValue("-webkit-text-security").trim().toLowerCase();
+      if (v && v !== "none") return true;
+    } catch (e) { /* no computed style */ }
+    return /-webkit-text-security\s*:\s*(?!none\b)[a-z]/i.test(attr(el, "style"));
+  }
+
+  // Sticky (D-405 (1)): once an element is sensitive it stays sensitive for its lifetime, so a
+  // show-password toggle or a type swap on focus never exposes the value. onMut also records
+  // elements whose old type or autocomplete was sensitive.
   function sensitive(el) {
-    if (String(el.type).toLowerCase() === "password") return true;
-    if (SENSITIVE_AC_RE.test(attr(el, "autocomplete").toLowerCase())) return true;
-    return SENSITIVE_NAME_RE.test(attr(el, "name") + " " + el.id);
+    if (S.sens.has(el)) return true;
+    const s = String(el.type).toLowerCase() === "password" ||
+      SENSITIVE_AC_RE.test(attr(el, "autocomplete").toLowerCase()) ||
+      SENSITIVE_NAME_RE.test(attr(el, "name") + " " + el.id) ||
+      masked(el);
+    if (s) S.sens.add(el);
+    return s;
   }
 
   // empty|filled without calling the value getter (H-2: passwords are never read from the DOM).
   // Evidence, in order: required + validity.valueMissing (exact); a caret or selection past 0
   // (insertText and programmatic sets leave it at the end); :placeholder-shown (exact when a
   // placeholder exists); validity flags that only a value can raise. No evidence: empty.
+  // A type swap (show password) resets the caret, so the evidence taken under the previous
+  // type (by a read or by the last edit) carries over until the next edit, D-426.
   function filledNoRead(el) {
+    const type = String(el.type).toLowerCase();
+    const ev = fillEvidence(el);
+    if (ev) {
+      S.lastFill.set(el, { ev, type });
+      return ev;
+    }
+    const last = S.lastFill.get(el);
+    return last && last.type !== type ? last.ev : "empty";
+  }
+  function fillEvidence(el) {
     try {
       if (el.required && el.validity) return el.validity.valueMissing ? "empty" : "filled";
     } catch (e) { /* no validity */ }
@@ -674,7 +812,7 @@
       const v = el.validity;
       if (v && (v.tooShort || v.tooLong || v.patternMismatch || v.typeMismatch || v.badInput)) return "filled";
     } catch (e) { /* no validity */ }
-    return "empty";
+    return "";
   }
 
   function fieldValue(el, role) {
@@ -756,12 +894,22 @@
         return n.localName;
       }
       case "section":
-        return n.hasAttribute("aria-label") || n.hasAttribute("aria-labelledby") ? "region" : "";
+        return hasAccName(n) ? "region" : "";
+      case "form":
+        // ARIA: a form with an accessible name is a form landmark (D-405 (7)).
+        return hasAccName(n) ? "form" : "";
+      case "search":
+        return "form";
       default:
         return "";
     }
   }
-  // Nearest enclosing landmark. <form> is not one here: rows carry it in `form` (D-414).
+  function hasAccName(n) {
+    return /\S/.test(attr(n, "aria-label")) || /\S/.test(attr(n, "aria-labelledby")) ||
+      /\S/.test(attr(n, "title"));
+  }
+  // Nearest enclosing landmark. An unnamed <form> is not one: rows carry it in `form` (D-414,
+  // amended by D-405 (7)).
   function landmarkOf(el) {
     const path = [];
     let res = null;
@@ -813,6 +961,16 @@
     return row;
   }
 
+  // Heading level: the tag's, else aria-level as an integer clamped to 1..6, default 2
+  // (D-405 (6): TextBlock.level is a u8 and one bad value must not fail the whole read).
+  function headingLevel(el) {
+    const tag = el.localName;
+    if (/^h[1-6]$/.test(tag)) return Number(tag[1]);
+    const n = Math.trunc(Number(attr(el, "aria-level")));
+    if (!Number.isFinite(n) || n < 1) return 2;
+    return Math.min(6, n);
+  }
+
   function compute(el) {
     const tag = el.localName;
     if (SKIP_TAGS.has(tag)) return HIDDEN_REC;
@@ -828,7 +986,7 @@
     };
 
     // A CHALLENGE container owns its subtree and is one row, carried on its iframe (D-55).
-    if (challengeBox(el)) {
+    if (challengeBox(el, vis)) {
       rec.challenge = true;
       rec.skipKids = true;
       const fr = tag === "iframe" || tag === "frame" ? el : el.querySelector("iframe,frame");
@@ -850,10 +1008,28 @@
       newRow(el, "iframe", rec);
       return rec;
     }
+
+    // "Verify you are human" and friends in a visible block (D-405 (4), D-422): the block is a
+    // CHALLENGE row. With at most two controls inside it is the widget and owns its subtree;
+    // around more controls it only marks them (act refuses them, text() skips them).
+    if (vis && tag !== "html" && tag !== "body") {
+      const ct = challengeText(el);
+      if (ct) {
+        rec.challenge = true;
+        rec.skipKids = el.querySelectorAll(VISIBLE_CONTROL_SEL).length <= 2;
+        const r = ROW_ROLES.has(role) && role !== "row" ? role : ariaRole(el) || "group";
+        const row = newRow(el, r, rec, { challenge: true });
+        if (r === "heading") row.level = headingLevel(el);
+        row.name = clean(attr(el, "aria-label")) || clean(ct);
+        row.named = true;
+        return rec;
+      }
+    }
+
     if (vis && ROW_ROLES.has(role) && !wrapsField(el, role) && !(role === "listbox" && tag !== "select")) {
       const row = newRow(el, role, rec);
       if (role === "heading") {
-        row.level = /^h[1-6]$/.test(tag) ? Number(tag[1]) : Number(attr(el, "aria-level")) || 2;
+        row.level = headingLevel(el);
         // A heading that holds links keeps them as rows.
         rec.skipKids = !el.querySelector(INTERACTIVE_SEL);
       } else {
@@ -904,6 +1080,8 @@
       row.options = Array.from(el.options).slice(0, OPTIONS_CAP).map((o) => clean(o.label || o.text, 60));
     }
     if (tag === "input") row.inputType = String(el.type).toLowerCase();
+    // Register sensitivity at walk time, so a later type swap cannot expose the value (D-405 (1)).
+    if (tag === "input" || tag === "textarea") sensitive(el);
     const ac = attr(el, "autocomplete").trim().toLowerCase();
     if (ac && ac !== "on" && ac !== "off") row.autocomplete = ac;
     if (!row.challenge) {
@@ -912,6 +1090,8 @@
       } else if (/captcha/i.test(attr(el, "name") + " " + el.id) && tag !== "form") {
         row.challenge = true;
       }
+      // act reads rec.challenge for the row and everything inside it.
+      if (row.challenge) rec.challenge = true;
     }
   }
 
@@ -992,7 +1172,12 @@
       }
     }
     const root = doc.documentElement;
-    if (root && !selfChallenge()) visitEl(root, !incremental);
+    S.selfCh = selfChallenge();
+    if (root && S.selfCh) idOf(root);
+    if (root && !S.selfCh) {
+      scanResponseFields();
+      visitEl(root, !incremental);
+    }
     buildLabelMap();
     for (const rec of S.fresh) finishRow(rec);
     S.fresh = [];
@@ -1007,12 +1192,14 @@
   function walk(opts) {
     if (typeof opts === "boolean") opts = { dirty: opts };
     opts = opts || {};
-    if (!S.walked) {
+    if (!S.based) {
+      // The first walk adopts the base sb-driver gives this document generation; without one
+      // no id is issued, so ids can never restart below a later base (D-405 (2)).
       const b = Number(opts.base);
-      if (Number.isInteger(b) && b > 0) {
-        S.base = b;
-        S.next = Math.max(S.next, b);
-      }
+      if (!(Number.isInteger(b) && b > 0)) return NO_BASE();
+      S.base = b;
+      S.next = b;
+      S.based = true;
     }
     let incremental = !!opts.dirty && S.walked && !S.full;
     if (Array.isArray(opts.dirty)) {
@@ -1023,9 +1210,10 @@
       incremental = S.walked && !S.full;
     }
     doWalk(incremental);
-    return { count: S.rows.length };
+    return { count: S.selfCh ? 1 : S.rows.length };
   }
 
+  // Callers check S.based first: ensure() never runs the first walk itself.
   function ensure() {
     if (!S.walked) doWalk(false);
     else if (S.full) doWalk(false);
@@ -1105,7 +1293,9 @@
 
   // ---------------------------------------------------------------- index (I-5 rows)
   function index() {
+    if (!S.based) return NO_BASE();
     ensure();
+    if (S.selfCh) return [selfRow()];
     S.layout = hasLayout();
     const L = S.layout;
     const vp = viewport();
@@ -1254,10 +1444,15 @@
   }
 
   function text(region) {
+    if (!S.based) return NO_BASE();
     ensure();
     S.lm = new Map();
     const blocks = [];
-    if (selfChallenge()) return blocks;
+    if (S.selfCh) {
+      // One block naming the challenge, linked to its row; nothing inside is read (D-424).
+      const r = selfRow();
+      return [{ order: 0, frame: 0, kind: "other", spans: [{ text: r.name, elem: "#" + r.id }] }];
+    }
     let order = 0;
     const headings = [];
     const stack = []; // {kind, level, el}
@@ -1422,7 +1617,7 @@
         flush();
         let [kind, level] = row && row.isHeading ? ["heading", row.level] : blockKind(n);
         const isList = tag === "ul" || tag === "ol";
-        if (kind === "list_item") level = Math.max(1, listDepth());
+        if (kind === "list_item") level = Math.min(255, Math.max(1, listDepth())); // u8 on the wire
         const pre = kind === "code" || (stack.length && stack[stack.length - 1].pre);
         if (stack.length && stack[stack.length - 1].kind === "code") kind = "code";
         stack.push({ el: n, kind, level, pre, list: isList });
@@ -1527,7 +1722,10 @@
   }
 
   // ---------------------------------------------------------------- settle() (B-4 #8)
-  const MO_OPTS = { subtree: true, childList: true, attributes: true, characterData: true };
+  // attributeOldValue: a type or autocomplete that was sensitive keeps the element sensitive.
+  const MO_OPTS = { subtree: true, childList: true, attributes: true, characterData: true, attributeOldValue: true };
+  const SENS_ATTR = { type: /^\s*password\s*$/i, autocomplete: /\b(current-password|new-password|one-time-code)\b/i };
+  const RECENT_MS = 5000;
 
   function markDirty(node) {
     let el = null;
@@ -1548,11 +1746,14 @@
     if (S.dirty.size > DIRTY_MAX) S.full = true;
   }
 
-  function remember(t, n) {
+  // Recently changed nodes for settle's animation check: [t, WeakRef<el>, self]. self: an
+  // attribute or text change, which only counts the node's own animations (a class toggle on
+  // <html> must not let every animation in the page hold settle).
+  function remember(t, n, self) {
     if (!n) return;
     const el = n.nodeType === 1 ? n : n.parentElement;
     if (!el) return;
-    S.recent.push([t, el]);
+    S.recent.push([t, new WeakRef(el), self]);
     if (S.recent.length > 300) S.recent.splice(0, S.recent.length - 300);
   }
 
@@ -1561,9 +1762,13 @@
     S.lastMut = t;
     S.mutCount += recs.length;
     for (const m of recs) {
+      if (m.type === "attributes" && m.oldValue && SENS_ATTR[m.attributeName] &&
+        SENS_ATTR[m.attributeName].test(m.oldValue) && m.target.nodeType === 1) {
+        S.sens.add(m.target);
+      }
       if (S.walked && !S.full) markDirty(m.target);
-      if (m.type === "childList") for (const a of m.addedNodes) remember(t, a);
-      else remember(t, m.target);
+      if (m.type === "childList") for (const a of m.addedNodes) remember(t, a, false);
+      else remember(t, m.target, true);
     }
     for (const w of Array.from(S.waiters)) w();
   }
@@ -1573,24 +1778,49 @@
   doc.addEventListener("readystatechange", () => {
     for (const w of Array.from(S.waiters)) w();
   });
+  // Each edit records the field's empty|filled evidence (caret, validity; never the value),
+  // so a later type swap that resets the caret still reports it (D-426).
+  doc.addEventListener("input", (e) => {
+    const t = typeof e.composedPath === "function" ? e.composedPath()[0] : e.target;
+    if (!t || t.nodeType !== 1 || (t.localName !== "input" && t.localName !== "textarea")) return;
+    const ev = fillEvidence(t);
+    if (ev) S.lastFill.set(t, { ev, type: String(t.type).toLowerCase() });
+    else S.lastFill.delete(t);
+  }, true);
+
+  function infinite(a) {
+    try {
+      const tm = a.effect.getComputedTiming();
+      return tm.endTime === Infinity || tm.iterations === Infinity;
+    } catch (e) {
+      return false;
+    }
+  }
 
   function runningAnims(since) {
     if (typeof doc.getAnimations !== "function") return [];
+    const cut = now() - RECENT_MS;
+    if (S.recent.length && S.recent[0][0] < cut) S.recent = S.recent.filter((r) => r[0] >= cut);
     const changed = [];
-    for (const [t, el] of S.recent) if (t >= since && el.isConnected) changed.push(el);
+    for (const [t, ref, self] of S.recent) {
+      const el = t >= since ? ref.deref() : null;
+      if (el && el.isConnected) changed.push({ el, self: self || el === doc.body || el === doc.documentElement });
+    }
     if (!changed.length) return [];
     return doc.getAnimations().filter((a) => {
       if (a.playState !== "running" || !a.effect || !a.effect.target) return false;
+      // An infinite animation (spinner, shimmer, marquee) never ends: it cannot hold settle.
+      if (infinite(a)) return false;
       const tg = a.effect.target;
-      return changed.some((c) => contains(c, tg));
+      return changed.some((c) => (c.self ? c.el === tg : contains(c.el, tg)));
     });
   }
 
-  // Something a reader can use: a control, media, or a visible text node in the body.
+  // Something a reader can use: a control, media, an embed (PDF), or a visible text node.
   function hasContent() {
     const b = doc.body;
     if (!b) return false;
-    if (b.querySelector("input:not([type=hidden]),button,select,textarea,img,iframe,video,canvas,svg,a[href]")) {
+    if (b.querySelector("input:not([type=hidden]),button,select,textarea,img,iframe,video,canvas,svg,a[href],embed,object")) {
       return true;
     }
     const tw = doc.createTreeWalker(b, NodeFilter.SHOW_TEXT);
@@ -1606,13 +1836,26 @@
     return false;
   }
 
+  // The D-416 content wait applies only to a document that may still render itself: it has
+  // script elements, is not about:blank / about:srcdoc, and its body has no content yet
+  // (D-405 (8)). A blank tab, a PDF embed or a static page never waits for content.
+  function wantsContent() {
+    try {
+      if (String(globalThis.location && globalThis.location.protocol) === "about:") return false;
+    } catch (e) { /* no location */ }
+    return !!doc.querySelector("script") && !hasContent();
+  }
+
   // Resolves when the DOM has had no mutation for `quiet` ms (counted from the call), no
-  // running animation on recently changed nodes, the document is past loading and has
-  // content (D-416); or when `cap` ms pass. Every wait below is on a condition with that cap.
+  // running finite animation on recently changed nodes, the document is past loading and,
+  // for a scripted page with an empty body, has content or `content_ms` (default 1000) has
+  // passed since the call (D-416, D-405 (8)); or when `cap` ms pass. Every wait below is on
+  // a condition with that cap.
   function settle(opts) {
     opts = opts || {};
     const quiet = Number(opts.quiet ?? opts.quiet_ms ?? QUIET_MS);
     const cap = Number(opts.cap ?? opts.cap_ms ?? CAP_MS);
+    const contentMs = Number(opts.content_ms ?? opts.contentMs ?? CONTENT_MS);
     const t0 = now();
     const c0 = S.mutCount;
     return new Promise((resolveP) => {
@@ -1652,7 +1895,12 @@
           });
           return;
         }
-        if (!hasContent()) return; // the next mutation wakes us
+        const left = t0 + contentMs - now();
+        if (left > 0 && wantsContent()) {
+          // The next mutation wakes us; this timer is the content condition's own deadline.
+          timer = setTimeout(check, left);
+          return;
+        }
         finish(true);
       };
       S.waiters.add(wake);
@@ -1710,6 +1958,7 @@
   }
 
   function fingerprint(spec) {
+    if (!S.based) return NO_BASE();
     const items = parseSpec(spec);
     if (!items.length) return "match";
     const rows = index();
@@ -1750,10 +1999,11 @@
 
   // ---------------------------------------------------------------- frames()
   function frames() {
+    if (!S.based) return NO_BASE();
     ensure();
     const out = [{
       frame: 0, parent: null, url: String(globalThis.location && globalThis.location.href),
-      opaque: false, challenge: selfChallenge(),
+      opaque: false, challenge: S.selfCh,
     }];
     for (const rec of S.rows) {
       const row = rec.row;
@@ -1783,6 +2033,7 @@
   function rowFor(el) {
     if (!el || el.nodeType !== 1) return null;
     ensure();
+    if (S.selfCh) return null; // never read inside a challenge page
     let rec = S.rec.get(el);
     if (!rec || !rec.row) {
       S.layout = hasLayout();
@@ -1795,13 +2046,16 @@
     return rec.row;
   }
   function nameApi(el) {
+    if (!S.based) return NO_BASE();
     const row = rowFor(el);
-    return row ? row.name : el && el.nodeType === 1 ? ladder(el, roleOf(el)) : "";
+    if (row) return row.name;
+    return el && el.nodeType === 1 && !S.selfCh ? ladder(el, roleOf(el)) : "";
   }
   function roleApi(el) {
     return el && el.nodeType === 1 ? roleOf(el) : "";
   }
   function stateApi(el) {
+    if (!S.based) return NO_BASE();
     const row = rowFor(el);
     if (!row) return null;
     const id = row.id;
@@ -1811,7 +2065,7 @@
 
   const api = {
     walk,
-    id: idOf,
+    id: idApi,
     resolve,
     name: nameApi,
     role: roleApi,

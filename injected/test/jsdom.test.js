@@ -9,6 +9,12 @@ const { jsdom, page, SRC, byName, fill } = require("./helpers");
 // jsdom objects come from another realm: compare their JSON.
 const same = (a, b, m) => assert.deepStrictEqual(JSON.parse(JSON.stringify(a)), b, m);
 const tick = () => new Promise((r) => setImmediate(r));
+// jsdom() plus the first based walk, as sb-driver does before any read (D-405 (2)).
+function walked(html, opts) {
+  const j = jsdom(html, opts);
+  j.sb.walk({ base: 1 });
+  return j;
+}
 
 function fillShadow(win) {
   const host = win.document.getElementById("host");
@@ -80,7 +86,7 @@ test("register.html: rows, names, form ids, submit, hidden promo absent", () => 
 });
 
 test("wire shape matches sb_sheet::IndexRow (index_row_wire_shape)", () => {
-  const { sb } = jsdom(page("register.html"));
+  const { sb } = walked(page("register.html"));
   const rows = sb.index();
   const allowed = new Set(["id", "frame", "role", "name", "nearby", "heading", "state", "flags", "form", "landmark", "child_frame", "box"]);
   const stateKeys = new Set(["visible", "enabled", "checked", "value", "submitish", "opens_new_tab", "options", "covered", "input_type", "autocomplete"]);
@@ -118,7 +124,7 @@ test("name ladder: every rung on controls.html", () => {
 });
 
 test("roles: ARIA, tag, behaviour", () => {
-  const { doc, sb } = jsdom(page("controls.html"), { before: fillShadow });
+  const { doc, sb } = walked(page("controls.html"), { before: fillShadow });
   const rows = sb.index();
   const role = (sel) => {
     const id = sb.id(doc.querySelector(sel));
@@ -140,7 +146,7 @@ test("roles: ARIA, tag, behaviour", () => {
 });
 
 test("collapse: interactive owns its subtree; container emits only its own text; table rows fold", () => {
-  const { doc, sb } = jsdom(page("controls.html"), { before: fillShadow });
+  const { doc, sb } = walked(page("controls.html"), { before: fillShadow });
   const rows = sb.index();
   // the link owns its span and paragraph: no row and no text block for them
   assert.ok(!rows.some((r) => r.name === "Card title"));
@@ -174,7 +180,7 @@ test("collapse: interactive owns its subtree; container emits only its own text;
 });
 
 test("consumed label text is not emitted again as text", () => {
-  const { sb } = jsdom(page("register.html"));
+  const { sb } = walked(page("register.html"));
   const texts = sb.text().map((b) => b.spans.map((s) => s.text).join(""));
   assert.ok(!texts.some((t) => /I agree/.test(t)), texts.join(" / "));
   assert.ok(!texts.includes("Email"));
@@ -184,7 +190,7 @@ test("consumed label text is not emitted again as text", () => {
 });
 
 test("text(region): landmark, form id, heading", () => {
-  const { sb } = jsdom(page("register.html"));
+  const { sb } = walked(page("register.html"));
   const footer = sb.text("footer");
   assert.ok(footer.length > 0 && footer.every((b) => b.landmark === "footer"));
   const f2 = sb.text("f2");
@@ -287,10 +293,100 @@ test("password value is never read and never emitted", () => {
   pw.value = "";
   same(sb.state(pw).value, { kind: "empty" });
   assert.equal(reads, 0);
+  // sticky (D-405 (1)): a show-password toggle swaps the type; the value is still never read
+  pw.value = CANARY;
+  sb.walk({ dirty: true });
+  pw.type = "text";
+  sb.walk({ dirty: true });
+  const shown = JSON.stringify(sb.index()) + JSON.stringify(sb.text()) + JSON.stringify(sb.state(pw));
+  sb.walk({});
+  const full = JSON.stringify(sb.index()) + JSON.stringify(sb.state(pw));
+  assert.equal(reads, 0, "the value getter was called after the type swap");
+  assert.ok(!shown.includes(CANARY) && !full.includes(CANARY));
+  same(sb.state(pw).value, { kind: "filled" });
+  same(byName(sb.index(), "Account password").state.value, { kind: "filled" });
+});
+
+test("sensitivity is sticky: type swap before the walk, masked text field, sensitive autocomplete", async () => {
+  const CANARY = "s3cret-canary-2";
+  const { doc, win, sb } = jsdom('<form><input id="p" type="password" aria-label="Password">' +
+    '<input id="m" type="text" aria-label="PIN" style="-webkit-text-security: disc">' +
+    '<input id="o" aria-label="Code" autocomplete="one-time-code">' +
+    '<input id="n" aria-label="Nickname"></form>');
+  let reads = 0;
+  const desc = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value");
+  for (const id of ["p", "m", "o"]) {
+    const el = doc.getElementById(id);
+    desc.set.call(el, CANARY);
+    Object.defineProperty(el, "value", {
+      get() {
+        reads++;
+        return desc.get.call(this);
+      },
+      set(v) {
+        desc.set.call(this, v);
+      },
+    });
+  }
+  doc.getElementById("n").value = "ada";
+  // the type swaps before the first walk: the observer saw the old type (attributeOldValue)
+  doc.getElementById("p").type = "text";
+  await tick();
+  sb.walk({ base: 1 });
+  const rows = sb.index();
+  const out = JSON.stringify(rows) + JSON.stringify(sb.text());
+  assert.equal(reads, 0);
+  assert.ok(!out.includes(CANARY), out);
+  same(byName(rows, "Password").state.value, { kind: "filled" });
+  same(byName(rows, "PIN").state.value, { kind: "filled" });
+  same(byName(rows, "Code").state.value, { kind: "filled" });
+  same(byName(rows, "Nickname").state.value, { kind: "text", text: "ada" });
+  // a masked field that later drops the masking stays sensitive, and so does the OTP field
+  doc.getElementById("m").removeAttribute("style");
+  doc.getElementById("o").removeAttribute("autocomplete");
+  await tick();
+  sb.walk({});
+  const again = sb.index();
+  assert.equal(reads, 0);
+  assert.ok(!JSON.stringify(again).includes(CANARY));
+  same(byName(again, "PIN").state.value, { kind: "filled" });
+  same(byName(again, "Code").state.value, { kind: "filled" });
+});
+
+test("no ids before walk({base}) (D-405 (2)): the review repro", () => {
+  const { doc, sb } = jsdom(page("register.html"));
+  const btn = Array.from(doc.querySelectorAll("button")).find((b) => b.textContent === "Register");
+  const NB = { why: "no base" };
+  same(sb.id(btn), NB);
+  same(sb.index(), NB);
+  same(sb.text(), NB);
+  same(sb.frames(), NB);
+  same(sb.fingerprint('button"Register"'), NB);
+  same(sb.state(btn), NB);
+  same(sb.name(btn), NB);
+  same(sb.walk({}), NB, "a walk without a base issues nothing");
+  same(sb.walk({ dirty: true }), NB);
+  assert.equal(sb.role(btn), "button", "role issues no id and works");
+  same(sb.resolve(1), { why: "stale" }, "nothing was issued in this document yet");
+  assert.equal(sb.walk({ base: 100 }).count > 0, true);
+  const id = sb.id(btn);
+  assert.ok(id >= 100, String(id));
+  assert.equal(sb.resolve(id), btn);
+  const rows = sb.index();
+  assert.equal(byName(rows, "Register").id, id);
+  assert.ok(rows.every((r) => r.id >= 100));
+  same(sb.resolve(1), { why: "stale" });
+  same(sb.resolve(99), { why: "stale" });
+  same(sb.resolve(100000), { why: "gone" }, "never issued and not below base");
+  // a later base is ignored: ids keep their numbers for the document's lifetime
+  sb.walk({ base: 5000 });
+  assert.equal(sb.id(btn), id);
+  btn.remove();
+  same(sb.resolve(id), { why: "gone" }, "issued here and lost");
 });
 
 test("fingerprint: match, partial, miss (T-4, D-49 aliases)", () => {
-  const { sb } = jsdom(page("register.html"));
+  const { sb } = walked(page("register.html"));
   assert.equal(sb.fingerprint('form#f1 button"Register" input"Email"'), "match");
   assert.equal(sb.fingerprint('form#f2 button"Subscribe" SUBMIT'), "match");
   assert.equal(sb.fingerprint('select"Plan" checkbox"I agree"'), "match");
@@ -299,25 +395,137 @@ test("fingerprint: match, partial, miss (T-4, D-49 aliases)", () => {
   assert.equal(sb.fingerprint(""), "match");
 });
 
-test("CHALLENGE: never read inside a challenge frame; captcha fields flagged", () => {
-  const { sb } = jsdom("<form><input name=q aria-label=Query><button>Go</button></form>", {
-    url: "https://www.google.com/recaptcha/api2/anchor?k=x",
-  });
-  same(sb.index(), []);
-  same(sb.text(), []);
-  assert.equal(sb.frames()[0].challenge, true);
-  const t = jsdom('<form><img alt="code"><input name="captcha_answer" aria-label="Type the characters"><button>Go</button></form>');
+test("CHALLENGE: a challenge page is one CHALLENGE row and nothing inside is read; captcha fields flagged", () => {
+  for (const url of [
+    "https://www.google.com/recaptcha/api2/anchor?k=x",
+    "https://newassets.hcaptcha.com/captcha/v1/abc/static/hcaptcha.html",
+    "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2",
+    "https://shop.example.test/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page",
+    "https://client-api.arkoselabs.com/fc/gt2/public_key/X",
+    "https://static.geetest.com/static/js/fullpage.js",
+    "https://www.recaptcha.net/recaptcha/api2/bframe",
+  ]) {
+    const { sb } = walked("<form><input name=q aria-label=Query><button>Go</button></form>", { url });
+    const rows = sb.index();
+    assert.equal(rows.length, 1, url);
+    assert.equal(rows[0].flags.challenge, true, url);
+    assert.equal(rows[0].role, "document");
+    assert.ok(!JSON.stringify(rows).includes("Query"), "nothing inside is read: " + url);
+    const text = sb.text();
+    assert.equal(text.length, 1);
+    assert.equal(text[0].spans[0].elem, "#" + rows[0].id);
+    assert.ok(!JSON.stringify(text).includes("Go"));
+    assert.equal(sb.frames()[0].challenge, true);
+    assert.equal(sb.frames().length, 1);
+  }
+  // the Cloudflare interstitial title, on the site's own host
+  const cf = walked("<title>Just a moment...</title><p>Checking</p><button>x</button>", { url: "https://shop.example.test/" });
+  assert.equal(cf.sb.index().length, 1);
+  assert.equal(cf.sb.index()[0].flags.challenge, true);
+  const t = walked('<form><img alt="code"><input name="captcha_answer" aria-label="Type the characters"><button>Go</button></form>');
   const row = byName(t.sb.index(), "Type the characters");
   assert.equal(row.flags.challenge, true);
   // a form wrapper whose class mentions captcha is not swallowed as one row
-  const w = jsdom('<form class="captcha-form"><input aria-label="Email"><div class="g-recaptcha"><iframe title="reCAPTCHA"></iframe></div><button>Send</button></form>');
+  const w = walked('<form class="captcha-form"><input aria-label="Email"><div class="g-recaptcha"><iframe title="reCAPTCHA"></iframe></div><button>Send</button></form>');
   const rows = w.sb.index();
   assert.ok(byName(rows, "Email") && byName(rows, "Send"));
   assert.equal(rows.filter((r) => r.flags.challenge).length, 1);
 });
 
+test("a URL that only mentions captcha is a normal page (/posts/how-captchas-work)", () => {
+  for (const url of ["https://blog.example.org/posts/how-captchas-work", "https://developers.example.org/recaptcha/docs"]) {
+    const { sb } = walked(page("how-captchas-work.html"), { url });
+    const rows = sb.index();
+    assert.ok(!rows.some((r) => r.flags.challenge), url + " " + JSON.stringify(rows.filter((r) => r.flags.challenge)));
+    assert.ok(byName(rows, "How captchas work", "heading"));
+    assert.ok(byName(rows, "Subscribe", "button"));
+    assert.equal(sb.frames()[0].challenge, false);
+    const text = sb.text().map((b) => b.spans.map((x) => x.text).join("")).join(" / ");
+    assert.match(text, /not a robot/, "the article text is read normally");
+  }
+});
+
+test("CHALLENGE detection: interstitial prompt, response fields, Arkose, GeeTest; v3 badge and invisible widgets are not", () => {
+  // the review repro: a prompt paragraph and a widget behind its response field
+  const it = walked(page("challenge-interstitial.html"));
+  const rows = it.sb.index();
+  const ch = rows.filter((r) => r.flags.challenge);
+  assert.equal(ch.length, 2, JSON.stringify(ch));
+  assert.equal(ch[0].name, "Verify you are human by completing the action below.");
+  assert.equal(it.sb.id(it.doc.getElementById("prompt")), ch[0].id);
+  assert.equal(it.sb.id(it.doc.getElementById("widget")), ch[1].id);
+  assert.ok(byName(rows, "Why am I seeing this page?", "link"));
+  assert.ok(!JSON.stringify(it.sb.text()).includes("Verify you are human"), "the prompt is the row, not text");
+  // widgets
+  const wd = walked(page("challenge-widgets.html"));
+  const wr = wd.sb.index();
+  const wch = wr.filter((r) => r.flags.challenge);
+  const ids = (sel) => wd.sb.id(wd.doc.querySelector(sel));
+  const sorted = (a) => a.slice().sort((x, y) => x - y);
+  same(sorted(wch.map((r) => r.id)), sorted([ids("#arkose iframe"), ids(".geetest_holder"), ids("#hc")]));
+  assert.equal(byName(wr, "Verification challenge").role, "iframe");
+  // v3: the badge frame is an ordinary iframe row; the v3-bound submit is a normal SUBMIT
+  const badge = wr.find((r) => r.id === ids(".grecaptcha-badge iframe"));
+  assert.ok(badge && !badge.flags.challenge);
+  const signin = byName(wr, "Sign in", "button");
+  assert.ok(signin.flags.submit && !signin.flags.challenge);
+  assert.ok(byName(wr, "Password") && byName(wr, "Username"));
+  // invisible-size widget and frame (real Google URLs: jsdom loads no subresources)
+  const inv = walked('<form><input aria-label="Email"><div class="g-recaptcha" data-sitekey="k" data-size="invisible">' +
+    '<div><iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?k=k&amp;size=invisible"></iframe></div></div>' +
+    '<button>Send</button></form><iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?ar=1&amp;size=invisible"></iframe>');
+  assert.ok(!inv.sb.index().some((r) => r.flags.challenge), JSON.stringify(inv.sb.index()));
+  // a v2 checkbox frame is a challenge
+  const v2 = walked('<form><iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?k=k&amp;size=normal"></iframe><button>Send</button></form>');
+  assert.equal(v2.sb.index().filter((r) => r.flags.challenge).length, 1);
+  // challenge text as a dialog name: a CHALLENGE row
+  const dl = walked('<div role="dialog" aria-label="Are you a robot?"><p>Hold on</p><button>Continue</button></div>');
+  assert.ok(byName(dl.sb.index(), "Are you a robot?").flags.challenge);
+});
+
+test("heading level: aria-level clamped to an integer in 1..6 (D-405 (6))", () => {
+  const { sb } = walked('<div role="heading" aria-level="300">A</div><div role="heading" aria-level="2.5">B</div>' +
+    '<div role="heading" aria-level="0">C</div><div role="heading" aria-level="x">D</div><div role="heading">E</div>' +
+    '<div role="heading" aria-level="4">F</div><h3 aria-level="9">G</h3>');
+  const lv = sb.text().filter((b) => b.kind === "heading").map((b) => [b.spans[0].text, b.level]);
+  same(lv, [["A", 6], ["B", 2], ["C", 2], ["D", 2], ["E", 2], ["F", 4], ["G", 3]]);
+});
+
+test("a named form is landmark form, an unnamed one is not; search is form (D-405 (7))", () => {
+  const { sb } = walked('<main><form aria-label="Checkout"><input aria-label="Card"></form>' +
+    '<form title="Filters"><input aria-label="Colour"></form>' +
+    '<form><input aria-label="Plain"></form><search><input aria-label="Find"></search></main>');
+  const rows = sb.index();
+  assert.equal(byName(rows, "Card").landmark, "form");
+  assert.equal(byName(rows, "Colour").landmark, "form");
+  assert.equal(byName(rows, "Plain").landmark, "main");
+  assert.equal(byName(rows, "Find").landmark, "form");
+  assert.equal(byName(rows, "Card").form, "f1");
+});
+
+test("TextBlock wire shape: keys and types sb_sheet::TextBlock accepts", () => {
+  const { sb } = walked(page("controls.html"), { before: fillShadow });
+  const keys = new Set(["order", "frame", "kind", "level", "landmark", "heading", "table", "header", "spans"]);
+  const kinds = new Set(["heading", "paragraph", "list_item", "table_row", "code", "quote", "other"]);
+  let last = -1;
+  for (const b of sb.text()) {
+    for (const k of Object.keys(b)) assert.ok(keys.has(k), "block key " + k);
+    assert.ok(Number.isInteger(b.order) && b.order > last);
+    last = b.order;
+    assert.ok(kinds.has(b.kind), b.kind);
+    if (b.level !== undefined) assert.ok(Number.isInteger(b.level) && b.level >= 0 && b.level <= 255);
+    if (b.table !== undefined) assert.ok(Number.isInteger(b.table) && b.table >= 0);
+    if (b.header !== undefined) assert.equal(typeof b.header, "boolean");
+    for (const sp of b.spans) {
+      for (const k of Object.keys(sp)) assert.ok(k === "text" || k === "elem", "span key " + k);
+      assert.equal(typeof sp.text, "string");
+      if (sp.elem !== undefined) assert.match(sp.elem, /^#\d+$/);
+    }
+  }
+});
+
 test("frames(): self plus one entry per iframe row", () => {
-  const { sb } = jsdom(page("register.html"));
+  const { sb } = walked(page("register.html"));
   const fr = sb.frames();
   assert.equal(fr[0].frame, 0);
   assert.equal(fr[0].parent, null);
@@ -328,7 +536,7 @@ test("frames(): self plus one entry per iframe row", () => {
 });
 
 test("icon-only link falls back to its last path segment; empty-text button stays empty", () => {
-  const { sb } = jsdom('<nav><a href="/account/shopping-cart"><svg></svg></a><a href="/help.html" title="Help centre"><img src="x.png"></a></nav>');
+  const { sb } = walked('<nav><a href="/account/shopping-cart"><svg></svg></a><a href="/help.html" title="Help centre"><img src="x.png"></a></nav>');
   const rows = sb.index();
   assert.equal(rows[0].name, "shopping cart");
   assert.equal(rows[1].name, "Help centre");

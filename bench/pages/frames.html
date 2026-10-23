@@ -7,7 +7,9 @@
                 from a second loopback port (same site, other origin): one OPAQUE row, never read.
                 Without ?xo it falls back to a sandboxed srcdoc frame (opaque origin).
     .h-captcha  a fake hCaptcha widget around a cross-origin frame: ONE row, CHALLENGE + OPAQUE
-                (D-55); the child's own __sb sees "captcha" in its URL and reads nothing.
+                (D-55). With ?xo the child is served from a challenge path
+                (/cdn-cgi/challenge-platform/, D-405 (3)): its own __sb returns one CHALLENGE
+                row for the page and reads nothing.
 -->
 <html lang="en">
 <head><meta charset="utf-8"><title>Frames · fixture</title>
@@ -27,7 +29,7 @@
   const cap = document.getElementById("cap");
   if (xo) {
     cross.src = xo + "/frame-child.html";
-    cap.src = xo + "/frame-child.html?widget=hcaptcha";
+    cap.src = xo + "/cdn-cgi/challenge-platform/frame-child.html";
   } else {
     cross.setAttribute("sandbox", "");
     cross.srcdoc = "<p>opaque child</p>";

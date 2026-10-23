@@ -34,9 +34,12 @@ after(async () => {
   if (B) await B.close();
 });
 
-async function open(name, opts) {
+// After load, the first based walk sb-driver runs per document (D-405 (2): before it the API
+// returns {why: "no base"}). opts.base sets the base (default 1); null skips the walk.
+async function open(name, opts = {}) {
   const o = await openSb(browser, (/^[a-z]+:/.test(name) ? "" : A.origin + "/") + name, opts);
   opened.push(o);
+  if (opts.base !== null) await o.ev((b) => globalThis.__sb.walk({ base: b }), opts.base || 1);
   return o;
 }
 
@@ -69,7 +72,7 @@ function dump(name, rows) {
 
 // ------------------------------------------------------------------ 1 identity
 test("A1 identity: same ids over 3 walks with sibling insert/remove + attribute churn; gone; stale; never reused", async (t) => {
-  const o = await open("register.html");
+  const o = await open("register.html", { base: 500 });
   await o.ev(() => globalThis.__sb.walk({ base: 500 }));
   const first = await o.ev(() => globalThis.__sb.index());
   assert.ok(first.length > 15);
@@ -355,20 +358,26 @@ test("A3c settle on a blank page (empty body, about:blank): duration reported", 
   const flag = !s.r.settled && s.ms >= 2900 ? " FLAG burns the full cap" : "";
   t.diagnostic(`ACCEPT A3c empty-body settle ${s.ms.toFixed(0)} ms settled=${s.r.settled}${flag}`);
   assert.ok(s.ms < 3050, `cap exceeded: ${s.ms} ms`);
+  // D-405 (8): no scripts and an empty body means no content wait
+  assert.ok(s.ms < 1000, `empty-body settle took ${s.ms.toFixed(0)} ms (D-405 (8): well under 1 s)`);
+  assert.equal(s.r.settled, true);
   const q = await timedSettle(o, { cap: 500 });
   t.diagnostic(`ACCEPT A3c empty-body settle cap 500: ${q.ms.toFixed(0)} ms settled=${q.r.settled}`);
   // about:blank: is there an sb world at all?
   const b = await open("about:blank");
   let msg;
+  let ms = null;
   try {
     const sb = await timedSettle(b);
+    ms = sb.ms;
     const flag2 = !sb.r.settled && sb.ms >= 2900 ? " FLAG burns the full cap" : "";
     msg = `about:blank settle ${sb.ms.toFixed(0)} ms settled=${sb.r.settled}${flag2}`;
-    assert.ok(sb.ms < 3050);
   } catch (e) {
     msg = `about:blank: ${String(e.message).slice(0, 120)}`;
   }
   t.diagnostic(`ACCEPT A3c ${msg}`);
+  assert.ok(ms !== null, msg);
+  assert.ok(ms < 1000, `${msg} (D-405 (8): well under 1 s)`);
 });
 
 // ------------------------------------------------------------------ 4 register index + wire shape
@@ -767,7 +776,12 @@ test("A7 fixtures: popup, dialog, spa, overlay, frames present and exercised", a
     // the same-origin child has its own __sb with its own rows
     const tree = await o.frames();
     const sf = tree.find((f) => f.url === A.origin + "/frame-child.html");
-    assert.ok(byName(fill(await o.ev(() => globalThis.__sb.index(), undefined, sf.id)), "Nickname", "textbox"));
+    // each frame gets its own first based walk from sb-driver (D-405 (2))
+    const childRows = await o.ev(() => {
+      globalThis.__sb.walk({ base: 1 });
+      return globalThis.__sb.index();
+    }, undefined, sf.id);
+    assert.ok(byName(fill(childRows), "Nickname", "textbox"));
     notes.push(`frames${q ? " xo" : " sandboxed"} ok (${kids.map((f) => (f.opaque ? "OPAQUE " : "") + f.url.replace(/^http:\/\/127\.0\.0\.1:\d+/, "")).join(", ")})`);
   }
   t.diagnostic("ACCEPT A7 " + notes.join("; "));
