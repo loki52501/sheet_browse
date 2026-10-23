@@ -12,7 +12,7 @@ interfaces:
     rust: "harness_core::memory::MemoryStore (+ Fact, Source, Node, Filter, Hit, Why, Contact, Review, Baseline, LedgerEvent, LedgerId, LedgerMode, ToolHealth, ToolStatus, GateRule, Run, RunStatus, Schedule, ScheduleKind, FactId, NodeId, ReviewId, Ts, ts_now, contact_key)"
     consumers: [core-pg, srv-web, srv-files, srv-cli, sb-mcp, toolforge, toolstore]
     spec: docs/02-MEMORY.md#M-2
-    notes: "M-2 under #[async_trait] (D-40), plus D-48: append -> LedgerId, gate_rule -> Option<GateRule{mode, strict}> with a `Class` or `Class:hint` key (D-39), and run/schedule/rule-write/review-add/ledger-read methods for the M-3 tables M-2 omits. Hit carries id; Why adds exact|trigram."
+    notes: "M-2 under #[async_trait] (D-40), plus D-48: append -> LedgerId, gate_rule -> Option<GateRule{mode, strict}> with a `Class` or `Class:hint` key (D-39), and run/schedule/rule-write/review-add/ledger-read methods for the M-3 tables M-2 omits. Hit carries id; Why adds exact|trigram. contact_key normalises with trim() + to_ascii_lowercase(), never Unicode lowercasing, so look-alike addresses stay distinct contacts (D-62)."
   - id: I-2
     name: "core::mcp::serve(server, tools, harness), dispatch(), ToolSpec { name, description, class, args, handler }"
     tier: contract
@@ -47,18 +47,18 @@ interfaces:
     name: "sb_sheet::{skeleton, find, sheet, read}(index, text_blocks, opts)"
     tier: draft
     crate: sb-sheet
-    rust: "sb_sheet::{skeleton, find, sheet, read, TextBlock, Span, BlockKind, PageMeta, *Opts, FindHit, HitReason, ReadOutput, Cursor}"
-    consumers: [srv-web, sb-mcp]
+    rust: "sb_sheet::{skeleton, find, sheet, read, sheet_line, find_lines, TextBlock, Span, BlockKind, PageMeta, *Opts, FindHit, HitReason, ReadOutput, Cursor}; sb_sheet::data::{aria_roles, alias_for, role_prior, synonyms}; sb_sheet::tokens::estimate"
+    consumers: [srv-web, sb-mcp, toolstore]
     spec: docs/05-BROWSER.md#B-6
-    notes: "The only scorer, live and fetched (D-51); `?` threshold and acceptance k=1 per D-54. TextBlock is produced by page (injected.js text()) and servers (srv-web walk): changes to it need interface_changes even while draft."
+    notes: "The only scorer, live and fetched (D-51); `?` threshold and acceptance k=1 per D-54. TextBlock is produced by page (injected.js text()) and servers (srv-web walk): changes to it need interface_changes even while draft. Line rendering (sheet_line, find_lines; format D-203), the role alias and prior tables (sb_sheet::data, D-49, D-201) and the token estimate (D-200) are public so servers and toolstore::fingerprint never re-implement them (D-59). Smoke test without a browser: cargo run -p sb-sheet --example skeleton -- <index.json>."
   - id: I-7
     name: "toolstore::{load(domain, path) -> Vec<Tool>, fingerprint(tool, index), record(result)}"
     tier: draft
     crate: toolstore
-    rust: "toolstore::{ToolStore::load, ToolStore::record, ToolStore::folder_for, fingerprint, skeleton_line, Tool, FingerprintResult, ToolRunResult, RunOutcome}"
-    consumers: [srv-web, sb-mcp, toolforge]
+    rust: "toolstore::{ToolStore::{load, scan, record, folder_for, tool_path, archive_path, archive, git_commit, health, register_forged, reforge, confirm, set_pinned, log_invariant, sweep}, fingerprint, relocate, planner_class, planner_act_class, check_repair, skeleton_line, Tool, LoadReport, SweepAction, RepairKind, PlannerCheck, FingerprintResult, ToolRunResult, RunOutcome, StoreError}; pub modules header, domain, loader, fingerprint, invariants, lifecycle, archive, runner (wave-0 names re-exported at the root)"
+    consumers: [srv-web, sb-mcp, toolforge, harness]
     spec: docs/03-TOOL-STORE.md#T-3
-    notes: "Tool runtime and page API per D-53."
+    notes: "Tool runtime and page API per D-53 and I-12. load/scan take a host or folder and a path or full URL; scan reports skipped files (D-306). sb-act is reached through the object-safe PlannerCheck trait (D-301). record, reforge and sweep change files but never commit; the caller commits with git_commit and a message carrying its task id (StoreError::Git). sweep is retire -> archive -> delete at 90 days (D-303). Accepted as IC-300 (D-60)."
   - id: I-8
     name: "Transport trait (send, recv)"
     tier: draft
@@ -79,10 +79,10 @@ interfaces:
     name: "sb_act::parse(program) -> Vec<Step>, classify(steps, index) -> ActClass"
     tier: draft
     crate: sb-act
-    rust: "sb_act::{parse, quote, classify, classify_step, check_planner, ActClass, Step, Scroll, ParseError, PlannerError}"
+    rust: "sb_act::{parse, quote, classify, classify_step, check_planner, ActClass, Step, Scroll, ParseError, PlannerError, MAX_WAIT}"
     consumers: [sb-driver, toolstore, toolforge]
     spec: docs/05-BROWSER.md#B-7
-    notes: "Value quoting D-52; ?s rule D-50; classify returns hints for D-39 rules."
+    notes: "Value quoting D-52; ?s rule D-50; classify returns hints for D-39 rules. w(n) needs a unit (ms or s) and is clamped to MAX_WAIT = 30 s (D-431); sb-driver's settle cap for w() reads MAX_WAIT (D-63)."
   - id: I-11
     name: "__sb in-page API: walk, id, resolve, name, role, state, index, text, act, settle, fingerprint, frames"
     tier: draft
@@ -95,5 +95,7 @@ interfaces:
     name: "Tool file header and page API for readers/planners"
     tier: draft
     crate: toolstore
-    rust: "toolstore::{parse_header, ToolHeader, ToolKind, ArgSpec, FpItem}; page API per D-53"
+    rust: "toolstore::{parse_header, ToolHeader, ToolKind, ArgSpec, FpItem}; toolstore::runner::{PageHost, ApiFetch, run_reader, run_planner, run_reader_with, run_planner_with, RunOpts, RunError, SheetPage}; page API per D-53"
+    consumers: [srv-web, sb-mcp]
     spec: docs/03-TOOL-STORE.md#T-2
+    notes: "Runner per D-305 and D-308: PageHost {find, find_all, text(Option<&str>), table, url, title} and ApiFetch {api(url)} are synchronous; callers run the runner inside spawn_blocking and bridge ApiFetch with Handle::block_on (B-322). In JS page.url and page.title are properties (B-321); page.api exists only for @phase 1 readers; page.table returns {header, rows, refs?} (B-320). RunOpts defaults: 2 s wall cap including api time (B-323), 32 MiB memory. SheetPage implements PageHost over (&[IndexRow], &[TextBlock], url, title). Accepted as IC-301 (D-61)."
