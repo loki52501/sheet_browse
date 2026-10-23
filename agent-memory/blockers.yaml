@@ -14,6 +14,11 @@
 # proposals item:         reflect writes forge proposals, _generic merges, pinned-tool retirements
 
 blockers:
+  - id: B-405
+    task: T-19
+    question: "Drive C: has 0.29 GB free on 2026-10-23 13:35; cargo test and pipes fail with 'No space left on device'. C:/Users/Admin/AppData/Local/Temp/claude holds 73 GB, 44.8 GB of it under F--sb-swarm-wt-core (area core's session temp) and 25.5 GB under f--aside-mcp-for-claude. Page did not delete another session's files. Supreme or the user should clear them."
+    default_taken: "Area page runs every build and test with TMP/TEMP/TMPDIR=F:/sb-swarm/tmp-page (outside the repo); all page agents are told to do the same."
+    needs_user: true
   - id: B-402
     task: T-19
     question: "Is an invisible reCAPTCHA v3 badge a challenge (D-5 stop) or not? Flagging it CHALLENGE makes every v3-protected login a stop although there is nothing for the user to solve."
