@@ -1,0 +1,19 @@
+from: page/rust-coder
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "D-404 applied in commit 51f1c7e (crates/sb-act/src/classify.rs, lib.rs). (1) 2FA/two-factor/2-step/multi-factor/MFA/TOTP/security-key text is Account only with a set-up verb (enable, set up/setup, turn on, turn off, disable, add, remove, manage, change, reset) within four words either side in the same text, or with a set-up verb on the submit button under a bare second-factor heading ('Two-factor authentication' + 'Enable'); a 'Two-step verification' / 'Enter the code' prompt with Next/Verify/Continue stays Submit, by click and by Enter, including after a current-password login. (2) A non-submit affirmative button (confirm, yes, ok, okay, continue, proceed, delete, remove) is Delete when its context (same form id in the frame, plus rows with landmark 'dialog' and the same heading in the frame) has Delete evidence in any row's heading or a form row's name; Cancel/Close/No/Back/Keep are not affirmative and stay Navigate; checkables and text fields are excluded (a 'Yes, I am sure' checkbox is Fill). (3) Delete/Del with any modifiers (Shift, Control...) on a non-text row merges Delete into click(row); in a text field Delete and Shift+Delete stay Fill. (4) PlannerError::ChallengeTarget { step } (message 'step N targets a challenge; stop and hand back to the user (D-5)') is returned for any step whose class is Challenge, checked before the ?s rule, with or without ?s. Gates: cargo fmt -p sb-act --check clean, clippy --all-targets -D warnings clean, cargo test -p sb-act 81/81 (lib 48, accept_t19_classify 16, accept_t19_forms 11, accept_t19_quote_fuzz 6)."
+not_done: "1) reviewer + tester on 51f1c7e (a coder does not accept its own work). 2) suborch: record PlannerError::ChallengeTarget { step } under interface_changes for I-10 (new variant of a public enum; the old MissingStop { class: Challenge } path for challenge targets is gone). 3) Open proposals, not in D-404: Backspace (or Cmd+Backspace) on a non-text row is still click(row), not Delete (Drive and Finder-style apps delete on it); a SUBMIT-flagged Cancel inside a Delete-headed form is still Delete from the heading (pre-D-404 raise-only behaviour, kept because D-404 is raise-only except (1)); an affirmative button with a Delete heading but in neither a form nor a dialog landmark stays Navigate (D-404 scopes the rule to forms and dialogs); 'I understand' alone is not in the affirmative list. 4) Enter in a formless textbox is Submit, not Send (B-431 default per D-403); B-431 formless SPA submits still wait on the js-coder's synthetic form id."
+gotchas:
+  - "D-404 (1) is the one lowering change: a 2FA login page with a bare 'Two-factor authentication' / '2-Step Verification' / 'Security keys' heading is Submit again. The D-403 test that pinned those headings as Account was updated to the D-404 set-up phrasings, and the bare headings moved to the negative list."
+  - "The set-up verb window is four words: 'Two-step verification sent a code to your phone, you can change it in settings' is Submit because 'change' is too far from the second factor."
+  - "The dialog context needs landmark == 'dialog' AND equal heading (both None counts as equal) in the same frame; a 'Save changes?' Confirm next to a 'Delete account?' dialog is not borrowed. A row with a form id gets its form plus, if it is in a dialog landmark, the dialog rows."
+  - "Delete-key raise merges with click(row), so Delete on a Pay button stays Pay and hints are kept."
+  - "check_planner tests class == Challenge per step, so a duplicate ref with one CHALLENGE row is also rejected (classify_step takes the max)."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-act/src/classify.rs
+  - crates/sb-act/src/lib.rs
+  - agent-memory/handoffs/T-19-rust-coder-4.yaml
+verify: "cargo fmt -p sb-act --check && cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act"
