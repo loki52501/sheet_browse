@@ -1,31 +1,29 @@
 //! B-7 step classification: D-402, refined by D-433 (Enter, form context), D-434 (hints),
-//! D-58 (Pay from checkout text), D-403 (keys, implicit submission, more evidence) and
-//! D-404 (2FA set-up verbs, delete dialogs, the Delete key). Every refinement only raises
-//! a class (D-36 max), never lowers one, except D-404 (1) narrowing D-403's 2FA rule.
+//! D-58 (Pay from checkout text), D-403 (keys, implicit submission, more evidence),
+//! D-404 (2FA set-up verbs, delete dialogs, the Delete key) and D-406 (control-character
+//! keys, Enter takes the form max on every row, per-form evidence cache, more words).
+//!
+//! Every refinement only raises a class (D-36 max). The one sanctioned lowering is
+//! D-404 (1): second-factor text (2FA, 2-step, MFA, TOTP, security key, passkey,
+//! authenticator app) is Account only with a set-up verb, so a bare "Two-step
+//! verification" code prompt is Submit again. D-406 (3) records the scope of the
+//! one-time-code exemption: a one-time-code field whose only card evidence is the phrase
+//! "security code" is not a card field; CVC, CVV, CSC, cardholder, MM/YY, expiry and card
+//! number on it still are.
 
 use crate::{ActClass, Scroll, Step};
 use harness_core::gate::{HINT_JOB_APPLICATION, HINT_SIGNATURE};
 use harness_core::Class;
-use sb_sheet::IndexRow;
+use sb_sheet::{FrameId, IndexRow};
+use std::borrow::Cow;
+use std::cell::{OnceCell, RefCell};
+use std::collections::{HashMap, HashSet};
 
 /// Roles a plain (non-submit) click only toggles or selects: Fill (D-402).
 const FILL_ROLES: &[&str] = &["checkbox", "radio", "switch", "option", "tab"];
 
-/// Roles where Enter activates the element itself instead of submitting its form (D-403).
-const ACTIVATOR_ROLES: &[&str] = &[
-    "button",
-    "link",
-    "menuitem",
-    "menuitemcheckbox",
-    "menuitemradio",
-    "option",
-    "switch",
-    "tab",
-    "treeitem",
-];
-
 /// Roles and `<input type>`s that take typed text (D-403 "printable characters into a
-/// textbox").
+/// textbox"). A file input is never one, whatever its role (D-406 (2)).
 const TEXT_ROLES: &[&str] = &["textbox", "searchbox", "combobox", "spinbutton"];
 const TEXT_INPUT_TYPES: &[&str] = &[
     "text", "email", "password", "search", "tel", "url", "number",
@@ -71,50 +69,254 @@ fn merge(into: &mut ActClass, other: ActClass) {
     }
 }
 
-pub(crate) fn classify_step(step: &Step, index: &[IndexRow]) -> ActClass {
-    let target = match step {
-        Step::Wait(_) | Step::StopHere => return plain(Class::Read),
-        Step::Scroll(Scroll::Down | Scroll::Up) => return plain(Class::Navigate),
-        Step::Scroll(Scroll::To(target))
-        | Step::Type { target, .. }
-        | Step::Select { target, .. }
-        | Step::Click { target }
-        | Step::Key { target, .. }
-        | Step::Upload { target, .. } => *target,
-    };
-    // A ref should be unique, but if a producer ever emits it twice the max over all its
-    // rows wins, so a duplicate CHALLENGE row cannot be shadowed by an earlier one.
-    let rows: Vec<&IndexRow> = index.iter().filter(|r| r.elem() == target).collect();
-    if rows.is_empty() {
-        // Not in the index: cannot be shown to be below Submit (D-402).
-        return plain(Class::Submit);
+type FormKey<'a> = (FrameId, &'a str);
+
+/// One classification call's view of the index (D-406 (5)): the rows of each form, grouped
+/// in one pass the first time a form is needed, and each form's evidence, computed once
+/// per form and reused by every step and every submit button of that form. Enter in a
+/// form with many submits is then linear in the index, not submits x rows.
+pub(crate) struct Ctx<'a> {
+    index: &'a [IndexRow],
+    forms: OnceCell<HashMap<FormKey<'a>, Vec<&'a IndexRow>>>,
+    evidence: RefCell<HashMap<FormKey<'a>, FormEvidence>>,
+    /// How many times form evidence was built (tests check the cache).
+    #[cfg(test)]
+    builds: std::cell::Cell<usize>,
+}
+
+impl<'a> Ctx<'a> {
+    pub(crate) fn new(index: &'a [IndexRow]) -> Self {
+        Ctx {
+            index,
+            forms: OnceCell::new(),
+            evidence: RefCell::new(HashMap::new()),
+            #[cfg(test)]
+            builds: std::cell::Cell::new(0),
+        }
     }
-    if rows.iter().any(|r| r.flags.challenge) {
-        return plain(Class::Challenge);
+
+    #[cfg(test)]
+    pub(crate) fn evidence_builds(&self) -> usize {
+        self.builds.get()
     }
-    let mut out = plain(Class::Read);
-    for row in rows {
-        let c = match step {
-            Step::Click { .. } => click(row, index),
-            Step::Key { key, .. } => key_press(row, index, key),
-            Step::Scroll(_) => plain(Class::Navigate),
-            _ => plain(Class::Fill),
+
+    /// The row's form: rows with the same form id in the same frame; a row without a form
+    /// id is its own context (D-433, B-431).
+    fn form_of(&self, row: &'a IndexRow) -> Cow<'_, [&'a IndexRow]> {
+        let Some(form) = row.form.as_deref() else {
+            return Cow::Owned(vec![row]);
         };
-        merge(&mut out, c);
+        let forms = self.forms.get_or_init(|| {
+            let mut map: HashMap<FormKey<'a>, Vec<&'a IndexRow>> = HashMap::new();
+            for r in self.index {
+                if let Some(f) = r.form.as_deref() {
+                    map.entry((r.frame, f)).or_default().push(r);
+                }
+            }
+            map
+        });
+        match forms.get(&(row.frame, form)) {
+            Some(rows) if rows.iter().any(|r| std::ptr::eq(*r, row)) => Cow::Borrowed(rows),
+            Some(rows) => {
+                let mut rows = rows.clone();
+                rows.push(row);
+                Cow::Owned(rows)
+            }
+            None => Cow::Owned(vec![row]),
+        }
     }
-    out
+
+    /// The row's form evidence, cached per (frame, form id).
+    fn evidence(&self, row: &'a IndexRow) -> FormEvidence {
+        let key = row.form.as_deref().map(|f| (row.frame, f));
+        if let Some(e) = key.and_then(|k| self.evidence.borrow().get(&k).copied()) {
+            return e;
+        }
+        #[cfg(test)]
+        self.builds.set(self.builds.get() + 1);
+        let e = FormEvidence::of(&self.form_of(row));
+        if let Some(k) = key {
+            self.evidence.borrow_mut().insert(k, e);
+        }
+        e
+    }
+
+    pub(crate) fn step(&self, step: &Step) -> ActClass {
+        let target = match step {
+            Step::Wait(_) | Step::StopHere => return plain(Class::Read),
+            Step::Scroll(Scroll::Down | Scroll::Up) => return plain(Class::Navigate),
+            Step::Scroll(Scroll::To(target))
+            | Step::Type { target, .. }
+            | Step::Select { target, .. }
+            | Step::Click { target }
+            | Step::Key { target, .. }
+            | Step::Upload { target, .. } => *target,
+        };
+        // A ref should be unique, but if a producer ever emits it twice the max over all
+        // its rows wins, so a duplicate CHALLENGE row cannot be shadowed by an earlier one.
+        let rows: Vec<&'a IndexRow> = self.index.iter().filter(|r| r.elem() == target).collect();
+        if rows.is_empty() {
+            // Not in the index: cannot be shown to be below Submit (D-402).
+            return plain(Class::Submit);
+        }
+        if rows.iter().any(|r| r.flags.challenge) {
+            return plain(Class::Challenge);
+        }
+        let mut out = plain(Class::Read);
+        for row in rows {
+            let c = match step {
+                Step::Click { .. } => self.click(row),
+                Step::Key { key, .. } => self.key_press(row, key),
+                Step::Scroll(_) => plain(Class::Navigate),
+                _ => plain(Class::Fill),
+            };
+            merge(&mut out, c);
+        }
+        out
+    }
+
+    /// A key step (D-403 (1), D-406 (1)).
+    ///
+    /// - `Enter`, `NumpadEnter`, `Return` (any modifiers) and a key value holding a raw line
+    ///   break (`"\r"`, `"\n"`, `"\r\n"`, from a quoted value) are [`Ctx::enter`].
+    /// - Any other key holding a control character (`"\t"`, DEL, BS, ETX...) is unknown: a
+    ///   click on its row, plus Delete for DEL on a non-text row as for the Delete key.
+    /// - Fill: Tab, Escape, arrows, Home/End/PageUp/PageDown (alone or with Shift), modifiers
+    ///   alone; and in a text field (not a file input), one printable character, Space
+    ///   (U+0020 or U+00A0 only), Backspace or Delete, alone or with Shift.
+    /// - Delete (any modifiers) on a non-text row is at least Delete (D-404 (3)).
+    /// - Every other key, unknown keys included, is a click on its row (Space on a button,
+    ///   a letter on a link, `F13`...), so a key step is never below a `c#` on the same
+    ///   target except for the Fill cases above.
+    fn key_press(&self, row: &'a IndexRow, key: &str) -> ActClass {
+        if key.contains(['\r', '\n']) {
+            return self.enter(row);
+        }
+        if key.chars().any(char::is_control) {
+            let mut out = self.click(row);
+            if key.contains('\u{7f}') && !is_text_field(row) {
+                merge(&mut out, plain(Class::Delete));
+            }
+            return out;
+        }
+        let (mods, k) = split_key(key);
+        if matches!(k.as_str(), "enter" | "numpadenter" | "return") {
+            return self.enter(row);
+        }
+        let all_mods = mods.iter().all(|m| MODIFIER_KEYS.contains(&m.as_str()));
+        if all_mods && MODIFIER_KEYS.contains(&k.as_str()) {
+            return plain(Class::Fill);
+        }
+        let shift_only = mods.iter().all(|m| m == "shift");
+        if shift_only && NAV_KEYS.contains(&k.as_str()) {
+            return plain(Class::Fill);
+        }
+        let editing = k.chars().count() == 1
+            || matches!(
+                k.as_str(),
+                "space" | "spacebar" | "backspace" | "delete" | "del"
+            );
+        if shift_only && editing && is_text_field(row) {
+            return plain(Class::Fill);
+        }
+        let mut out = self.click(row);
+        // D-404 (3): Delete on a selected mail, file or list row deletes it (Gmail, Drive).
+        // Inside a text field it only edits text (above, or a click on the field with Ctrl).
+        if matches!(k.as_str(), "delete" | "del") && !is_text_field(row) {
+            merge(&mut out, plain(Class::Delete));
+        }
+        out
+    }
+
+    fn click(&self, row: &'a IndexRow) -> ActClass {
+        if is_submit(row) {
+            return submit_class(&self.evidence(row), &row.name);
+        }
+        let toks = tokens(&row.name);
+        let mut class = if FILL_ROLES.contains(&row.role.as_str()) {
+            Class::Fill
+        } else {
+            Class::Navigate
+        };
+        if delete_text(&toks, false) || self.confirms_delete(row, &toks) {
+            class = class.max(Class::Delete);
+        }
+        // D-406 (7): an "Upgrade" button changes the plan; an "Upgrade" link only opens the
+        // pricing page.
+        if matches!(row.role.as_str(), "button" | "menuitem") && has_any(&toks, &["upgrade"]) {
+            class = class.max(Class::Pay);
+        }
+        plain(class)
+    }
+
+    /// D-404 (2), D-406 (6): an affirmative non-submit button (confirm, yes, ok, continue,
+    /// proceed, delete, remove) whose own heading carries Delete wording, or whose form or
+    /// dialog does ("Delete account?" + Confirm). Checkables and text fields are not
+    /// buttons: a "Yes" checkbox only toggles, a "Type DELETE to confirm" field only takes
+    /// text.
+    fn confirms_delete(&self, row: &'a IndexRow, toks: &[String]) -> bool {
+        if FILL_ROLES.contains(&row.role.as_str()) || is_text_field(row) || !affirmative(toks) {
+            return false;
+        }
+        // The row's own heading, form or no form (D-406 (6): div modals without a dialog
+        // landmark).
+        if row
+            .heading
+            .as_deref()
+            .is_some_and(|h| delete_text(&tokens(h), true))
+        {
+            return true;
+        }
+        if row.form.is_some() && self.evidence(row).delete {
+            return true;
+        }
+        // A dialog landmark: rows in the same frame with landmark dialog and the same
+        // heading. Their heading is the row's own (checked above), so only a form row's
+        // name is left.
+        row.landmark.as_deref() == Some("dialog")
+            && self.index.iter().any(|r| {
+                r.frame == row.frame
+                    && r.landmark.as_deref() == Some("dialog")
+                    && r.heading == row.heading
+                    && r.role == "form"
+                    && delete_text(&tokens(&r.name), true)
+            })
+    }
+
+    /// Enter (D-433, D-403 (2), D-406 (2)). On any row inside a form, whatever its role
+    /// (fields, buttons, links, switches, checkboxes, submits), it is the max of a click on
+    /// the row and the form's implicit submission: at least Submit, raised by the form's
+    /// own evidence even when the form has no indexed submit row, and by every submit row
+    /// of the form. In a formless text field (chat composers, SPA search boxes) it is
+    /// Submit raised by the field's headings. Elsewhere it is a click on the row.
+    fn enter(&self, row: &'a IndexRow) -> ActClass {
+        let mut out = self.click(row);
+        if row.form.is_none() && !is_text_field(row) {
+            return out;
+        }
+        let ev = self.evidence(row);
+        // The field's own label is not submit-button text: only form evidence counts.
+        merge(&mut out, submit_class(&ev, ""));
+        if row.form.is_some() {
+            for button in self.form_of(row).iter().filter(|r| is_submit(r)) {
+                merge(&mut out, submit_class(&ev, &button.name));
+            }
+        }
+        out
+    }
 }
 
 /// A key name split into lowercased modifiers and key: `"Shift+Tab"` -> `(["shift"],
-/// "tab")`. A trailing `+` is the plus key itself (`"+"`, `"Control++"`), and a
-/// whitespace-only key (`" "`) is `"space"`.
+/// "tab")`. A trailing `+` is the plus key itself (`"+"`, `"Control++"`). A key made only
+/// of U+0020 / U+00A0 (`" "`) is `"space"`; other whitespace trims to an empty, unknown key
+/// (D-406 (1)). Control characters are handled before this.
 fn split_key(key: &str) -> (Vec<String>, String) {
     let (mods, last) = match key.strip_suffix('+') {
         Some("") => ("", "+"),
         Some(rest) if rest.ends_with('+') => (rest.trim_end_matches('+'), "+"),
         _ => key.rsplit_once('+').unwrap_or(("", key)),
     };
-    let last = if !last.is_empty() && last.trim().is_empty() {
+    let last = if !last.is_empty() && last.chars().all(|c| c == ' ' || c == '\u{a0}') {
         "space".to_string()
     } else {
         last.trim().to_lowercase()
@@ -128,95 +330,16 @@ fn split_key(key: &str) -> (Vec<String>, String) {
 }
 
 fn is_text_field(row: &IndexRow) -> bool {
+    let input_type = row.state.input_type.as_deref();
+    if input_type.is_some_and(|t| t.eq_ignore_ascii_case("file")) {
+        return false;
+    }
     TEXT_ROLES.contains(&row.role.as_str())
-        || row
-            .state
-            .input_type
-            .as_deref()
-            .is_some_and(|t| TEXT_INPUT_TYPES.iter().any(|x| t.eq_ignore_ascii_case(x)))
-}
-
-/// A key step (D-403 (1)). Keys known not to activate are Fill: Tab, Escape, arrows,
-/// Home/End/PageUp/PageDown (alone or with Shift), modifiers alone, and printable
-/// characters, Space, Backspace and Delete typed into a text field. Delete (any modifiers)
-/// on a non-text row is at least Delete (D-404 (3)). Enter in any form (`Enter`, `NumpadEnter`, `Control+Enter`...) is [`enter`]. Every other key, including
-/// any key this list does not know, is a click on its row, so a key step is never below a
-/// `c#` on the same target (Space on a button, a letter on a link, `F13`...).
-fn key_press(row: &IndexRow, index: &[IndexRow], key: &str) -> ActClass {
-    let (mods, k) = split_key(key);
-    if matches!(k.as_str(), "enter" | "numpadenter" | "return") {
-        return enter(row, index);
-    }
-    let all_mods = mods.iter().all(|m| MODIFIER_KEYS.contains(&m.as_str()));
-    if all_mods && MODIFIER_KEYS.contains(&k.as_str()) {
-        return plain(Class::Fill);
-    }
-    let shift_only = mods.iter().all(|m| m == "shift");
-    if shift_only && NAV_KEYS.contains(&k.as_str()) {
-        return plain(Class::Fill);
-    }
-    let editing = k.chars().count() == 1
-        || matches!(
-            k.as_str(),
-            "space" | "spacebar" | "backspace" | "delete" | "del"
-        );
-    if shift_only && editing && is_text_field(row) {
-        return plain(Class::Fill);
-    }
-    let mut out = click(row, index);
-    // D-404 (3): Delete on a selected mail, file or list row deletes it (Gmail, Drive).
-    // Inside a text field it only edits text (above, or a click on the field with Ctrl).
-    if matches!(k.as_str(), "delete" | "del") && !is_text_field(row) {
-        merge(&mut out, plain(Class::Delete));
-    }
-    out
+        || input_type.is_some_and(|t| TEXT_INPUT_TYPES.iter().any(|x| t.eq_ignore_ascii_case(x)))
 }
 
 fn is_submit(row: &IndexRow) -> bool {
     row.flags.submit || row.state.submitish
-}
-
-/// The row's form: rows with the same form id in the same frame; a row without a form id
-/// is its own context (D-433, B-431).
-fn form_of<'a>(row: &'a IndexRow, index: &'a [IndexRow]) -> Vec<&'a IndexRow> {
-    match row.form.as_deref() {
-        Some(form) => {
-            let mut rows: Vec<&IndexRow> = index
-                .iter()
-                .filter(|r| r.frame == row.frame && r.form.as_deref() == Some(form))
-                .collect();
-            if !rows.iter().any(|r| std::ptr::eq(*r, row)) {
-                rows.push(row);
-            }
-            rows
-        }
-        None => vec![row],
-    }
-}
-
-/// The row's form plus, when it sits in a dialog landmark, the dialog's rows (same frame,
-/// landmark `dialog`, same heading). Empty for a row in neither (D-404 (2)).
-fn form_or_dialog<'a>(row: &'a IndexRow, index: &'a [IndexRow]) -> Vec<&'a IndexRow> {
-    let mut rows = if row.form.is_some() {
-        form_of(row, index)
-    } else {
-        Vec::new()
-    };
-    if row.landmark.as_deref() == Some("dialog") {
-        for r in index.iter().filter(|r| {
-            r.frame == row.frame
-                && r.landmark.as_deref() == Some("dialog")
-                && r.heading == row.heading
-        }) {
-            if !rows.iter().any(|x| std::ptr::eq(*x, r)) {
-                rows.push(r);
-            }
-        }
-        if !rows.iter().any(|x| std::ptr::eq(*x, row)) {
-            rows.push(row);
-        }
-    }
-    rows
 }
 
 /// A button that goes ahead with what its dialog asks (D-404 (2)): confirm, yes, ok,
@@ -230,80 +353,111 @@ fn affirmative(toks: &[String]) -> bool {
     )
 }
 
-/// D-404 (2): an affirmative non-submit button in a form or dialog whose heading or name
-/// carries Delete evidence ("Delete account?" + Confirm).
-/// Checkables and text fields are not buttons: a "Yes" checkbox only toggles, a "Type
-/// DELETE to confirm" field only takes text.
-fn confirms_delete(row: &IndexRow, index: &[IndexRow]) -> bool {
-    if FILL_ROLES.contains(&row.role.as_str())
-        || is_text_field(row)
-        || !affirmative(&tokens(&row.name))
-    {
-        return false;
-    }
-    let ctx = form_or_dialog(row, index);
-    !ctx.is_empty() && form_texts(row, &ctx).any(|t| delete_text(&tokens(t), true))
+/// What a form says about its submission, independent of which submit is pressed: the
+/// part of [`submit_class`] that reads every row of the form (D-406 (5)).
+#[derive(Debug, Clone, Copy, Default)]
+struct FormEvidence {
+    /// A card or IBAN field, or checkout text in a heading or the form's name (D-58).
+    pay: bool,
+    /// New-password or two password fields, or change/create-account text (create only
+    /// outside a login, D-433).
+    account: bool,
+    /// A second factor named in a heading or the form's name; Account only with a set-up
+    /// verb on the submit button (D-404 (1)).
+    twofa: bool,
+    /// Delete wording in a heading or the form's name.
+    delete: bool,
+    /// A resume/CV upload or an apply/application heading (D-434).
+    job: bool,
+    /// E-sign wording in a heading, the form's name or any row's name (D-434).
+    signature: bool,
 }
 
-fn click(row: &IndexRow, index: &[IndexRow]) -> ActClass {
-    if is_submit(row) {
-        return submit(row, &row.name, &form_of(row, index));
+impl FormEvidence {
+    fn of(form: &[&IndexRow]) -> Self {
+        // Section headings over the form's rows (each distinct text once), plus the names
+        // of `form` rows.
+        let mut seen = HashSet::new();
+        let headings: Vec<(&str, Vec<String>)> = form
+            .iter()
+            .filter_map(|r| r.heading.as_deref())
+            .filter(|h| seen.insert(*h))
+            .map(|h| (h, tokens(h)))
+            .collect();
+        let form_names: Vec<(&str, Vec<String>)> = form
+            .iter()
+            .filter(|r| r.role == "form")
+            .map(|r| (r.name.as_str(), tokens(&r.name)))
+            .collect();
+        let texts = || headings.iter().chain(form_names.iter());
+
+        let passwords: Vec<&IndexRow> = form.iter().copied().filter(|r| is_password(r)).collect();
+        // A login (one current-password field) is Submit; its "Sign in or create an
+        // account" heading is not evidence (D-433), but "Change email" or "Set up 2FA" is
+        // (D-403, D-404).
+        let login = passwords.len() == 1 && has_autocomplete(passwords[0], "current-password");
+        let account_fields =
+            passwords.len() >= 2 || form.iter().any(|r| has_autocomplete(r, "new-password"));
+
+        const RESUME: &[&str] = &["resume", "resumé", "résumé", "cv", "curriculum"];
+        let resume_upload = form.iter().any(|r| {
+            r.state
+                .input_type
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case("file"))
+                && [
+                    Some(r.name.as_str()),
+                    r.nearby.as_deref(),
+                    r.heading.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|t| has_any(&tokens(t), RESUME))
+        });
+
+        FormEvidence {
+            pay: form.iter().any(|r| is_card_field(r)) || texts().any(|(raw, t)| pay_words(t, raw)),
+            account: account_fields
+                || texts().any(|(_, t)| change_text(t) || (!login && create_text(t))),
+            twofa: texts().any(|(_, t)| !twofa_spans(t).is_empty()),
+            delete: texts().any(|(_, t)| delete_text(t, true)),
+            job: resume_upload
+                || headings
+                    .iter()
+                    .any(|(_, t)| has_any(t, &["apply", "application", "applications"])),
+            signature: texts().any(|(_, t)| signature_words(t))
+                || form.iter().any(|r| signature_words(&tokens(&r.name))),
+        }
     }
-    let class = if delete_text(&tokens(&row.name), false) || confirms_delete(row, index) {
-        Class::Delete
-    } else if FILL_ROLES.contains(&row.role.as_str()) {
-        Class::Fill
-    } else {
-        Class::Navigate
-    };
-    plain(class)
 }
 
-/// Enter (D-433, D-403 (1)(2)). On a submit, button, link or other activator it is a click
-/// on that row. On any other row in a form it is an implicit submission: at least Submit,
-/// raised by the form's own evidence even when the form has no indexed submit row, and
-/// by every submit row of the form (max). In a formless text field (chat composers, SPA
-/// search boxes) it is Submit raised by the field's headings. Never below a click on the
-/// row.
-fn enter(row: &IndexRow, index: &[IndexRow]) -> ActClass {
-    let mut out = click(row, index);
-    if is_submit(row) || ACTIVATOR_ROLES.contains(&row.role.as_str()) {
-        return out;
-    }
-    if row.form.is_none() && !is_text_field(row) {
-        return out;
-    }
-    let form = form_of(row, index);
-    // The field's own label is not submit-button text: only form evidence counts.
-    merge(&mut out, submit(row, "", &form));
-    for button in form.iter().filter(|r| is_submit(r)) {
-        merge(&mut out, submit(button, &button.name, &form));
-    }
-    out
-}
-
-/// A form submit anchored at `anchor` (the submit button, or the field Enter was pressed
-/// in): Submit raised to Pay / Account / Delete (max wins), with the D-434 hints. `name` is
-/// the submit button's own text, empty for an implicit submission.
-fn submit(anchor: &IndexRow, name: &str, form: &[&IndexRow]) -> ActClass {
-    let name_toks = tokens(name);
+/// A form submit pressed through a button named `name` (empty for an implicit submission):
+/// Submit raised to Pay / Account / Delete by the form evidence and the button's own text
+/// (max wins), with the D-434 hints.
+fn submit_class(ev: &FormEvidence, name: &str) -> ActClass {
+    let toks = tokens(name);
     let mut class = Class::Submit;
-    if form.iter().any(|r| is_card_field(r)) || is_pay(anchor, name, form) {
+    // D-406 (7): "Upgrade" on a submit changes a paid plan.
+    if ev.pay || pay_words(&toks, name) || has_any(&toks, &["upgrade"]) {
         class = class.max(Class::Pay);
     }
-    if is_account(anchor, &name_toks, form) {
+    // A set-up verb on the button over a second-factor heading counts ("Two-factor
+    // authentication" + "Enable"); a "Next" or "Verify" under one does not.
+    if ev.account
+        || create_text(&toks)
+        || change_text(&toks)
+        || (ev.twofa && !setup_verbs(&toks).is_empty())
+    {
         class = class.max(Class::Account);
     }
-    if delete_text(&name_toks, false)
-        || form_texts(anchor, form).any(|t| delete_text(&tokens(t), true))
-    {
+    if ev.delete || delete_text(&toks, false) {
         class = class.max(Class::Delete);
     }
     let mut hints = Vec::new();
-    if is_job_application(anchor, &name_toks, form) {
+    if ev.job || has_any(&toks, &["application"]) {
         hints.push(HINT_JOB_APPLICATION.to_string());
     }
-    if is_signature(anchor, &name_toks, form) {
+    if ev.signature || bare_sign(&toks) {
         hints.push(HINT_SIGNATURE.to_string());
     }
     ActClass { class, hints }
@@ -352,7 +506,9 @@ fn is_password(row: &IndexRow) -> bool {
 
 /// Card or IBAN field (D-402, D-433, D-403 (5)): autocomplete `cc-*`; a hosted card iframe
 /// named card/payment/IBAN; or a field whose name or nearby label says one of
-/// [`card_label`]'s words.
+/// [`card_label`]'s words. On a one-time-code field the phrase "security code" alone is an
+/// SMS or authenticator code, not a card's ("Enter the security code we sent you"); its
+/// other card words still count (D-406 (3)).
 fn is_card_field(row: &IndexRow) -> bool {
     let cc = row.state.autocomplete.as_deref().is_some_and(|a| {
         a.split_whitespace()
@@ -365,19 +521,20 @@ fn is_card_field(row: &IndexRow) -> bool {
         // Hosted card frames (Stripe Elements and the like): opaque, named by the host.
         "iframe" => has_any(&tokens(&row.name), &["card", "payment", "iban"]),
         "button" | "link" => false,
-        // An SMS or authenticator code ("Enter the security code we sent you").
-        _ if has_autocomplete(row, "one-time-code") => false,
-        _ => std::iter::once(row.name.as_str())
-            .chain(row.nearby.as_deref())
-            .any(|t| card_label(&tokens(t))),
+        _ => {
+            let security_code = !has_autocomplete(row, "one-time-code");
+            std::iter::once(row.name.as_str())
+                .chain(row.nearby.as_deref())
+                .any(|t| card_label(&tokens(t), security_code))
+        }
     }
 }
 
-/// Card field wording, whole words only: card number, IBAN, CVC/CVV/CSC, security code,
-/// cardholder / card holder / name on card, card expiry or expiration, MM/YY. A passport
-/// "Expiration date" or "DD/MM/YYYY" is not a card's; neither is a "Security settings"
-/// heading (headings are not field labels).
-fn card_label(toks: &[String]) -> bool {
+/// Card field wording, whole words only: card number, IBAN, CVC/CVV/CSC, security code
+/// (when `security_code`), cardholder / card holder / name on card, card expiry or
+/// expiration, MM/YY. A passport "Expiration date" or "DD/MM/YYYY" is not a card's;
+/// neither is a "Security settings" heading (headings are not field labels).
+fn card_label(toks: &[String], security_code: bool) -> bool {
     has_any(
         toks,
         &[
@@ -393,30 +550,30 @@ fn card_label(toks: &[String]) -> bool {
         ],
     ) || near(toks, &["card"], &["number", "no", "num", "holder"], 1)
         || near(toks, &["name"], &["card"], 2)
-        || near(toks, &["security"], &["code"], 1)
+        || (security_code && near(toks, &["security"], &["code"], 1))
         || (has_any(toks, &["card"]) && has_any(toks, &["expiry", "expiration", "exp", "expires"]))
         || near(toks, &["mm"], &["yy"], 1)
 }
 
-/// Checkout wording (D-58, D-403 (5)): checkout / check out, pay, payment, purchase, buy,
-/// donate / donation, place or confirm order, add card, and paid-subscription phrases.
-/// Small fillers between two words are allowed ("Place your order", "Add a new card").
+/// Checkout wording (D-58, D-403 (5), D-406 (7)): checkout / check out, pay, payment,
+/// purchase, buy, donate / donation, place, confirm or submit order, add card, and
+/// paid-subscription phrases. Small fillers between two words are allowed ("Place your
+/// order", "Add a new card"). `raw` is the text `toks` came from (for currency signs).
 ///
 /// Matching is on whole words from `tokens()`, never substrings, so "Repay later",
 /// "Payroll settings", "Display options", "PayPal account" and "Buyer info" do not match.
 /// "Pay with PayPal", "Google Pay" and "Buy with 1-Click" do, which is intended: a false
 /// Pay costs one ask, a missed Pay costs money (D-58).
-fn pay_text(text: &str) -> bool {
-    let toks = tokens(text);
+fn pay_words(toks: &[String], raw: &str) -> bool {
     has_any(
-        &toks,
+        toks,
         &[
             "checkout", "pay", "payment", "purchase", "buy", "donate", "donation",
         ],
-    ) || near(&toks, &["check"], &["out"], 1)
-        || near(&toks, &["place", "confirm"], &["order"], 2)
-        || near(&toks, &["add"], &["card"], 3)
-        || paid_subscription(&toks, text)
+    ) || near(toks, &["check"], &["out"], 1)
+        || near(toks, &["place", "confirm", "submit"], &["order"], 2)
+        || near(toks, &["add"], &["card"], 3)
+        || paid_subscription(toks, raw)
 }
 
 /// "Start subscription", "Activate membership", or subscribe/subscription text with a
@@ -439,12 +596,6 @@ fn paid_subscription(toks: &[String], raw: &str) -> bool {
     ) || (has_any(toks, &["subscribe", "subscription", "membership"]) && price)
 }
 
-/// The submit button's name, or the form's headings or name, say checkout (D-58). Raise-only:
-/// the caller takes the max with the other evidence (D-36).
-fn is_pay(anchor: &IndexRow, name: &str, form: &[&IndexRow]) -> bool {
-    pay_text(name) || form_texts(anchor, form).any(pay_text)
-}
-
 /// Create account, sign up (H-1 Account). Login headings say this too ("Sign in or create
 /// an account"), so in a login it counts only on the button (D-433).
 fn create_text(toks: &[String]) -> bool {
@@ -453,9 +604,9 @@ fn create_text(toks: &[String]) -> bool {
         || near(toks, &["create"], &["account"], 3)
 }
 
-/// Change password or email, or setting up two-factor / 2-step / MFA / security keys (H-1
-/// Account). Counts in headings even in a one-password form, where the password confirms
-/// the change (D-403 (3)).
+/// Change password or email, or setting up a second factor (H-1 Account). Counts in
+/// headings even in a one-password form, where the password confirms the change
+/// (D-403 (3)).
 fn change_text(toks: &[String]) -> bool {
     near(
         toks,
@@ -465,17 +616,19 @@ fn change_text(toks: &[String]) -> bool {
     ) || twofa_setup(toks)
 }
 
-/// Token spans `[start, end)` naming a second factor: 2FA, MFA, TOTP, two-factor,
-/// 2-step, multi-factor, security key(s).
+/// Token spans `[start, end)` naming a second factor: 2FA, MFA, TOTP, two-factor, 2-step,
+/// multi-factor, security key(s), passkey(s), authenticator app (D-404 (1), D-406 (7)).
 fn twofa_spans(toks: &[String]) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     for (i, t) in toks.iter().enumerate() {
         let next = toks.get(i + 1).map(String::as_str);
-        if matches!(t.as_str(), "2fa" | "mfa" | "totp") {
+        if matches!(t.as_str(), "2fa" | "mfa" | "totp" | "passkey" | "passkeys") {
             spans.push((i, i + 1));
         } else if matches!(
             (t.as_str(), next),
-            ("two" | "2" | "multi", Some("factor" | "step")) | ("security", Some("key" | "keys"))
+            ("two" | "2" | "multi", Some("factor" | "step"))
+                | ("security", Some("key" | "keys"))
+                | ("authenticator", Some("app" | "apps" | "application"))
         ) {
             spans.push((i, i + 2));
         }
@@ -483,8 +636,8 @@ fn twofa_spans(toks: &[String]) -> Vec<(usize, usize)> {
     spans
 }
 
-/// Start positions of a set-up verb (D-404 (1)): enable, set up, turn on, turn off,
-/// disable, add, remove, manage, change, reset.
+/// Start positions of a set-up verb, ascending (D-404 (1)): enable, set up, turn on, turn
+/// off, disable, add, remove, manage, change, reset.
 fn setup_verbs(toks: &[String]) -> Vec<usize> {
     toks.iter()
         .enumerate()
@@ -504,53 +657,23 @@ fn setup_verbs(toks: &[String]) -> Vec<usize> {
 
 /// A second factor named with a set-up verb within four words either side ("Set up 2FA",
 /// "Turn on 2-Step Verification", "Two-factor authentication: manage"). A bare
-/// "Two-step verification" over an "Enter the code" login prompt is not Account (D-404 (1)).
+/// "Two-step verification" over an "Enter the code" login prompt is not Account
+/// (D-404 (1)). One pass for the verbs, then a bounded window per span.
 fn twofa_setup(toks: &[String]) -> bool {
     let verbs = setup_verbs(toks);
     twofa_spans(toks).iter().any(|&(start, end)| {
-        verbs
+        let from = verbs.partition_point(|&v| v + 4 < start);
+        verbs[from..]
             .iter()
-            .any(|&v| (v < start && start - v <= 4) || (v >= end && v - end < 4))
-    })
-}
-
-/// Section headings over the anchor and its form, plus the names of `form` rows.
-fn form_texts<'a>(anchor: &'a IndexRow, form: &'a [&'a IndexRow]) -> impl Iterator<Item = &'a str> {
-    std::iter::once(anchor.heading.as_deref())
-        .chain(form.iter().map(|r| r.heading.as_deref()))
-        .flatten()
-        .chain(
-            form.iter()
-                .filter(|r| r.role == "form")
-                .map(|r| r.name.as_str()),
-        )
-}
-
-fn is_account(anchor: &IndexRow, name: &[String], form: &[&IndexRow]) -> bool {
-    let passwords: Vec<&IndexRow> = form.iter().copied().filter(|r| is_password(r)).collect();
-    if passwords.len() >= 2 || form.iter().any(|r| has_autocomplete(r, "new-password")) {
-        return true;
-    }
-    if create_text(name) || change_text(name) {
-        return true;
-    }
-    // A login (one current-password field) is Submit; its "Sign in or create an account"
-    // heading is not evidence (D-433), but "Change email" or "Set up 2FA" is (D-403,
-    // D-404). A set-up verb on the button over a second-factor heading counts too
-    // ("Two-factor authentication" + "Enable"); a "Next" or "Verify" under one does not.
-    let login = passwords.len() == 1 && has_autocomplete(passwords[0], "current-password");
-    let verb_button = !setup_verbs(name).is_empty();
-    form_texts(anchor, form).any(|t| {
-        let t = tokens(t);
-        change_text(&t)
-            || (!login && create_text(&t))
-            || (verb_button && !twofa_spans(&t).is_empty())
+            .take_while(|&&v| v < end + 4)
+            .any(|&v| v < start || v >= end)
     })
 }
 
 /// delete / remove / deactivate / discard / erase / revoke / unsubscribe / trash, close
-/// account, or "cancel <something>" (D-402, D-403 (4)). Not Delete:
-/// - a bare "Cancel" (D-402);
+/// account, clear history / data / all (D-406 (7)), or "cancel <something>" (D-402,
+/// D-403 (4)). Not Delete:
+/// - a bare "Cancel" (D-402), or a bare "Clear" (clears a search box);
 /// - "cancel and ..." / "cancel or ..." ("Cancel and close", "Cancel or go back"): these
 ///   dismiss a dialog like a bare Cancel, so they are read as D-402's bare-Cancel case
 ///   rather than "cancel <something>";
@@ -570,6 +693,7 @@ fn delete_text(toks: &[String], heading: bool) -> bool {
             "trash",
         ],
     ) || near(toks, &["close"], &["account"], 2)
+        || near(toks, &["clear"], &["history", "data", "all"], 2)
         || toks.iter().enumerate().any(|(i, t)| {
             t == "cancel"
                 && toks.get(i + 1).is_some_and(|next| {
@@ -580,33 +704,6 @@ fn delete_text(toks: &[String], heading: bool) -> bool {
         })
 }
 
-fn is_job_application(anchor: &IndexRow, name: &[String], form: &[&IndexRow]) -> bool {
-    const RESUME: &[&str] = &["resume", "resumé", "résumé", "cv", "curriculum"];
-    let resume_upload = form.iter().any(|r| {
-        r.state
-            .input_type
-            .as_deref()
-            .is_some_and(|t| t.eq_ignore_ascii_case("file"))
-            && [
-                Some(r.name.as_str()),
-                r.nearby.as_deref(),
-                r.heading.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            .any(|t| has_any(&tokens(t), RESUME))
-    });
-    let heading = std::iter::once(anchor.heading.as_deref())
-        .chain(form.iter().map(|r| r.heading.as_deref()))
-        .flatten()
-        .any(|h| has_any(&tokens(h), &["apply", "application", "applications"]));
-    resume_upload || heading || has_any(name, &["application"])
-}
-
-fn says_signature(t: &str) -> bool {
-    signature_words(&tokens(t))
-}
-
 fn signature_words(toks: &[String]) -> bool {
     has_any(
         toks,
@@ -614,19 +711,16 @@ fn signature_words(toks: &[String]) -> bool {
     ) || near(toks, &["e"], &["sign", "signature"], 1)
 }
 
-fn is_signature(anchor: &IndexRow, name: &[String], form: &[&IndexRow]) -> bool {
-    let bare_sign = name.iter().enumerate().any(|(i, t)| {
+/// A submit's own name says sign ("Sign", "Adopt and sign") but not sign in/up/out/on/off,
+/// or names a signature.
+fn bare_sign(name: &[String]) -> bool {
+    name.iter().enumerate().any(|(i, t)| {
         t == "sign"
             && !name.get(i + 1).is_some_and(|next| {
                 matches!(next.as_str(), "in" | "up" | "out" | "on" | "off" | "into")
             })
-    });
-    bare_sign
-        || signature_words(name)
-        || form_texts(anchor, form).any(says_signature)
-        || form.iter().any(|r| says_signature(&r.name))
+    }) || signature_words(name)
 }
-
 #[cfg(test)]
 mod tests {
     use crate::{check_planner, classify, classify_step, parse, ActClass, PlannerError, Step};
@@ -1155,10 +1249,12 @@ mod tests {
         assert_eq!(cls("k#14=Enter", &links), Class::Delete);
         // Space on a checkbox toggles it: a click on a checkable is Fill.
         assert_eq!(cls("k#15=Space", &links), Class::Fill);
-        // A non-submit button in a form: Enter presses the button, it does not submit.
+        // A non-submit button in a form: Enter takes the form max (D-406 (2)); round 2
+        // pinned Navigate here, which lowered D-433.
         let mut idx = login();
         idx.push(form(row(15, "button", "Show password"), "f2"));
-        assert_eq!(cls("k#15=Enter", &idx), Class::Navigate);
+        assert_eq!(cls("k#15=Enter", &idx), Class::Submit);
+        assert_eq!(cls("c#15", &idx), Class::Navigate);
     }
 
     /// Enter on a field submits its form implicitly, with or without a submit row
@@ -1875,5 +1971,441 @@ mod tests {
         let steps: Vec<Step> = parse("t#7=a; w(1s)").unwrap();
         assert_eq!(classify(&steps, &idx).class, Class::Fill);
         assert_eq!(ElemRef::main(14), idx[5].elem());
+    }
+
+    // ---- D-406 (round-2 review probes) ----------------------------------------------
+
+    /// A card form: #1 Promo code, #2 card number, #3 SUBMIT "Pay now"; #4 a file row.
+    fn promo_card() -> Vec<IndexRow> {
+        vec![
+            form(row(1, "textbox", "Promo code"), "f3"),
+            form(
+                input(row(2, "textbox", "Card"), "text", Some("cc-number")),
+                "f3",
+            ),
+            form(submit(row(3, "button", "Pay now")), "f3"),
+            row(4, "row", "report.pdf"),
+        ]
+    }
+
+    fn key_prog(target: u32, key: &str) -> String {
+        format!("k#{target}={}", crate::quote(key))
+    }
+
+    /// D-406 (1): raw line breaks are Enter, only U+0020/U+00A0 are Space, any other
+    /// control character is unknown (a click on the row, never Fill).
+    #[test]
+    fn d406_control_character_keys() {
+        let idx = promo_card();
+        for k in ["\r", "\n", "\r\n", "Shift+\r", "Control+\n", "a\rb"] {
+            let p = key_prog(1, k);
+            assert_eq!(cls(&p, &idx), Class::Pay, "{k:?}");
+            assert_eq!(
+                check_planner(&parse(&p).unwrap(), &idx),
+                Err(PlannerError::MissingStop {
+                    step: 1,
+                    class: Class::Pay
+                }),
+                "{k:?}"
+            );
+        }
+        // A raw CR inside quotes reaches the classifier as is.
+        assert_eq!(cls("k#1=\"\r\"", &idx), Class::Pay);
+        for k in [
+            "\t", "\u{7f}", "\u{8}", "\u{3}", "Shift+\t", "\u{1b}", "\u{85}",
+        ] {
+            assert_eq!(
+                cls(&key_prog(1, k), &idx),
+                Class::Navigate,
+                "{k:?} in the promo field"
+            );
+            // On the Pay submit it is a click on it.
+            assert_eq!(cls(&key_prog(3, k), &idx), Class::Pay, "{k:?} on Pay now");
+        }
+        // DEL on a selected non-text row deletes it, like the Delete key (D-404 (3)).
+        assert_eq!(cls(&key_prog(4, "\u{7f}"), &idx), Class::Delete);
+        assert_eq!(cls(&key_prog(4, "\u{8}"), &idx), Class::Navigate);
+        // Space is U+0020 or U+00A0 only; other whitespace is an unknown key.
+        for k in [" ", "\u{a0}", "Shift+ ", "Space"] {
+            assert_eq!(cls(&key_prog(1, k), &idx), Class::Fill, "{k:?}");
+            assert_eq!(cls(&key_prog(3, k), &idx), Class::Pay, "{k:?} on Pay now");
+        }
+        for k in ["\u{2003}", "\u{3000}", "\u{2028}"] {
+            assert_eq!(cls(&key_prog(1, k), &idx), Class::Navigate, "{k:?}");
+        }
+        // Printable characters still type.
+        for k in ["a", "\u{e9}", "Shift+A", "Backspace"] {
+            assert_eq!(cls(&key_prog(1, k), &idx), Class::Fill, "{k:?}");
+        }
+    }
+
+    /// D-406 (2): Enter on any row inside a form takes the form max, whatever the role.
+    #[test]
+    fn d406_enter_on_activators_in_a_form_takes_the_form_max() {
+        let mut idx = promo_card();
+        let mut switch = form(row(5, "switch", "Save card"), "f3");
+        switch.state.input_type = Some("checkbox".into());
+        idx.extend([
+            switch,
+            form(row(6, "checkbox", "Save card"), "f3"),
+            form(row(7, "button", "Show card number"), "f3"),
+            form(row(8, "link", "Terms"), "f3"),
+            form(row(9, "tab", "Card"), "f3"),
+            form(row(10, "menuitem", "Options"), "f3"),
+            form(row(11, "option", "Visa"), "f3"),
+            form(row(12, "radio", "Mastercard"), "f3"),
+        ]);
+        for id in 5..=12 {
+            for k in ["Enter", "NumpadEnter", "\r"] {
+                assert_eq!(cls(&key_prog(id, k), &idx), Class::Pay, "#{id} {k:?}");
+            }
+        }
+        // Space and clicks are still the row's own click.
+        assert_eq!(cls("k#5=Space", &idx), Class::Fill);
+        assert_eq!(cls("c#6", &idx), Class::Fill);
+        assert_eq!(cls("c#7", &idx), Class::Navigate);
+        assert_eq!(cls("k#8=Space", &idx), Class::Navigate);
+        // "Show password" in a login form submits the login.
+        let mut idx = login();
+        idx.push(form(row(15, "button", "Show password"), "f2"));
+        idx.push(form(row(16, "link", "Forgot password?"), "f2"));
+        assert_eq!(cls("k#15=Enter", &idx), Class::Submit);
+        assert_eq!(cls("k#16=Enter", &idx), Class::Submit);
+        // Formless activators are still only their click.
+        assert_eq!(
+            cls("k#1=Enter", &[row(1, "switch", "Dark mode")]),
+            Class::Fill
+        );
+        assert_eq!(
+            cls("k#1=Enter", &[row(1, "link", "Pricing")]),
+            Class::Navigate
+        );
+    }
+
+    /// D-406 (2): a submitish field takes the max over the form's other submits.
+    #[test]
+    fn d406_submitish_field_takes_the_form_max() {
+        for submitish in [false, true] {
+            let mut email = form(input(row(1, "textbox", "Email"), "email", None), "f3");
+            email.state.submitish = submitish;
+            let idx = vec![
+                email,
+                form(row(2, "textbox", "Address"), "f3"),
+                form(submit(row(3, "button", "Place order")), "f3"),
+            ];
+            assert_eq!(cls("k#1=Enter", &idx), Class::Pay, "submitish {submitish}");
+        }
+        // A SUBMIT button also takes the max over its form's other submits on Enter.
+        let idx = vec![
+            form(submit(row(1, "button", "Save for later")), "f3"),
+            form(submit(row(2, "button", "Place order")), "f3"),
+        ];
+        assert_eq!(cls("c#1", &idx), Class::Submit);
+        assert_eq!(cls("k#1=Enter", &idx), Class::Pay);
+    }
+
+    /// D-406 (2): a file input is not a text field for key steps.
+    #[test]
+    fn d406_file_input_keys_are_clicks() {
+        for role in ["textbox", "button"] {
+            let idx = vec![
+                form(input(row(1, role, "Upload resume"), "file", None), "f6"),
+                form(submit(row(2, "button", "Send")), "f6"),
+                input(row(3, role, "Attach"), "file", None),
+            ];
+            for k in ["Space", " ", "a", "Backspace"] {
+                assert_eq!(cls(&key_prog(1, k), &idx), Class::Navigate, "{role} {k:?}");
+                assert_eq!(
+                    cls(&key_prog(3, k), &idx),
+                    Class::Navigate,
+                    "{role} formless {k:?}"
+                );
+            }
+            // Delete on it is the Delete key on a non-text row (D-404 (3)).
+            assert_eq!(cls("k#1=Delete", &idx), Class::Delete, "{role}");
+            // Enter in its form submits the form (the resume upload gives the hint).
+            assert_eq!(
+                class_of("k#1=Enter", &idx),
+                ActClass {
+                    class: Class::Submit,
+                    hints: vec![HINT_JOB_APPLICATION.to_string()]
+                },
+                "{role}"
+            );
+            // A formless file input: Enter is a click on it.
+            assert_eq!(cls("k#3=Enter", &idx), Class::Navigate, "{role}");
+            // Focus keys and uploads are unchanged.
+            assert_eq!(cls("k#1=Tab", &idx), Class::Fill);
+            assert_eq!(cls("u#1=files/cv.pdf", &idx), Class::Fill);
+        }
+    }
+
+    /// D-406 (3): the one-time-code exemption covers only the phrase "security code".
+    #[test]
+    fn d406_one_time_code_card_words_still_count() {
+        let with_field = |f: IndexRow| {
+            vec![
+                heading(form(f, "f3"), "Details"),
+                heading(form(submit(row(2, "button", "Next")), "f3"), "Details"),
+            ]
+        };
+        let otp = |name: &str| input(row(1, "textbox", name), "text", Some("one-time-code"));
+        for name in [
+            "CVC",
+            "CVV",
+            "CSC",
+            "Card number",
+            "Cardholder name",
+            "Card expiry",
+            "Expiry (MM/YY)",
+            "Card security code (CVC)",
+        ] {
+            assert_eq!(cls("c#2", &with_field(otp(name))), Class::Pay, "{name}");
+            assert_eq!(
+                cls("k#1=Enter", &with_field(otp(name))),
+                Class::Pay,
+                "Enter: {name}"
+            );
+        }
+        // The label can come from nearby text too.
+        let mut f = otp("123");
+        f.nearby = Some("CVV".into());
+        assert_eq!(cls("c#2", &with_field(f)), Class::Pay);
+        // "Security code" on a one-time-code field is an SMS code.
+        for name in [
+            "Security code",
+            "Enter the security code we sent you",
+            "Card security code",
+        ] {
+            assert_eq!(cls("c#2", &with_field(otp(name))), Class::Submit, "{name}");
+        }
+        // Without one-time-code it is a card's.
+        assert_eq!(
+            cls("c#2", &with_field(row(1, "textbox", "Security code"))),
+            Class::Pay
+        );
+    }
+
+    /// D-406 (4): a challenge target anywhere wins over an earlier missing `?s`.
+    #[test]
+    fn d406_challenge_target_before_missing_stop() {
+        let mut idx = login();
+        let mut cap = row(42, "iframe", "reCAPTCHA");
+        cap.flags.challenge = true;
+        idx.push(cap);
+        for (p, step) in [
+            ("c#14; c#42; ?s", 2),
+            ("c#14; k#42=Enter", 2),
+            ("c#14; t#7=a; sc(#42)", 3),
+            ("c#14; c#42; c#42", 2),
+        ] {
+            assert_eq!(
+                check_planner(&parse(p).unwrap(), &idx),
+                Err(PlannerError::ChallengeTarget { step }),
+                "{p}"
+            );
+        }
+        // Without a challenge target the ?s rule still applies.
+        assert_eq!(
+            check_planner(&parse("c#14; t#7=a").unwrap(), &idx),
+            Err(PlannerError::MissingStop {
+                step: 1,
+                class: Class::Submit
+            })
+        );
+    }
+
+    /// D-406 (6): an affirmative button under a Delete heading is Delete with no form or
+    /// dialog landmark (div modals).
+    #[test]
+    fn d406_affirmative_under_delete_heading_outside_form_or_dialog() {
+        let h = "Delete account?";
+        let idx = vec![
+            heading(row(1, "button", "Confirm"), h),
+            heading(row(2, "button", "Cancel"), h),
+            heading(row(3, "button", "Yes"), h),
+            heading(row(4, "checkbox", "Yes, I am sure"), h),
+            heading(row(5, "button", "Confirm"), "Save changes?"),
+            heading(row(6, "link", "OK"), "Remove this device"),
+        ];
+        for p in ["c#1", "k#1=Enter", "k#1=Space", "c#3", "c#6"] {
+            assert_eq!(cls(p, &idx), Class::Delete, "{p}");
+        }
+        assert_eq!(cls("c#2", &idx), Class::Navigate);
+        assert_eq!(cls("c#4", &idx), Class::Fill);
+        assert_eq!(cls("c#5", &idx), Class::Navigate);
+        // Marketing in the heading is still not Delete.
+        assert_eq!(
+            cls(
+                "c#1",
+                &[heading(row(1, "button", "Continue"), "Cancel anytime")]
+            ),
+            Class::Navigate
+        );
+    }
+
+    /// D-406 (7): new Pay, Account and Delete words, with negatives.
+    #[test]
+    fn d406_new_words() {
+        // Pay.
+        for name in [
+            "Submit order",
+            "Submit your order",
+            "Upgrade",
+            "Upgrade to Pro",
+            "Upgrade plan",
+            "Subscribe for $5/month",
+            "Subscribe, 12 per year",
+        ] {
+            let idx = saved_card(name, None);
+            assert_eq!(cls("c#2", &idx), Class::Pay, "{name}");
+            assert_eq!(cls("k#1=Enter", &idx), Class::Pay, "Enter: {name}");
+        }
+        assert_eq!(
+            cls("c#2", &saved_card("Submit", Some("Submit your order"))),
+            Class::Pay
+        );
+        // A non-submit "Upgrade" button changes the plan; a link only opens pricing.
+        assert_eq!(
+            cls("c#1", &[row(1, "button", "Upgrade to Pro")]),
+            Class::Pay
+        );
+        assert_eq!(cls("c#1", &[row(1, "menuitem", "Upgrade")]), Class::Pay);
+        for (role, name) in [
+            ("link", "Upgrade"),
+            ("button", "Upgraded features"),
+            ("button", "Order history"),
+        ] {
+            assert_eq!(
+                cls("c#1", &[row(1, role, name)]),
+                Class::Navigate,
+                "{role} {name}"
+            );
+        }
+        for (name, h) in [
+            ("Submit", "Order summary"),
+            ("Submit feedback", "Your order"),
+            ("Subscribe", "Newsletter"),
+            ("Save", "Upgrade options"),
+        ] {
+            let idx = saved_card(name, Some(h));
+            assert_eq!(cls("c#2", &idx), Class::Submit, "{name} / {h}");
+        }
+        // Account: passkeys and authenticator apps with a set-up verb.
+        let code = || input(row(1, "textbox", "Code"), "text", Some("one-time-code"));
+        for (h, button) in [
+            ("Set up authenticator app", "Next"),
+            ("Add a passkey", "Continue"),
+            ("Manage passkeys", "Save"),
+            ("Passkeys", "Add passkey"),
+            ("Authenticator app", "Turn on"),
+            ("Turn off authenticator app", "Confirm"),
+        ] {
+            let idx = vec![
+                heading(form(code(), "f1"), h),
+                heading(form(submit(row(2, "button", button)), "f1"), h),
+            ];
+            assert_eq!(cls("c#2", &idx), Class::Account, "{h} / {button}");
+        }
+        for name in ["Add passkey", "Set up authenticator app"] {
+            let idx = vec![form(submit(row(2, "button", name)), "f1")];
+            assert_eq!(cls("c#2", &idx), Class::Account, "{name}");
+        }
+        for (h, button) in [
+            ("Sign in with a passkey", "Continue"),
+            ("Enter the code from your authenticator app", "Verify"),
+            ("Use your passkey", "Next"),
+            ("Authenticator", "Next"),
+        ] {
+            let idx = vec![
+                heading(form(code(), "f1"), h),
+                heading(form(submit(row(2, "button", button)), "f1"), h),
+            ];
+            assert_eq!(cls("c#2", &idx), Class::Submit, "{h} / {button}");
+            assert_eq!(cls("k#1=Enter", &idx), Class::Submit, "Enter: {h}");
+        }
+        // Delete.
+        for name in [
+            "Clear history",
+            "Clear browsing history",
+            "Clear data",
+            "Clear all",
+            "Clear all data",
+            "Empty trash",
+        ] {
+            assert_eq!(
+                cls("c#1", &[row(1, "button", name)]),
+                Class::Delete,
+                "{name}"
+            );
+            let idx = vec![form(submit(row(2, "button", name)), "f4")];
+            assert_eq!(cls("c#2", &idx), Class::Delete, "{name}");
+        }
+        let idx = vec![heading(
+            form(submit(row(2, "button", "Confirm")), "f4"),
+            "Clear browsing data",
+        )];
+        assert_eq!(cls("c#2", &idx), Class::Delete);
+        for name in [
+            "Clear",
+            "Clear filters",
+            "Clear search",
+            "Nuclear data",
+            "Clearance",
+        ] {
+            assert_eq!(
+                cls("c#1", &[row(1, "button", name)]),
+                Class::Navigate,
+                "{name}"
+            );
+        }
+    }
+
+    /// A page-wide form: `submits` SUBMIT rows, then text fields, `rows` in all.
+    fn big_form(submits: u32, rows: u32) -> Vec<IndexRow> {
+        (0..rows)
+            .map(|i| {
+                let r = if i < submits {
+                    submit(row(i + 1, "button", &format!("Save row {i}")))
+                } else {
+                    input(
+                        row(i + 1, "textbox", &format!("Quantity {i}")),
+                        "text",
+                        None,
+                    )
+                };
+                heading(form(r, "f1"), "Inventory admin")
+            })
+            .collect()
+    }
+
+    /// D-406 (5): Enter in a 200-submit x 1 700-row form is linear in the index.
+    #[test]
+    fn d406_enter_in_a_big_form_is_linear() {
+        use std::time::{Duration, Instant};
+        let idx = big_form(200, 1700);
+        let start = Instant::now();
+        assert_eq!(cls("k#900=Enter", &idx), Class::Submit);
+        let one = start.elapsed();
+        // The target is well under 100 ms in a debug build (round 2 took seconds); the bound
+        // has slack for a loaded machine, and the counter below is exact.
+        assert!(one < Duration::from_millis(250), "Enter took {one:?}");
+        // Evidence is built once per form for a whole program, whatever the step count.
+        let ctx = super::Ctx::new(&idx);
+        for id in [201, 900, 1700, 5, 199] {
+            let steps = parse(&format!("k#{id}=Enter")).unwrap();
+            assert_eq!(ctx.step(&steps[0]).class, Class::Submit, "#{id}");
+        }
+        assert_eq!(ctx.evidence_builds(), 1);
+        let steps = parse("k#900=Enter; ?s; k#901=Enter; ?s; c#1; ?s").unwrap();
+        let start = Instant::now();
+        assert_eq!(classify(&steps, &idx).class, Class::Submit);
+        assert_eq!(check_planner(&steps, &idx), Ok(()));
+        let prog = start.elapsed();
+        assert!(prog < Duration::from_millis(500), "program took {prog:?}");
+        // A Pay submit anywhere in it still raises Enter on every row.
+        let mut idx = idx;
+        idx[150].name = "Place order".into();
+        assert_eq!(cls("k#900=Enter", &idx), Class::Pay);
     }
 }
