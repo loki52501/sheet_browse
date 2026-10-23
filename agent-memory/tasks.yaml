@@ -65,7 +65,9 @@ tasks:
     step: 2
     title: "toolstore: layout, header parser, loader, fingerprint check, lifecycle updates, git commit helper"
     docs: [docs/03-TOOL-STORE.md]
-    status: todo
+    status: doing
+    owner: store/sub-orchestrator
+    claimed_at: "2026-10-23"
   - id: T-12
     step: 2
     title: "srv-web: fetch→index (scraper), read/sheet/raw modes, api with vault headers, feed, search backend (decide D-31)"
