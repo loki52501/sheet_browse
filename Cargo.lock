@@ -1519,6 +1519,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dirs 7.0.0",
+ "harness-core",
  "keyring",
  "percent-encoding",
  "serde",

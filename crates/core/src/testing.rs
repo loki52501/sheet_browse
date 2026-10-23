@@ -6,16 +6,16 @@
 //! `harness-core = { workspace = true, features = ["testing"] }` under `[dev-dependencies]`.
 //! Nothing here talks to Postgres, a model, or the network.
 
-use crate::class::{Class, Mode};
-use crate::gate::{AskCard, AskOutcome, Asker, OnTimeout};
+use crate::class::Mode;
+use crate::gate::{rule_class_key, rule_domain, rule_key, AskCard, AskOutcome, Asker, OnTimeout};
 use crate::memory::{
-    contact_key, Baseline, Contact, Fact, FactId, Filter, GateRule, Hit, LedgerEvent, LedgerId,
-    MemoryError, MemoryStore, Node, NodeId, Result, Review, ReviewId, Run, RunStatus, Schedule,
-    Source, ToolHealth, Ts, Why,
+    contact_key, ts_now, Baseline, Contact, Fact, FactId, Filter, GateRule, Hit, LedgerEvent,
+    LedgerId, MemoryError, MemoryStore, Node, NodeId, Result, Review, ReviewId, Run, RunStatus,
+    Schedule, Source, ToolHealth, Ts, Why,
 };
 use crate::run::RunId;
 use async_trait::async_trait;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 
@@ -74,10 +74,14 @@ struct Inner {
 }
 
 /// In-memory [`MemoryStore`]. Same observable rules as the Postgres store where tests
-/// depend on them: seeded gate rules, Challenge rules must be `stop`, contacts keyed by
-/// [`contact_key`], increasing ledger ids, append-only ledger, SM-2 reviews, `neighbors`
-/// walking both edge directions with M-5's caps. `recall` and `search` are case-insensitive
-/// substring matches over subject, key and value (no embeddings).
+/// depend on them: seeded gate rules, gate rules stored under the canonical key
+/// ([`rule_key`], D-110) with Challenge rules `stop`, contacts keyed by [`contact_key`],
+/// increasing ledger ids, append-only ledger, SM-2 reviews, every stored timestamp
+/// truncated to microseconds (what `timestamptz` keeps), `neighbors` walking both edge
+/// directions with M-5's caps ordered by (depth, node id), and the same `Invalid` checks
+/// (empty node kind/name, edge relation, tool domain/name, contact). `recall` and `search`
+/// are case-insensitive substring matches over subject, key and value (no embeddings); a
+/// blank query finds nothing.
 pub struct MemStore {
     inner: Mutex<Inner>,
 }
@@ -122,7 +126,7 @@ impl MemStore {
         touch(&mut self.lock(), person, "test", "");
     }
 
-    /// Sets a gate rule synchronously; same checks as `gate_rule_set`.
+    /// Sets a gate rule synchronously; same checks and canonical key as `gate_rule_set`.
     pub fn add_rule(&self, domain: &str, class: &str, mode: Mode, strict: bool) -> Result<()> {
         set_rule(
             &mut self.lock(),
@@ -133,8 +137,9 @@ impl MemStore {
         )
     }
 
-    /// Writes a rule row without any validation, as a hand-edited `gate.rules` table could.
-    /// Exists to prove the gate does not trust the table for D-5 (a Challenge `allow`).
+    /// Writes a rule row verbatim without any validation, as a hand-edited `gate.rules`
+    /// table could. Exists to prove the gate does not trust the table for D-5 (a Challenge
+    /// `allow`).
     pub fn force_rule(&self, domain: &str, class: &str, rule: GateRule) {
         self.lock().rules.insert(
             (domain.to_string(), class.to_string()),
@@ -147,17 +152,22 @@ impl MemStore {
         self.lock().ledger.clone()
     }
 
-    /// The note stored with a gate rule, if the rule exists.
+    /// The note stored with a gate rule, if the rule exists. The key is canonicalised
+    /// first when it can be (so `rule_note("Bank.com", "submit")` finds `(bank.com, Submit)`).
     pub fn rule_note(&self, domain: &str, class: &str) -> Option<String> {
-        self.lock()
-            .rules
-            .get(&(domain.to_string(), class.to_string()))
-            .map(|(_, n)| n.clone())
+        let d = rule_domain(domain).unwrap_or_else(|_| domain.to_string());
+        let k = rule_class_key(class).unwrap_or_else(|_| class.to_string());
+        self.lock().rules.get(&(d, k)).map(|(_, n)| n.clone())
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// Truncated to the microsecond precision Postgres stores (`timestamptz`).
+fn micros(t: Ts) -> Ts {
+    DateTime::from_timestamp_micros(t.timestamp_micros()).unwrap_or(t)
 }
 
 fn touch(g: &mut Inner, person: &str, channel: &str, note: &str) {
@@ -170,7 +180,7 @@ fn touch(g: &mut Inner, person: &str, channel: &str, note: &str) {
         note: None,
     });
     c.count = c.count.saturating_add(1);
-    c.last = Some(Utc::now());
+    c.last = Some(ts_now());
     if !channel.is_empty() {
         c.channel = Some(channel.to_string());
     }
@@ -179,32 +189,11 @@ fn touch(g: &mut Inner, person: &str, channel: &str, note: &str) {
     }
 }
 
-/// Validates a `gate.rules.class` key (`Class` or `Class:hint`) and enforces D-5.
+/// Stores a rule under its canonical key ([`rule_key`]: canonical domain and class key,
+/// D-5), exactly as every `gate_rule_set` backend must (D-110 (1)).
 fn set_rule(g: &mut Inner, domain: &str, class: &str, rule: GateRule, note: &str) -> Result<()> {
-    if domain.trim().is_empty() {
-        return Err(MemoryError::Invalid("gate rule domain is empty".into()));
-    }
-    let (base, hint) = match class.split_once(':') {
-        Some((b, h)) => (b, Some(h)),
-        None => (class, None),
-    };
-    if hint.is_some_and(|h| h.trim().is_empty()) {
-        return Err(MemoryError::Invalid(format!(
-            "gate rule class {class:?} has an empty hint"
-        )));
-    }
-    let base: Class = base
-        .parse()
-        .map_err(|e: crate::class::UnknownClass| MemoryError::Invalid(e.to_string()))?;
-    if base == Class::Challenge && rule.mode != Mode::Stop {
-        return Err(MemoryError::Invalid(
-            "a Challenge rule must be stop (D-5)".into(),
-        ));
-    }
-    g.rules.insert(
-        (domain.to_string(), class.to_string()),
-        (rule, note.to_string()),
-    );
+    let key = rule_key(domain, class, &rule)?;
+    g.rules.insert(key, (rule, note.to_string()));
     Ok(())
 }
 
@@ -249,6 +238,8 @@ impl MemoryStore for MemStore {
                 f.confidence
             )));
         }
+        let mut f = f;
+        f.seen_at = micros(f.seen_at);
         let mut g = self.lock();
         g.next_fact += 1;
         let id = g.next_fact;
@@ -265,6 +256,9 @@ impl MemoryStore for MemStore {
     }
 
     async fn link(&self, src: NodeId, rel: &str, dst: NodeId, source: Source) -> Result<()> {
+        if rel.trim().is_empty() {
+            return Err(MemoryError::Invalid("edge relation is empty".into()));
+        }
         let mut g = self.lock();
         for n in [src, dst] {
             if !g.nodes.contains_key(&n.0) {
@@ -287,6 +281,11 @@ impl MemoryStore for MemStore {
     }
 
     async fn node(&self, kind: &str, name: &str) -> Result<NodeId> {
+        if kind.trim().is_empty() || name.trim().is_empty() {
+            return Err(MemoryError::Invalid(
+                "node kind and name are required".into(),
+            ));
+        }
         let mut g = self.lock();
         if let Some(n) = g.nodes.values().find(|n| n.kind == kind && n.name == name) {
             return Ok(n.id);
@@ -305,11 +304,13 @@ impl MemoryStore for MemStore {
     }
 
     async fn neighbors(&self, n: NodeId, rel: Option<&str>, depth: u8) -> Result<Vec<Node>> {
+        // Breadth-first, so each node is found at its minimum depth; then ordered by
+        // (depth, node id) and capped, like PgStore's `order by d, n.id limit 500`.
         let g = self.lock();
         let mut seen: HashSet<NodeId> = HashSet::from([n]);
         let mut frontier = vec![n];
-        let mut out = Vec::new();
-        for _ in 0..depth.min(MAX_DEPTH) {
+        let mut found: Vec<(u8, NodeId)> = Vec::new();
+        for d in 1..=depth.min(MAX_DEPTH) {
             let mut next = Vec::new();
             for cur in &frontier {
                 for e in g.edges.iter().filter(|e| rel.is_none_or(|r| e.rel == r)) {
@@ -321,23 +322,26 @@ impl MemoryStore for MemStore {
                         continue;
                     };
                     if seen.insert(other) {
-                        if let Some(node) = g.nodes.get(&other.0) {
-                            out.push(node.clone());
-                            if out.len() >= MAX_NEIGHBORS {
-                                return Ok(out);
-                            }
-                        }
+                        found.push((d, other));
                         next.push(other);
                     }
                 }
             }
             frontier = next;
         }
-        Ok(out)
+        found.sort();
+        Ok(found
+            .into_iter()
+            .filter_map(|(_, id)| g.nodes.get(&id.0).cloned())
+            .take(MAX_NEIGHBORS)
+            .collect())
     }
 
     async fn recall(&self, q: &str, k: usize, filter: Option<Filter>) -> Result<Vec<Hit>> {
         let q = q.trim().to_lowercase();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
         let g = self.lock();
         Ok(g.facts
             .iter()
@@ -356,6 +360,9 @@ impl MemoryStore for MemStore {
 
     async fn search(&self, q: &str, k: usize) -> Result<Vec<Hit>> {
         let q = q.trim().to_lowercase();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
         let g = self.lock();
         let mut hits: Vec<Hit> = g
             .facts
@@ -425,7 +432,7 @@ impl MemoryStore for MemStore {
         }
         r.ease = (r.ease + (0.1 - (5.0 - q) * (0.08 + (5.0 - q) * 0.02))).max(1.3);
         let secs = (f64::from(r.interval_days) * 86_400.0) as i64;
-        r.due = Utc::now() + ChronoDuration::seconds(secs);
+        r.due = ts_now() + ChronoDuration::seconds(secs);
         Ok(())
     }
 
@@ -434,6 +441,8 @@ impl MemoryStore for MemStore {
     }
 
     async fn baseline_set(&self, watch: &str, b: Baseline) -> Result<()> {
+        let mut b = b;
+        b.updated = micros(b.updated);
         self.lock().baselines.insert(watch.to_string(), b);
         Ok(())
     }
@@ -445,6 +454,8 @@ impl MemoryStore for MemStore {
                 e.duration_ms
             )));
         }
+        let mut e = e;
+        e.ts = micros(e.ts);
         let mut g = self.lock();
         g.next_ledger += 1;
         let id = LedgerId(g.next_ledger);
@@ -463,6 +474,14 @@ impl MemoryStore for MemStore {
     }
 
     async fn tool_health_set(&self, h: ToolHealth) -> Result<()> {
+        if h.domain.trim().is_empty() || h.name.trim().is_empty() {
+            return Err(MemoryError::Invalid(
+                "tool domain and name are required".into(),
+            ));
+        }
+        let mut h = h;
+        h.last_ok = h.last_ok.map(micros);
+        h.last_fail = h.last_fail.map(micros);
         self.lock()
             .tools
             .insert((h.domain.clone(), h.name.clone()), h);
@@ -478,6 +497,9 @@ impl MemoryStore for MemStore {
     }
 
     async fn run_start(&self, run: Run) -> Result<()> {
+        let mut run = run;
+        run.started = micros(run.started);
+        run.ended = run.ended.map(micros);
         let mut g = self.lock();
         if g.runs.contains_key(&run.id.0) {
             return Err(MemoryError::Invalid(format!("run {} exists", run.id)));
@@ -493,7 +515,7 @@ impl MemoryStore for MemStore {
             .get_mut(&id.0)
             .ok_or_else(|| MemoryError::NotFound(format!("run {id}")))?;
         r.status = status;
-        r.ended = Some(ended);
+        r.ended = Some(micros(ended));
         Ok(())
     }
 
@@ -505,6 +527,7 @@ impl MemoryStore for MemStore {
         let mut g = self.lock();
         g.next_schedule += 1;
         s.id = g.next_schedule;
+        s.last_run = s.last_run.map(micros);
         g.schedules.insert(s.id, s);
         Ok(g.next_schedule)
     }
@@ -527,7 +550,7 @@ impl MemoryStore for MemStore {
             .schedules
             .get_mut(&id)
             .ok_or_else(|| MemoryError::NotFound(format!("schedule {id}")))?;
-        s.last_run = Some(at);
+        s.last_run = Some(micros(at));
         Ok(())
     }
 
@@ -551,7 +574,7 @@ impl MemoryStore for MemStore {
                 id,
                 item: item.to_string(),
                 answer: answer.to_string(),
-                due: Utc::now(),
+                due: ts_now(),
                 interval_days: 1.0,
                 ease: 2.5,
                 reps: 0,
@@ -574,7 +597,9 @@ impl MemoryStore for MemStore {
 /// An [`Asker`] for tests. Answers from a queue of outcomes in order; once the queue is
 /// empty it behaves like an unanswered card and returns the card's own timeout outcome
 /// (`TimeoutProceed` / `TimeoutSkip` from `card.on_timeout`) immediately, without waiting
-/// out `card.timeout`. Every card it is shown is recorded for assertions.
+/// out `card.timeout`. A queued `Timeout*` outcome must equal what the card says: one that
+/// contradicts `card.on_timeout` panics (a scripted timeout cannot override the gate).
+/// Every card it is shown is recorded for assertions.
 #[derive(Default)]
 pub struct ScriptedAsker {
     outcomes: Mutex<VecDeque<AskOutcome>>,
@@ -621,17 +646,29 @@ impl Asker for ScriptedAsker {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .pop_front();
-        scripted.unwrap_or(match card.on_timeout {
+        let timeout = match card.on_timeout {
             OnTimeout::Proceed => AskOutcome::TimeoutProceed,
             OnTimeout::Skip => AskOutcome::TimeoutSkip,
-        })
+        };
+        match scripted {
+            Some(o @ (AskOutcome::TimeoutProceed | AskOutcome::TimeoutSkip)) if o != timeout => {
+                panic!(
+                    "ScriptedAsker: scripted {o:?} contradicts the card's on_timeout {:?}",
+                    card.on_timeout
+                )
+            }
+            Some(o) => o,
+            None => timeout,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::class::Class;
     use crate::memory::{node_kind, rel, SourceKind};
+    use chrono::Utc;
     use serde_json::json;
     use std::time::Duration;
 
@@ -870,6 +907,234 @@ mod tests {
         assert_eq!(asker.ask(&skip).await, AskOutcome::TimeoutSkip);
         asker.push(AskOutcome::AnsweredProceed);
         assert_eq!(asker.ask(&skip).await, AskOutcome::AnsweredProceed);
-        assert_eq!(asker.cards().len(), 4);
+        // A scripted timeout that agrees with the card is fine.
+        asker.push(AskOutcome::TimeoutSkip);
+        assert_eq!(asker.ask(&skip).await, AskOutcome::TimeoutSkip);
+        assert_eq!(asker.cards().len(), 5);
+    }
+
+    fn skip_card() -> AskCard {
+        AskCard {
+            class: Class::Pay,
+            what: "pay".into(),
+            site: None,
+            values: Vec::new(),
+            timeout: Duration::from_secs(60),
+            on_timeout: OnTimeout::Skip,
+        }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "contradicts")]
+    async fn scripted_timeout_proceed_on_a_skip_card_panics() {
+        let asker = ScriptedAsker::with([AskOutcome::TimeoutProceed]);
+        asker.ask(&skip_card()).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "contradicts")]
+    async fn scripted_timeout_skip_on_a_proceed_card_panics() {
+        let asker = ScriptedAsker::with([AskOutcome::TimeoutSkip]);
+        let card = AskCard {
+            on_timeout: OnTimeout::Proceed,
+            ..skip_card()
+        };
+        asker.ask(&card).await;
+    }
+
+    #[tokio::test]
+    async fn rules_are_stored_under_the_canonical_key() {
+        // D-110 (1): stored verbatim before, so the gate's canonical lookup never hit.
+        let s = MemStore::empty();
+        let ask = GateRule {
+            mode: Mode::Ask,
+            strict: false,
+        };
+        for (d, k, want_d, want_k) in [
+            ("Bank.com.", "submit", "bank.com", "Submit"),
+            (" shop2.com", "Submit", "shop2.com", "Submit"),
+            (" * ", "Submit: Wire", "*", "Submit:wire"),
+        ] {
+            s.gate_rule_set(d, k, ask, "n").await.unwrap();
+            assert_eq!(
+                s.gate_rule(want_d, want_k).await.unwrap(),
+                Some(ask),
+                "{d:?} {k:?}"
+            );
+            // The verbatim key is not stored.
+            assert!(s.gate_rule(d, k).await.unwrap().is_none(), "{d:?} {k:?}");
+        }
+        for (d, k) in [
+            ("", "Submit"),
+            ("a b", "Submit"),
+            ("*", "Submit:"),
+            ("*", "Nope"),
+        ] {
+            assert!(
+                matches!(
+                    s.gate_rule_set(d, k, ask, "").await,
+                    Err(MemoryError::Invalid(_))
+                ),
+                "{d:?} {k:?}"
+            );
+        }
+        // Seed rules are already canonical.
+        for (d, k, mode, _) in SEED_RULES {
+            let rule = GateRule {
+                mode,
+                strict: false,
+            };
+            assert_eq!(
+                rule_key(d, k, &rule).unwrap(),
+                (d.to_string(), k.to_string())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_timestamps_are_truncated_to_micros() {
+        // PgStore keeps microseconds; the fake used to keep nanoseconds.
+        let ns = DateTime::from_timestamp(1_700_000_000, 123_456_789).unwrap();
+        let us = DateTime::from_timestamp(1_700_000_000, 123_456_000).unwrap();
+        let s = MemStore::new();
+
+        let mut e = event(Some("r1"));
+        e.ts = ns;
+        s.append(e).await.unwrap();
+        assert_eq!(s.ledger()[0].1.ts, us);
+
+        let id = RunId("r1".into());
+        s.run_start(Run {
+            id: id.clone(),
+            started: ns,
+            ended: Some(ns),
+            prompt: "p".into(),
+            status: RunStatus::Running,
+            folder: "runs/r1".into(),
+            parent_run: None,
+            strict: false,
+        })
+        .await
+        .unwrap();
+        let r = s.run_get(&id).await.unwrap().unwrap();
+        assert_eq!((r.started, r.ended), (us, Some(us)));
+        s.run_end(&id, RunStatus::Done, ns).await.unwrap();
+        assert_eq!(s.run_get(&id).await.unwrap().unwrap().ended, Some(us));
+
+        let sid = s
+            .schedule_add(Schedule {
+                id: 0,
+                cron: "* * * * *".into(),
+                prompt: "p".into(),
+                kind: crate::memory::ScheduleKind::Cron,
+                watch_target: None,
+                enabled: true,
+                last_run: Some(ns),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(s.schedule_list().await.unwrap()[0].last_run, Some(us));
+        s.schedule_fired(sid, ns).await.unwrap();
+        assert_eq!(s.schedule_list().await.unwrap()[0].last_run, Some(us));
+
+        let mut f = Fact::new("a", "b", "c", src());
+        f.seen_at = ns;
+        s.remember(f).await.unwrap();
+        assert_eq!(s.search("a", 1).await.unwrap()[0].fact.seen_at, us);
+
+        s.baseline_set(
+            "w",
+            Baseline {
+                hash: "h".into(),
+                snapshot: json!({}),
+                updated: ns,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.baseline_get("w").await.unwrap().unwrap().updated, us);
+
+        s.add_contact("x@y.z");
+        let last = s.contact("x@y.z").await.unwrap().unwrap().last.unwrap();
+        assert_eq!(last.timestamp_subsec_nanos() % 1_000, 0);
+    }
+
+    #[tokio::test]
+    async fn neighbors_are_ordered_by_depth_then_id() {
+        // Insertion order used to decide; PgStore orders by (depth, node id).
+        let s = MemStore::new();
+        let a = s.node(node_kind::PERSON, "a").await.unwrap();
+        let b = s.node(node_kind::PERSON, "b").await.unwrap();
+        let c = s.node(node_kind::PERSON, "c").await.unwrap();
+        let d = s.node(node_kind::PERSON, "d").await.unwrap();
+        let root = s.node(node_kind::PERSON, "root").await.unwrap();
+        // depth 1: d then b (inserted in that order); depth 2: c then a.
+        s.link(root, rel::EMAILED, d, src()).await.unwrap();
+        s.link(b, rel::EMAILED, root, src()).await.unwrap();
+        s.link(d, rel::EMAILED, c, src()).await.unwrap();
+        s.link(b, rel::EMAILED, a, src()).await.unwrap();
+        let ids: Vec<NodeId> = s
+            .neighbors(root, None, 2)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert_eq!(ids, [b, d, a, c]);
+        assert!(s.neighbors(root, None, 0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn validation_matches_pgstore() {
+        let s = MemStore::new();
+        for (k, n) in [("", "x"), ("person", " "), (" ", "")] {
+            assert!(
+                matches!(s.node(k, n).await, Err(MemoryError::Invalid(_))),
+                "{k:?} {n:?}"
+            );
+        }
+        let a = s.node(node_kind::PERSON, "a").await.unwrap();
+        assert!(matches!(
+            s.link(a, " ", a, src()).await,
+            Err(MemoryError::Invalid(_))
+        ));
+        let health = |domain: &str, name: &str| ToolHealth {
+            domain: domain.into(),
+            name: name.into(),
+            version: 1,
+            status: crate::memory::ToolStatus::Saved,
+            runs: 0,
+            fails: 0,
+            last_ok: None,
+            last_fail: None,
+            why: None,
+            pinned: false,
+        };
+        for (d, n) in [("", "t"), ("x.com", ""), (" ", " ")] {
+            assert!(
+                matches!(
+                    s.tool_health_set(health(d, n)).await,
+                    Err(MemoryError::Invalid(_))
+                ),
+                "{d:?} {n:?}"
+            );
+        }
+        s.tool_health_set(health("x.com", "t")).await.unwrap();
+        assert!(matches!(
+            s.touch_contact("  ", "mail", "").await,
+            Err(MemoryError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn blank_queries_find_nothing() {
+        // A blank query used to match every fact (empty substring).
+        let s = MemStore::new();
+        s.remember(Fact::new("a", "b", "c", src())).await.unwrap();
+        for q in ["", "   "] {
+            assert!(s.recall(q, 5, None).await.unwrap().is_empty(), "{q:?}");
+            assert!(s.search(q, 5).await.unwrap().is_empty(), "{q:?}");
+        }
     }
 }

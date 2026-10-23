@@ -28,7 +28,8 @@ tokio.workspace = true
 toml.workspace = true
 zeroize.workspace = true
 
-# T-06: ledger + report through the global scrub; needs MemStore (D-108).
-[[test]]
-name = "ledger_t06"
-required-features = ["testing"]
+# D-111: the integration tests (gate_accept_t04, vault_accept_t05, ledger_t06) use
+# harness_core::testing; a self dev-dependency turns the feature on for every test target,
+# so `cargo test -p harness-core` (and the S-8 `cargo test --workspace`) runs them all.
+[dev-dependencies]
+harness-core = { path = ".", features = ["testing"] }
