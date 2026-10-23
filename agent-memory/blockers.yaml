@@ -14,6 +14,16 @@
 # proposals item:         reflect writes forge proposals, _generic merges, pinned-tool retirements
 
 blockers:
+  - id: B-300
+    task: T-11
+    question: "D-49 says toolstore::fingerprint reads sb-sheet's data/roles.txt, which does not exist yet (area sheet, T-10). What does toolstore use for role aliases meanwhile?"
+    default_taken: "toolstore carries a small built-in alias map (input textbox searchbox, button, select combobox listbox, checkbox, radio, link, form); swap to sb-sheet's table in the merge that brings both."
+    needs_user: false
+  - id: B-301
+    task: T-11
+    question: "docs/03 acceptance says an unused ephemeral tool 'is deleted by reflect', but T-7 says deletion is always retire -> archive -> delete. Which?"
+    default_taken: "D-303: retire and archive at 14 days (ledger event), delete the archived file at 90 days."
+    needs_user: false
 
 interface_changes:
 
