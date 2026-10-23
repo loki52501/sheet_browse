@@ -309,10 +309,15 @@ fn lowering_guard_every_fixture_submit_is_at_least_its_field_class() {
             }
             // Enter in a field of a form with a submit row submits that form: never below
             // the form's field-based class.
-            // Any textbox role, file inputs included: D-403 (1) makes printable keys
-            // (Space too) typed into a textbox Fill.
-            let text_field = matches!(row.role.as_str(), "textbox" | "combobox");
-            if text_field && row.form.is_some() {
+            // D-403 (1) makes printable keys (Space too) typed into a text field Fill;
+            // D-406 (2) says a file input is not a text field, so it gets the Space check.
+            let file_input = row
+                .state
+                .input_type
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case("file"));
+            let text_field = matches!(row.role.as_str(), "textbox" | "combobox") && !file_input;
+            if (text_field || file_input) && row.form.is_some() {
                 let floor = field_rule(&form);
                 let p = format!("k{r}=Enter");
                 let got = class_of(&p, &idx);

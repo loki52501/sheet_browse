@@ -1,6 +1,7 @@
 //! Shared I-5 wire-JSON index fixtures for the T-19 sb-act acceptance tests. Items 1-6
-//! (accept_t19_classify.rs) and items 7-11 (accept_t19_round2.rs) use the same rows, and
-//! item 11's lowering guard walks every fixture listed in [`ALL`].
+//! (accept_t19_classify.rs), items 7-11 (accept_t19_round2.rs) and items 12-18
+//! (accept_t19_round3.rs) use the same rows, and the lowering guards (items 11 and 18)
+//! walk every fixture listed in [`ALL`].
 #![allow(dead_code)]
 
 /// bench/pages/register.html as the live walk would ship it (B-5): nav links, #signup (f1)
@@ -186,7 +187,108 @@ pub const D404: &str = r#"[
   {"id":182,"frame":0,"role":"button","name":"Confirm","heading":"Save changes?","landmark":"dialog"}
 ]"#;
 
-/// Every fixture in the acceptance suite, for item 11's lowering guard.
+/// D-406 (1)(2)(3). f40: a card form (cc-number, cc-name) with a "Save card" switch, a
+/// "Save card for next time" checkbox, a Terms link, a saved-card radio and a neutral
+/// "Continue" SUBMIT; f41: a login with a non-submit "Show password" button; #215 and #216:
+/// formless file inputs (role textbox and role button); f43: "CVC" with autocomplete
+/// one-time-code; f44: "Security code" with autocomplete one-time-code.
+pub const D406: &str = r#"[
+  {"id":200,"frame":0,"role":"textbox","name":"Card number","heading":"Your details",
+   "state":{"input_type":"text","autocomplete":"cc-number"},"form":"f40"},
+  {"id":201,"frame":0,"role":"textbox","name":"Name on card","heading":"Your details",
+   "state":{"input_type":"text","autocomplete":"cc-name"},"form":"f40"},
+  {"id":202,"frame":0,"role":"switch","name":"Save card","heading":"Your details",
+   "state":{"checked":false,"input_type":"checkbox"},"form":"f40"},
+  {"id":203,"frame":0,"role":"checkbox","name":"Save card for next time","heading":"Your details",
+   "state":{"checked":false,"input_type":"checkbox"},"form":"f40"},
+  {"id":204,"frame":0,"role":"link","name":"Terms of sale","heading":"Your details","form":"f40"},
+  {"id":205,"frame":0,"role":"radio","name":"Visa ending 4242","heading":"Your details",
+   "state":{"checked":true,"input_type":"radio"},"form":"f40"},
+  {"id":206,"frame":0,"role":"button","name":"Continue","heading":"Your details",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f40"},
+  {"id":210,"frame":0,"role":"textbox","name":"Email","heading":"Sign in",
+   "state":{"input_type":"email","autocomplete":"username"},"form":"f41"},
+  {"id":211,"frame":0,"role":"textbox","name":"Password","heading":"Sign in",
+   "state":{"input_type":"password","autocomplete":"current-password"},"form":"f41"},
+  {"id":212,"frame":0,"role":"button","name":"Show password","heading":"Sign in","form":"f41"},
+  {"id":213,"frame":0,"role":"button","name":"Sign in","heading":"Sign in",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f41"},
+  {"id":215,"frame":0,"role":"textbox","name":"Upload ID","heading":"Documents",
+   "state":{"input_type":"file"}},
+  {"id":216,"frame":0,"role":"button","name":"Choose file","heading":"Documents",
+   "state":{"input_type":"file"}},
+  {"id":220,"frame":0,"role":"textbox","name":"CVC","heading":"Your details",
+   "state":{"input_type":"text","autocomplete":"one-time-code"},"form":"f43"},
+  {"id":221,"frame":0,"role":"button","name":"Continue","heading":"Your details",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f43"},
+  {"id":222,"frame":0,"role":"textbox","name":"Security code","heading":"Your details",
+   "state":{"input_type":"text","autocomplete":"one-time-code"},"form":"f44"},
+  {"id":223,"frame":0,"role":"button","name":"Continue","heading":"Your details",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f44"}
+]"#;
+
+/// D-406 (4): #14 a "Sign in" SUBMIT with its email field #7, #42 a reCAPTCHA CHALLENGE.
+pub const PLANNER: &str = r#"[
+  {"id":7,"frame":0,"role":"textbox","name":"Email","heading":"Sign in",
+   "state":{"input_type":"email","autocomplete":"username"},"form":"f1"},
+  {"id":14,"frame":0,"role":"button","name":"Sign in","heading":"Sign in",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f1"},
+  {"id":42,"frame":0,"role":"iframe","name":"reCAPTCHA","heading":"Sign in",
+   "flags":{"challenge":true,"opaque":true},"child_frame":1}
+]"#;
+
+/// D-406 (6)(7) and D-407. #230..#232: affirmative buttons with no form and no dialog
+/// landmark; f50..f57: one neutral "Step 3" form per new Pay word on its SUBMIT;
+/// #248..#251: Upgrade/Renew/Order history outside a form; f60: "Renewal date"; f61: "Book
+/// now"; f62..f65: passkeys; #270..#273: clear/empty buttons; #280, #281: "Cancel and/or
+/// ..." in a dialog.
+pub const D407: &str = r#"[
+  {"id":230,"frame":0,"role":"button","name":"Confirm","heading":"Delete account?"},
+  {"id":231,"frame":0,"role":"button","name":"Cancel","heading":"Delete account?"},
+  {"id":232,"frame":0,"role":"button","name":"Confirm","heading":"Save changes?"},
+  {"id":240,"frame":0,"role":"button","name":"Submit order","heading":"Step 3",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f50"},
+  {"id":241,"frame":0,"role":"button","name":"Upgrade","heading":"Step 3",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f51"},
+  {"id":242,"frame":0,"role":"button","name":"Complete order","heading":"Step 3",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f52"},
+  {"id":243,"frame":0,"role":"button","name":"Order now","heading":"Step 3",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f53"},
+  {"id":244,"frame":0,"role":"button","name":"Top up","heading":"Step 3",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f54"},
+  {"id":245,"frame":0,"role":"button","name":"Send money","heading":"Step 3",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f55"},
+  {"id":246,"frame":0,"role":"button","name":"Transfer funds","heading":"Step 3",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f56"},
+  {"id":247,"frame":0,"role":"button","name":"Renew","heading":"Step 3",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f57"},
+  {"id":248,"frame":0,"role":"button","name":"Upgrade","heading":"Your plan"},
+  {"id":249,"frame":0,"role":"link","name":"Renew","heading":"Your plan"},
+  {"id":250,"frame":0,"role":"link","name":"Upgrade","landmark":"nav"},
+  {"id":251,"frame":0,"role":"link","name":"Order history","landmark":"nav"},
+  {"id":252,"frame":0,"role":"textbox","name":"Renewal date","heading":"Renewal date",
+   "state":{"input_type":"date"},"form":"f60"},
+  {"id":253,"frame":0,"role":"button","name":"Save","heading":"Renewal date",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f60"},
+  {"id":254,"frame":0,"role":"button","name":"Book now","heading":"Step 3",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f61"},
+  {"id":260,"frame":0,"role":"button","name":"Create a passkey","heading":"Security",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f62"},
+  {"id":261,"frame":0,"role":"button","name":"Continue","heading":"Create a passkey",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f63"},
+  {"id":262,"frame":0,"role":"button","name":"Continue","heading":"Sign in with a passkey",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f64"},
+  {"id":263,"frame":0,"role":"button","name":"Sign in with a passkey","heading":"Welcome back",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f65"},
+  {"id":270,"frame":0,"role":"button","name":"Clear history","heading":"History"},
+  {"id":271,"frame":0,"role":"button","name":"Clear browsing data","heading":"Privacy"},
+  {"id":272,"frame":0,"role":"button","name":"Clear all","heading":"Notifications"},
+  {"id":273,"frame":0,"role":"button","name":"Empty trash","heading":"Trash"},
+  {"id":280,"frame":0,"role":"button","name":"Cancel and close","landmark":"dialog"},
+  {"id":281,"frame":0,"role":"button","name":"Cancel or go back","landmark":"dialog"}
+]"#;
+
+/// Every fixture in the acceptance suite, for the lowering guards (items 11 and 18).
 pub const ALL: &[(&str, &str)] = &[
     ("REGISTER", REGISTER),
     ("LOGIN", LOGIN),
@@ -197,4 +299,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("IMPLICIT", IMPLICIT),
     ("EVIDENCE", EVIDENCE),
     ("D404", D404),
+    ("D406", D406),
+    ("PLANNER", PLANNER),
+    ("D407", D407),
 ];
