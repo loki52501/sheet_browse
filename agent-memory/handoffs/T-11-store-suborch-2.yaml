@@ -1,0 +1,27 @@
+from: store/sub-orchestrator
+to: supreme
+task: T-11
+date: "2026-10-23"
+state: "T-11 done; area store PR is branch swarm/store with areas.store.status pr_open (D-46, no remote). main merged in cleanly (725c92d). crates/toolstore: header parser (T-2, I-12), folder_for via psl + _site.yaml aliases with path validation (T-1, D-300, D-310, D-311), loader scan/load + skeleton_line (T-3, D-306), fingerprint + relocate (T-4, D-304, B-300 alias map), lifecycle record/reforge/confirm/pin/sweep with ledger events (T-5 partial, T-7, D-302, D-303, D-310), invariants check_repair + planner_class with PlannerCheck/SbAct and runtime vault-key check (T-9, G-4, D-301, D-307, D-309), archive + git_commit with --literal-pathspecs, rquickjs runner with PageHost/ApiFetch, deadlines, output and memory caps (D-53, D-305, D-308). Seeds tools/ashbyhq.com/list_jobs.js and tools/_generic/read_table.js. Reports: bench/results/review-T-11.md (Verdict: approve, Blocking none, addendum for 87c725f), bench/results/accept-T-11.md (34/34 pass, Verdict: green). merge_gate.py store: gate ok. fmt clean, clippy --workspace --all-targets -D warnings clean, cargo test --workspace green (toolstore 95 lib + 29 accept)."
+not_done: "1. Vault canary acceptance row is deferred until core T-05 (Vault) lands; then switch invariants::vault_keys and the D-309 check to harness_core::vault::vault_refs (B-312). 2. After sheet merges: replace fingerprint.rs ROLE_ALIASES with sb_sheet::data::{aria_roles, alias_for} (D-59, B-300). 3. After page merges: SbAct becomes live; callers stop passing fake PlannerCheck; switch accept tests' local step splitter to sb_act::parse. 4. G-5 hand-edit reset needs a content-hash column in tools.health (contract change, not proposed yet). 5. T-6, T-8, T-5 auto @expects belong to T-16/T-28. 6. Consumers: srv-web/sb-mcp run the runner inside spawn_blocking (B-322) and their ApiFetch must honour `remaining` (D-64)."
+gotchas:
+  - "record/reforge/sweep change files but never commit; the caller runs ToolStore::git_commit(paths, \"... (T-xx)\")."
+  - "folder_for returns an empty string for hosts that cannot be a folder; every mutator refuses it with BadPath."
+  - "Only confirm() leaves `ask` (D-310)."
+  - "The runner's memory cap is armed after module compile (compile is bounded by tool file size); arming earlier crashes quickjs-ng."
+  - "A dotpals hook blocks git commit until a test run newer than your last edit has passed; run cargo test -p toolstore without pipes."
+  - "C: (TEMP) can fill up during long test sweeps; point TMP/TEMP at target/tmp on F:."
+decisions_made: [D-300, D-301, D-302, D-303, D-304, D-305, D-306, D-307, D-308, D-309, D-310, D-311]
+blockers_opened: [B-300, B-301, B-302, B-303, B-304, B-305, B-306, B-307, B-308, B-309, B-310, B-311, B-312, B-320, B-321, B-322, B-323]
+files_touched:
+  - crates/toolstore/
+  - tools/ashbyhq.com/list_jobs.js
+  - tools/_generic/read_table.js
+  - Cargo.toml
+  - Cargo.lock
+  - bench/results/review-T-11.md
+  - bench/results/review-T-11-runner.md
+  - bench/results/review-T-11-core.md
+  - bench/results/accept-T-11.md
+  - agent-memory/{tasks,swarm,decisions,blockers}.yaml
+verify: "cargo test -p toolstore && python scripts/swarm/merge_gate.py store --worktree ."

@@ -26,7 +26,7 @@ areas:
     crates: [toolstore]
     tasks: [T-11]
     docs: [docs/03-TOOL-STORE.md]
-    status: in_progress
+    status: pr_open
     merged: false
   page:
     wave: 1
