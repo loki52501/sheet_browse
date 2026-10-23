@@ -1,21 +1,45 @@
-//! Ledger (H-3) and `report.md` (Q-4). Owned by area core (T-06).
+//! Ledger (H-3) and `report.md` (Q-4, Q-5). Owned by area core (T-06).
 //!
 //! The row type is `memory::LedgerEvent` (contract). [`Ledger::write`] writes it twice:
 //! the DB first through `MemoryStore::append`, then one line in `runs/<run>/ledger.jsonl`
-//! carrying the returned id, so the mirror matches the table row-for-row.
+//! carrying the returned id. Several tool server processes each hold their own `Ledger`
+//! for one run, so their appends can land out of id order; "the mirror matches the table
+//! row-for-row" therefore means *keyed by id*: [`read_jsonl`] returns the lines sorted by
+//! id, which is the order `MemoryStore::ledger_events` returns rows in.
 //!
 //! # Event shapes [`report`] reads
 //!
 //! The wrapper (T-07) writes the events; the report derives everything from these fields:
 //!
-//! * a tool call: `server = <tool server>`, `tool`, `class`, `mode` = how the gate let it
-//!   through (`allow`, `answered_proceed`, `timeout_proceed`; `None` counts as allowed),
-//!   `ok`, `args` (the target is the first of `url href to path file id message_id thread
-//!   query q domain`), `result_summary`, `consequences` (file paths anywhere in it end up
-//!   on the `Files:` line);
-//! * how an ask ended: `server = core`, `mode` = one of the four outcomes, `class` and
-//!   `tool` of the asked call, `why` (or `result_summary`) = the card's what line;
-//! * a stop (gate Stop, Challenge mid-call): `mode = stop`, `why` = the reason.
+//! * a tool call: `server` = the tool server (`sheetbrowse`, `web`, `files`, `cli`, ...),
+//!   `tool` (a site tool is named after its site, e.g. `calendar.google.com/events`),
+//!   `class`, `mode` = how the gate let it through (`allow`, `answered_proceed`,
+//!   `timeout_proceed`; `None` counts as allowed), `ok`, `args` (the target is the first of
+//!   `url href to path file id message_id thread query q domain`), `result_summary`,
+//!   `consequences` (paths in it that resolve inside the run's `files/` end up on the
+//!   `Files:` line).
+//!   A call stopped by a challenge is written with `mode = stop` next to the core stop
+//!   event below; it never counts under `Did:` and is listed once under `Not done`.
+//!   Calls whose mode is a skip never count under `Did:` either.
+//! * `Read:` counts every `ok` call with `class = Read` outside `core`, one per distinct
+//!   target (one per call when there is no target), so the counts match the refs listed:
+//!   mails = server, tool or target host mentions `mail` or `outlook`; files = server
+//!   `files`, a `files`/`file`/`fs` token or an `fs.*` tool; pages = server `web` or
+//!   `sheetbrowse`, a site tool, or a web/fetch/page/browser name; anything else (`cli`
+//!   tools such as gh or dns, memory...) is `, n other`, printed only when n > 0.
+//! * a failed call (`ok = false`, not a stop or skip) is resolved when a later `ok` call has
+//!   the same server, tool and target: it then makes the run neither partial nor listed.
+//!   An unresolved one is listed (Q-5) with its class, why, consequence and the fallback:
+//!   the next non-core event's tool and target, or `none`.
+//! * how an ask ended: `server = core` ([`CORE_SERVER`]), `mode` = one of the four
+//!   outcomes, `class` and `tool` of the asked call, `why` (or `result_summary`) = the
+//!   card's what line;
+//! * a stop (gate Stop, Challenge mid-call): `server = core`, `mode = stop`, `why` = the
+//!   reason.
+//!
+//! Known limits (no fix needed): an integral f64 of 1e16 or more comes back from jsonb as
+//! an integer, so such a row and its line compare unequal; a `write` future dropped
+//! between the insert and the append leaves a row without a jsonl line.
 
 use crate::class::Class;
 use crate::memory::{LedgerEvent, LedgerId, LedgerMode, MemoryError, MemoryStore, RunStatus, Ts};
@@ -24,9 +48,12 @@ use crate::vault::scrub;
 use chrono::DateTime;
 use serde::Serialize;
 use serde_json::Value;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// `server` of events the harness itself writes (gate decisions, ask outcomes, stops).
+pub const CORE_SERVER: &str = "core";
 
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
@@ -49,6 +76,11 @@ pub enum LedgerError {
         line: usize,
         reason: String,
     },
+    /// After scrubbing, the serialized event still matches a vault value (in a field that
+    /// cannot be rewritten, such as `ts` or `duration_ms`, or across fields). Nothing was
+    /// inserted and no line was written. `fields` names the fields, never the value.
+    #[error("ledger event still matches a vault value after scrubbing (in {fields}); not written")]
+    Unscrubbable { fields: String },
 }
 
 pub type Result<T, E = LedgerError> = std::result::Result<T, E>;
@@ -85,26 +117,34 @@ impl Ledger {
 
     /// Insert, then mirror to jsonl; returns the row id.
     ///
-    /// Every string in the event (tool, server, args recursively, result_summary,
-    /// consequences, why) goes through the global [`scrub`] first: the contract says events
-    /// arrive scrubbed, this is defence in depth (D-102). `run_id: None` is filled with this
-    /// ledger's run; another run is [`LedgerError::WrongRun`]. `ts` is not re-stamped, only
-    /// truncated to microseconds (a no-op for [`crate::memory::ts_now`]), so the line and
-    /// the row carry the same instant. If the insert succeeds and the append fails the
-    /// error is [`LedgerError::Io`] and the row stays (the table is append-only).
-    pub async fn write(&self, e: LedgerEvent) -> Result<LedgerId> {
-        let mut e = scrub_event(e);
+    /// Every string in the event (tool, server, args recursively including object keys,
+    /// result_summary, consequences, why) and every JSON number goes through the global
+    /// [`scrub`] first, repeated until nothing changes; a number that matches becomes its
+    /// scrubbed text as a string (`"@vault(name)"`). U+0000 becomes U+FFFD (Postgres
+    /// rejects 0x00 in text and jsonb). The contract says events arrive scrubbed; this is
+    /// defence in depth (D-102). Then the whole serialized event is scrubbed once more and
+    /// must come back unchanged, else [`LedgerError::Unscrubbable`] and nothing is written
+    /// (fail closed).
+    ///
+    /// `run_id: None` is filled with this ledger's run; another run is
+    /// [`LedgerError::WrongRun`]. `ts` is not re-stamped, only truncated to microseconds (a
+    /// no-op for [`crate::memory::ts_now`]), so the line and the row carry the same
+    /// instant. If the insert succeeds and the append fails the error is
+    /// [`LedgerError::Io`] and the row stays (the table is append-only).
+    pub async fn write(&self, mut e: LedgerEvent) -> Result<LedgerId> {
         match &e.run_id {
             None => e.run_id = Some(self.run.id.clone()),
             Some(r) if *r != self.run.id => {
                 return Err(LedgerError::WrongRun {
-                    event: r.clone(),
+                    event: RunId(scrub(&r.0)),
                     ledger: self.run.id.clone(),
                 })
             }
             Some(_) => {}
         }
         e.ts = truncate_micros(e.ts);
+        let e = scrub_event(e);
+        check_clean(&e)?;
 
         let _order = self.order.lock().await;
         let id = self.store.append(e.clone()).await?;
@@ -116,63 +156,184 @@ impl Ledger {
         Ok(id)
     }
 
-    /// This run's `ledger.jsonl`, parsed back (see [`read_jsonl`]).
+    /// This run's `ledger.jsonl`, parsed back and sorted by id (see [`read_jsonl`]).
     pub fn read_back(&self) -> Result<Vec<(LedgerId, LedgerEvent)>> {
         read_jsonl(&self.run.ledger_jsonl())
     }
 }
 
-/// One `write` call on a file opened for append: concurrent appenders (several tool server
-/// processes on one run) never interleave inside a line.
+/// Appends `line` (which ends in `\n`) with a single `write_all` of one buffer on a file
+/// opened for append, so concurrent appenders never interleave inside a line. If the file
+/// does not end in `\n` (a torn write from a crashed process), a `\n` goes first so this
+/// line stays whole.
 fn append_line(path: &Path, line: &[u8]) -> std::io::Result<()> {
     let mut f = std::fs::OpenOptions::new()
-        .create(true)
+        .read(true)
         .append(true)
+        .create(true)
         .open(path)?;
-    let n = f.write(line)?;
-    if n < line.len() {
-        // A regular file in append mode takes the whole buffer; finish rather than lose it.
-        f.write_all(&line[n..])?;
+    let len = f.metadata()?.len();
+    let mut buf = Vec::with_capacity(line.len() + 1);
+    if len > 0 {
+        f.seek(SeekFrom::Start(len - 1))?;
+        let mut last = [0u8; 1];
+        f.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            buf.push(b'\n');
+        }
     }
-    Ok(())
+    buf.extend_from_slice(line);
+    f.write_all(&buf)
 }
 
 fn truncate_micros(ts: Ts) -> Ts {
     DateTime::from_timestamp_micros(ts.timestamp_micros()).unwrap_or(ts)
 }
 
-/// Passes every string field and every JSON string (and object key) through [`scrub`].
-pub fn scrub_event(mut e: LedgerEvent) -> LedgerEvent {
-    e.server = scrub(&e.server);
-    e.tool = scrub(&e.tool);
-    e.result_summary = scrub(&e.result_summary);
-    e.why = e.why.map(|w| scrub(&w));
+/// How many scrub passes [`scrub_event`] makes at most before it stops at a fixpoint.
+const SCRUB_ROUNDS: usize = 4;
+
+/// Passes every string field, every JSON string and object key, and every JSON number's
+/// decimal text through [`scrub`], and replaces U+0000 with U+FFFD, until nothing changes
+/// (at most a few passes). `run_id` is left alone: [`Ledger::write`] only accepts its own
+/// run, and the serialized check catches anything else.
+pub fn scrub_event(e: LedgerEvent) -> LedgerEvent {
+    let mut cur = scrub_event_once(e);
+    for _ in 1..SCRUB_ROUNDS {
+        let next = scrub_event_once(cur.clone());
+        if next == cur {
+            break;
+        }
+        cur = next;
+    }
+    cur
+}
+
+fn scrub_event_once(mut e: LedgerEvent) -> LedgerEvent {
+    e.server = clean_str(&e.server);
+    e.tool = clean_str(&e.tool);
+    e.result_summary = clean_str(&e.result_summary);
+    e.why = e.why.map(|w| clean_str(&w));
     e.args = scrub_value(e.args);
     e.consequences = scrub_value(e.consequences);
     e
 }
 
+/// Scrub, then U+0000 → U+FFFD.
+fn clean_str(s: &str) -> String {
+    let s = scrub(s);
+    if s.contains('\0') {
+        s.replace('\0', "\u{FFFD}")
+    } else {
+        s
+    }
+}
+
 fn scrub_value(v: Value) -> Value {
     match v {
-        Value::String(s) => Value::String(scrub(&s)),
+        Value::String(s) => Value::String(clean_str(&s)),
+        Value::Number(n) => {
+            let text = n.to_string();
+            let s = scrub(&text);
+            if s == text {
+                Value::Number(n)
+            } else {
+                Value::String(s)
+            }
+        }
         Value::Array(a) => Value::Array(a.into_iter().map(scrub_value).collect()),
         Value::Object(o) => Value::Object(
             o.into_iter()
-                .map(|(k, v)| (scrub(&k), scrub_value(v)))
+                .map(|(k, v)| (clean_str(&k), scrub_value(v)))
                 .collect(),
         ),
         other => other,
     }
 }
 
-/// Reads a `ledger.jsonl` back as `(id, event)` pairs in file order, for comparison with
-/// `MemoryStore::ledger_events` (T-09) and `harness ledger <run>`. A missing file is an
-/// empty ledger; blank lines are skipped; anything else unparsable is
-/// [`LedgerError::Corrupt`].
+/// The serialized event must survive a whole-text scrub unchanged (what an external grep
+/// of `ledger.jsonl` checks). Names the offending top-level fields on failure.
+fn check_clean(e: &LedgerEvent) -> Result<()> {
+    let whole = serde_json::to_string(e)?;
+    if scrub(&whole) == whole {
+        return Ok(());
+    }
+    let mut fields = Vec::new();
+    if let Value::Object(o) = serde_json::to_value(e)? {
+        for (k, v) in &o {
+            let t = v.to_string();
+            if scrub(&t) != t {
+                fields.push(scrub(k));
+            }
+        }
+    }
+    let fields = if fields.is_empty() {
+        "the line as a whole".to_owned()
+    } else {
+        fields.join(", ")
+    };
+    Err(LedgerError::Unscrubbable { fields })
+}
+
+/// A parsed `ledger.jsonl`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonlRead {
+    /// `(id, event)` pairs sorted by id (stable for equal ids).
+    pub events: Vec<(LedgerId, LedgerEvent)>,
+    /// 1-based numbers of torn lines that were skipped: an unparsable last line without a
+    /// trailing `\n`, or a line cut short by a crash mid-write (JSON that ends early or
+    /// UTF-8 cut inside a character) that a later append terminated. Their rows can be in
+    /// the table without a line here.
+    pub torn: Vec<usize>,
+}
+
+/// Reads a `ledger.jsonl` back as `(id, event)` pairs sorted by id, for comparison with
+/// `MemoryStore::ledger_events` (T-09) and `harness ledger <run>`: several processes
+/// append to one run's file, so file order is not id order. Torn lines are skipped (see
+/// [`read_jsonl_checked`] to learn which); a missing file is an empty ledger; blank lines
+/// are skipped; any other unparsable line is [`LedgerError::Corrupt`].
 pub fn read_jsonl(path: &Path) -> Result<Vec<(LedgerId, LedgerEvent)>> {
-    let text = match std::fs::read_to_string(path) {
+    Ok(read_jsonl_checked(path)?.events)
+}
+
+enum BadLine {
+    Torn,
+    Corrupt(String),
+}
+
+fn parse_line(raw: &[u8]) -> Result<(LedgerId, LedgerEvent), BadLine> {
+    let text = match std::str::from_utf8(raw) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        // error_len None: the bytes end inside a character, i.e. the line was cut.
+        Err(e) if e.error_len().is_none() => return Err(BadLine::Torn),
+        Err(e) => return Err(BadLine::Corrupt(e.to_string())),
+    };
+    let mut v: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) if e.is_eof() => return Err(BadLine::Torn),
+        Err(e) => return Err(BadLine::Corrupt(scrub(&e.to_string()))),
+    };
+    let id = v
+        .as_object_mut()
+        .and_then(|o| o.remove("id"))
+        .ok_or_else(|| BadLine::Corrupt("no id".into()))?;
+    let id: LedgerId =
+        serde_json::from_value(id).map_err(|e| BadLine::Corrupt(scrub(&e.to_string())))?;
+    let e: LedgerEvent =
+        serde_json::from_value(v).map_err(|e| BadLine::Corrupt(scrub(&e.to_string())))?;
+    Ok((id, e))
+}
+
+/// [`read_jsonl`] that also reports the torn lines it skipped.
+pub fn read_jsonl_checked(path: &Path) -> Result<JsonlRead> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(JsonlRead {
+                events: Vec::new(),
+                torn: Vec::new(),
+            })
+        }
         Err(source) => {
             return Err(LedgerError::Io {
                 path: path.to_path_buf(),
@@ -180,31 +341,37 @@ pub fn read_jsonl(path: &Path) -> Result<Vec<(LedgerId, LedgerEvent)>> {
             })
         }
     };
-    let corrupt = |line: usize, reason: String| LedgerError::Corrupt {
-        path: path.to_path_buf(),
-        line,
-        reason,
-    };
-    let mut out = Vec::new();
-    for (i, raw) in text.lines().enumerate() {
-        if raw.trim().is_empty() {
+    let terminated = bytes.last() == Some(&b'\n');
+    let pieces: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
+    let last = pieces.len();
+    let mut events = Vec::new();
+    let mut torn = Vec::new();
+    for (i, raw) in pieces.into_iter().enumerate() {
+        let n = i + 1;
+        let raw = raw.trim_ascii();
+        if raw.is_empty() {
             continue;
         }
-        let mut v: Value = serde_json::from_str(raw).map_err(|e| corrupt(i + 1, e.to_string()))?;
-        let id = v
-            .as_object_mut()
-            .and_then(|o| o.remove("id"))
-            .ok_or_else(|| corrupt(i + 1, "no id".into()))?;
-        let id: LedgerId = serde_json::from_value(id).map_err(|e| corrupt(i + 1, e.to_string()))?;
-        let e: LedgerEvent =
-            serde_json::from_value(v).map_err(|e| corrupt(i + 1, e.to_string()))?;
-        out.push((id, e));
+        match parse_line(raw) {
+            Ok(pair) => events.push(pair),
+            Err(BadLine::Torn) => torn.push(n),
+            // The last line without its newline: a write that never finished.
+            Err(BadLine::Corrupt(_)) if n == last && !terminated => torn.push(n),
+            Err(BadLine::Corrupt(reason)) => {
+                return Err(LedgerError::Corrupt {
+                    path: path.to_path_buf(),
+                    line: n,
+                    reason,
+                })
+            }
+        }
     }
-    Ok(out)
+    events.sort_by_key(|(id, _)| *id);
+    Ok(JsonlRead { events, torn })
 }
 
 // ---------------------------------------------------------------------------------------
-// report.md (Q-4)
+// report.md (Q-4, Q-5)
 
 /// How many items a report line lists before `+n more`.
 const LIST_MAX: usize = 8;
@@ -226,7 +393,7 @@ const TARGET_KEYS: [&str; 11] = [
 ];
 
 fn is_core(e: &LedgerEvent) -> bool {
-    e.server == "core"
+    e.server == CORE_SERVER
 }
 
 fn is_outcome(m: Option<LedgerMode>) -> bool {
@@ -254,12 +421,29 @@ fn is_failure(e: &LedgerEvent) -> bool {
     !e.ok && !is_stop(e) && !is_skip(e.mode)
 }
 
+/// A failure at `i` is resolved when a later ok call (not core, not a stop or skip) has
+/// the same server, tool and target.
+fn is_resolved(events: &[LedgerEvent], i: usize) -> bool {
+    let e = &events[i];
+    let t = target_raw(e);
+    events[i + 1..].iter().any(|l| {
+        l.ok && !is_core(l)
+            && !is_stop(l)
+            && !is_skip(l.mode)
+            && l.server == e.server
+            && l.tool == e.tool
+            && target_raw(l) == t
+    })
+}
+
 /// `Result:` of a run, as stored in `runs.status` at the end: any stop → Stopped; any
-/// skipped ask or failed step → Partial; otherwise Done.
+/// skip or unresolved failed step → Partial; otherwise Done.
 pub fn run_status(events: &[LedgerEvent]) -> RunStatus {
     if events.iter().any(is_stop) {
         RunStatus::Stopped
-    } else if events.iter().any(|e| is_skip(e.mode) || !e.ok) {
+    } else if events.iter().any(|e| is_skip(e.mode))
+        || (0..events.len()).any(|i| is_failure(&events[i]) && !is_resolved(events, i))
+    {
         RunStatus::Partial
     } else {
         RunStatus::Done
@@ -271,32 +455,71 @@ enum ReadKind {
     Page,
     Mail,
     File,
+    Other,
 }
 
-fn read_kind(e: &LedgerEvent) -> Option<ReadKind> {
-    let both = format!("{} {}", e.server, e.tool).to_ascii_lowercase();
-    let has = |w: &str| {
-        both.split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|t| t == w)
-    };
-    if both.contains("mail") {
-        Some(ReadKind::Mail)
-    } else if has("files") || has("file") || has("fs") {
-        Some(ReadKind::File)
-    } else if both.contains("web")
-        || both.contains("fetch")
-        || both.contains("page")
-        || has("sb")
-        || has("browser")
+/// Lower-cased host of a URL-ish string (`https://user@host:443/x` → `host`).
+fn host_of(s: &str) -> String {
+    let rest = s.split_once("://").map(|(_, r)| r).unwrap_or(s);
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = auth.rsplit('@').next().unwrap_or_default();
+    host.split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn read_kind(e: &LedgerEvent) -> ReadKind {
+    let server = e.server.to_ascii_lowercase();
+    let tool = e.tool.to_ascii_lowercase();
+    let hosts: Vec<String> = e
+        .args
+        .as_object()
+        .map(|o| {
+            ["url", "href", "domain"]
+                .iter()
+                .filter_map(|k| o.get(*k).and_then(Value::as_str))
+                .map(host_of)
+                .collect()
+        })
+        .unwrap_or_default();
+    let names = [server.as_str(), tool.as_str()];
+    let mentions =
+        |w: &str| names.iter().any(|n| n.contains(w)) || hosts.iter().any(|h| h.contains(w));
+    let tokens: Vec<&str> = names
+        .iter()
+        .flat_map(|n| n.split(|c: char| !c.is_ascii_alphanumeric()))
+        .collect();
+    let token = |w: &str| tokens.contains(&w);
+    // A site tool is named after its site: `calendar.google.com/events`.
+    let site_tool = tool
+        .split_once('/')
+        .is_some_and(|(site, _)| site.contains('.'));
+    if mentions("mail") || mentions("outlook") {
+        ReadKind::Mail
+    } else if server == "files" || token("files") || token("file") || token("fs") {
+        ReadKind::File
+    } else if server == "web"
+        || server == "sheetbrowse"
+        || site_tool
+        || mentions("web")
+        || mentions("fetch")
+        || mentions("page")
+        || mentions("browse")
+        || token("sb")
     {
-        Some(ReadKind::Page)
+        ReadKind::Page
     } else {
-        None
+        ReadKind::Other
     }
 }
 
+/// Scrub, collapse whitespace, scrub again (collapsing can form a value), then cut to
+/// `max` chars. Cutting a clean string cannot expose part of a value: any value it
+/// crossed was already replaced.
 fn clip(s: &str, max: usize) -> String {
-    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let s = scrub(s);
+    let s = scrub(&s.split_whitespace().collect::<Vec<_>>().join(" "));
     if s.chars().count() <= max {
         s
     } else {
@@ -308,39 +531,53 @@ fn clip(s: &str, max: usize) -> String {
 
 fn value_text(v: &Value) -> Option<String> {
     match v {
-        Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) if !s.trim().is_empty() => Some(scrub(s)),
+        Value::Number(n) => Some(scrub(&n.to_string())),
         Value::Array(a) => {
             let parts: Vec<String> = a.iter().filter_map(value_text).collect();
-            (!parts.is_empty()).then(|| parts.join(", "))
+            (!parts.is_empty()).then(|| scrub(&parts.join(", ")))
         }
         _ => None,
     }
 }
 
-/// The call's target from its args (url, recipient, path, id...).
-fn target(e: &LedgerEvent) -> Option<String> {
+/// The call's target from its args (url, recipient, path, id...), scrubbed, unclipped.
+fn target_raw(e: &LedgerEvent) -> Option<String> {
     let o = e.args.as_object()?;
     TARGET_KEYS
         .iter()
         .find_map(|k| o.get(*k).and_then(value_text))
-        .map(|t| clip(&t, ITEM_MAX))
 }
 
-fn consequence(e: &LedgerEvent) -> String {
+/// [`target_raw`] for display.
+fn target(e: &LedgerEvent) -> Option<String> {
+    target_raw(e).map(|t| clip(&t, ITEM_MAX))
+}
+
+/// `tool target` (or just `tool`) for display.
+fn step(e: &LedgerEvent) -> String {
+    let tool = clip(&e.tool, ITEM_MAX);
+    match target(e) {
+        Some(t) => format!("{tool} {t}"),
+        None => tool,
+    }
+}
+
+/// First consequence, else the result summary, else `empty`.
+fn consequence(e: &LedgerEvent, empty: &str) -> String {
     let from_list = match &e.consequences {
         Value::Array(a) => a.first().map(|c| match c {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
+            Value::String(s) => scrub(s),
+            other => scrub(&other.to_string()),
         }),
         Value::Null => None,
         Value::Object(o) if o.is_empty() => None,
-        other => Some(other.to_string()),
+        other => Some(scrub(&other.to_string())),
     };
     let text = from_list
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| (!e.result_summary.trim().is_empty()).then(|| e.result_summary.clone()))
-        .unwrap_or_else(|| "ok".into());
+        .or_else(|| (!e.result_summary.trim().is_empty()).then(|| scrub(&e.result_summary)))
+        .unwrap_or_else(|| empty.into());
     clip(&text, ITEM_MAX)
 }
 
@@ -377,54 +614,243 @@ fn push_unique(v: &mut Vec<String>, s: String) {
     }
 }
 
-/// `runs/<id>/files/<rel>` for a string that names a file under the run's `files/`.
-fn run_file(s: &str, run: Option<&str>) -> Option<String> {
-    let s = s.replace('\\', "/");
-    let rel = match run {
-        Some(id) => {
-            let marker = format!("{id}/files/");
-            s.find(&marker)
-                .filter(|&at| at == 0 || s[..at].ends_with('/'))
-                .map(|at| s[at + marker.len()..].to_string())
-                .or_else(|| s.strip_prefix("files/").map(str::to_string))
-        }
-        None => s.strip_prefix("files/").map(str::to_string),
-    }?;
-    let rel = rel.trim_end_matches('/');
-    if rel.is_empty() || rel.split('/').any(|c| c == "..") {
-        return None;
-    }
-    Some(format!("runs/{}/files/{rel}", run.unwrap_or("<run>")))
+/// What the `Files:` line resolves paths against.
+struct FilesCtx<'a> {
+    /// The run id, for the `runs/<id>/files/<rel>` output and the relative and
+    /// marker forms.
+    id: Option<&'a str>,
+    /// `/`-separated absolute `<run_dir>/files`, when the run folder is known.
+    files_abs: Option<String>,
 }
 
-fn collect_files(v: &Value, run: Option<&str>, out: &mut Vec<String>) {
+/// `\` → `/`, and the `\\?\` verbatim prefix dropped.
+fn norm_path(s: &str) -> String {
+    let s = s.replace('\\', "/");
+    match s.strip_prefix("//?/") {
+        Some(rest) => rest.to_owned(),
+        None => s,
+    }
+}
+
+fn has_drive(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+/// `rest` of `s` = `base/rest` (ASCII case-insensitive on Windows).
+fn strip_dir<'s>(s: &'s str, base: &str) -> Option<&'s str> {
+    let head = s.get(..base.len())?;
+    let same = if cfg!(windows) {
+        head.eq_ignore_ascii_case(base)
+    } else {
+        head == base
+    };
+    if !same {
+        return None;
+    }
+    s.get(base.len()..)?.strip_prefix('/')
+}
+
+/// `runs/<id>/files/<rel>` for a string that names a file inside this run's `files/`:
+/// a relative `files/<rel>` (relative to the run dir) or `runs/<id>/files/<rel>` (the form
+/// this report prints); an absolute path under `<run_dir>/files` when the run folder is
+/// known, else one containing `/runs/<id>/files/`. Anything with a `..` component, a drive
+/// letter or `:` outside the known base, or an absolute path elsewhere is not a run file.
+fn run_file(s: &str, ctx: &FilesCtx<'_>) -> Option<String> {
+    let s = norm_path(s.trim());
+    if s.split('/').any(|c| c == "..") {
+        return None;
+    }
+    let rel: String = if s.starts_with('/') || has_drive(&s) {
+        match (&ctx.files_abs, ctx.id) {
+            (Some(base), _) => strip_dir(&s, base)?.to_owned(),
+            (None, Some(id)) => {
+                let marker = format!("/runs/{id}/files/");
+                let at = s.find(&marker)?;
+                s[at + marker.len()..].to_owned()
+            }
+            (None, None) => return None,
+        }
+    } else if let Some(r) = s.strip_prefix("files/") {
+        r.to_owned()
+    } else {
+        let id = ctx.id?;
+        s.strip_prefix(&format!("runs/{id}/files/"))?.to_owned()
+    };
+    let parts: Vec<&str> = rel
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    if parts.is_empty() || parts.iter().any(|c| c.contains(':')) {
+        return None;
+    }
+    Some(format!(
+        "runs/{}/files/{}",
+        ctx.id.unwrap_or("<run>"),
+        parts.join("/")
+    ))
+}
+
+fn collect_files(v: &Value, ctx: &FilesCtx<'_>, out: &mut Vec<String>) {
     match v {
         Value::String(s) => {
-            if let Some(f) = run_file(s, run) {
+            if let Some(f) = run_file(s, ctx) {
                 push_unique(out, f);
             }
         }
-        Value::Array(a) => a.iter().for_each(|x| collect_files(x, run, out)),
-        Value::Object(o) => o.values().for_each(|x| collect_files(x, run, out)),
+        Value::Array(a) => a.iter().for_each(|x| collect_files(x, ctx, out)),
+        Value::Object(o) => o.values().for_each(|x| collect_files(x, ctx, out)),
         _ => {}
     }
 }
 
-/// `report.md` from a run's events (H-3, Q-4 format), scrubbed. Deterministic: the same
-/// events give the same text.
+/// `report.md` from a run's events (H-3, Q-4 format, Q-5 failures), scrubbed.
+/// Deterministic: the same events give the same text.
 pub fn report(prompt: &str, events: &[LedgerEvent]) -> String {
     let run = events
         .iter()
         .find_map(|e| e.run_id.as_ref().map(|r| r.0.clone()));
-    build_report(prompt, events, run.as_deref(), &[])
+    let ctx = FilesCtx {
+        id: run.as_deref(),
+        files_abs: None,
+    };
+    build_report(prompt, events, &ctx, &[])
+}
+
+/// One `Read:` ref: a distinct target, or a target-less tool with its call count.
+struct ReadRef {
+    kind: ReadKind,
+    target: Option<String>,
+    shown: String,
+    calls: usize,
+}
+
+fn read_line(events: &[LedgerEvent]) -> String {
+    let mut refs: Vec<ReadRef> = Vec::new();
+    for e in events
+        .iter()
+        .filter(|e| !is_core(e) && e.ok && e.class == Some(Class::Read))
+    {
+        let kind = read_kind(e);
+        // Distinct by the full target; two long URLs sharing a clipped prefix are two reads.
+        let t = target_raw(e);
+        let shown = match &t {
+            Some(t) => clip(t, ITEM_MAX),
+            None => clip(&e.tool, ITEM_MAX),
+        };
+        match refs
+            .iter_mut()
+            .find(|r| r.kind == kind && r.target == t && r.shown == shown)
+        {
+            Some(r) if t.is_none() => r.calls += 1,
+            Some(_) => {}
+            None => refs.push(ReadRef {
+                kind,
+                target: t,
+                shown,
+                calls: 1,
+            }),
+        }
+    }
+    let count = |k: ReadKind| {
+        refs.iter()
+            .filter(|r| r.kind == k)
+            .map(|r| r.calls)
+            .sum::<usize>()
+    };
+    let mut read = format!(
+        "Read: {} pages, {} mails, {} files",
+        count(ReadKind::Page),
+        count(ReadKind::Mail),
+        count(ReadKind::File)
+    );
+    let other = count(ReadKind::Other);
+    if other > 0 {
+        read.push_str(&format!(", {other} other"));
+    }
+    if !refs.is_empty() {
+        let items: Vec<String> = refs
+            .iter()
+            .map(|r| match r.calls {
+                1 => r.shown.clone(),
+                n => format!("{} (x{n})", r.shown),
+            })
+            .collect();
+        read.push_str(&format!(" ({})", list(&items)));
+    }
+    read
+}
+
+fn needs_line(events: &[LedgerEvent]) -> String {
+    // A challenge-stopped call is written twice (tool event with mode=stop and the core
+    // stop event); list the core one only.
+    let core_stops: Vec<&str> = events
+        .iter()
+        .filter(|e| is_core(e) && is_stop(e))
+        .map(|e| e.tool.as_str())
+        .collect();
+    let mut first = Vec::new();
+    let mut fails = Vec::new();
+    for (i, e) in events.iter().enumerate() {
+        if is_stop(e) {
+            if !is_core(e) && core_stops.contains(&e.tool.as_str()) {
+                continue;
+            }
+            first.push(format!(
+                "stopped at {} ({}): {}; handed back to you",
+                clip(&e.tool, ITEM_MAX),
+                class_str(e.class),
+                why_text(e)
+            ));
+        } else if is_skip(e.mode) && is_core(e) {
+            let how = if e.mode == Some(LedgerMode::TimeoutSkip) {
+                "timed out, skipped"
+            } else {
+                "you said skip"
+            };
+            first.push(format!(
+                "{} ({}): {}: {}",
+                clip(&e.tool, ITEM_MAX),
+                class_str(e.class),
+                why_text(e),
+                how
+            ));
+        } else if is_failure(e) && !is_resolved(events, i) {
+            let fallback = events[i + 1..]
+                .iter()
+                .find(|l| !is_core(l))
+                .map(step)
+                .unwrap_or_else(|| "none".into());
+            fails.push(format!(
+                "failed {} ({}): {}; consequence: {}; fallback: {}",
+                step(e),
+                class_str(e.class),
+                why_text(e),
+                consequence(e, "none captured"),
+                fallback
+            ));
+        }
+    }
+    if first.is_empty() && fails.is_empty() {
+        return "Not done / needs you: nothing".to_string();
+    }
+    // Stops and skipped asks are never cut; failures after them are capped.
+    let mut parts = first;
+    if !fails.is_empty() {
+        parts.push(list(&fails));
+    }
+    format!("Not done / needs you: {}", parts.join("; "))
 }
 
 fn build_report(
     prompt: &str,
     events: &[LedgerEvent],
-    run: Option<&str>,
+    ctx: &FilesCtx<'_>,
     disk: &[String],
 ) -> String {
+    // Scrub the whole prompt before taking its first line: a value spanning lines would
+    // otherwise leave its first part behind.
+    let prompt = scrub(prompt);
     let task = prompt
         .lines()
         .map(str::trim)
@@ -435,32 +861,17 @@ fn build_report(
 
     let result = match run_status(events) {
         RunStatus::Stopped => {
-            let why = events.iter().find(|e| is_stop(e)).map(why_text);
-            format!("stopped ({})", why.unwrap_or_default())
+            let stop = events
+                .iter()
+                .find(|e| is_stop(e) && is_core(e))
+                .or_else(|| events.iter().find(|e| is_stop(e)));
+            format!("stopped ({})", stop.map(why_text).unwrap_or_default())
         }
         RunStatus::Partial => "partial".into(),
         _ => "done".into(),
     };
 
-    // Read
-    let (mut pages, mut mails, mut files) = (0usize, 0usize, 0usize);
-    let mut read_refs = Vec::new();
-    for e in events
-        .iter()
-        .filter(|e| !is_core(e) && e.ok && e.class == Some(Class::Read))
-    {
-        let Some(kind) = read_kind(e) else { continue };
-        match kind {
-            ReadKind::Page => pages += 1,
-            ReadKind::Mail => mails += 1,
-            ReadKind::File => files += 1,
-        }
-        push_unique(&mut read_refs, target(e).unwrap_or_else(|| e.tool.clone()));
-    }
-    let mut read = format!("Read: {pages} pages, {mails} mails, {files} files");
-    if !read_refs.is_empty() {
-        read.push_str(&format!(" ({})", list(&read_refs)));
-    }
+    let read = read_line(events);
 
     // Asked
     let asks: Vec<&LedgerEvent> = events
@@ -497,7 +908,7 @@ fn build_report(
         asked.push_str(&format!(" ({})", list(&items)));
     }
 
-    // Did
+    // Did: ok side effects the gate let through; never stops or skips.
     let did_items: Vec<String> = events
         .iter()
         .filter(|e| {
@@ -514,11 +925,12 @@ fn build_report(
                 )
         })
         .map(|e| {
-            let what = match target(e) {
-                Some(t) => format!("{} {}", e.tool, t),
-                None => e.tool.clone(),
-            };
-            format!("{} {}: {}", class_str(e.class), what, consequence(e))
+            format!(
+                "{} {}: {}",
+                class_str(e.class),
+                step(e),
+                consequence(e, "ok")
+            )
         })
         .collect();
     let mut did = format!("Did: {} actions", did_items.len());
@@ -529,7 +941,7 @@ fn build_report(
     // Files
     let mut out_files = Vec::new();
     for e in events {
-        collect_files(&e.consequences, run, &mut out_files);
+        collect_files(&e.consequences, ctx, &mut out_files);
     }
     for f in disk {
         push_unique(&mut out_files, f.clone());
@@ -540,47 +952,10 @@ fn build_report(
         format!("Files: {}", list(&out_files))
     };
 
-    // Not done / needs you (Q-5: step, class, why, consequence)
-    let mut needs = Vec::new();
-    for e in events {
-        if is_stop(e) {
-            needs.push(format!(
-                "stopped at {} ({}): {}; handed back to you",
-                e.tool,
-                class_str(e.class),
-                why_text(e)
-            ));
-        } else if is_skip(e.mode) && is_core(e) {
-            let how = if e.mode == Some(LedgerMode::TimeoutSkip) {
-                "timed out, skipped"
-            } else {
-                "you said skip"
-            };
-            needs.push(format!(
-                "{} ({}): {}: {}",
-                e.tool,
-                class_str(e.class),
-                why_text(e),
-                how
-            ));
-        } else if is_failure(e) {
-            needs.push(format!(
-                "failed {} ({}): {}; consequence: {}",
-                e.tool,
-                class_str(e.class),
-                why_text(e),
-                consequence(e)
-            ));
-        }
-    }
-    let needs_line = if needs.is_empty() {
-        "Not done / needs you: nothing".to_string()
-    } else {
-        format!("Not done / needs you: {}", list(&needs))
-    };
+    let needs = needs_line(events);
 
     let text =
-        format!("# {task}\nResult: {result}\n{read}\n{asked}\n{did}\n{files_line}\n{needs_line}\n");
+        format!("# {task}\nResult: {result}\n{read}\n{asked}\n{did}\n{files_line}\n{needs}\n");
     scrub(&text)
 }
 
@@ -627,6 +1002,7 @@ fn walk_files(dir: &Path) -> std::io::Result<Vec<String>> {
 }
 
 /// [`report`] plus every file found on disk under `files/`, written to `report.md`.
+/// Absolute paths in consequences count only under this run's `files/`.
 /// Returns the text written.
 pub fn write_report(run: &RunFolder, prompt: &str, events: &[LedgerEvent]) -> Result<String> {
     let io = |path: PathBuf| move |source| LedgerError::Io { path, source };
@@ -635,7 +1011,16 @@ pub fn write_report(run: &RunFolder, prompt: &str, events: &[LedgerEvent]) -> Re
         .into_iter()
         .map(|rel| format!("runs/{}/files/{rel}", run.id))
         .collect();
-    let text = build_report(prompt, events, Some(&run.id.0), &disk);
+    let files_abs = std::path::absolute(run.files()).ok().map(|p| {
+        norm_path(&p.to_string_lossy())
+            .trim_end_matches('/')
+            .to_owned()
+    });
+    let ctx = FilesCtx {
+        id: Some(&run.id.0),
+        files_abs,
+    };
+    let text = build_report(prompt, events, &ctx, &disk);
     std::fs::write(run.report_md(), &text).map_err(io(run.report_md()))?;
     Ok(text)
 }
@@ -674,6 +1059,12 @@ mod tests {
         e
     }
 
+    fn read(server: &str, tool: &str, args: Value) -> LedgerEvent {
+        let mut e = ev(server, tool, Class::Read, Some(LedgerMode::Allow));
+        e.args = args;
+        e
+    }
+
     fn send(to: &str, mode: LedgerMode) -> LedgerEvent {
         let mut e = ev("echo", "echo.send", Class::Send, Some(mode));
         e.args = json!({ "to": to, "body": "hi" });
@@ -685,6 +1076,13 @@ mod tests {
         let mut e = ev("core", "echo.send", Class::Send, Some(mode));
         e.why = Some(what.into());
         e
+    }
+
+    fn line(r: &str, prefix: &str) -> String {
+        r.lines()
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_default()
+            .to_owned()
     }
 
     #[test]
@@ -713,7 +1111,7 @@ mod tests {
         let expected = format!(
             "# Say hi to new@x.com\n\
              Result: done\n\
-             Read: 3 pages, 1 mails, 1 files (https://a.example/; https://b.example/; mail.read; notes.txt)\n\
+             Read: 2 pages, 1 mails, 1 files (https://a.example/; https://b.example/; mail.read; notes.txt)\n\
              Asked: 1 (1 answered / 0 timed out) (send mail to new@x.com at 09:00:05: answered, proceeded)\n\
              Did: 2 actions (Send echo.send new@x.com: sent to new@x.com; Fill fs.write files/out.md: {{\"files\":[\"F:\\\\x\\\\runs\\\\{RUN}\\\\files\\\\out.md\"]}})\n\
              Files: runs/{RUN}/files/out.md\n\
@@ -722,6 +1120,61 @@ mod tests {
         assert_eq!(r, expected);
         assert_eq!(run_status(&events), RunStatus::Done);
         assert_eq!(report("Say hi to new@x.com\nmore detail", &events), r);
+    }
+
+    /// Item 3: the real server names (sheetbrowse, web, files, cli) and site tools are
+    /// counted; counts are distinct targets and match the refs.
+    #[test]
+    fn read_counts_real_servers_by_distinct_target() {
+        let events = vec![
+            read(
+                "sheetbrowse",
+                "read",
+                json!({ "url": "https://news.example/a" }),
+            ),
+            read(
+                "sheetbrowse",
+                "read",
+                json!({ "url": "https://news.example/a" }),
+            ),
+            read("web", "fetch", json!({ "url": "https://docs.example/" })),
+            read(
+                "sheetbrowse",
+                "calendar.google.com/events",
+                json!({ "id": "evt-1" }),
+            ),
+            read(
+                "sheetbrowse",
+                "read",
+                json!({ "url": "https://mail.google.com/mail/u/0/#inbox/abc" }),
+            ),
+            read("sheetbrowse", "outlook.office.com/inbox", json!({})),
+            read("files", "read", json!({ "path": "notes.txt" })),
+            read("files", "list", json!({})),
+            read("files", "list", json!({})),
+            read("cli", "gh", json!({ "q": "repo issues" })),
+            read("cli", "dns", json!({})),
+        ];
+        let r = report("t", &events);
+        assert_eq!(
+            line(&r, "Read: "),
+            "Read: 3 pages, 2 mails, 3 files, 2 other (https://news.example/a; \
+             https://docs.example/; evt-1; https://mail.google.com/mail/u/0/#inbox/abc; \
+             outlook.office.com/inbox; notes.txt; list (x2); repo issues; +1 more)"
+        );
+        // Long targets sharing the clipped prefix still count apart.
+        let long = format!("https://e.example/{}", "p".repeat(120));
+        let r = report(
+            "t",
+            &[fetch(&format!("{long}/a")), fetch(&format!("{long}/b"))],
+        );
+        assert!(line(&r, "Read: ").starts_with("Read: 2 pages,"), "{r}");
+        // No other reads: no `other` part at all.
+        let r = report("t", &events[..3]);
+        assert_eq!(
+            line(&r, "Read: "),
+            "Read: 2 pages, 0 mails, 0 files (https://news.example/a; https://docs.example/)"
+        );
     }
 
     #[test]
@@ -746,18 +1199,53 @@ mod tests {
         assert_eq!(run_status(&events), RunStatus::Partial);
     }
 
+    /// Items 11 + 12: Q-5 failure line (class, why, consequence, fallback); no captured
+    /// consequence is `none captured`, never `ok`.
     #[test]
-    fn report_partial_on_failure() {
+    fn report_failure_q5_fields() {
         let mut bad = fetch("https://down.example/");
         bad.ok = false;
         bad.why = Some("connection refused".into());
-        let r = report("read it", &[bad]);
+        let r = report("read it", std::slice::from_ref(&bad));
         assert!(r.contains("Result: partial"), "{r}");
         assert!(r.contains("Read: 0 pages, 0 mails, 0 files\n"), "{r}");
+        assert_eq!(
+            line(&r, "Not done"),
+            "Not done / needs you: failed fetch https://down.example/ (Read): connection refused; \
+             consequence: none captured; fallback: none"
+        );
+
+        // The next step is the fallback.
+        let events = vec![bad.clone(), fetch("https://mirror.example/")];
+        let r = report("read it", &events);
         assert!(
-            r.contains("failed fetch (Read): connection refused; consequence: ok"),
+            line(&r, "Not done")
+                .ends_with("consequence: none captured; fallback: fetch https://mirror.example/"),
             "{r}"
         );
+        assert_eq!(run_status(&events), RunStatus::Partial);
+    }
+
+    /// Item 11: a failure followed by an ok retry of the same server+tool+target is resolved.
+    #[test]
+    fn failure_resolved_by_later_ok_retry() {
+        let mut bad = fetch("https://flaky.example/");
+        bad.ok = false;
+        bad.why = Some("timeout".into());
+        let events = vec![bad.clone(), fetch("https://flaky.example/")];
+        let r = report("read it", &events);
+        assert!(r.contains("\nResult: done\n"), "{r}");
+        assert!(r.ends_with("Not done / needs you: nothing\n"), "{r}");
+        assert_eq!(run_status(&events), RunStatus::Done);
+
+        // Another target or another tool does not resolve it.
+        let mut other_tool = fetch("https://flaky.example/");
+        other_tool.tool = "fetch2".into();
+        for later in [fetch("https://else.example/"), other_tool] {
+            let events = vec![bad.clone(), later];
+            assert_eq!(run_status(&events), RunStatus::Partial);
+            assert!(report("x", &events).contains("failed fetch https://flaky.example/"));
+        }
     }
 
     #[test]
@@ -780,6 +1268,68 @@ mod tests {
         assert_eq!(run_status(&events), RunStatus::Stopped);
     }
 
+    /// Item 13: the tool event of a challenge-stopped call (mode=stop) is not a Did and the
+    /// stop is listed once; skipped calls are not Did either.
+    #[test]
+    fn stopped_tool_event_not_did_and_listed_once() {
+        let mut tool_ev = ev(
+            "sheetbrowse",
+            "act.click",
+            Class::Send,
+            Some(LedgerMode::Stop),
+        );
+        tool_ev.ok = true;
+        tool_ev.args = json!({ "url": "https://lu.ma/e" });
+        tool_ev.why = Some("hCaptcha".into());
+        let mut core_stop = ev(
+            "core",
+            "act.click",
+            Class::Challenge,
+            Some(LedgerMode::Stop),
+        );
+        core_stop.ok = false;
+        core_stop.why = Some("hCaptcha on lu.ma".into());
+        let mut skipped = send("a@x.com", LedgerMode::AnsweredSkip);
+        skipped.ok = true;
+        let events = vec![skipped, tool_ev, core_stop];
+        let r = report("Register", &events);
+        assert!(r.contains("\nResult: stopped (hCaptcha on lu.ma)\n"), "{r}");
+        assert!(r.contains("\nDid: 0 actions\n"), "{r}");
+        assert_eq!(r.matches("stopped at").count(), 1, "{r}");
+        assert!(
+            r.contains("stopped at act.click (Challenge): hCaptcha on lu.ma; handed back to you"),
+            "{r}"
+        );
+    }
+
+    /// Item 10: stops and skipped asks come first and are never cut by the list cap.
+    #[test]
+    fn stops_and_skips_never_truncated() {
+        let mut events: Vec<LedgerEvent> = (0..12)
+            .map(|i| {
+                let mut e = fetch(&format!("https://down.example/{i}"));
+                e.ok = false;
+                e.why = Some("refused".into());
+                e
+            })
+            .collect();
+        events.push(ask(LedgerMode::AnsweredSkip, "send mail to z@x.com"));
+        let mut stop = ev("core", "act", Class::Challenge, Some(LedgerMode::Stop));
+        stop.ok = false;
+        stop.why = Some("Turnstile".into());
+        events.push(stop);
+        let r = report("t", &events);
+        let needs = line(&r, "Not done");
+        assert!(
+            needs.starts_with(
+                "Not done / needs you: echo.send (Send): send mail to z@x.com: you said skip; \
+                 stopped at act (Challenge): Turnstile; handed back to you; failed fetch https://down.example/0 "
+            ),
+            "{needs}"
+        );
+        assert!(needs.ends_with("; +4 more"), "{needs}");
+    }
+
     #[test]
     fn report_empty_and_long_lists() {
         let r = report("", &[]);
@@ -794,19 +1344,75 @@ mod tests {
         assert!(r.contains("; +4 more)"), "{r}");
     }
 
+    /// Item 9: only paths inside `<run_dir>/files` are run files.
     #[test]
     fn run_file_rules() {
+        let no_dir = FilesCtx {
+            id: Some(RUN),
+            files_abs: None,
+        };
+        let f = |s: &str, ctx: &FilesCtx<'_>| run_file(s, ctx);
+        let want = |rel: &str| Some(format!("runs/{RUN}/files/{rel}"));
+        assert_eq!(f("files/a/b.pdf", &no_dir), want("a/b.pdf"));
+        assert_eq!(f("files\\a\\.\\b.pdf", &no_dir), want("a/b.pdf"));
         assert_eq!(
-            run_file("files/a/b.pdf", Some(RUN)).as_deref(),
-            Some(format!("runs/{RUN}/files/a/b.pdf").as_str())
+            f(&format!("runs/{RUN}/files/c.txt"), &no_dir),
+            want("c.txt")
         );
         assert_eq!(
-            run_file(&format!("/r/runs/{RUN}/files/x.png"), Some(RUN)).as_deref(),
-            Some(format!("runs/{RUN}/files/x.png").as_str())
+            f(&format!("/r/runs/{RUN}/files/x.png"), &no_dir),
+            want("x.png")
         );
-        assert_eq!(run_file("/other/files/x.png", Some(RUN)), None);
-        assert_eq!(run_file("files/../../etc", Some(RUN)), None);
-        assert_eq!(run_file(&format!("x{RUN}/files/a"), Some(RUN)), None);
+        for bad in [
+            "/other/files/x.png".to_owned(),
+            "files/../../etc".to_owned(),
+            "files/a/../b".to_owned(),
+            format!("x{RUN}/files/a"),
+            format!("/r/x{RUN}/files/a"),
+            format!("/r/{RUN}/files/a"),
+            "files/C:/x".to_owned(),
+            "C:files/x".to_owned(),
+            "C:\\files\\x".to_owned(),
+            "files/".to_owned(),
+            "files/a:stream".to_owned(),
+            format!("runs/{RUN}-2/files/a"),
+            "other/files/a".to_owned(),
+        ] {
+            assert_eq!(f(&bad, &no_dir), None, "{bad}");
+        }
+
+        let base = "F:/work/runs/2026-10-23T09-00-00-test/files".to_owned();
+        let with_dir = FilesCtx {
+            id: Some(RUN),
+            files_abs: Some(base.clone()),
+        };
+        assert_eq!(
+            f(&format!("{base}/sub/a.pdf"), &with_dir),
+            want("sub/a.pdf")
+        );
+        assert_eq!(
+            f(
+                "F:\\work\\runs\\2026-10-23T09-00-00-test\\files\\a.pdf",
+                &with_dir
+            ),
+            want("a.pdf")
+        );
+        assert_eq!(f("files/a.pdf", &with_dir), want("a.pdf"));
+        // Same run id under another root: elsewhere.
+        assert_eq!(
+            f(&format!("D:/evil/runs/{RUN}/files/a.pdf"), &with_dir),
+            None
+        );
+        assert_eq!(f(&format!("{base}x/a.pdf"), &with_dir), None);
+        assert_eq!(f(&format!("{base}/../files/a.pdf"), &with_dir), None);
+        assert_eq!(f(&format!("{base}/C:/a.pdf"), &with_dir), None);
+
+        let no_id = FilesCtx {
+            id: None,
+            files_abs: None,
+        };
+        assert_eq!(f("files/a", &no_id).as_deref(), Some("runs/<run>/files/a"));
+        assert_eq!(f("/x/runs/r/files/a", &no_id), None);
     }
 
     struct Tmp(PathBuf);
@@ -852,6 +1458,37 @@ mod tests {
         assert_eq!(ledger.read_back().unwrap().len(), 1);
     }
 
+    /// Item 6: U+0000 never reaches the store or the jsonl (Postgres rejects it).
+    #[tokio::test]
+    async fn nul_becomes_replacement_char() {
+        let tmp = Tmp::new();
+        let run = RunFolder::create(&tmp.0, "nul", "p").unwrap();
+        let store = Arc::new(MemStore::new());
+        let ledger = Ledger::new(store.clone(), run.clone());
+        let mut e = fetch("https://a/\0");
+        e.run_id = None;
+        e.ts = ts_now();
+        e.server = "web\0".into();
+        e.tool = "fe\0tch".into();
+        e.result_summary = "a\0b".into();
+        e.why = Some("\0".into());
+        e.args = json!({ "k\0": ["v\0", { "deep\0": "x\0" }] });
+        e.consequences = json!(["c\0"]);
+        ledger.write(e).await.unwrap();
+        let rows = store.ledger_events(&run.id).await.unwrap();
+        let rows_json = serde_json::to_string(&rows).unwrap();
+        assert!(!rows_json.contains("\\u0000"), "{rows_json}");
+        let (_, row) = &rows[0];
+        assert_eq!(row.server, "web\u{FFFD}");
+        assert_eq!(row.tool, "fe\u{FFFD}tch");
+        assert_eq!(row.result_summary, "a\u{FFFD}b");
+        assert_eq!(row.why.as_deref(), Some("\u{FFFD}"));
+        assert_eq!(row.args["k\u{FFFD}"][1]["deep\u{FFFD}"], json!("x\u{FFFD}"));
+        let text = std::fs::read_to_string(run.ledger_jsonl()).unwrap();
+        assert!(!text.contains("\\u0000") && !text.contains('\0'), "{text}");
+        assert_eq!(ledger.read_back().unwrap(), rows);
+    }
+
     #[test]
     fn read_jsonl_missing_blank_and_corrupt() {
         let tmp = Tmp::new();
@@ -864,6 +1501,94 @@ mod tests {
         assert!(matches!(
             read_jsonl(&p),
             Err(LedgerError::Corrupt { line: 1, .. })
+        ));
+    }
+
+    fn jsonl_line(id: i64, e: &LedgerEvent) -> String {
+        serde_json::to_string(&Line {
+            id: LedgerId(id),
+            event: e,
+        })
+        .unwrap()
+    }
+
+    /// Item 4: lines appended out of id order (two processes) read back sorted by id.
+    #[test]
+    fn read_jsonl_sorts_by_id() {
+        let tmp = Tmp::new();
+        std::fs::create_dir_all(&tmp.0).unwrap();
+        let p = tmp.0.join("ledger.jsonl");
+        let (a, b, c) = (
+            fetch("https://a/"),
+            fetch("https://b/"),
+            fetch("https://c/"),
+        );
+        std::fs::write(
+            &p,
+            format!(
+                "{}\n{}\n{}\n",
+                jsonl_line(6, &b),
+                jsonl_line(5, &a),
+                jsonl_line(7, &c)
+            ),
+        )
+        .unwrap();
+        let got = read_jsonl(&p).unwrap();
+        let ids: Vec<i64> = got.iter().map(|(id, _)| id.0).collect();
+        assert_eq!(ids, vec![5, 6, 7]);
+        assert_eq!(got[0].1, a);
+    }
+
+    /// Item 5: a torn last line is skipped and reported, the next append starts a fresh
+    /// line, and a garbage line in the middle still fails the read.
+    #[tokio::test]
+    async fn torn_last_line_is_skipped_and_next_append_stays_whole() {
+        let tmp = Tmp::new();
+        let run = RunFolder::create(&tmp.0, "torn", "p").unwrap();
+        let store = Arc::new(MemStore::new());
+        let ledger = Ledger::new(store.clone(), run.clone());
+        let p = run.ledger_jsonl();
+        let mut e = fetch("https://a/");
+        e.run_id = None;
+        e.ts = ts_now();
+        ledger.write(e.clone()).await.unwrap();
+
+        // A crash mid-write: half a line, cut inside a UTF-8 character, no newline.
+        let mut torn = jsonl_line(99, &e).into_bytes();
+        torn.truncate(torn.len() / 2);
+        torn.extend_from_slice(&[b'"', b'x', 0xC3]);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&p)
+            .unwrap()
+            .write_all(&torn)
+            .unwrap();
+        let got = read_jsonl_checked(&p).unwrap();
+        assert_eq!(got.events.len(), 1);
+        assert_eq!(got.torn, vec![2]);
+
+        // The next write starts on its own line; the cut line stays skipped.
+        let id = ledger.write(e.clone()).await.unwrap();
+        let got = read_jsonl_checked(&p).unwrap();
+        assert_eq!(got.events.len(), 2);
+        assert_eq!(got.events[1].0, id);
+        assert_eq!(got.torn, vec![2]);
+        assert_eq!(got.events, store.ledger_events(&run.id).await.unwrap());
+        let text = std::fs::read(&p).unwrap();
+        assert_eq!(text.last(), Some(&b'\n'));
+
+        // An unterminated last line that is complete but invalid is torn too...
+        std::fs::write(&p, format!("{}\nnot json", jsonl_line(1, &e))).unwrap();
+        assert_eq!(read_jsonl_checked(&p).unwrap().torn, vec![2]);
+        // ...but garbage in the middle is corruption.
+        std::fs::write(
+            &p,
+            format!("{}\nnot json\n{}\n", jsonl_line(1, &e), jsonl_line(2, &e)),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_jsonl(&p),
+            Err(LedgerError::Corrupt { line: 2, .. })
         ));
     }
 
@@ -882,6 +1607,24 @@ mod tests {
                 "Files: runs/{id}/files/a.pdf; runs/{id}/files/sub/b.txt\n"
             )),
             "{text}"
+        );
+    }
+
+    /// Item 9 through write_report: an absolute path under this run's files/ counts, the
+    /// same run id under another root does not.
+    #[tokio::test]
+    async fn write_report_files_only_inside_run_dir() {
+        let tmp = Tmp::new();
+        let run = RunFolder::create(&tmp.0, "abs", "p").unwrap();
+        let inside = std::path::absolute(run.files().join("out.md")).unwrap();
+        let elsewhere = format!("D:\\evil\\runs\\{}\\files\\x.md", run.id);
+        let mut save = ev("files", "write", Class::Fill, Some(LedgerMode::Allow));
+        save.run_id = Some(run.id.clone());
+        save.consequences = json!([inside.to_string_lossy(), elsewhere]);
+        let text = write_report(&run, "p", &[save]).unwrap();
+        assert_eq!(
+            line(&text, "Files: "),
+            format!("Files: runs/{}/files/out.md", run.id)
         );
     }
 }

@@ -73,31 +73,47 @@ impl RunFolder {
     }
 
     /// An existing run's folder (a tool server attaching to the run its session created).
-    /// `NotFound` if `root/<id>/` is not a directory; `InvalidInput` if `id` is not a
-    /// single plain path component.
+    /// `InvalidInput` unless `id` has exactly the shape [`RunFolder::create`] makes
+    /// (`<yyyy-mm-ddThh-mm-ss>-<slug>` with a lowercase `[a-z0-9]` slug in dash-separated
+    /// parts, see [`is_run_id`]). `NotFound` unless `root` holds a directory entry with
+    /// exactly that name (not a symlink or junction); this rejects the aliases Windows
+    /// would resolve, such as another case or a trailing dot or space.
     pub fn open(root: &Path, id: &RunId) -> io::Result<RunFolder> {
         let s = id.0.as_str();
-        let plain = !s.is_empty()
-            && s != "."
-            && s != ".."
-            && !s.contains(['/', '\\', ':'])
-            && Path::new(s).components().count() == 1;
-        if !plain {
+        if !is_run_id(s) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("run id {s:?} is not a folder name"),
+                format!(
+                    "run id {:?} is not a run folder name",
+                    crate::vault::scrub(s)
+                ),
             ));
         }
-        let dir = root.join(s);
-        if !dir.is_dir() {
-            return Err(io::Error::new(
+        let not_found = || {
+            io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("run folder {} does not exist", dir.display()),
-            ));
+                format!("run folder {} does not exist", root.join(s).display()),
+            )
+        };
+        let entries = match std::fs::read_dir(root) {
+            Ok(e) => e,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(not_found()),
+            Err(e) => return Err(e),
+        };
+        let mut found = false;
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_name().to_str() == Some(s) && entry.file_type()?.is_dir() {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(not_found());
         }
         Ok(RunFolder {
             id: id.clone(),
-            dir,
+            dir: root.join(s),
         })
     }
 
@@ -121,28 +137,64 @@ impl RunFolder {
     }
 }
 
-/// The slug part of a run id: lowercase `[a-z0-9-]`, runs of anything else become one
-/// dash, no leading or trailing dash, at most [`SLUG_MAX`] chars, `run` if nothing is left.
-/// The input is vault-scrubbed first, so a value in a prompt-derived slug shows as
-/// `vault-<name>`.
-pub fn slugify(s: &str) -> String {
-    let s = crate::vault::scrub(s);
-    let mut out = String::with_capacity(s.len().min(SLUG_MAX));
+/// `^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[a-z0-9]+(-[a-z0-9]+)*$`: the ids
+/// [`RunFolder::create`] makes (the timestamp is not checked as a date).
+pub fn is_run_id(s: &str) -> bool {
+    const TS: &[u8] = b"dddd-dd-ddTdd-dd-dd-";
+    let b = s.as_bytes();
+    if b.len() <= TS.len() {
+        return false;
+    }
+    let ts_ok = TS.iter().zip(b).all(|(&p, &c)| match p {
+        b'd' => c.is_ascii_digit(),
+        other => c == other,
+    });
+    ts_ok
+        && s[TS.len()..].split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
+}
+
+/// Lowercase `[a-z0-9]`, runs of anything else become one dash, no leading or trailing
+/// dash. No length cap.
+fn clean_slug(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
     for c in s.chars().flat_map(char::to_lowercase) {
         let keep = c.is_ascii_lowercase() || c.is_ascii_digit();
-        if !keep && (out.is_empty() || out.ends_with('-')) {
-            continue;
+        if keep {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
         }
-        if out.len() == SLUG_MAX {
-            break;
-        }
-        out.push(if keep { c } else { '-' });
     }
     while out.ends_with('-') {
         out.pop();
     }
-    if out.is_empty() {
-        out.push_str("run");
+    out
+}
+
+/// The slug part of a run id: lowercase `[a-z0-9-]`, runs of anything else become one
+/// dash, no leading or trailing dash, at most [`SLUG_MAX`] chars, `run` if nothing is left.
+///
+/// Vault values are kept out (H-2): the raw input is scrubbed, then cleaned, then scrubbed
+/// again (a value that is itself slug-shaped, written in the prompt with other case or
+/// punctuation, only matches after cleaning), then cleaned again and cut. A value in a
+/// prompt-derived slug shows as `vault-<name>`. If the final slug still contains a vault
+/// value, the slug is `run`.
+pub fn slugify(s: &str) -> String {
+    use crate::vault::scrub;
+    let cleaned = clean_slug(&scrub(s));
+    let mut out = clean_slug(&scrub(&cleaned));
+    // ASCII only, so the byte cut is a char cut.
+    out.truncate(SLUG_MAX);
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() || scrub(&out) != out {
+        return "run".to_owned();
     }
     out
 }
@@ -203,12 +255,59 @@ mod tests {
         assert_eq!(c.id.0, "2026-10-23T09-05-07-say-hi-3");
 
         assert_eq!(RunFolder::open(&root, &a.id).unwrap(), a);
-        let missing = RunFolder::open(&root, &RunId("nope".into())).unwrap_err();
+        assert_eq!(RunFolder::open(&root, &c.id).unwrap(), c);
+        let missing =
+            RunFolder::open(&root, &RunId("2026-10-23T09-05-07-nope".into())).unwrap_err();
         assert_eq!(missing.kind(), io::ErrorKind::NotFound);
-        for bad in ["", "..", "a/b", "a\\b", "c:x"] {
-            let e = RunFolder::open(&root, &RunId(bad.into())).unwrap_err();
+        let no_root = RunFolder::open(&root.join("absent"), &a.id).unwrap_err();
+        assert_eq!(no_root.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// Item 8: only the exact create() id shape is accepted, and only a directory entry
+    /// with exactly that name; Windows aliases (case, trailing dot or space) are rejected.
+    #[test]
+    fn open_rejects_malformed_ids_and_aliases() {
+        let tmp = Tmp::new();
+        let root = tmp.0.join("runs");
+        let at = chrono::Utc.with_ymd_and_hms(2026, 10, 23, 9, 5, 7).unwrap();
+        let a = RunFolder::create_at(&root, "Say hi", "p", at).unwrap();
+        // A plain file with a run-id name is not a run folder.
+        std::fs::write(root.join("2026-10-23T09-05-07-file"), "x").unwrap();
+        let file = RunFolder::open(&root, &RunId("2026-10-23T09-05-07-file".into()));
+        assert_eq!(file.unwrap_err().kind(), io::ErrorKind::NotFound);
+        let id = a.id.0.clone();
+        for bad in [
+            String::new(),
+            "..".into(),
+            ".".into(),
+            "nope".into(),
+            "a/b".into(),
+            "a\\b".into(),
+            "c:x".into(),
+            format!("{id}."),
+            format!("{id} "),
+            format!("{id}/"),
+            format!("{id}\\"),
+            format!("{id}-"),
+            format!("{id}::$DATA"),
+            id.to_uppercase(),
+            id.replace('T', "t"),
+            id.replace("say-hi", "say--hi"),
+            id.replace("say-hi", "Say-hi"),
+            "2026-10-23T09-05-07".into(),
+            "2026-10-23T09-05-07-".into(),
+            "2026-10-23 09-05-07-say-hi".into(),
+            "26-10-23T09-05-07-say-hi".into(),
+            "2026-10-23T09-05-07-say_hi".into(),
+            "2026-10-23T09-05-07-con.txt".into(),
+            "2026-10-23T09-05-07-SAY~1".into(),
+        ] {
+            let e = RunFolder::open(&root, &RunId(bad.clone())).unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
         }
+        assert!(is_run_id(&id));
+        assert!(is_run_id("2026-10-23T09-05-07-say-hi-2"));
+        assert!(is_run_id("2026-10-23T09-05-07-run"));
     }
 
     #[test]

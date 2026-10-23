@@ -277,7 +277,10 @@ async fn report_done_partial_stopped_from_written_events() {
     // (b) a timeout_skip → partial
     let run = RunFolder::create(&tmp.0, "b", "b").unwrap();
     let ledger = Ledger::new(store.clone(), run.clone());
-    ledger.write(fetch.clone()).await.ok();
+    // `fetch` carries run a's id; let this ledger fill in its own (WrongRun otherwise).
+    let mut fetch_b = fetch.clone();
+    fetch_b.run_id = None;
+    ledger.write(fetch_b).await.unwrap();
     let mut skip = event(&run.id, "core", "act", Class::Pay, LedgerMode::TimeoutSkip);
     skip.why = Some(format!("pay with card {c}"));
     ledger.write(skip).await.unwrap();
