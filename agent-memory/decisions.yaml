@@ -1,0 +1,58 @@
+# One line per decision. Add, never delete. Reference ids in commits.
+decisions:
+  - id: D-1
+    text: "Claude Code is the only model path. No API keys, no .env, no other SDKs."
+    why: "User rule; keeps the harness portable and auditable."
+  - id: D-2
+    text: "Rust for everything that touches the browser or the core; plain JS only inside the page."
+    why: "Latency and one binary."
+  - id: D-5
+    text: "A challenge (captcha, Turnstile, hCaptcha, phone verify) means stop. No solving, no stealth, no fingerprint tricks."
+    why: "User rule; not revisited."
+  - id: D-6
+    text: "The model never receives raw HTML or pixels except from explicit screenshot and video tools."
+    why: "Token cost and reliability."
+  - id: D-7
+    text: "Priority order: efficiency > latency > throughput > token cost."
+    why: "User criteria."
+  - id: D-19
+    text: "Gate is lenient: Read/Fill/Navigate/Submit/Send(known) allow; Send(new)/Pay/Account/Delete ask; Challenge stop. Overrides per domain+class in gate.rules."
+    why: "User asked for lenient; irreversible classes still ask."
+  - id: D-20
+    text: "Mail and calendar are used through the browser (Gmail, Google Calendar web UIs) as site tools. No Gmail/Calendar API, no connectors."
+    why: "User decision."
+  - id: D-21
+    text: "Memory is Postgres 16 + pgvector + pg_trgm behind a MemoryStore trait. Never two databases. SQLite+sqlite-vec and SurrealDB are future backends of the same trait."
+    why: "One query joins facts, relations, recall, search, history; swap path kept open."
+  - id: D-22
+    text: "Forged tools are saved under tools/<eTLD+1>/ and announced in the skeleton on the next visit; readers return data, planners return act programs, a tool never gets hands."
+    why: "Reuse instead of re-forging; safety."
+  - id: D-23
+    text: "Harness first, browser as a tool server. Phase 1 proves gate/vault/ledger/memory/scheduler on 22 use cases before any browser code."
+    why: "Separate harness failures from browser failures."
+  - id: D-24
+    text: "New folder sheetbrowseV2_, start from scratch. Old sheetbrowse is reference only."
+    why: "User decision."
+  - id: D-25
+    text: "Five Playwright ideas are borrowed (isolated-world script, actionability, auto-wait, event-driven targets, real input); nothing else is ported."
+    why: "Those fix the bench failures; the rest serves human test authors."
+  - id: D-26
+    text: "No fixed sleeps in driver code; wait on a condition with a cap."
+    why: "Bench: fixed waits were both too short and too long."
+  - id: D-27
+    text: "Planners are never dry-run against live sites; readers may be."
+    why: "Bench failure F-7 (forge dry-run timeouts, risk of real submits)."
+  - id: D-28
+    text: "Text sent as Lokesh has no em dashes or double-dash separators."
+    why: "User rule."
+  - id: D-29
+    text: "Repairs and forges can raise a gate floor, never lower it; cannot remove ?s; cannot add vault keys or widen @match."
+    why: "Learn as data, never as permission."
+  - id: D-30
+    text: "Headless is never used with the 'me' profile; mail/calendar run headed (hidden window if scheduled)."
+    why: "Login challenges and ToS; headless was blocked in 18/60 bench runs."
+# Open decisions a coding agent must make and record here with a why:
+#   D-31 search backend: SearXNG (Docker) or Brave free tier (vault token)
+#   D-32 embedding model: fastembed bge-small (384) or other local; fix the vector column size
+#   D-33 Postgres hosting: Docker compose vs system install on Windows
+#   D-34 Chromium acquisition: pinned revision download vs system Chrome for 'me' profile

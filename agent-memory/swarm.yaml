@@ -1,0 +1,64 @@
+# Roster, areas, waves. Supreme updates `waves` and `areas.*.merged`; sub-orchestrators update `areas.*.status`.
+topology:
+  supreme: "1 session at repo root on main; owns tasks.yaml merges, interfaces.yaml, wave gates, bench runs"
+  sub_orchestrators: "1 session per area in wt/<area> on branch swarm/<area>; spawns subagents from .claude/agents/"
+  subagents: [rust-coder, js-coder, reviewer, tester, memory-keeper, spec-reader, bench-runner]
+  limit: "Claude Code subagents cannot spawn subagents; the middle tier is sessions, coordinated through agent-memory/ and git"
+
+areas:
+  core:
+    wave: 1
+    crates: [core, core-pg, harness]
+    tasks: [T-03, T-04, T-05, T-06, T-07, T-08, T-09]
+    later: {wave: 3, tasks: [T-16]}
+    docs: [docs/01-HARNESS-CORE.md, docs/02-MEMORY.md]
+    status: not_started
+    merged: false
+  sheet:
+    wave: 1
+    crates: [sb-sheet]
+    tasks: [T-10]
+    docs: [docs/05-BROWSER.md#B-6, docs/04-TOOL-SERVERS-PHASE1.md#W-5]
+    status: not_started
+    merged: false
+  store:
+    wave: 1
+    crates: [toolstore]
+    tasks: [T-11]
+    docs: [docs/03-TOOL-STORE.md]
+    status: not_started
+    merged: false
+  page:
+    wave: 1
+    crates: [injected, sb-act]
+    tasks: [T-19]
+    docs: [docs/05-BROWSER.md#B-5, docs/05-BROWSER.md#B-7]
+    status: not_started
+    merged: false
+    note: "Phase 2 code started early because nothing blocks it; not part of the Phase 1 baseline"
+  servers:
+    wave: 2
+    crates: [srv-web, srv-files, srv-cli]
+    tasks: [T-12, T-13, T-14, T-15]
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    needs_merged: [core, sheet, store]
+    status: not_started
+    merged: false
+  driver:
+    wave: 2
+    crates: [sb-cdp, sb-driver]
+    tasks: [T-18, T-20, T-21, T-22]
+    later: {wave: 3, tasks: [T-23, T-24, T-25, T-26], crates: [sb-mcp, sb-media]}
+    docs: [docs/05-BROWSER.md]
+    needs_merged: [page]
+    status: not_started
+    merged: false
+
+waves:
+  "0": "todo: supreme writes workspace, core trait + types, stub crates, compose, migration 0001 (T-01, T-02)"
+  "1": "not started"
+  "2": "not started"
+  "3": "not started"
+  "4": "not started: Phase 1 baseline T-17, then T-27 T-28 T-29"
+
+merge_rule: "review report has no Blocking items AND accept report green for claimed tasks AND no leak hook fired AND cargo test --workspace passes on the merge commit"

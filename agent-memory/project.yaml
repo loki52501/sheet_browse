@@ -1,0 +1,30 @@
+name: sheetbrowseV2_
+one_line: "Agent harness for Claude Code (gate, vault, ledger, Postgres memory, site-scoped tool store) with a Rust CDP browser as one tool server."
+owner: Lokesh
+started: "2026-10-22"
+language: "Rust 2021 + plain ES2020 for injected/"
+model_path: "Claude Code only; no API keys anywhere"
+priorities: "efficiency > latency > throughput > token cost"
+phases:
+  - id: 1
+    name: "harness, no browser"
+    steps: [1, 2, 3, 4, 5]
+    covers_use_cases: 22
+  - id: 2
+    name: "browser, mail and calendar via browser, toolforge"
+    steps: [6]
+    covers_use_cases: 30
+docs_order:
+  - docs/00-OVERVIEW.md
+  - docs/01-HARNESS-CORE.md
+  - docs/02-MEMORY.md
+  - docs/03-TOOL-STORE.md
+  - docs/04-TOOL-SERVERS-PHASE1.md
+  - docs/05-BROWSER.md
+  - docs/06-TOOLFORGE.md
+  - docs/07-MAIL-CALENDAR-VIA-BROWSER.md
+  - docs/08-USE-CASES-AND-TESTS.md
+  - docs/09-BUILD-ORDER.md
+reference_only:
+  - path: "F:/aside_mcp for claude/sheetbrowse"
+    note: "old sheetbrowse v1; read its bench logs and snapshot.js for ideas; copy nothing wholesale"

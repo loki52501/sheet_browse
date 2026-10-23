@@ -1,0 +1,158 @@
+# status: todo | doing | blocked | done. One owner at a time. Update when you start and finish.
+tasks:
+  - id: T-01
+    step: 1
+    title: "Workspace, Cargo.toml, docker-compose for Postgres 16 + pgvector + pg_trgm, migrations/0001"
+    docs: [docs/02-MEMORY.md]
+    status: todo
+  - id: T-02
+    step: 1
+    title: "core: MemoryStore trait, types (Fact, Node, Edge, Contact, Review, Baseline, LedgerEvent, ToolHealth)"
+    docs: [docs/02-MEMORY.md]
+    status: todo
+  - id: T-03
+    step: 1
+    title: "core-pg: implement MemoryStore with sqlx; recall fusion; recursive neighbors; append-only trigger"
+    docs: [docs/02-MEMORY.md]
+    status: todo
+    blocked_by: [T-02]
+  - id: T-04
+    step: 1
+    title: "core::gate: classes, classifier hooks, gate.rules lookup, ask cards with 60 s timeout semantics, stop"
+    docs: [docs/01-HARNESS-CORE.md]
+    status: todo
+  - id: T-05
+    step: 1
+    title: "core::vault: age-encrypted file + keychain key, resolve_into(sink), scrub()"
+    docs: [docs/01-HARNESS-CORE.md]
+    status: todo
+  - id: T-06
+    step: 1
+    title: "core::ledger + run folder + report.md generator"
+    docs: [docs/01-HARNESS-CORE.md]
+    status: todo
+    blocked_by: [T-03]
+  - id: T-07
+    step: 1
+    title: "core::mcp::serve wrapper (classify, gate, vault at sink, scrub, ledger, duration)"
+    docs: [docs/01-HARNESS-CORE.md]
+    status: todo
+    blocked_by: [T-04, T-05, T-06]
+  - id: T-08
+    step: 1
+    title: "core::sched loop + harnessd + harness CLI (run, schedule, vault, gate, tools, ledger, db)"
+    docs: [docs/01-HARNESS-CORE.md]
+    status: todo
+    blocked_by: [T-07]
+  - id: T-09
+    step: 1
+    title: "Fake echo server + step-1 acceptance tests incl. vault leak grep"
+    docs: [docs/01-HARNESS-CORE.md, docs/02-MEMORY.md]
+    status: todo
+    blocked_by: [T-08]
+  - id: T-10
+    step: 2
+    title: "sb-sheet (pure): index row types, skeleton, find scorer (BM25 + synonyms + roles + group), sheet lines, read renderer with chunking"
+    docs: [docs/05-BROWSER.md, docs/04-TOOL-SERVERS-PHASE1.md]
+    status: todo
+  - id: T-11
+    step: 2
+    title: "toolstore: layout, header parser, loader, fingerprint check, lifecycle updates, git commit helper"
+    docs: [docs/03-TOOL-STORE.md]
+    status: todo
+  - id: T-12
+    step: 2
+    title: "srv-web: fetch→index (scraper), read/sheet/raw modes, api with vault headers, feed, search backend (decide D-31)"
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: todo
+    blocked_by: [T-10, T-11]
+  - id: T-13
+    step: 2
+    title: "Seed tools/ashbyhq.com/list_jobs.js (@phase 1) and step-2 acceptance; ladder rungs 1, 2, 4"
+    status: todo
+    blocked_by: [T-12]
+  - id: T-14
+    step: 3
+    title: "srv-files: fs, shell classification, docs wrappers, csv.clean, diff, history.search"
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: todo
+  - id: T-15
+    step: 3
+    title: "srv-cli: gh, dns, flags, allowlisted cli; ladder rungs 3, 5, 9"
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: todo
+  - id: T-16
+    step: 4
+    title: "reviews SM-2, contacts in gate, baselines, watch diff + single notify, reflect readers-only, proposals"
+    docs: [docs/01-HARNESS-CORE.md, docs/02-MEMORY.md, docs/06-TOOLFORGE.md]
+    status: todo
+    blocked_by: [T-13, T-15]
+  - id: T-17
+    step: 5
+    title: "Phase 1 baseline: 10 rungs x 3 variants, A/B use cases, bench/results/phase1-<date>.md"
+    docs: [docs/08-USE-CASES-AND-TESTS.md]
+    status: todo
+    blocked_by: [T-16]
+  - id: T-18
+    step: 6
+    title: "sb-cdp Pipe transport, launch, flattened sessions, pipelining; registry skeleton"
+    docs: [docs/05-BROWSER.md]
+    status: todo
+    blocked_by: [T-17]
+  - id: T-19
+    step: 6
+    title: "injected.js: identity, walk, names, roles, states, flags, collapse, dirty re-walk; acceptance 1"
+    status: todo
+    blocked_by: [T-17]
+  - id: T-20
+    step: 6
+    title: "act(id) in page + Rust retry/backoff/5 s cap; acceptance 2"
+    status: todo
+    blocked_by: [T-18, T-19]
+  - id: T-21
+    step: 6
+    title: "input synthesis + consequence capture; acceptance 3"
+    status: todo
+    blocked_by: [T-20]
+  - id: T-22
+    step: 6
+    title: "registry complete + settle(); acceptance 4, 5"
+    status: todo
+    blocked_by: [T-21]
+  - id: T-23
+    step: 6
+    title: "skeleton/find/sheet on live index, read on live index, tool store line in skeleton; acceptance 6, 7"
+    status: todo
+    blocked_by: [T-22]
+  - id: T-24
+    step: 6
+    title: "sb-media; acceptance 8"
+    status: todo
+    blocked_by: [T-23]
+  - id: T-25
+    step: 6
+    title: "scheduling, errors/recovery, eval/cdp/network hatches with classification"
+    status: todo
+    blocked_by: [T-23]
+  - id: T-26
+    step: 6
+    title: "bench parity run; acceptance 9"
+    status: todo
+    blocked_by: [T-24, T-25]
+  - id: T-27
+    step: 6
+    title: "'me' profile login flow; tools/mail.google.com and tools/calendar.google.com hand-written; 07 acceptance"
+    docs: [docs/07-MAIL-CALENDAR-VIA-BROWSER.md]
+    status: todo
+    blocked_by: [T-26]
+  - id: T-28
+    step: 6
+    title: "toolforge: ladder, forge pipeline, static check, reflect integration; 06 acceptance"
+    docs: [docs/06-TOOLFORGE.md]
+    status: todo
+    blocked_by: [T-26]
+  - id: T-29
+    step: 6
+    title: "Re-run Phase 1 baseline (no regression) + Phase 2 ladder; bench/results/phase2-<date>.md"
+    status: todo
+    blocked_by: [T-27, T-28]

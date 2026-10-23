@@ -1,0 +1,59 @@
+# Interfaces between crates. Change here first, then in code, then note the id in the commit.
+interfaces:
+  - id: I-1
+    name: MemoryStore
+    crate: core
+    consumers: [core-pg, srv-web, srv-files, srv-cli, sb-mcp, toolforge, toolstore]
+    spec: docs/02-MEMORY.md#M-2
+  - id: I-2
+    name: "core::mcp::serve(server, tools) and ToolSpec { name, class, args, handler }"
+    crate: core
+    consumers: [srv-web, srv-files, srv-cli, sb-mcp]
+    spec: docs/01-HARNESS-CORE.md#H-6
+  - id: I-3
+    name: "Gate::check(call) -> Allow | Ask(card) | Stop(reason)"
+    crate: core
+    spec: docs/01-HARNESS-CORE.md#H-1
+  - id: I-4
+    name: "Vault::resolve_into(sink), scrub(&str)"
+    crate: core
+    spec: docs/01-HARNESS-CORE.md#H-2
+  - id: I-5
+    name: "IndexRow { id, frame, role, name, nearby, heading, state, flags, form, box }"
+    crate: sb-sheet
+    consumers: [srv-web, sb-mcp, toolstore]
+    spec: docs/05-BROWSER.md#B-5
+  - id: I-6
+    name: "sb_sheet::{skeleton, find, sheet, read}(index, text_blocks, opts)"
+    crate: sb-sheet
+    consumers: [srv-web, sb-mcp]
+    spec: docs/05-BROWSER.md#B-6
+  - id: I-7
+    name: "toolstore::{load(domain, path) -> Vec<Tool>, fingerprint(tool, index), record(result)}"
+    crate: toolstore
+    consumers: [srv-web, sb-mcp, toolforge]
+    spec: docs/03-TOOL-STORE.md#T-3
+  - id: I-8
+    name: "Transport trait (send, recv)"
+    crate: sb-cdp
+    consumers: [sb-driver]
+    spec: docs/05-BROWSER.md#B-3
+  - id: I-9
+    name: "sb_driver::{open, act(tab, program) -> ActResult, settle, screenshot, frames}"
+    crate: sb-driver
+    consumers: [sb-mcp, sb-media]
+    spec: docs/05-BROWSER.md#B-4
+  - id: I-10
+    name: "sb_act::parse(program) -> Vec<Step>, classify(steps, index) -> Class"
+    crate: sb-act
+    consumers: [sb-driver, toolstore, toolforge]
+    spec: docs/05-BROWSER.md#B-7
+  - id: I-11
+    name: "__sb in-page API: walk, resolve, index, skeleton, find, sheet, text, act, settle, fingerprint, frames"
+    crate: injected
+    consumers: [sb-driver]
+    spec: docs/05-BROWSER.md#B-5
+  - id: I-12
+    name: "Tool file header and page API for readers/planners"
+    crate: toolstore
+    spec: docs/03-TOOL-STORE.md#T-2

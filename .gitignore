@@ -1,0 +1,9 @@
+target/
+runs/
+bench/results/*.jsonl
+*.age
+.env
+.mcp.json
+profiles/
+node_modules/
+*.log

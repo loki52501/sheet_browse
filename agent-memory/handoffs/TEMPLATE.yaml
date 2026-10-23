@@ -1,0 +1,13 @@
+from: <agent or role>
+to: <agent or role, or "next">
+task: T-xx
+date: "YYYY-MM-DD"
+state: "what is done, what compiles, what tests pass"
+not_done: "what is left, in order"
+gotchas:
+  - "things that cost you time and will cost the next agent time"
+decisions_made: [D-xx]
+blockers_opened: [B-xx]
+files_touched:
+  - path
+verify: "the one command that proves the state above"

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "harness-web":   { "command": "target/release/srv-web",   "args": [] },
+    "harness-files": { "command": "target/release/srv-files", "args": [] },
+    "harness-cli":   { "command": "target/release/srv-cli",   "args": [] },
+    "sheetbrowse":   { "command": "target/release/sb-mcp",    "args": ["--profile", "bench"] }
+  }
+}
