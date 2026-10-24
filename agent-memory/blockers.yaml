@@ -44,6 +44,11 @@ blockers:
     question: "harness-core has no tokio test-util dev-dependency (paused clock), so the ask cap (card.timeout + 5 s on a 60 s card) cannot be tested through dispatch without a 65 s wait. Add tokio features [test-util] to crates/core dev-dependencies?"
     default_taken: "The cap is unit-tested on mcp::ask_capped_with with a 30 ms margin (a hung asker gives TimeoutSkip) plus an asker that claims TimeoutProceed on a Skip card. crates/core/Cargo.toml is not touched by T-07 round 2."
     needs_user: false
+  - id: B-190
+    task: T-04
+    question: "Review-T-04 round 2 should-fix 2: rule_domain did not IDNA-map non-ASCII domains. Full UTS-46 (the idna crate) or the subset in gate.rs?"
+    default_taken: "D-120 subset, no new dependency (crates/core/Cargo.toml is outside this round's paths): full stops and full-width ASCII mapped, lowercase, Punycode per label, everything UTS-46 would map further (NFC/NFKC, compatibility letters, ignorables) refused with MemoryError::Invalid. Switching to the idna crate later only turns some refusals into mappings; no stored key changes."
+    needs_user: false
 
 interface_changes:
   - id: B-101
@@ -193,5 +198,10 @@ interface_changes:
     interface: "harness_core::sched (owned by core, not a contract module; consumer: harness)"
     change: "Additive pub API (T-08, D-116). sched::run_loop(store) is replaced by Scheduler { runner, wake: Arc<Notify>, fired: Option<mpsc::UnboundedSender<Fired>> }::run_loop(shutdown). New: trait Launcher { launch(LaunchRequest{run, runs_root, prompt}) -> Result<LaunchExit{code}, LaunchError> } (D-106 placement moved from the harness crate to core, D-116 (1)); trait Clock { now, sleep_until } with SystemClock and ManualClock { new, set, next_deadline, deadline_where }; Runner { store, launcher, clock, runs_root } with fire(&Schedule) and execute(RunSpec{prompt, parent_run, strict, schedule}) -> Finished{run, folder, status, parent_run, schedule, launch_problem}; parse_cron (5 fields, UTC), next_after, changed_dir, notify_changed, CHANGED_DIR, FIRE_TOOL, LAUNCH_TOOL; SchedError {BadCron, NotInPhase1, Memory, Ledger, Io}. The harness crate (lib) adds Env, CliError, cli::{Cli, Cmd, Ctx, execute, SCHEDULE_ADD_TOOL}, daemon::{Daemon, watch_changes}, ClaudeLauncher."
     why: "The scheduler loop in core must call the launcher, so the trait cannot live in the crate above it; a Clock seam makes the step-1 scheduler acceptance testable without a model or a real minute. Anything that adds or removes a schedule outside the CLI (a future srv-cli tool) must call sched::notify_changed so harnessd re-reads. Default: as implemented."
+  - id: B-191
+    from: core
+    interface: I-3
+    change: "Behaviour, no signature change (D-120): rule_domain returns the Punycode A-label form and refuses non-mappable Unicode; rule_hint accepts only ASCII a-z 0-9 _ - .; a Send AskCard's values[0] is always ('new recipients (N)', list) written by the gate, and any other value under that key (classifier, args, clean_card input) is dropped; blank Call.recipients are ignored and duplicates count once."
+    why: "Consumers that render or parse cards (FileAsker, harness ask, T-09 echo.send tests) and classifiers that emit hints must know the row and the hint alphabet; stored gate.rules keys written before this change with non-ASCII domains will no longer match and should be re-set."
 
 proposals:

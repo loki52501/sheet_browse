@@ -194,6 +194,10 @@ async fn recall_finds_chromiumoxide_by_meaning_and_words() {
 
     // A query that is only stop words still answers through the vector side.
     let hits = s.recall("the of and", 2, None).await.unwrap();
+    assert!(
+        !hits.is_empty(),
+        "stop words still answer through the vector side"
+    );
     assert!(hits.iter().all(|h| h.why == Why::Vector));
     assert!(s.recall("anything", 0, None).await.unwrap().is_empty());
 
@@ -661,4 +665,212 @@ async fn runs_schedules_baselines_health() {
     s.tool_health_set(h3.clone()).await.unwrap();
     assert_eq!(s.tool_health("linkedin.com").await.unwrap(), vec![h3, h2]);
     assert!(s.tool_health("_generic").await.unwrap().is_empty());
+}
+
+// ------------------------------------------------------------------ review T-03 should-fix
+
+/// `err.to_string()` and every `source()` below it.
+fn error_chain(err: &MemoryError) -> String {
+    let mut out = err.to_string();
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
+    while let Some(e) = cur {
+        out.push_str(" <- ");
+        out.push_str(&e.to_string());
+        cur = e.source();
+    }
+    out
+}
+
+#[tokio::test]
+async fn backend_errors_never_carry_bound_values() {
+    // Rule 2: a database error must not echo what was bound. Each call below fails on the
+    // server (NUL in text, \u0000 in jsonb) with the canary in the parameter.
+    let db = TestDb::new().await;
+    let s = &db.store;
+    let canary = "CANARY-pg-backend-7f3a";
+    let bad_text = format!("{canary}\0{canary}");
+    let a = s.node(node_kind::PERSON, "a").await.unwrap();
+    let b = s.node(node_kind::PERSON, "b").await.unwrap();
+
+    let errors = [
+        s.node(node_kind::PERSON, &bad_text).await.unwrap_err(),
+        s.touch_contact(&bad_text, "mail", "").await.unwrap_err(),
+        s.link(a, rel::EMAILED, b, src(SourceKind::Email, &bad_text))
+            .await
+            .unwrap_err(),
+        s.baseline_set(
+            "w",
+            Baseline {
+                hash: "h".into(),
+                snapshot: json!({ "v": bad_text }),
+                updated: ts_now(),
+            },
+        )
+        .await
+        .unwrap_err(),
+    ];
+    for err in &errors {
+        assert!(matches!(err, MemoryError::Backend(_)), "{err:?}");
+        let chain = error_chain(err);
+        assert!(!chain.contains(canary), "bound value in error: {chain}");
+        assert!(
+            !format!("{err:?}").contains(canary),
+            "bound value in Debug: {err:?}"
+        );
+        assert!(chain.contains("sqlstate"), "{chain}");
+    }
+}
+
+#[tokio::test]
+async fn neighbors_caps_at_500_nearest_first() {
+    // M-5: a star of 510 leaves plus one node two hops out. The far node has the lowest id,
+    // so an id-only order would return it; nearest-first must not.
+    let db = TestDb::new().await;
+    let s = &db.store;
+    let user = src(SourceKind::User, "test");
+    let far = s.node(node_kind::PERSON, "far").await.unwrap();
+    let hub = s.node(node_kind::PERSON, "hub").await.unwrap();
+    let mut leaves = Vec::new();
+    for i in 0..510 {
+        let leaf = s
+            .node(node_kind::PERSON, &format!("leaf{i}"))
+            .await
+            .unwrap();
+        s.link(hub, rel::EMAILED, leaf, user.clone()).await.unwrap();
+        leaves.push(leaf);
+    }
+    s.link(leaves[509], rel::EMAILED, far, user.clone())
+        .await
+        .unwrap();
+
+    let got: Vec<NodeId> = s
+        .neighbors(hub, None, 2)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| n.id)
+        .collect();
+    assert_eq!(got.len(), 500);
+    assert!(!got.contains(&far), "a depth-2 node beat depth-1 nodes");
+    assert!(!got.contains(&hub));
+    // Depth 1 only, ordered by id: the first 500 leaves.
+    assert_eq!(got, leaves[..500].to_vec());
+}
+
+#[tokio::test]
+async fn recall_reports_a_words_only_hit_as_fts() {
+    // M-4: a fact that shares a word with the query but is outside the vector top 20. The
+    // decoys say what the query means without any of its words; the target shares one
+    // word in an unrelated sense.
+    let db = TestDb::new().await;
+    let s = &db.store;
+    let decoys = [
+        "venomous serpent attack, first aid",
+        "treating an injury from a constrictor",
+        "what to do after a viper strikes you",
+        "reptile fang wound care",
+        "serpent venom emergency treatment",
+    ];
+    for i in 0..25 {
+        s.remember(Fact::new(
+            "first aid",
+            "note",
+            format!("{} ({i})", decoys[i % decoys.len()]),
+            src(SourceKind::Page, "https://example.org"),
+        ))
+        .await
+        .unwrap();
+    }
+    let target = s
+        .remember(Fact::new(
+            "release",
+            "note",
+            "Python 3.13 interpreter release notes: free-threaded build",
+            src(SourceKind::User, "cli"),
+        ))
+        .await
+        .unwrap();
+    let hits = s.recall("python snake bite", 40, None).await.unwrap();
+    let hit = hits
+        .iter()
+        .find(|h| h.id == target)
+        .expect("the word 'python' finds it");
+    assert_eq!(hit.why, Why::Fts, "{hits:?}");
+    assert_eq!(hits.iter().filter(|h| h.why == Why::Vector).count(), 20);
+}
+
+#[tokio::test]
+async fn search_follows_d115_like_memstore() {
+    // Same rows and expectations as harness_core::testing's search_follows_d115.
+    let db = TestDb::new().await;
+    let s = &db.store;
+    let put = |subject: &str, key: &str, value: &str, at: i64| {
+        let mut f = Fact::new(subject, key, value, src(SourceKind::User, "cli"));
+        f.seen_at = chrono::DateTime::from_timestamp(at, 0).unwrap();
+        f
+    };
+    let company = s
+        .remember(put("Foo-Bar Inc", "kind", "company", 1_000))
+        .await
+        .unwrap();
+    let mention = s
+        .remember(put("note", "text", "we met Foo-Bar Inc staff", 2_000))
+        .await
+        .unwrap();
+    let person = s
+        .remember(put("Vasanth Raghavan", "works_at", "acme", 3_000))
+        .await
+        .unwrap();
+
+    let hits = s.search("foo bar INC", 5).await.unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(
+        (hits[0].id, hits[0].why, hits[0].score),
+        (company, Why::Exact, 1.0)
+    );
+    let got: Vec<(FactId, Why, f32)> = s
+        .search("Foo-Bar Inc", 5)
+        .await
+        .unwrap()
+        .iter()
+        .map(|h| (h.id, h.why, h.score))
+        .collect();
+    assert_eq!(
+        got,
+        [(company, Why::Exact, 1.0), (mention, Why::Exact, 0.9)]
+    );
+    let hits = s.search("acme", 5).await.unwrap();
+    assert_eq!(
+        (hits[0].id, hits[0].why, hits[0].score),
+        (person, Why::Exact, 0.9)
+    );
+
+    let hits = s.search("Vasanh", 5).await.unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!((hits[0].id, hits[0].why), (person, Why::Trigram));
+    assert!(
+        (hits[0].score - 5.0 / 7.0).abs() < 1e-6,
+        "{}",
+        hits[0].score
+    );
+    assert!(s.search("Zebra", 5).await.unwrap().is_empty());
+
+    let older = s.remember(put("old", "k", "acme", 10)).await.unwrap();
+    let ids: Vec<FactId> = s
+        .search("acme", 5)
+        .await
+        .unwrap()
+        .iter()
+        .map(|h| h.id)
+        .collect();
+    assert_eq!(ids, [person, older]);
+    let exact_word = s.remember(put("Vasanh", "k", "v", 5)).await.unwrap();
+    let ids: Vec<FactId> = s
+        .search("vasanh", 5)
+        .await
+        .unwrap()
+        .iter()
+        .map(|h| h.id)
+        .collect();
+    assert_eq!(ids, [exact_word, person]);
 }

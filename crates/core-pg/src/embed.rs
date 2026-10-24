@@ -71,7 +71,8 @@ fn embed_blocking(texts: &[String]) -> Result<Vec<Vec<f32>>> {
     };
     let out = model
         .embed(texts, None)
-        .map_err(|e| backend(format!("embedding: {e}")))?;
+        // A fixed message: the library's text could quote the input being embedded (rule 2).
+        .map_err(|_| backend("embedding: the model failed on this input"))?;
     if out.len() != texts.len() || out.iter().any(|v| v.len() != EMBEDDING_DIMS) {
         return Err(backend(format!(
             "embedding model returned the wrong shape (want {} x {EMBEDDING_DIMS})",

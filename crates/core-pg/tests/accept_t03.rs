@@ -310,6 +310,57 @@ async fn a03_touch_contact_then_contact() {
     assert!(c.last.is_some());
 }
 
+// Row 5 (docs/02, gate half, review T-03 should-fix): over the real store, a Send to a
+// person asks before touch_contact and is allowed on the next gate check after it.
+#[tokio::test]
+async fn a03_touch_contact_makes_send_allow_through_the_gate() {
+    use harness_core::gate::{Call, Decision, Gate, OnTimeout};
+    use std::sync::Arc;
+    let db = TestDb::new().await;
+    let store = Arc::new(PgStore::connect(&db.url).await.expect("second store"));
+    let gate = Gate::new(store.clone());
+    let send = Call {
+        run_id: None,
+        server: "echo".into(),
+        tool: "echo.send".into(),
+        class: Class::Send,
+        domain: Some("mail.example".into()),
+        recipients: vec!["  Ravi@Example.com ".into()],
+        hints: Vec::new(),
+        args: json!({"to": "Ravi@Example.com", "body": "hi"}),
+        what: None,
+        values: Vec::new(),
+        strict: false,
+    };
+    match gate.check(&send).await.unwrap() {
+        Decision::Ask(card) => assert_eq!(card.on_timeout, OnTimeout::Proceed),
+        other => panic!("Send(new) must ask, got {other:?}"),
+    }
+    store
+        .touch_contact("ravi@example.com", "email", "")
+        .await
+        .unwrap();
+    let d = gate.check(&send).await.unwrap();
+    println!("a03 gate after touch_contact: {d:?}");
+    assert_eq!(d, Decision::Allow);
+    // An IDN rule written by the user matches the A-label host a URL carries (D-120).
+    store
+        .gate_rule_set(
+            "BÜCHER.DE",
+            "Send",
+            GateRule {
+                mode: Mode::Stop,
+                strict: false,
+            },
+            "",
+        )
+        .await
+        .unwrap();
+    let mut idn = send.clone();
+    idn.domain = Some("xn--bcher-kva.de".into());
+    assert!(matches!(gate.check(&idn).await.unwrap(), Decision::Stop(_)));
+}
+
 // Row 6 (docs/02 seeds, H-1.2, D-5): gate_rule finds the seeded rules; gate_rule_set
 // rejects a Challenge allow, in any spelling.
 #[tokio::test]

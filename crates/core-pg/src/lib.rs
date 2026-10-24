@@ -17,7 +17,7 @@ use harness_core::run::RunId;
 use harness_core::Harness;
 use pgvector::Vector;
 use serde::{de::DeserializeOwned, Serialize};
-use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgRow};
 use sqlx::types::Json;
 use sqlx::Row;
 use std::fmt;
@@ -45,23 +45,37 @@ pub struct PgStore {
 }
 
 impl PgStore {
-    /// Connects and runs pending migrations.
+    /// Connects and runs pending migrations. A migration the database has but this binary
+    /// does not (another worktree applied a newer one to the shared database) is ignored
+    /// (D-114).
+    ///
+    /// Every pooled session starts with `hnsw.iterative_scan = relaxed_order` (a startup
+    /// option, no extra round trip), so a filtered `recall` keeps scanning the HNSW index
+    /// until 20 rows pass the filter (pgvector 0.8) and stays one query.
     pub async fn connect(url: &str) -> Result<PgStore> {
+        let opts: PgConnectOptions = url
+            .parse()
+            .map_err(|e: sqlx::Error| backend(format!("connecting: {}", describe(&e))))?;
+        let opts = opts.options([("hnsw.iterative_scan", "relaxed_order")]);
         let pool = PgPoolOptions::new()
             .max_connections(8)
             .acquire_timeout(Duration::from_secs(10))
-            .connect(url)
+            .connect_with(opts)
             .await
             .map_err(|e| backend(format!("connecting: {} ({SETUP_HINT})", describe(&e))))?;
-        sqlx::migrate!("../../migrations")
+        let mut migrator = sqlx::migrate!("../../migrations");
+        migrator.set_ignore_missing(true);
+        migrator
             .run(&pool)
             .await
             .map_err(|e| backend(format!("migrating: {e}")))?;
         Ok(PgStore { pool })
     }
 
-    /// The underlying pool, for tests and `harness db` maintenance. Nothing outside the store
-    /// writes memory through it.
+    /// The underlying pool, for core-pg's own tests only (feature `testing`). M-2: nothing
+    /// outside the store talks to the database, so this is not part of the public surface.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
@@ -253,17 +267,17 @@ fn ledger_row(row: &PgRow) -> Result<(LedgerId, LedgerEvent)> {
 // ---------------------------------------------------------------- pure helpers
 
 /// SM-2 after one graded repetition: `(reps, interval_days, ease)` -> the new triple.
-/// A pass (grade >= 3) steps the interval 1, 6, then `interval * ease` (rounded to whole
-/// days, using the ease before this grade); a fail resets to 1 day and reps 0. The ease
-/// moves by the SM-2 formula on every grade and never drops below 1.3. Same arithmetic as
-/// `harness_core::testing::MemStore`, so the fake and the real store agree.
+/// A pass (grade >= 3) steps the interval 1, 6, then `interval * ease` (rounded up to whole
+/// days, D-115, using the ease before this grade); a fail resets to 1 day and reps 0. The
+/// ease moves by the SM-2 formula on every grade and never drops below 1.3. Same arithmetic
+/// as `harness_core::testing::MemStore`, so the fake and the real store agree.
 pub fn sm2(reps: i32, interval_days: f32, ease: f32, grade: u8) -> (i32, f32, f32) {
     let q = f32::from(grade.min(5));
     let (reps, interval) = if grade >= 3 {
         let interval = match reps {
             r if r <= 0 => 1.0,
             1 => 6.0,
-            _ => (interval_days * ease).round().max(1.0),
+            _ => ceil_days(interval_days * ease),
         };
         (reps.max(0).saturating_add(1), interval)
     } else {
@@ -271,6 +285,12 @@ pub fn sm2(reps: i32, interval_days: f32, ease: f32, grade: u8) -> (i32, f32, f3
     };
     let ease = (ease + (0.1 - (5.0 - q) * (0.08 + (5.0 - q) * 0.02))).max(1.3);
     (reps, interval, ease)
+}
+
+/// D-115: a fractional interval rounds up. The slack keeps f32 noise in `interval * ease`
+/// (15.000001) from adding a day; never below one day. Same as MemStore's.
+fn ceil_days(days: f32) -> f32 {
+    (days - 1e-4).ceil().max(1.0)
 }
 
 fn limit(k: usize) -> i64 {
@@ -337,32 +357,41 @@ from fused join memory.facts f on f.id = fused.id
 order by fused.score desc, f.id
 limit $6";
 
-/// Exact first (case-insensitive equality scores 1.0, substring 0.9, on subject/key/value),
-/// then trigram similarity on subject for what exact missed.
+/// D-115. Exact tier: the subject equals the query case- and punctuation-insensitively
+/// (lowercased, every non-alphanumeric run one space, trimmed) for 1.0, or the query is a
+/// case-insensitive substring of subject, key or value for 0.9. Trigram tier, for what
+/// exact missed: `$1 <% subject` (written `subject %> $1` so the trigram index applies)
+/// scored by `word_similarity($1, subject)`. Ordered by score; tier, newest `seen_at` and
+/// id break ties.
 const SEARCH_SQL: &str = "
-with ex as (
-  select id,
-         case when lower(subject) = lower($1) or lower(key) = lower($1) or lower(value) = lower($1)
+with q as (
+  select lower($1) as l, trim(regexp_replace(lower($1), '[^[:alnum:]]+', ' ', 'g')) as n
+),
+ex as (
+  select f.id,
+         case when q.n <> ''
+                   and trim(regexp_replace(lower(f.subject), '[^[:alnum:]]+', ' ', 'g')) = q.n
               then 1.0 else 0.9 end::float8 as score,
          0 as tier
-  from memory.facts
-  where strpos(lower(subject), lower($1)) > 0
-     or strpos(lower(key), lower($1)) > 0
-     or strpos(lower(value), lower($1)) > 0
-  order by score desc, seen_at desc, id
+  from memory.facts f, q
+  where (q.n <> '' and trim(regexp_replace(lower(f.subject), '[^[:alnum:]]+', ' ', 'g')) = q.n)
+     or strpos(lower(f.subject), q.l) > 0
+     or strpos(lower(f.key), q.l) > 0
+     or strpos(lower(f.value), q.l) > 0
+  order by score desc, f.seen_at desc, f.id
   limit $2
 ),
 tg as (
-  select id, similarity(subject, $1)::float8 as score, 1 as tier
+  select id, word_similarity($1, subject)::float8 as score, 1 as tier
   from memory.facts
-  where subject % $1 and id not in (select id from ex)
+  where subject %> $1 and id not in (select id from ex)
   order by score desc, seen_at desc, id
   limit $2
 ),
 hits as (select * from ex union all select * from tg)
 select f.id, f.subject, f.key, f.value, f.source, f.seen_at, f.confidence, hits.score, hits.tier
 from hits join memory.facts f on f.id = hits.id
-order by hits.tier, hits.score desc, f.seen_at desc, f.id
+order by hits.score desc, hits.tier, f.seen_at desc, f.id
 limit $2";
 
 // ---------------------------------------------------------------- the store
@@ -407,14 +436,16 @@ impl MemoryStore for PgStore {
         if rel.trim().is_empty() {
             return Err(MemoryError::Invalid("edge relation is empty".into()));
         }
+        // `since` comes from this process, like every timestamp core-pg writes (D-112).
         sqlx::query(
-            "insert into memory.edges (src, rel, dst, source) values ($1, $2, $3, $4)
+            "insert into memory.edges (src, rel, dst, source, since) values ($1, $2, $3, $4, $5)
              on conflict (src, rel, dst) do nothing",
         )
         .bind(src.0)
         .bind(rel)
         .bind(dst.0)
         .bind(Json(&source))
+        .bind(ts_now())
         .execute(&self.pool)
         .await
         .map_err(|e| {
@@ -500,21 +531,9 @@ impl MemoryStore for PgStore {
             .bind(limit(k))
             .bind(RECALL_POOL)
             .bind(RRF_K);
-        let filtered = filter != Filter::default();
-        let rows = if filtered {
-            // With a filter the HNSW scan must keep going until 20 rows pass it (pgvector
-            // 0.8 iterative scan); without one the plain index scan already returns 20.
-            let mut tx = self.pool.begin().await.map_err(db("recall"))?;
-            sqlx::query("set local hnsw.iterative_scan = relaxed_order")
-                .execute(&mut *tx)
-                .await
-                .map_err(db("recall"))?;
-            let rows = query.fetch_all(&mut *tx).await.map_err(db("recall"))?;
-            tx.commit().await.map_err(db("recall"))?;
-            rows
-        } else {
-            query.fetch_all(&self.pool).await.map_err(db("recall"))?
-        };
+        // One round trip: every session already has hnsw.iterative_scan on (see connect),
+        // so a filtered scan keeps going until 20 rows pass the filter.
+        let rows = query.fetch_all(&self.pool).await.map_err(db("recall"))?;
         rows.iter()
             .map(|r| {
                 let (id, fact) = fact_row(r)?;
@@ -965,6 +984,15 @@ pub async fn bootstrap() -> Result<Harness> {
             RunFolder::open(&runs_root, &id).map_err(|e| {
                 MemoryError::Invalid(harness_core::scrub(&format!("SB_RUN_ID: {e}")))
             })?;
+            // B-175: the launching session creates the runs row; a folder without one would
+            // make every ask of this server read as strict (D-119 (2)), so refuse it here.
+            if store.run_get(&id).await?.is_none() {
+                return Err(MemoryError::Invalid(harness_core::scrub(&format!(
+                    "SB_RUN_ID {}: the run folder exists but there is no runs row for it; \
+                     start the run with `harness run` or unset SB_RUN_ID",
+                    id.0
+                ))));
+            }
             id
         }
         None => {
@@ -1021,6 +1049,9 @@ mod tests {
         let (r, i, e) = sm2(2, 6.0, 2.5, 5);
         assert_eq!((r, i), (3, 15.0));
         assert!((e - 2.6).abs() < 1e-6);
+        // D-115: a fractional interval rounds up (6 x 2.7 = 16.2 -> 17, round() gave 16).
+        let (_, i, _) = sm2(2, 6.0, 2.7, 5);
+        assert_eq!(i, 17.0);
         // A fail resets, and the ease floor is 1.3.
         let (r, i, e) = sm2(7, 40.0, 1.35, 0);
         assert_eq!((r, i), (0, 1.0));
@@ -1068,10 +1099,43 @@ mod tests {
             ("*".into(), "Submit:wire".into())
         );
         assert_eq!(ok("x.org", " pay "), ("x.org".into(), "Pay".into()));
+        assert_eq!(
+            ok("BÜCHER.de", "Submit"),
+            ("xn--bcher-kva.de".into(), "Submit".into())
+        );
         assert!(check_rule("bank com", "Pay", ask).is_err());
         assert!(check_rule("bank.com/x", "Pay", ask).is_err());
         assert!(check_rule(".", "Pay", ask).is_err());
         assert!(check_rule("a.b", "Submit:  ", ask).is_err());
+        // Review T-03 blocking: the private copies accepted these, so the rule was dead.
+        for bad in [
+            "*.bank.com",
+            "bank.com:443",
+            "a..b",
+            ".bank.com",
+            "u@bank.com",
+            "bank.com?x",
+            "bank.com#x",
+            "bank\\com",
+            "bank\u{7}.com",
+            "bank\u{200b}.com",
+        ] {
+            assert!(
+                matches!(check_rule(bad, "Pay", ask), Err(MemoryError::Invalid(_))),
+                "{bad:?}"
+            );
+        }
+        for bad in [
+            "Submit:job application",
+            "Submit:a:b",
+            "Submit:job\u{7}",
+            "Submit:job\u{200b}",
+        ] {
+            assert!(
+                matches!(check_rule("*", bad, ask), Err(MemoryError::Invalid(_))),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
