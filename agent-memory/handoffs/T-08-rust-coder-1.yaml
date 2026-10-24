@@ -1,0 +1,29 @@
+from: rust-coder (core, T-08)
+to: core/suborch, then reviewer and tester
+task: T-08
+date: "2026-10-23"
+state: "core::sched loop, harnessd and the harness CLI are implemented and green. crates/core/src/sched.rs: 5-field UTC croner (parse_cron, next_after), Clock (SystemClock, ManualClock), Launcher trait (D-116 (1)), Runner::{fire, execute} (folder, runs row running with parent_run, sched.fire ledger event, launcher, report.md from the ledger, ended/status), Scheduler::run_loop (sleep_until the earliest due instant, wake on Notify, join finished firings, coalesce missed occurrences, skip watch/reflect with one log line, capped DB retry, drain on shutdown). crates/harness: lib (Env, CliError, cli, daemon, launcher), bins harness and harnessd. CLI: run, schedule add|list|rm, vault set (rpassword, name checked before prompting), gate set, tools list|health|pin|unpin|retire, ledger <run>, db migrate|status, ask <run> <n> yes|no. ClaudeLauncher: `claude -p` with the prompt on stdin, SB_RUN_ID + absolute SB_RUNS_ROOT, stdout scrubbed to files/answer.md; interactive `claude <prompt>` for harness run; Windows .cmd shim fallback; SB_CLAUDE overrides the program. fmt clean, clippy -p harness --all-targets -D warnings clean, cargo test -p harness (3 unit + 7 Postgres integration) and cargo test -p harness-core --lib sched:: (8) green."
+not_done: "1. Reviewer pass on crates/core/src/sched.rs and crates/harness. 2. Tester runs docs/01 acceptance item 4 (crates/harness/tests/t08.rs::schedule_add_fires_run_with_report_and_parent_run). 3. T-16 (wave 3): watch and reflect firings in Runner::fire (they return SchedError::NotInPhase1 today, and the loop skips them). 4. A live `claude -p` firing was not run (rule 1: tests use FakeLauncher); the first real harnessd run should check that claude reads the prompt from stdin with -p and that tool servers attach through SB_RUN_ID."
+gotchas:
+  - "Four coders share this worktree: gate.rs, core-pg and ledger.rs were mid-edit and broke the build twice; retry after a minute rather than touching their files."
+  - "On Windows, spawning a missing `x.cmd` goes through cmd.exe and returns exit code 1 instead of NotFound, so the .cmd fallback only fires when the shim file exists (launcher::cmd_shim)."
+  - "ManualClock::deadline_where lets a test wait until harnessd sleeps on a specific deadline; the acceptance test uses it to prove the .sched/changed marker wakes an idle harnessd (yearly deadline -> next minute)."
+  - "A schedule never fired counts from the first time the loop saw it (D-116 (4)); a test that moves the clock before the loop has read the schedule will see the next minute after that, so wait for the deadline first."
+  - "harness ask prints ask::answer's AlreadyExists message as `harness: <message>` (B-177)."
+  - "No change was needed in files owned by the other coders (gate, vault, ledger/run, mcp/ask, core-pg); everything goes through their public APIs. `harness db migrate` is PgStore::connect (migrator with ignore_missing, D-114); `db status` reads _sqlx_migrations directly and never migrates."
+decisions_made: [D-116]
+blockers_opened: [B-185]
+files_touched:
+  - crates/core/src/sched.rs
+  - crates/harness/Cargo.toml
+  - crates/harness/src/lib.rs
+  - crates/harness/src/main.rs
+  - crates/harness/src/bin/harnessd.rs
+  - crates/harness/src/cli.rs
+  - crates/harness/src/daemon.rs
+  - crates/harness/src/launcher.rs
+  - crates/harness/tests/t08.rs
+  - Cargo.lock
+  - agent-memory/decisions.yaml (D-116)
+  - agent-memory/blockers.yaml (B-185 under interface_changes)
+verify: "cargo test -p harness && cargo test -p harness-core --lib sched::"
