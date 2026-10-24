@@ -10,7 +10,8 @@ areas.<area>.tasks, plus later.tasks once that wave is open):
   * bench/results/accept-<task>.md has every table result cell `pass` and ends with a
     `Verdict: green` line;
 and agent-memory/decisions.yaml + blockers.yaml load without duplicate keys or ids (the
-union merge driver can produce both), and the area's worktree has no leak log
+union merge driver can produce both), every blockers.yaml entry sits under the section its
+fields belong to (a merge can move entries between sections, D-75), and the area's worktree has no leak log
 (.claude/state/leaks.log, written by the leak hooks).
 """
 import re
@@ -99,6 +100,24 @@ def area_tasks(swarm, area):
     return tasks
 
 
+BLOCKER_SECTIONS = {"blockers": ("question", "default_taken"), "interface_changes": ("interface", "change")}
+
+
+def check_blockers_shape(doc):
+    """Entries filed under the wrong section (a merge can move them) and duplicate ids."""
+    problems, ids = [], []
+    for section, keys in BLOCKER_SECTIONS.items():
+        for item in (doc or {}).get(section) or []:
+            ids.append(item.get("id"))
+            missing = [k for k in keys if k not in item]
+            if missing:
+                problems.append(f"blockers.yaml: {item.get('id')} under {section} lacks {', '.join(missing)} (misfiled?)")
+    dups = sorted({i for i in ids if ids.count(i) > 1})
+    if dups:
+        problems.append(f"blockers.yaml: duplicate ids {dups}")
+    return problems
+
+
 def main(argv):
     area = argv[1]
     worktree = Path(argv[argv.index("--worktree") + 1]) if "--worktree" in argv else None
@@ -111,6 +130,7 @@ def main(argv):
         dups = sorted({i for i in ids if ids.count(i) > 1})
         if dups:
             problems.append(f"decisions.yaml: duplicate ids {dups}")
+        problems += check_blockers_shape(load(ROOT / "agent-memory" / "blockers.yaml"))
     except yaml.YAMLError as e:
         problems.append(f"agent-memory YAML after merge: {e}")
         print("gate BLOCKED:\n  " + "\n  ".join(problems))

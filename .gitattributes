@@ -2,5 +2,7 @@
 *.png binary
 *.mp4 binary
 # Append-only agent memory: every area appends entries; keep both sides on merge (D-42).
+# decisions.yaml is one list, so union is safe. blockers.yaml has three lists (blockers,
+# interface_changes, proposals); union stacks both sides' additions in one place and files
+# entries under the wrong key, so it uses the normal 3-way merge (D-75).
 agent-memory/decisions.yaml merge=union
-agent-memory/blockers.yaml merge=union
