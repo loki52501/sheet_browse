@@ -211,3 +211,95 @@ opens a structural lowering: Enter+Delete chords and Enter plus DEL drop from De
 breaks D-408's raise-only rule and hard rule 4.
 
 Verdict: request changes
+
+# Round 5 (reviewer-7): 361b28d, D-409
+
+Scope: 361b28d (`crates/sb-act/src/classify.rs`, `lib.rs`). Line numbers are for 361b28d.
+The tester's uncommitted `crates/sb-act/tests/` edits (round4, common, new round5) were not
+reviewed.
+
+Gates (unpiped, TMP/TEMP/TMPDIR on F:/sb-swarm/tmp-page). I ran them on a clean
+`git archive 361b28d` export, because the worktree holds the tester's in-progress files.
+`cargo fmt -p sb-act --check` is clean. `cargo clippy -p sb-act --all-targets -- -D
+warnings` is clean, both in the export and in the worktree. `cargo test -p sb-act` passes:
+lib 60, classify 16, forms 11, quote_fuzz 6, round2 18, round3 15, round4 8 and wire 3,
+with 0 failed.
+
+Method: I exported 361b28d^ and 361b28d with `git archive` to F:/sb-swarm/tmp-page/r5-probe,
+each with its own target dir. One probe ran on both: every row of `common::ALL` plus 21
+extra rows (a formless mail row, option, listitem, gridcell, textbox, searchbox, combobox,
+input_type=text, file input, formless Pay buttons, a frame-2 card form, a Pay link,
+Delegate/Enterprise buttons, a menuitem Delete, a checkbox, a mail compose form). Each row
+got `c#` plus 66 key values, which makes 12,864 steps. Then I diffed the classes. Nothing
+was written to the worktree.
+
+## Round 4 items
+
+- R4 Blocking 1, Enter chords lowering Delete: **resolved** (`key_press`,
+  classify.rs:206-215). `key_base` is the old path. The Delete merge runs after it, on its
+  result, so it can only raise. On the mail row, Enter+Delete, Enter+Del,
+  Control+Enter+Delete, Return+Shift+Delete, `Enter\u{7f}` and `\u{7f}Enter` are Delete.
+- R4 Should 2, `Delete+Enter`: **resolved**. So are `Del Enter`, `Delete\tEnter`,
+  `Enter Delete`, `Delete+a`, `Delete+Shift` and `Del+`.
+- R4 Should 1, formless Pay buttons: **resolved** per D-409 (2) (classify.rs:268). A
+  formless "Pay $20.00", "Place order", and "Complete purchase" with the card form in frame 2
+  all go Navigate -> Pay. The Pay link stays Navigate.
+- R4 Should 3, split-heading 2SV: kept as Submit by D-409 (3). Closed by ruling.
+- R4 Nit, lib.rs doc lines: **resolved**. No line in lib.rs or classify.rs is over 100
+  columns.
+
+## Blocking
+
+- none
+
+## Should fix
+
+- none for the coder.
+
+## Notes
+
+- Raise-only (hard rule 4): of 12,864 probes, 1,206 were raised and **0 lowered**.
+  Raised: Navigate->Delete 530, Submit->Delete 251, Account->Delete 173, Navigate->Pay 141,
+  Fill->Delete 60, Delete->Pay 51. All the Fill->Delete rows are checkables (radio,
+  checkbox, switch, option), not text fields. All the click raises are the three formless
+  Pay buttons. No fixture button's click class changed.
+- Segment matcher (`names_segment`, classify.rs:399-402): it splits only at `+`,
+  whitespace and control characters and compares whole segments, ignoring ASCII case. On the
+  mail row these stay Navigate, the same as a click: Delegate, Delegate+Enter, Enterprise,
+  Backspace, Shift+/Control+Backspace, Backspace+Enter, Deleted, Undelete, Model, Idle,
+  Delta, DelEnter, Delete_Enter, Delete-Enter, Insert and NumpadDecimal. `DELETE`, `del`
+  and `dEl` match, as intended.
+- Text fields (textbox, searchbox, combobox, input_type=text, and a field in a form):
+  Shift+Delete, Shift+Del, Delete, Del, Backspace and Shift+Backspace stay Fill, the same
+  as before. Enter+Delete, Delete+Enter and `Enter\u{7f}` keep the Enter class (Submit)
+  with no Delete merge. A file input is not a text field, so Enter+Delete on it is now
+  Delete (a raise).
+- Efficiency cost of D-409 (2): `pay_words` includes payment, buy, purchase, checkout and
+  "add ... card". So a formless "Payment methods", "Proceed to checkout", "Buy again",
+  "Purchase history" or "Add card" button, or a menuitem with those words, now asks for Pay.
+  That is one extra ask each. D-409 accepts this cost. If live runs show it often, narrowing
+  to verb phrases is a later raise-safe change only if it is paired with form context.
+- Pre-existing, not a lowering: on a text field, `Delete+Shift` and `Delete+a` are a click
+  (Navigate), but `Shift+Delete` is Fill.
+- Spec ids: the commit implements D-409 (1) and (2) as written, and (3) correctly has no
+  code. Nothing goes beyond the spec. Interface I-10 is unchanged: no pub item changed, and
+  the lib.rs diff is docs only.
+- Hard rules: the crate is still pure (no I/O, sleeps or env), and there is no unwrap or
+  indexing on input in non-test code. Rules 1, 2, 3, 5 and 7 do not apply.
+- Tests: `d409_chord_max_and_formless_pay` (classify.rs:2683) asserts exact classes for 9
+  chords on a mail row, a signup form and a card form. It also asserts the text-field
+  negatives, whole-segment negatives (Delegate, Backspace+Enter), formless Pay positives
+  and the button/link negatives. For the tester: `common::RAISE_KEYS` (item 22) still has
+  no Delete chord, so the acceptance guard would not catch a repeat of R4 Blocking 1. Add
+  this round's chords there or in round 5.
+- Still open from earlier rounds (not this commit): the "New password" field without
+  autocomplete nit, and the 250 ms wall-clock bound in the tester-owned
+  `accept_t19_round3.rs`.
+
+## Round 5 verdict
+
+D-409 closes R4 Blocking 1 and Should 1 and 2 with raise-only changes. Diffing 361b28d^
+against 361b28d over 12,864 steps finds 0 lowered. The segment matcher has no false matches,
+and text fields keep Fill for Shift+Delete.
+
+Verdict: approve
