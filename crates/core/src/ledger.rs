@@ -35,11 +35,18 @@
 //!   outcomes, `class` and `tool` of the asked call, `why` (or `result_summary`) = the
 //!   card's what line;
 //! * a stop (gate Stop, Challenge mid-call): `server = core`, `mode = stop`, `why` = the
-//!   reason.
+//!   reason, `tool` and `args` of the call. One stop is listed once under `Not done`: a
+//!   mid-call challenge writes a core stop from `ToolCtx::ask`, then the tool event with
+//!   `mode = stop` and a second core stop, and only the first core stop of a (tool, args)
+//!   pair is listed (its why is also the `Result: stopped (...)` text).
+//! * core events with any other mode (`allow`, `ask` gate decisions) are not read.
 //!
 //! Known limits (no fix needed): an integral f64 of 1e16 or more comes back from jsonb as
 //! an integer, so such a row and its line compare unequal; a `write` future dropped
-//! between the insert and the append leaves a row without a jsonl line.
+//! between the insert and the append leaves a row without a jsonl line; the D-117
+//! fail-closed check reads the data fields only, so a vault value that coincides with a
+//! harness field (`ts`, a duration) can appear there, and one containing the JSON glue
+//! between two top-level fields is not seen across them.
 
 use crate::class::Class;
 use crate::memory::{LedgerEvent, LedgerId, LedgerMode, MemoryError, MemoryStore, RunStatus, Ts};
@@ -76,8 +83,8 @@ pub enum LedgerError {
         line: usize,
         reason: String,
     },
-    /// After scrubbing, the serialized event still matches a vault value (in a field that
-    /// cannot be rewritten, such as `ts` or `duration_ms`, or across fields). Nothing was
+    /// After scrubbing, a data field as serialized still matches a vault value (D-117; for
+    /// example a value spanning an object key and its value in `args`). Nothing was
     /// inserted and no line was written. `fields` names the fields, never the value.
     #[error("ledger event still matches a vault value after scrubbing (in {fields}); not written")]
     Unscrubbable { fields: String },
@@ -122,9 +129,10 @@ impl Ledger {
     /// [`scrub`] first, repeated until nothing changes; a number that matches becomes its
     /// scrubbed text as a string (`"@vault(name)"`). U+0000 becomes U+FFFD (Postgres
     /// rejects 0x00 in text and jsonb). The contract says events arrive scrubbed; this is
-    /// defence in depth (D-102). Then the whole serialized event is scrubbed once more and
-    /// must come back unchanged, else [`LedgerError::Unscrubbable`] and nothing is written
-    /// (fail closed).
+    /// defence in depth (D-102). Then every data field as serialized is scrubbed once more
+    /// and must come back unchanged, else [`LedgerError::Unscrubbable`] and nothing is
+    /// written (fail closed). Fields the harness generates (`ts`, `run_id`, `class`, `mode`,
+    /// `duration_ms`, `ok`, the id) are not checked (D-117).
     ///
     /// `run_id: None` is filled with this ledger's run; another run is
     /// [`LedgerError::WrongRun`]. `ts` is not re-stamped, only truncated to microseconds (a
@@ -251,28 +259,50 @@ fn scrub_value(v: Value) -> Value {
     }
 }
 
-/// The serialized event must survive a whole-text scrub unchanged (what an external grep
-/// of `ledger.jsonl` checks). Names the offending top-level fields on failure.
+/// D-117: every data field (the ones that can carry outside data: `server`, `tool`, `args`,
+/// `result_summary`, `consequences`, `why`), serialized exactly as it appears in the jsonl
+/// line, must survive a scrub unchanged. Names the offending fields on failure.
+///
+/// The fields the harness generates itself (`id`, `run_id` (always this ledger's own run),
+/// `ts`, `class`, `mode`, `duration_ms` as the wrapper measured it, `ok`) and the line's key
+/// names and JSON punctuation are not checked: a vault value equal to a year, a duration, a
+/// mode or a key name is a coincidence there, not a leak, and failing on it would refuse
+/// every write of the run. Known limit: a vault value that itself contains JSON glue
+/// between two top-level fields (`","why":"`) is not seen across that boundary.
 fn check_clean(e: &LedgerEvent) -> Result<()> {
-    let whole = serde_json::to_string(e)?;
-    if scrub(&whole) == whole {
-        return Ok(());
-    }
-    let mut fields = Vec::new();
-    if let Value::Object(o) = serde_json::to_value(e)? {
-        for (k, v) in &o {
-            let t = v.to_string();
-            if scrub(&t) != t {
-                fields.push(scrub(k));
-            }
-        }
-    }
-    let fields = if fields.is_empty() {
-        "the line as a whole".to_owned()
-    } else {
-        fields.join(", ")
+    // A field that is null (no data) is not checked: `null` is the line's syntax.
+    let json = |v: &Value| -> Result<Option<String>> {
+        Ok(match v {
+            Value::Null => None,
+            v => Some(serde_json::to_string(v)?),
+        })
     };
-    Err(LedgerError::Unscrubbable { fields })
+    let data: [(&str, Option<String>); 6] = [
+        ("server", Some(serde_json::to_string(&e.server)?)),
+        ("tool", Some(serde_json::to_string(&e.tool)?)),
+        ("args", json(&e.args)?),
+        (
+            "result_summary",
+            Some(serde_json::to_string(&e.result_summary)?),
+        ),
+        ("consequences", json(&e.consequences)?),
+        (
+            "why",
+            e.why.as_ref().map(serde_json::to_string).transpose()?,
+        ),
+    ];
+    let fields: Vec<&str> = data
+        .iter()
+        .filter(|(_, text)| text.as_ref().is_some_and(|t| scrub(t) != *t))
+        .map(|(name, _)| *name)
+        .collect();
+    if fields.is_empty() {
+        Ok(())
+    } else {
+        Err(LedgerError::Unscrubbable {
+            fields: fields.join(", "),
+        })
+    }
 }
 
 /// A parsed `ledger.jsonl`.
@@ -416,9 +446,9 @@ fn is_stop(e: &LedgerEvent) -> bool {
     e.mode == Some(LedgerMode::Stop)
 }
 
-/// A failed step that is not a stop or a skip (those are reported as such).
+/// A failed tool call that is not a stop or a skip (those are reported as such).
 fn is_failure(e: &LedgerEvent) -> bool {
-    !e.ok && !is_stop(e) && !is_skip(e.mode)
+    !e.ok && !is_core(e) && !is_stop(e) && !is_skip(e.mode)
 }
 
 /// A failure at `i` is resolved when a later ok call (not core, not a stop or skip) has
@@ -782,13 +812,17 @@ fn read_line(events: &[LedgerEvent]) -> String {
 }
 
 fn needs_line(events: &[LedgerEvent]) -> String {
-    // A challenge-stopped call is written twice (tool event with mode=stop and the core
-    // stop event); list the core one only.
+    // One stop, one listing. A challenge-stopped call is written as a tool event with
+    // mode=stop plus a core stop event, and a mid-call challenge (`ToolCtx::ask`) adds a
+    // core stop of its own before them, all with the call's tool and args: list the first
+    // core stop of a (tool, args) pair only, and a tool stop event only when no core stop
+    // has its tool.
     let core_stops: Vec<&str> = events
         .iter()
         .filter(|e| is_core(e) && is_stop(e))
         .map(|e| e.tool.as_str())
         .collect();
+    let mut listed: Vec<(&str, &Value)> = Vec::new();
     let mut first = Vec::new();
     let mut fails = Vec::new();
     for (i, e) in events.iter().enumerate() {
@@ -796,6 +830,11 @@ fn needs_line(events: &[LedgerEvent]) -> String {
             if !is_core(e) && core_stops.contains(&e.tool.as_str()) {
                 continue;
             }
+            let key = (e.tool.as_str(), &e.args);
+            if listed.contains(&key) {
+                continue;
+            }
+            listed.push(key);
             first.push(format!(
                 "stopped at {} ({}): {}; handed back to you",
                 clip(&e.tool, ITEM_MAX),
@@ -1300,6 +1339,52 @@ mod tests {
             r.contains("stopped at act.click (Challenge): hCaptcha on lu.ma; handed back to you"),
             "{r}"
         );
+    }
+
+    /// Round 2: a mid-call challenge writes a core stop from `ToolCtx::ask`, then the tool
+    /// event with mode=stop and a second core stop with another why. One listing, the first
+    /// why; a stop of another call (other args) is still listed.
+    #[test]
+    fn mid_call_challenge_stop_listed_once() {
+        let stop = |server: &str, why: &str| {
+            let mut e = ev(
+                server,
+                "act.click",
+                Class::Challenge,
+                Some(LedgerMode::Stop),
+            );
+            e.args = json!({ "ref": "9" });
+            e.why = Some(why.into());
+            e
+        };
+        let events = vec![
+            stop("core", "challenge during act.click: hCaptcha appeared"),
+            stop("sheetbrowse", "hCaptcha on lu.ma"),
+            stop("core", "hCaptcha on lu.ma"),
+        ];
+        let r = report("Register", &events);
+        assert_eq!(r.matches("stopped at").count(), 1, "{r}");
+        assert!(
+            r.contains(
+                "
+Result: stopped (challenge during act.click: hCaptcha appeared)
+"
+            ),
+            "{r}"
+        );
+        assert!(
+            r.contains(
+                "
+Did: 0 actions
+"
+            ),
+            "{r}"
+        );
+        let mut other = stop("core", "Turnstile");
+        other.args = json!({ "ref": "12" });
+        let mut more = events.clone();
+        more.push(other);
+        assert_eq!(report("Register", &more).matches("stopped at").count(), 2);
     }
 
     /// Item 10: stops and skipped asks come first and are never cut by the list cap.

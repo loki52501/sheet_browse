@@ -624,7 +624,6 @@ async fn r2_wrapper_handler_stop_listed_once() {
 /// stop and returns TimeoutSkip; the handler then returns `ToolOutput::stopped`, which the
 /// wrapper logs as a tool stop event plus a second core stop event. One stop, one listing.
 #[tokio::test]
-#[ignore = "red-first T-06 round 2"]
 async fn r2_wrapper_mid_call_challenge_listed_once() {
     install();
     let e = env("wrap-mid", ScriptedAsker::new()).await;

@@ -27,6 +27,9 @@ const LEDGER_CANARY: &str = "canary-ledger-not-a-secret";
 const NUM: &str = "48291377";
 /// A canary whose spelling a whitespace collapse changes.
 const SPACED: &str = "canary-ledger  not-a-secret";
+/// A canary that only appears across an object key and its value (`{"zq9":"x7"}`), which no
+/// per-string scrub can rewrite.
+const GLUE: &str = "zq9\":\"x7";
 
 fn canary() -> String {
     std::env::var("SB_VAULT_CANARY")
@@ -42,6 +45,7 @@ fn install() {
             ("test".to_owned(), canary(), EntryKind::Secret),
             ("otp".to_owned(), NUM.to_owned(), EntryKind::Secret),
             ("spaced".to_owned(), SPACED.to_owned(), EntryKind::Secret),
+            ("glue".to_owned(), GLUE.to_owned(), EntryKind::Secret),
         ];
         if canary() != LEDGER_CANARY {
             entries.push((
@@ -142,8 +146,10 @@ async fn numeric_vault_value_is_scrubbed_in_store_and_jsonl() {
     assert_eq!(read_jsonl(&run.ledger_jsonl()).unwrap(), rows);
 }
 
-/// Item 1 (fail closed): a field scrub cannot rewrite (`duration_ms`) still matches a
-/// vault value: nothing is inserted, no line is written, the error names the field only.
+/// Item 1 (fail closed, D-117): a data field that scrubbing cannot rewrite (a value
+/// spanning a key and its value in `args`) still matches a vault value: nothing is
+/// inserted, no line is written, the error names the field only. A harness-generated
+/// field (`duration_ms`) that happens to equal a vault value is not a leak and is written.
 #[tokio::test]
 async fn unscrubbable_event_is_refused_before_insert() {
     install();
@@ -152,21 +158,29 @@ async fn unscrubbable_event_is_refused_before_insert() {
     let store = Arc::new(MemStore::new());
     let ledger = Ledger::new(store.clone(), run.clone());
     let mut e = event(&run.id, "web", "fetch", Class::Read, LedgerMode::Allow);
-    e.duration_ms = NUM.parse().unwrap();
+    e.args = json!({ "zq9": "x7" });
     let err = ledger.write(e).await.unwrap_err();
     let msg = err.to_string();
-    assert!(!msg.contains(NUM), "numeric canary in error");
+    assert!(!msg.contains(GLUE), "glue canary in error");
     match err {
-        LedgerError::Unscrubbable { fields } => assert_eq!(fields, "duration_ms"),
+        LedgerError::Unscrubbable { fields } => assert_eq!(fields, "args"),
         _ => panic!("expected Unscrubbable"),
     }
     assert!(store.ledger_events(&run.id).await.unwrap().is_empty());
     assert!(!run.ledger_jsonl().exists());
 
+    // D-117: a duration equal to a numeric vault value is the harness's own measurement.
+    let mut timed = event(&run.id, "web", "fetch", Class::Read, LedgerMode::Allow);
+    timed.duration_ms = NUM.parse().unwrap();
+    ledger.write(timed).await.unwrap();
+    let rows = store.ledger_events(&run.id).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(read_jsonl(&run.ledger_jsonl()).unwrap(), rows);
+
     // The same ledger keeps working for clean events.
     let ok = event(&run.id, "web", "fetch", Class::Read, LedgerMode::Allow);
     ledger.write(ok).await.unwrap();
-    assert_eq!(read_jsonl(&run.ledger_jsonl()).unwrap().len(), 1);
+    assert_eq!(read_jsonl(&run.ledger_jsonl()).unwrap().len(), 2);
 }
 
 /// Item 2: every report input is scrubbed before clip/collapse. A value crossing the

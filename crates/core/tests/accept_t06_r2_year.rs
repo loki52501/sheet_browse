@@ -28,7 +28,6 @@ impl Drop for Tmp {
 }
 
 #[tokio::test]
-#[ignore = "red-first T-06 round 2"]
 async fn r2_year_shaped_vault_value_does_not_make_write_fail() {
     Vault::in_memory([("pin".to_owned(), YEAR.to_owned(), EntryKind::Secret)]).install_global();
     let tmp = Tmp(std::env::temp_dir().join(format!(
