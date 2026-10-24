@@ -24,6 +24,16 @@ blockers:
     question: "H-1.3 names timeout behaviour only for Send(new), Account (proceed) and Pay, Delete (skip). What does an ask on another class time out to, e.g. the seeded ('*','Submit:job_application','ask') rule or a ('bank.com','Submit','ask') override?"
     default_taken: "Skip. Gate::on_timeout returns Proceed only for Send and Account with strict off; every other class skips. A job application or signature that times out to proceed would be the harness acting as the user on exactly what the user reserved for themselves (H-1.2)."
     needs_user: false
+  - id: B-151
+    task: T-05
+    question: "Known scrub limits (review-T-05 round 2) that must close before step 2 (srv-web `api` and the header-sink acceptance) and the Phase 1 'zero vault leaks' baseline: a value inside base64 or base64url (HTTP Basic `user:<value>`, JWT payloads, data: URLs) survives scrub, e.g. `Basic <base64 of user:canary>`. Owner?"
+    default_taken: "Area core closes it in the first core task of step 2, before srv-web's api acceptance: add the 3 base64 alignments of each value (standard and url alphabets, padded and unpadded) with the edge characters that depend on neighbouring bytes trimmed, and skip any trimmed pattern shorter than 8 characters so the D-118 floor still holds for the encoded form. HTML-safe JSON escapes (Go, Rails, System.Text.Json) are closed in T-05 round 3 (D-118 (1))."
+    needs_user: false
+  - id: B-152
+    task: T-05
+    question: "Known scrub limits that must close before step 3 (browser readers): (a) values a site reformats with an input mask (phone, card, date: `(415) 555-0100` for 4155550100); (b) values split across DOM nodes or truncated with an ellipsis (`canary-7f3…`); (c) mixed Unicode case from CSS text-transform: capitalize (`Émile Ærø` for `émile ærø`; only the all-lower and all-upper bases exist). Owner?"
+    default_taken: "Area core closes them in step 3 together with page's readers: (a) digit-normalised matching for personal entries (match the value's digits with any non-digit separators between them, for values with at least 7 digits); (b) readers scrub their joined text, never per node, and core adds a prefix-of-value rule for an ellipsis-truncated tail of at least 8 characters; (c) add a capitalised base (first letter of each word upper-cased) for non-ASCII values. Accepted for Phase 1 without a fix: HTML entities (readers return decoded text, rule 5), quoted-printable (mail is read through the browser UI), punycode (IDN hosts only), unzeroed library internals (memory hygiene, documented in vault.rs)."
+    needs_user: false
 
 interface_changes:
   - id: B-101
@@ -41,6 +51,11 @@ interface_changes:
     interface: I-2
     change: "Additive pub items in harness_core::mcp: serve_io(server, registry, harness, reader, writer), PROTOCOL_VERSION, scrub_value(vault, &Value); new module harness_core::ask (FileAsker, answer, asks_dir, card_path, answer_path). Behaviour: tools/call for a name not in the registry answers JSON-RPC error -32602 (MCP 2025-06-18 'Unknown tool'), not isError; dispatch() still returns ToolError::Args for it."
     why: "Listed so the contract file can name them; serve_io is the test seam for the stdio transport, answer() is what T-08's `harness ask` calls. Default: as implemented in T-07."
+  - id: B-150
+    from: core
+    interface: I-4
+    change: "Additive pub items in harness_core::vault: fn default_path() -> Result<PathBuf, VaultError> (SB_VAULT_PATH, else <config_dir>/sheetbrowse/vault.toml.age; D-101), fn default_key() -> KeySource (keychain service `sheetbrowse`, account `vault`; D-101), const MIN_VALUE_CHARS: usize = 4 (D-118). VaultError gains ValueTooShort { name, min } (set or open of a non-empty value under MIN_VALUE_CHARS characters) and ScrubUnavailable (the scrub automaton could not be built; set writes nothing). Adding variants breaks an exhaustive match on VaultError; the only one is harness-core's own test vault_accept_t05 row 5, updated."
+    why: "The CLI (`harness vault set`) and bootstrap need one definition of the D-101 defaults; D-118 needs typed errors so a refused short value and a failed scrubber are reported instead of silently over-scrubbing or withholding every output. Default until supreme answers: as implemented in T-05 round 3."
   - id: B-31
     task: T-11
     question: "Supreme second-opinion review of swarm/store (approve after D-74) left four should-fix items for toolstore. (1) valid_name allows upper case, so on NTFS `Register` and `register` are one file but two tools.health rows, and reforge never checks that the new @name equals the name it was called with (lifecycle.rs reforge, invariants.rs). (2) check_repair accepts a re-forge from @phase 2 to @phase 1 (gains page.api) and a change of @kind. (3) accept_t11 g4_no_new_vault_key's canary is never fed into any input, so that check cannot fail. (4) archive renames then sets mtime; if set_mtime fails the archived copy keeps its old mtime and the next sweep can delete it before 90 days (D-303). Also: tool_path/archive_path #[deprecated] per D-72."
