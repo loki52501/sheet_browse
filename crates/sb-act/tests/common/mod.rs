@@ -1,7 +1,7 @@
 //! Shared I-5 wire-JSON index fixtures for the T-19 sb-act acceptance tests. Items 1-6
 //! (accept_t19_classify.rs), items 7-11 (accept_t19_round2.rs) and items 12-18
-//! (accept_t19_round3.rs) use the same rows, and the lowering guards (items 11 and 18)
-//! walk every fixture listed in [`ALL`].
+//! (accept_t19_round3.rs) and items 19-23 (accept_t19_round4.rs) use the same rows, and
+//! the lowering guards (items 11, 18 and 22) walk every fixture listed in [`ALL`].
 #![allow(dead_code)]
 
 /// bench/pages/register.html as the live walk would ship it (B-5): nav links, #signup (f1)
@@ -288,6 +288,80 @@ pub const D407: &str = r#"[
   {"id":281,"frame":0,"role":"button","name":"Cancel or go back","landmark":"dialog"}
 ]"#;
 
+/// D-408 (1)(3). f70: a card form ("Payment") with non-submit buttons: Pay words
+/// (#302 "Complete purchase", #303 "Confirm", menuitem #304 "Place bid"), no Pay word
+/// (#305 "Show details", #306 "Back to top"), a link #307 and a checkbox #308; f71: a
+/// "Checkout" form with a non-submit "Submit" and "Edit address"; f72: a neutral form
+/// with Pay-word buttons and a bare "Confirm"; f73: signup with a non-submit "Create
+/// account"; f74: a login with one; f75: a "Change password" button; #350..#353: formless
+/// buttons and a link sharing the "Pay with card" heading of f76; #355/#356: a formless
+/// "Add" sharing "Passkeys" with f77; #360..#362: formless buttons with no shared heading
+/// (#362 has the "Pay with card" heading, but in frame 1, where no form row is); #370..#379:
+/// leave group and wipe device, with negatives.
+pub const D408: &str = r#"[
+  {"id":300,"frame":0,"role":"textbox","name":"Card number","heading":"Payment",
+   "state":{"input_type":"text","autocomplete":"cc-number"},"form":"f70"},
+  {"id":301,"frame":0,"role":"textbox","name":"Promo code","heading":"Payment",
+   "state":{"input_type":"text"},"form":"f70"},
+  {"id":302,"frame":0,"role":"button","name":"Complete purchase","heading":"Payment","form":"f70"},
+  {"id":303,"frame":0,"role":"button","name":"Confirm","heading":"Payment","form":"f70"},
+  {"id":304,"frame":0,"role":"menuitem","name":"Place bid","heading":"Payment","form":"f70"},
+  {"id":305,"frame":0,"role":"button","name":"Show details","heading":"Payment","form":"f70"},
+  {"id":306,"frame":0,"role":"button","name":"Back to top","heading":"Payment","form":"f70"},
+  {"id":307,"frame":0,"role":"link","name":"Complete purchase","heading":"Payment","form":"f70"},
+  {"id":308,"frame":0,"role":"checkbox","name":"Subscribe to offers","heading":"Payment",
+   "state":{"checked":false,"input_type":"checkbox"},"form":"f70"},
+  {"id":310,"frame":0,"role":"textbox","name":"Full name","heading":"Checkout",
+   "state":{"input_type":"text"},"form":"f71"},
+  {"id":311,"frame":0,"role":"button","name":"Submit","heading":"Checkout","form":"f71"},
+  {"id":312,"frame":0,"role":"button","name":"Edit address","heading":"Checkout","form":"f71"},
+  {"id":320,"frame":0,"role":"textbox","name":"Amount","heading":"Step 2",
+   "state":{"input_type":"text"},"form":"f72"},
+  {"id":321,"frame":0,"role":"button","name":"Pay now","heading":"Step 2","form":"f72"},
+  {"id":322,"frame":0,"role":"button","name":"Buy now","heading":"Step 2","form":"f72"},
+  {"id":323,"frame":0,"role":"button","name":"Donate","heading":"Step 2","form":"f72"},
+  {"id":324,"frame":0,"role":"button","name":"Top up","heading":"Step 2","form":"f72"},
+  {"id":325,"frame":0,"role":"button","name":"Renew","heading":"Step 2","form":"f72"},
+  {"id":326,"frame":0,"role":"button","name":"Order now","heading":"Step 2","form":"f72"},
+  {"id":327,"frame":0,"role":"button","name":"Confirm","heading":"Step 2","form":"f72"},
+  {"id":330,"frame":0,"role":"textbox","name":"Email","heading":"Sign up",
+   "state":{"input_type":"email"},"form":"f73"},
+  {"id":331,"frame":0,"role":"button","name":"Create account","heading":"Sign up","form":"f73"},
+  {"id":332,"frame":0,"role":"button","name":"Show password","heading":"Sign up","form":"f73"},
+  {"id":335,"frame":0,"role":"textbox","name":"Email","heading":"Sign in",
+   "state":{"input_type":"email","autocomplete":"username"},"form":"f74"},
+  {"id":336,"frame":0,"role":"textbox","name":"Password","heading":"Sign in",
+   "state":{"input_type":"password","autocomplete":"current-password"},"form":"f74"},
+  {"id":337,"frame":0,"role":"button","name":"Create account","heading":"Sign in","form":"f74"},
+  {"id":338,"frame":0,"role":"button","name":"Sign in","heading":"Sign in",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f74"},
+  {"id":340,"frame":0,"role":"textbox","name":"Email","heading":"Profile",
+   "state":{"input_type":"email"},"form":"f75"},
+  {"id":341,"frame":0,"role":"button","name":"Change password","heading":"Profile","form":"f75"},
+  {"id":350,"frame":0,"role":"textbox","name":"Card number","heading":"Pay with card",
+   "state":{"input_type":"text","autocomplete":"cc-number"},"form":"f76"},
+  {"id":351,"frame":0,"role":"button","name":"Complete","heading":"Pay with card"},
+  {"id":352,"frame":0,"role":"button","name":"Show details","heading":"Pay with card"},
+  {"id":353,"frame":0,"role":"link","name":"Complete","heading":"Pay with card"},
+  {"id":355,"frame":0,"role":"textbox","name":"Name","heading":"Passkeys",
+   "state":{"input_type":"text"},"form":"f77"},
+  {"id":356,"frame":0,"role":"button","name":"Add","heading":"Passkeys"},
+  {"id":360,"frame":0,"role":"button","name":"Create account"},
+  {"id":361,"frame":0,"role":"button","name":"Create account","heading":"Welcome"},
+  {"id":362,"frame":1,"role":"button","name":"Complete","heading":"Pay with card"},
+  {"id":370,"frame":0,"role":"button","name":"Leave group","heading":"Family"},
+  {"id":371,"frame":0,"role":"button","name":"Leave this group","heading":"Family"},
+  {"id":372,"frame":0,"role":"button","name":"Wipe device","heading":"Devices"},
+  {"id":373,"frame":0,"role":"button","name":"Wipe this device","heading":"Devices"},
+  {"id":374,"frame":0,"role":"button","name":"Leave group","heading":"Group settings",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f78"},
+  {"id":375,"frame":0,"role":"button","name":"Confirm","heading":"Leave group?"},
+  {"id":376,"frame":0,"role":"button","name":"Leave feedback","heading":"Family"},
+  {"id":377,"frame":0,"role":"button","name":"Leave a comment","heading":"Family"},
+  {"id":378,"frame":0,"role":"button","name":"Group settings","heading":"Family"},
+  {"id":379,"frame":0,"role":"button","name":"Device settings","heading":"Devices"}
+]"#;
+
 /// Every fixture in the acceptance suite, for the lowering guards (items 11 and 18).
 pub const ALL: &[(&str, &str)] = &[
     ("REGISTER", REGISTER),
@@ -302,4 +376,46 @@ pub const ALL: &[(&str, &str)] = &[
     ("D406", D406),
     ("PLANNER", PLANNER),
     ("D407", D407),
+    ("D408", D408),
 ];
+
+/// Item 22 (raise-only, hard rule 4): the key values every row is probed with, besides a
+/// click, a type, a select and an upload. The pre-D-408 baseline in
+/// `bench/fixtures/t19_pre_d408_classes.txt` was written with exactly this list, in this
+/// order; changing it means regenerating the baseline with `crates/sb-act/src` at 3122050.
+pub const RAISE_KEYS: &[&str] = &[
+    "Enter",
+    "Space",
+    "Tab",
+    "Delete",
+    "a",
+    "\r",
+    "\n",
+    "Enter+Shift",
+    "Shift+Enter",
+    " Enter",
+    "Enter\t",
+    "NumpadEnter",
+    "Return",
+    "Enterprise",
+];
+
+/// Item 22: the programs every row is probed with, as `(label, program)`. Key values go
+/// through `quote` (D-52) so control characters survive the parser.
+pub fn raise_programs(r: &sb_sheet::IndexRow) -> Vec<(String, String)> {
+    let rf = if r.frame == 0 {
+        format!("#{}", r.id)
+    } else {
+        format!("#f{}.{}", r.frame, r.id)
+    };
+    let mut out = vec![
+        ("c".to_string(), format!("c{rf}")),
+        ("t".to_string(), format!("t{rf}=x")),
+        ("s".to_string(), format!("s{rf}=x")),
+        ("u".to_string(), format!("u{rf}=files/a.pdf")),
+    ];
+    for (i, k) in RAISE_KEYS.iter().enumerate() {
+        out.push((format!("k{i}"), format!("k{rf}={}", sb_act::quote(k))));
+    }
+    out
+}

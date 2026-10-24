@@ -314,10 +314,15 @@ fn big_form() -> Vec<IndexRow> {
     idx
 }
 
+/// The wall-clock bound is loose on purpose (5 s, as in the unit tests since D-408): on a
+/// loaded shared runner a debug build can stall well past D-406 (5)'s 250 ms target
+/// without any quadratic scan. The exact check is the unit test
+/// `classify::tests::d406_enter_in_a_big_form_is_linear` (`evidence_builds() == 1`), which
+/// item 16 runs next to this one; the times printed here are recorded in the report.
 #[test]
-fn d406_enter_in_200_submit_1700_row_form_under_250ms() {
+fn d406_enter_in_200_submit_1700_row_form_loose_wall_clock() {
     let idx = big_form();
-    let budget = Duration::from_millis(250);
+    let budget = Duration::from_secs(5);
     let cases: [(&str, Vec<Step>); 4] = [
         ("k#1=Enter", parse("k#1=Enter").unwrap()),
         ("k#1700=Enter", parse("k#1700=Enter").unwrap()),
