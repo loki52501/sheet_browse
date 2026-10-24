@@ -1,0 +1,80 @@
+<!doctype html>
+<!--
+  bench/pages/accept-pw.html: password and masked fields for the T-19 acceptance (B-5, D-405 (1),
+  D-426, D-429 (1)). The test fills every sensitive field with one canary and then drives the
+  site's own handlers:
+    #p1   type=password, a show toggle that swaps type to text (then more typing)
+    #p2   type=password, swapped to text by the test before the first walk (attributeOldValue)
+    #m1   type=text masked by a class with -webkit-text-security, class removed later
+    #m2   type=text masked by an inline style, style removed later
+    #ac   type=text autocomplete=current-password, attribute removed later
+    #nm   type=text name=pw-confirm (D-429 sensitive name)
+    #r1   type=password rebuilt by replaceWith into a neutral type=text input carrying the value
+    #w-in type=password whose wrapper div is rebuilt with a neutral type=text input
+    #r3   type=password removed, a neutral type=text input appended to the same parent
+    #nick ordinary text field (control: its value is read)
+  Replacement fields have neutral names and ids, so only inheritance can mark them sensitive.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Password fields · acceptance fixture</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; }
+  label { display: block; margin-top: 6px; }
+  .masked { -webkit-text-security: disc; }
+</style>
+<script>
+  function showPw() { document.getElementById("p1").type = "text"; }
+  function neutral(id, name, label, value) {
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = id;
+    n.name = name;
+    n.setAttribute("aria-label", label);
+    n.value = value;
+    return n;
+  }
+  function rebuildOne() {
+    const o = document.getElementById("r1");
+    o.replaceWith(neutral("plain-copy", "shown", "Shown field", o.value));
+  }
+  function rebuildWrap() {
+    const w = document.getElementById("wrap");
+    const d = document.createElement("div");
+    d.id = "wrap-b";
+    const s = document.createElement("span");
+    s.textContent = "Shown";
+    d.append(s, neutral("wrap-copy", "visible", "Wrapped field", w.querySelector("input").value));
+    w.replaceWith(d);
+  }
+  function moveAppend() {
+    const o = document.getElementById("r3");
+    const p = o.parentNode;
+    const v = o.value;
+    o.remove();
+    p.appendChild(neutral("appended-copy", "entry", "Appended field", v));
+  }
+</script>
+</head>
+<body>
+<main>
+  <h1>Sign in</h1>
+  <form id="f1" action="/login" method="post">
+    <label>Nickname <input id="nick" name="nick"></label>
+    <label>Password one <input id="p1" name="password" type="password"></label>
+    <button id="btn-show" type="button" onclick="showPw()">Show password</button>
+    <label>Password two <input id="p2" name="p2" type="password"></label>
+    <label>PIN <input id="m1" name="m1" type="text" class="masked"></label>
+    <label>Passcode <input id="m2" name="m2" type="text" style="-webkit-text-security: disc"></label>
+    <label>Current <input id="ac" name="ac" type="text" autocomplete="current-password"></label>
+    <label>Confirm <input id="nm" name="pw-confirm" type="text"></label>
+    <span id="slot"><input id="r1" name="r1" type="password" aria-label="Rebuilt one"></span>
+    <button id="btn-rebuild" type="button" onclick="rebuildOne()">Rebuild</button>
+    <div id="wrap"><input id="w-in" name="w-in" type="password" aria-label="Wrapped one"></div>
+    <button id="btn-wrap" type="button" onclick="rebuildWrap()">Rebuild wrapper</button>
+    <div id="holder"><input id="r3" name="r3" type="password" aria-label="Appended one"></div>
+    <button id="btn-append" type="button" onclick="moveAppend()">Re-append</button>
+    <button type="submit">Sign in</button>
+  </form>
+</main>
+</body>
+</html>

@@ -1,0 +1,20 @@
+<!doctype html>
+<!--
+  bench/pages/accept-just-a-moment.html: the Cloudflare interstitial title "Just a moment..." on
+  the site's own host, for the T-19 acceptance of the challenge-page shape (D-405 (3), D-424).
+  Expected: one CHALLENGE row (role document), one text block, frames() only self with
+  challenge: true; nothing inside (marker "zqx") is read. Self-contained, no network.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Just a moment...</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; }</style>
+</head>
+<body>
+<main>
+  <h1>shop.example.test zqx</h1>
+  <p>Checking if the site connection is secure zqx.</p>
+  <form id="chk"><input id="q" name="q" value="zqx-inner-value" aria-label="Field zqx"><button id="go" type="submit">Continue zqx</button></form>
+  <iframe id="kid" title="Widget zqx" srcdoc="<p>widget zqx</p>"></iframe>
+</main>
+</body>
+</html>

@@ -1,0 +1,27 @@
+<!doctype html>
+<!--
+  bench/pages/accept-challenge-page.html: an ordinary page with a form, a link, a frame and
+  marker text "zqx", for the T-19 acceptance of the challenge-page shape (D-73, D-424). Served at
+  /accept-challenge-page.html it is a normal page (control). Served at
+  /cdn-cgi/challenge-platform/accept-challenge-page.html (a challenge path, D-405 (3)) it must be
+  index() = one CHALLENGE row (role document), text() = one other block linking it,
+  frames() = only self with challenge: true, and nothing inside (no "zqx") may be read.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Inner page · acceptance fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } iframe { width: 300px; height: 80px; }</style>
+</head>
+<body>
+<main>
+  <h1>Inner heading zqx</h1>
+  <p>Inner paragraph zqx with some text.</p>
+  <form id="inner" action="/go">
+    <label for="q">Inner field zqx</label>
+    <input id="q" name="q" value="zqx-inner-value">
+    <button id="go" type="submit">Inner go</button>
+  </form>
+  <iframe id="kid" title="Inner frame" srcdoc="<p>child zqx</p>"></iframe>
+  <p><a id="lnk" href="/elsewhere">Inner link zqx</a></p>
+</main>
+</body>
+</html>

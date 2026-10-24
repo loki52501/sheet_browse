@@ -786,3 +786,382 @@ test("A7 fixtures: popup, dialog, spa, overlay, frames present and exercised", a
   }
   t.diagnostic("ACCEPT A7 " + notes.join("; "));
 });
+
+// ================================================================== round 2 (tester-7)
+// Pins what D-405, D-425, D-426, D-429 and D-73 (I-11) promise and no test pinned in Chromium.
+
+const NB = { why: "no base" };
+const flat = (blocks) => blocks.map((b) => b.spans.map((s) => s.text).join("")).join(" / ");
+
+// ------------------------------------------------------------------ A8 no-base shapes
+test("A8 no base (D-73, D-425): every reading call answers exactly {why:\"no base\"} before walk({base}); role/resolve/act/settle work; nothing issued", async (t) => {
+  const o = await open("register.html", { base: null, media: true });
+  const out = await o.ev(async () => {
+    const sb = globalThis.__sb;
+    const m = globalThis.__sbMedia;
+    const btn = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Register");
+    const pw = document.querySelector('input[name="password"]');
+    const r = {};
+    r.id = sb.id(btn);
+    r.idPw = sb.id(pw);
+    r.idHtml = sb.id(document.documentElement);
+    r.index = sb.index();
+    r.text = sb.text();
+    r.textF1 = sb.text("f1");
+    r.textMain = sb.text("main");
+    r.fp = sb.fingerprint('button "Register" SUBMIT');
+    r.fpEmpty = sb.fingerprint("");
+    r.state = sb.state(btn);
+    r.statePw = sb.state(pw);
+    r.name = sb.name(btn);
+    r.frames = sb.frames();
+    const walks = [undefined, null, true, false, {}, { dirty: true }, { dirty: [1, 2] }, { base: "5" }, { base: "#5" },
+      { base: 0 }, { base: -1 }, { base: 1.5 }, { base: NaN }, { base: Infinity }, { base: 2 ** 53 }, { base: null },
+      { base: true }, { base: [1] }, { base: {} }];
+    const show = (w) => (w === undefined ? "undefined" : JSON.stringify(w, (k, v) => (typeof v === "number" && !Number.isFinite(v) ? String(v) : v)));
+    r.walks = walks.map((w) => ({ arg: show(w), got: sb.walk(w) }));
+    r.walkNoArg = sb.walk();
+    r.role = sb.role(btn);
+    r.resolve1 = sb.resolve(1);
+    r.resolveRef = sb.resolve("#1");
+    r.resolveBig = sb.resolve(99999);
+    r.act = await sb.act(1);
+    r.settle = await sb.settle({ cap: 400 });
+    r.mList = m.list();
+    r.mCues = m.cues(1);
+    r.mFrame = await m.frame(1, 0.1);
+    r.mFrames = await m.frames(1, [0.1, 0.2]);
+    // then the first based walk: everything issued is >= base, so nothing was issued before
+    r.based = sb.walk({ base: 700 });
+    r.idAfter = sb.id(btn);
+    r.rows = sb.index();
+    r.resolve699 = sb.resolve(699);
+    r.later = sb.walk({ base: 5 });
+    r.idLater = sb.id(btn);
+    return r;
+  });
+  const keys = ["id", "idPw", "idHtml", "index", "text", "textF1", "textMain", "fp", "fpEmpty", "state", "statePw", "name",
+    "frames", "walkNoArg", "mList", "mCues"];
+  for (const k of keys) {
+    assert.deepEqual(out[k], NB, k);
+    assert.equal(JSON.stringify(out[k]), JSON.stringify(NB), k);
+  }
+  for (const w of out.walks) assert.deepEqual(w.got, NB, "walk(" + w.arg + ")");
+  // media frame()/frames() use their entry shape for a whole-call refusal ({t: null, why}, as
+  // for gone/challenge/DRM; I-11 promises a bare {why} only for list() and cues())
+  assert.equal(out.mFrame.why, "no base", JSON.stringify(out.mFrame));
+  assert.ok(!("hash" in out.mFrame) && !("data" in out.mFrame));
+  assert.ok(Array.isArray(out.mFrames) && out.mFrames.length >= 1, JSON.stringify(out.mFrames));
+  for (const e of out.mFrames) {
+    assert.equal(e.why, "no base", JSON.stringify(out.mFrames));
+    assert.ok(!("hash" in e) && !("data" in e));
+  }
+  assert.equal(out.role, "button");
+  assert.deepEqual(out.resolve1, { why: "stale" });
+  assert.deepEqual(out.resolveRef, { why: "stale" });
+  assert.deepEqual(out.resolveBig, { why: "stale" });
+  assert.deepEqual(out.act, { why: "stale" });
+  assert.equal(typeof out.settle.settled, "boolean");
+  assert.equal(typeof out.settle.changed, "number");
+  assert.ok(out.based.count > 15, JSON.stringify(out.based));
+  assert.ok(out.idAfter >= 700, String(out.idAfter));
+  const minId = Math.min(...out.rows.map((r) => r.id));
+  assert.ok(minId >= 700, "an id below base was issued before the first based walk: " + minId);
+  assert.deepEqual(out.resolve699, { why: "stale" });
+  assert.equal(out.idLater, out.idAfter, "a later base is ignored");
+  t.diagnostic(`ACCEPT A8 ${keys.length + out.walks.length} calls answered exactly {why:"no base"}; media frame(1,0.1) -> ${JSON.stringify(out.mFrame)}, ` +
+    `frames(1,[0.1,0.2]) -> ${JSON.stringify(out.mFrames)}; ` +
+    `act(1) ${JSON.stringify(out.act)}; settle ${JSON.stringify(out.settle)}; first based walk ${JSON.stringify(out.based)}, min id ${minId}`);
+
+  // pushState keeps the document and its ids; a navigation makes a new, un-based document
+  await o.page.evaluate(() => history.pushState({}, "", "/register.html#step2"));
+  const regId = () => o.ev(() => globalThis.__sb.id(Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Register")));
+  assert.equal(await regId(), out.idAfter, "pushState keeps the ids");
+  await o.page.goto(A.origin + "/popup.html", { waitUntil: "load" });
+  const nav = await o.ev((i) => ({
+    index: globalThis.__sb.index(), text: globalThis.__sb.text(), frames: globalThis.__sb.frames(),
+    resolve: globalThis.__sb.resolve(i), walk: globalThis.__sb.walk({ dirty: true }),
+  }), out.idAfter);
+  assert.deepEqual(nav, { index: NB, text: NB, frames: NB, resolve: { why: "stale" }, walk: NB });
+  const nb = await o.ev(() => ({ w: globalThis.__sb.walk({ base: 2000 }), rows: globalThis.__sb.index() }));
+  assert.ok(nb.rows.length > 0 && nb.rows.every((r) => r.id >= 2000));
+
+  // a same-origin child frame needs its own based walk
+  const f = await open("frames.html");
+  const sf = (await f.frames()).find((x) => x.url === A.origin + "/frame-child.html");
+  assert.ok(sf);
+  const child = await f.ev(() => ({ index: globalThis.__sb.index(), frames: globalThis.__sb.frames(), text: globalThis.__sb.text() }), undefined, sf.id);
+  assert.deepEqual(child, { index: NB, frames: NB, text: NB });
+  assert.ok(Array.isArray(await f.ev(() => globalThis.__sb.index())), "the parent is based");
+  t.diagnostic(`ACCEPT A8 after goto: ${JSON.stringify(nav)}; child frame before its walk: ${JSON.stringify(child)}`);
+});
+
+// ------------------------------------------------------------------ A9 challenge page shapes
+const TEXT_KEYS = new Set(["order", "frame", "kind", "level", "landmark", "heading", "spans"]);
+const ROW_KEYS = new Set(["id", "frame", "role", "name", "state", "flags", "box"]);
+async function challengePage(t, o, label) {
+  const pre = await o.ev(() => ({ index: globalThis.__sb.index(), text: globalThis.__sb.text(), frames: globalThis.__sb.frames() }));
+  assert.deepEqual(pre, { index: NB, text: NB, frames: NB }, label + ": no base comes before the challenge answer");
+  const r = await o.ev(async () => {
+    const sb = globalThis.__sb;
+    const out = {};
+    out.walk = sb.walk({ base: 1 });
+    out.htmlId = sb.id(document.documentElement);
+    out.index = sb.index();
+    out.text = sb.text();
+    out.textMain = sb.text("main");
+    out.frames = sb.frames();
+    const q = document.getElementById("q");
+    const go = document.getElementById("go");
+    out.nameQ = sb.name(q);
+    out.stateQ = sb.state(q);
+    out.nameGo = sb.name(go);
+    out.goId = sb.id(go);
+    out.actGo = await sb.act(out.goId);
+    out.actPage = await sb.act(out.htmlId);
+    out.fp = sb.fingerprint("button \"" + go.textContent + "\"");
+    const b = document.createElement("button");
+    b.textContent = "Late zqx";
+    document.querySelector("main").append(b);
+    out.walkDirty = sb.walk({ dirty: true });
+    out.walkFull = sb.walk({});
+    out.index2 = sb.index();
+    out.vp = { w: innerWidth, h: innerHeight, cw: document.documentElement.clientWidth, ch: document.documentElement.clientHeight };
+    out.host = location.hostname;
+    return out;
+  });
+  const blob = JSON.stringify(r);
+  assert.deepEqual(r.walk, { count: 1 }, label);
+  assert.deepEqual(r.walkDirty, { count: 1 }, label);
+  assert.deepEqual(r.walkFull, { count: 1 }, label);
+  assert.equal(r.index.length, 1, label + " " + JSON.stringify(r.index));
+  const row = r.index[0];
+  assert.equal(row.id, r.htmlId, label + ": the row is the documentElement");
+  assert.equal(row.role, "document");
+  assert.equal(row.name, `challenge page (${r.host})`);
+  assert.deepEqual(row.flags, { challenge: true });
+  assert.ok(row.state === undefined || JSON.stringify(row.state) === "{}", JSON.stringify(row.state));
+  assert.deepEqual(Object.keys(row).filter((k) => !ROW_KEYS.has(k)), [], label);
+  assert.equal(row.frame, 0);
+  assert.ok(row.box && row.box.x === 0 && row.box.y === 0, JSON.stringify(row.box));
+  assert.ok([r.vp.w, r.vp.cw].includes(row.box.w) && [r.vp.h, r.vp.ch].includes(row.box.h), JSON.stringify({ box: row.box, vp: r.vp }));
+  assert.deepEqual(r.index2, r.index, label + ": still one row after a DOM change");
+  const res = spawnSync(process.execPath, [path.join(__dirname, "check-wire-shape.js"), dump("challenge-" + label, r.index)], { encoding: "utf8" });
+  assert.equal(res.status, 0, res.stdout + res.stderr);
+  // text(): one other block that links the row
+  assert.equal(r.text.length, 1, label + " " + JSON.stringify(r.text));
+  const tb = r.text[0];
+  assert.equal(tb.kind, "other");
+  assert.deepEqual(Object.keys(tb).filter((k) => !TEXT_KEYS.has(k)), []);
+  assert.ok(tb.spans.length >= 1 && tb.spans.some((s) => s.elem === "#" + row.id), JSON.stringify(r.text));
+  assert.ok(tb.spans.every((s) => s.elem === undefined || s.elem === "#" + row.id));
+  assert.ok(Array.isArray(r.textMain), JSON.stringify(r.textMain));
+  // frames(): only self, challenge true
+  assert.equal(r.frames.length, 1, label + " " + JSON.stringify(r.frames));
+  assert.equal(r.frames[0].frame, 0);
+  assert.equal(r.frames[0].parent, null);
+  assert.equal(r.frames[0].challenge, true);
+  // nothing inside is read; acts refused
+  assert.equal(r.nameQ, "");
+  assert.equal(r.stateQ, null);
+  assert.equal(r.nameGo, "");
+  assert.deepEqual(r.actGo, { why: "challenge" });
+  assert.deepEqual(r.actPage, { why: "challenge" });
+  assert.equal(r.fp, "miss");
+  assert.equal(/zqx|Inner|Continue/.test(blob), false, label + ": page content leaked: " + blob);
+  t.diagnostic(`ACCEPT A9 ${label}: index ${JSON.stringify(r.index)} text ${JSON.stringify(r.text)} textMain ${JSON.stringify(r.textMain)} ` +
+    `frames ${JSON.stringify(r.frames)} act ${JSON.stringify(r.actGo)}`);
+}
+
+test("A9 challenge page (D-73, D-424): one CHALLENGE document row, one other text block, frames() self only; nothing inside read", async (t) => {
+  // control: the same page on an ordinary path is read normally
+  const n = await open("accept-challenge-page.html");
+  const nr = fill(await n.ev(() => globalThis.__sb.index()));
+  assert.ok(byName(nr, "Inner go", "button") && !nr.some((r) => r.flags.challenge), JSON.stringify(nr.map(sig)));
+  assert.match(flat(await n.ev(() => globalThis.__sb.text())), /zqx/);
+  const nf = await n.ev(() => globalThis.__sb.frames());
+  assert.equal(nf.length, 2);
+  assert.equal(nf[0].challenge, false);
+  // a challenge path and the interstitial title
+  await challengePage(t, await open("cdn-cgi/challenge-platform/accept-challenge-page.html", { base: null }), "path");
+  await challengePage(t, await open("accept-just-a-moment.html", { base: null }), "title");
+});
+
+// ------------------------------------------------------------------ A10 password canary
+test("A10 password value never in index()/text()/state()/name() after type swap, -webkit-text-security, autocomplete, pw- name, rebuilds (D-405 (1), D-426, D-429 (1))", async (t) => {
+  const secret = process.env.SB_VAULT_CANARY || "sbpw" + crypto.randomBytes(12).toString("hex");
+  const o = await open("accept-pw.html", { base: null });
+  const SENS = ["p1", "p2", "m1", "m2", "ac", "nm", "r1", "w-in", "r3", "plain-copy", "wrap-copy", "appended-copy"];
+  // trap the value getter in world sb before anything reads
+  await o.ev((ids) => {
+    const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    globalThis.__pwReads = {};
+    Object.defineProperty(HTMLInputElement.prototype, "value", {
+      configurable: true,
+      enumerable: d.enumerable,
+      get() {
+        if (ids.includes(this.id)) globalThis.__pwReads[this.id] = (globalThis.__pwReads[this.id] || 0) + 1;
+        return d.get.call(this);
+      },
+      set(v) {
+        d.set.call(this, v);
+      },
+    });
+  }, SENS);
+  await o.page.fill("#nick", "ada");
+  await o.page.fill("#p1", secret.slice(0, 6));
+  await o.page.locator("#p1").pressSequentially(secret.slice(6));
+  for (const id of ["p2", "m1", "m2", "ac", "nm", "r1", "w-in", "r3"]) await o.page.fill("#" + id, secret);
+  // p2's type swaps before the first walk (D-426: the observer saw the old type)
+  await o.page.evaluate(() => { document.getElementById("p2").type = "text"; });
+  const read = (lbl) => o.ev(async (l) => {
+    const sb = globalThis.__sb;
+    const r = { label: l };
+    r.walkDirty = sb.walk({ dirty: true });
+    r.index = sb.index();
+    r.text = sb.text();
+    r.textF1 = sb.text("f1");
+    r.frames = sb.frames();
+    r.fp = sb.fingerprint("textbox \"Password one\" textbox \"Shown field\"");
+    r.per = {};
+    for (const el of document.querySelectorAll("input")) {
+      const id = sb.id(el);
+      r.per[el.id] = { id, name: sb.name(el), role: sb.role(el), state: sb.state(el), act: await sb.act(id) };
+    }
+    r.settle = await sb.settle({ cap: 400 });
+    r.walkFull = sb.walk({});
+    r.index2 = sb.index();
+    r.text2 = sb.text();
+    return r;
+  }, lbl);
+  await o.ev(() => globalThis.__sb.walk({ base: 1 }));
+  const r1 = await read("before");
+  // the site's own handlers: show toggle and three rebuilds; masking and autocomplete dropped
+  await o.page.click("#btn-show");
+  await o.page.click("#btn-rebuild");
+  await o.page.click("#btn-wrap");
+  await o.page.click("#btn-append");
+  await o.page.evaluate(() => {
+    document.getElementById("m1").classList.remove("masked");
+    document.getElementById("m2").removeAttribute("style");
+    document.getElementById("ac").removeAttribute("autocomplete");
+  });
+  const facts = await o.page.evaluate(() => ({
+    p1: document.getElementById("p1").type,
+    copies: ["plain-copy", "wrap-copy", "appended-copy"].map((i) => document.getElementById(i).value.length),
+    gone: ["r1", "w-in", "r3"].filter((i) => document.getElementById(i)).length,
+  }));
+  assert.equal(facts.p1, "text");
+  assert.deepEqual(facts.copies, [secret.length, secret.length, secret.length], "the rebuilt fields carry the value");
+  assert.equal(facts.gone, 0);
+  // more real typing into the toggled field (input events after the swap)
+  await o.page.locator("#p1").pressSequentially("zz");
+  const r2 = await read("after");
+  const reads = await o.ev(() => globalThis.__pwReads);
+  const blob = JSON.stringify([r1, r2]);
+  const df = dump("pw-canary", [r1, r2]);
+  assert.deepEqual(reads, {}, "world sb called the value getter of a sensitive field: " + JSON.stringify(reads));
+  assert.equal(blob.includes(secret), false, "secret found in __sb output");
+  if (secret.length >= 8) {
+    for (let i = 0; i + 8 <= secret.length; i += 2) {
+      assert.equal(blob.includes(secret.slice(i, i + 8)), false, "a fragment of the secret found in __sb output");
+    }
+  }
+  const kinds = {};
+  for (const r of [r1, r2]) {
+    for (const [id, p] of Object.entries(r.per)) {
+      if (id === "nick") continue;
+      assert.ok(p.state && p.state.value && ["empty", "filled"].includes(p.state.value.kind) && !("text" in p.state.value),
+        `${r.label} ${id} ${JSON.stringify(p.state)}`);
+      kinds[r.label + ":" + id] = p.state.value.kind;
+      const row = r.index2.find((x) => x.id === p.id);
+      assert.ok(row, `${r.label} ${id} has a row`);
+      assert.ok(row.state && row.state.value && ["empty", "filled"].includes(row.state.value.kind), `${r.label} ${id} row ${JSON.stringify(row.state)}`);
+      assert.equal(typeof p.act.x, "number", `${r.label} ${id} act ${JSON.stringify(p.act)}`);
+    }
+    assert.deepEqual(r.per.nick.state.value, { kind: "text", text: "ada" }, "control: the ordinary field is read");
+  }
+  for (const id of ["p1", "p2", "m1", "m2", "ac", "nm", "r1", "w-in", "r3"]) assert.equal(kinds["before:" + id], "filled", "before " + id);
+  for (const id of ["p1", "p2", "m1", "m2", "ac", "nm", "plain-copy", "wrap-copy", "appended-copy"]) {
+    assert.equal(kinds["after:" + id], "filled", "after " + id);
+  }
+  t.diagnostic(`ACCEPT A10 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""} absent from ${blob.length} bytes ` +
+    `(dump ${path.basename(df)}); sb value-getter reads on sensitive fields ${JSON.stringify(reads)}; kinds ${JSON.stringify(kinds)}`);
+});
+
+// ------------------------------------------------------------------ A11 D-429 challenge text
+test("A11 challenge text (D-429 (2), D-422): press-and-hold UI and an Are-you-human quiz are not CHALLENGE; widgets and real prompts are", async (t) => {
+  const o = await open("accept-challenge-text.html");
+  const idOf = (sel) => o.ev((s) => globalThis.__sb.id(document.querySelector(s)), sel);
+  const rows0 = fill(await o.ev(() => globalThis.__sb.index()));
+  assert.deepEqual(rows0.filter((r) => r.flags.challenge).map(sig), [], "no CHALLENGE row on ordinary UI");
+  assert.ok(byName(rows0, "Are you human?", "heading"));
+  const f0 = await o.ev(() => globalThis.__sb.frames());
+  assert.equal(f0[0].challenge, false);
+  const text0 = flat(await o.ev(() => globalThis.__sb.text()));
+  for (const re of [/Press and hold Shift/, /mic button to talk/, /record a voice message/, /what makes us human/]) assert.match(text0, re);
+  for (const sel of ["#files-in", "#mic", "#hold", "#start"]) {
+    const a = await timedAct(o, await idOf(sel));
+    assert.equal(typeof a.r.x, "number", sel + " " + JSON.stringify(a.r));
+  }
+  // positives added to the same page: an hCaptcha box, PerimeterX press-and-hold, strong prompts
+  await o.page.evaluate(() => {
+    document.getElementById("extra").innerHTML =
+      "<div id=\"hc\" class=\"h-captcha\" data-sitekey=\"fixture\" style=\"width:300px;height:60px\"></div>" +
+      "<div id=\"px\"><p id=\"px-p\">Press &amp; Hold to confirm you are a human (and not a bot).</p>" +
+      "<div id=\"px-captcha\" style=\"width:300px;height:50px\"></div></div>" +
+      "<p id=\"robot\">Are you a robot?</p><p id=\"vh\">Verify you are human</p>";
+  });
+  await o.ev(() => globalThis.__sb.walk({ dirty: true }));
+  const rows1 = fill(await o.ev(() => globalThis.__sb.index()));
+  const ch1 = new Set(rows1.filter((r) => r.flags.challenge).map((r) => r.id));
+  const chNames = JSON.stringify(rows1.filter((r) => r.flags.challenge).map(sig));
+  for (const sel of ["#hc", "#px-p", "#px-captcha", "#robot", "#vh"]) assert.ok(ch1.has(await idOf(sel)), sel + " is CHALLENGE: " + chNames);
+  assert.ok(byName(rows1, "Are you human?", "heading").flags.challenge, "with a widget on the page the quiz heading is a prompt (D-429 (2))");
+  assert.ok(!rows1.some((r) => r.flags.challenge && /Shift|mic|voice|Hold to talk|Mic|Files|Start the quiz/.test(r.name)), chNames);
+  assert.deepEqual((await timedAct(o, await idOf("#px-captcha"))).r, { why: "challenge" });
+  assert.equal(typeof (await timedAct(o, await idOf("#mic"))).r.x, "number", "the mic button stays actionable next to a real widget");
+  // widgets removed again: back to no CHALLENGE (the context change forces a full walk)
+  await o.page.evaluate(() => { document.getElementById("extra").textContent = ""; });
+  await o.ev(() => globalThis.__sb.walk({ dirty: true }));
+  const rows2 = fill(await o.ev(() => globalThis.__sb.index()));
+  assert.deepEqual(rows2.filter((r) => r.flags.challenge).map(sig), []);
+
+  // bench/pages challenge fixtures
+  const it = await open("challenge-interstitial.html");
+  const ir = fill(await it.ev(() => globalThis.__sb.index()));
+  const ich = ir.filter((r) => r.flags.challenge);
+  assert.equal(ich.length, 2, JSON.stringify(ich.map(sig)));
+  assert.ok(ich.some((r) => r.name === "Verify you are human by completing the action below."));
+  const wHost = await it.ev(() => globalThis.__sb.id(document.getElementById("widget")));
+  assert.ok(ich.some((r) => r.id === wHost), "the closed-shadow widget host is CHALLENGE");
+  for (const r of ich) assert.deepEqual((await timedAct(it, r.id)).r, { why: "challenge" });
+  const help = byName(ir, "Why am I seeing this page?", "link");
+  assert.ok(help && !help.flags.challenge);
+  assert.equal(typeof (await timedAct(it, help.id)).r.x, "number");
+
+  const w = await open("challenge-widgets.html");
+  const wid = (sel) => w.ev((s) => globalThis.__sb.id(document.querySelector(s)), sel);
+  const wr = fill(await w.ev(() => globalThis.__sb.index()));
+  const wch = wr.filter((r) => r.flags.challenge).map((r) => r.id).sort((a, b) => a - b);
+  assert.deepEqual(wch, [await wid("#arkose iframe"), await wid(".geetest_holder"), await wid("#hc")].sort((a, b) => a - b));
+  for (const id of wch) assert.deepEqual((await timedAct(w, id)).r, { why: "challenge" });
+  for (const n of ["Username", "Sign in"]) {
+    const r = byName(wr, n);
+    assert.ok(r && !r.flags.challenge, n);
+    assert.equal(typeof (await timedAct(w, r.id)).r.x, "number", n);
+  }
+  const wf = await w.ev(() => globalThis.__sb.frames());
+  const ark = wf.find((f) => f.name === "Verification challenge");
+  const badge = wf.find((f) => f.name === "reCAPTCHA");
+  assert.ok(ark && ark.challenge === true, JSON.stringify(wf));
+  assert.ok(badge && badge.challenge === false, JSON.stringify(wf));
+  assert.equal(wf[0].challenge, false);
+
+  const art = await open("how-captchas-work.html");
+  const ar = fill(await art.ev(() => globalThis.__sb.index()));
+  assert.ok(!ar.some((r) => r.flags.challenge), JSON.stringify(ar.filter((r) => r.flags.challenge).map(sig)));
+  assert.match(flat(await art.ev(() => globalThis.__sb.text())), /not a robot/);
+  t.diagnostic(`ACCEPT A11 negatives: 0 CHALLENGE rows of ${rows0.length}; positives: ${ch1.size} CHALLENGE rows after widgets (${chNames}); ` +
+    `interstitial ${ich.length} CHALLENGE (acts refused), widgets ${wch.length} CHALLENGE, badge frame challenge=${badge.challenge}, article 0`);
+});
