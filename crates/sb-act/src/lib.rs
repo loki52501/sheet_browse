@@ -107,7 +107,7 @@ pub struct ActClass {
 }
 
 /// One step's class from its target's row and form context (B-7, D-402, D-433, D-434,
-/// D-58, D-403, D-404, D-406, D-407, D-408).
+/// D-58, D-403, D-404, D-406, D-407, D-408, D-409).
 ///
 /// CHALLENGE target: Challenge. Target missing from the index: Submit. A click on a
 /// SUBMIT/submitish row is Submit raised by the form (max wins): Pay for card/IBAN/CVC/
@@ -121,20 +121,22 @@ pub struct ActClass {
 /// unsubscribe/trash/close account/clear history, data or all/`cancel <x>` on the button,
 /// form heading or form name. Other clicks: Delete by the same text rule, or for an
 /// affirmative button (confirm/yes/ok/continue/proceed) whose own heading, form or dialog
-/// carries Delete evidence; Pay for an "Upgrade" button (not a link); for a button or
-/// menuitem (not a link) in a form or sharing a heading with one, the submit's own-name Pay
-/// and Account checks, and Pay for any single Pay word when the form has Pay evidence
-/// (D-408 (1)); Fill on
+/// carries Delete evidence; for a button or menuitem (not a link), with or without a form,
+/// Pay for "Upgrade" or checkout text in its own name (D-409 (2)); for a button or menuitem
+/// in a form or sharing a heading with one, the submit's own-name Account checks too, and
+/// Pay for any single Pay word when the form has Pay evidence (D-408 (1)); Fill on
 /// checkbox/radio/switch/option/tab, else Navigate (a bare Cancel or Close is Navigate).
 ///
-/// Key steps (D-403 (1), D-406 (1)): Tab, Escape, arrows, Home/End/PageUp/PageDown,
-/// modifiers alone and typing into a text field (not a file input) are Fill; Delete on a
-/// non-text row is Delete; Enter (in any chord segment, D-408 (2)), or a raw `\r`/`\n` in the key value, on any row in a form
-/// is the max of a click on the row and the form's implicit submission (at least Submit,
-/// with the form's evidence even without a submit row, and the max over every submit of
-/// the form), and in a formless text field it is Submit raised by its headings; any other
-/// key, unknown keys and keys holding a control character included, is a click on its
-/// row. Type, select and upload: Fill; scroll: Navigate; wait and `?s`: Read.
+/// Key steps (D-403 (1), D-406 (1), D-409 (1)) take the max over every class their chord
+/// segments imply. Tab, Escape, arrows, Home/End/PageUp/PageDown, modifiers alone and
+/// typing into a text field (not a file input) are Fill; Delete or Del in any segment, or
+/// a DEL character, on a non-text row is at least Delete; Enter (in any chord segment,
+/// D-408 (2)), or a raw `\r`/`\n` in the key value, on any row in a form is the max of a
+/// click on the row and the form's implicit submission (at least Submit, with the form's
+/// evidence even without a submit row, and the max over every submit of the form), and in
+/// a formless text field it is Submit raised by its headings; any other key, unknown keys
+/// and keys holding a control character included, is a click on its row. Type, select
+/// and upload: Fill; scroll: Navigate; wait and `?s`: Read.
 /// Hints: `job_application` for a submit in a form with a resume/CV upload or an
 /// apply/application heading; `signature` for e-sign submits.
 pub fn classify_step(step: &Step, index: &[IndexRow]) -> ActClass {

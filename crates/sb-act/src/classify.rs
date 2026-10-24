@@ -199,16 +199,28 @@ impl<'a> Ctx<'a> {
     ///   a letter on a link, `F13`...), so a key step is never below a `c#` on the same
     ///   target except for the Fill cases above. Backspace on a non-text row is such a
     ///   click, not Delete (sanctioned as coded by D-407).
+    ///
+    /// D-409 (1): the result is the max over everything the segments imply, so the Delete
+    /// rule also applies to `Delete`/`Del` in any segment and to DEL anywhere in the key,
+    /// next to Enter or not (`"Enter+Delete"`, `"Delete+Enter"`, `"Enter\u{7f}"`).
     fn key_press(&self, row: &'a IndexRow, key: &str) -> ActClass {
-        if key.contains(['\r', '\n']) || names_enter(key) {
+        let mut out = self.key_base(row, key);
+        // D-404 (3): Delete on a selected mail, file or list row deletes it (Gmail, Drive).
+        // Inside a text field it only edits text (a Fill above, or a click on the field).
+        let deletes = key.contains('\u{7f}') || names_segment(key, &["delete", "del"]);
+        if deletes && !is_text_field(row) {
+            merge(&mut out, plain(Class::Delete));
+        }
+        out
+    }
+
+    /// [`Ctx::key_press`] before the D-409 (1) Delete merge.
+    fn key_base(&self, row: &'a IndexRow, key: &str) -> ActClass {
+        if key.contains(['\r', '\n']) || names_segment(key, &["enter", "return", "numpadenter"]) {
             return self.enter(row);
         }
         if key.chars().any(char::is_control) {
-            let mut out = self.click(row);
-            if key.contains('\u{7f}') && !is_text_field(row) {
-                merge(&mut out, plain(Class::Delete));
-            }
-            return out;
+            return self.click(row);
         }
         let (mods, k) = split_key(key);
         if matches!(k.as_str(), "enter" | "numpadenter" | "return") {
@@ -230,13 +242,8 @@ impl<'a> Ctx<'a> {
         if shift_only && editing && is_text_field(row) {
             return plain(Class::Fill);
         }
-        let mut out = self.click(row);
-        // D-404 (3): Delete on a selected mail, file or list row deletes it (Gmail, Drive).
-        // Inside a text field it only edits text (above, or a click on the field with Ctrl).
-        if matches!(k.as_str(), "delete" | "del") && !is_text_field(row) {
-            merge(&mut out, plain(Class::Delete));
-        }
-        out
+        // Delete on a non-text row is merged by the caller (D-404 (3), D-409 (1)).
+        self.click(row)
     }
 
     fn click(&self, row: &'a IndexRow) -> ActClass {
@@ -255,7 +262,10 @@ impl<'a> Ctx<'a> {
         if matches!(row.role.as_str(), "button" | "menuitem") {
             // D-406 (7): an "Upgrade" button changes the plan; an "Upgrade" link only opens
             // the pricing page.
-            if has_any(&toks, &["upgrade"]) {
+            // D-409 (2): checkout phrases on the button's own name are Pay with or without
+            // a form (a formless "Pay $20.00", a card form in another frame). The strict
+            // phrase list only, not the single PAY_TOKENS words.
+            if has_any(&toks, &["upgrade"]) || pay_words(&toks, &row.name) {
                 class = class.max(Class::Pay);
             }
             class = class.max(self.form_button(row, &toks));
@@ -382,16 +392,13 @@ fn split_key(key: &str) -> (Vec<String>, String) {
     (mods, last)
 }
 
-/// Enter, Return or NumpadEnter as any segment of a key value split at `+`, whitespace
-/// and control characters (D-408 (2)): `"Enter+Shift"`, `"Enter+"`, `" Enter"`,
-/// `"Enter\t"`. Whole segments only, so `"Enterprise"` is not Enter.
-fn names_enter(key: &str) -> bool {
+/// One of `names` (lowercase) as any segment of a key value split at `+`, whitespace and
+/// control characters, ignoring ASCII case (D-408 (2), D-409 (1)): Enter in
+/// `"Enter+Shift"`, `"Enter+"`, `" Enter"`, `"Enter\t"`; Delete in `"Delete+Enter"`.
+/// Whole segments only, so `"Enterprise"` is not Enter and `"Delegate"` is not Del.
+fn names_segment(key: &str, names: &[&str]) -> bool {
     key.split(|c: char| c == '+' || c.is_whitespace() || c.is_control())
-        .any(|s| {
-            ["enter", "return", "numpadenter"]
-                .iter()
-                .any(|e| s.eq_ignore_ascii_case(e))
-        })
+        .any(|s| names.iter().any(|n| s.eq_ignore_ascii_case(n)))
 }
 
 fn is_text_field(row: &IndexRow) -> bool {
@@ -2670,6 +2677,99 @@ mod tests {
             let idx = vec![form(submit(row(1, "button", name)), "f1")];
             assert_eq!(cls("c#1", &idx), Class::Delete, "submit {name}");
         }
+    }
+
+    #[test]
+    fn d409_chord_max_and_formless_pay() {
+        let key_class = |idx: &[IndexRow], target: u32, key: &str| {
+            let step = Step::Key {
+                target: ElemRef::main(target),
+                key: key.into(),
+            };
+            classify_step(&step, idx).class
+        };
+        let chords = [
+            "Enter+Delete",
+            "Enter+Del",
+            "Control+Enter+Delete",
+            "Return+Shift+Delete",
+            "Enter\u{7f}",
+            "\u{7f}Enter",
+            "Delete+Enter",
+            "Delete+a",
+            "Del Enter",
+        ];
+        // (1) A formless mail row (Gmail, D-404 (3)): every chord is Delete.
+        let mail = [row(1, "row", "Invoice")];
+        for key in chords {
+            assert_eq!(key_class(&mail, 1, key), Class::Delete, "{key:?}");
+        }
+        // Non-text rows in a form: at least Delete; Pay forms stay Pay.
+        let signup = vec![
+            form(input(row(1, "textbox", "Email"), "email", None), "f1"),
+            form(row(2, "checkbox", "Remember me"), "f1"),
+            form(submit(row(3, "button", "Create account")), "f1"),
+        ];
+        let card = vec![
+            form(
+                input(row(1, "textbox", "Card number"), "text", Some("cc-number")),
+                "f3",
+            ),
+            form(row(2, "checkbox", "Save card"), "f3"),
+            form(submit(row(3, "button", "Continue")), "f3"),
+        ];
+        for key in chords {
+            assert!(key_class(&signup, 2, key) >= Class::Delete, "{key:?}");
+            let k = key.to_lowercase();
+            let want = if k.contains("enter") || k.contains("return") {
+                Class::Pay
+            } else {
+                Class::Delete
+            };
+            assert_eq!(key_class(&card, 2, key), want, "{key:?}");
+        }
+        // Inside a text field Delete only edits text: Enter still submits the form.
+        assert_eq!(key_class(&signup, 1, "Enter+Delete"), Class::Account);
+        assert_eq!(key_class(&signup, 1, "Shift+Delete"), Class::Fill);
+        assert_eq!(
+            key_class(&[row(1, "textbox", "Note")], 1, "Delete+a"),
+            Class::Navigate
+        );
+        // Whole segments only.
+        assert_eq!(key_class(&mail, 1, "Delegate"), Class::Navigate);
+        assert_eq!(key_class(&mail, 1, "Backspace+Enter"), Class::Navigate);
+        // (2) Pay phrases on a button or menuitem without a form.
+        assert_eq!(cls("c#1", &[row(1, "button", "Pay now")]), Class::Pay);
+        assert_eq!(cls("k#1=Enter", &[row(1, "button", "Pay now")]), Class::Pay);
+        assert_eq!(cls("k#1=Space", &[row(1, "menuitem", "Buy")]), Class::Pay);
+        let summary = [heading(row(1, "button", "Pay $20.00"), "Order summary")];
+        assert_eq!(cls("c#1", &summary), Class::Pay);
+        // A Stripe-style checkout: the card form sits in another frame.
+        let mut card_frame = heading(
+            form(
+                input(row(21, "textbox", "Card number"), "text", Some("cc-number")),
+                "f1",
+            ),
+            "Checkout",
+        );
+        card_frame.frame = 2;
+        let idx = vec![
+            card_frame,
+            heading(row(5, "button", "Complete purchase"), "Checkout"),
+        ];
+        assert_eq!(cls("c#5", &idx), Class::Pay);
+        // Negatives: generic buttons and a Pay link.
+        assert_eq!(
+            cls("c#1", &[row(1, "button", "Back to top")]),
+            Class::Navigate
+        );
+        assert_eq!(
+            cls("c#1", &[row(1, "button", "Show details")]),
+            Class::Navigate
+        );
+        assert_eq!(cls("c#1", &[row(1, "link", "Pay")]), Class::Navigate);
+        assert_eq!(cls("k#1=Enter", &[row(1, "link", "Pay")]), Class::Navigate);
+        assert_eq!(cls("c#1", &[row(1, "button", "Confirm")]), Class::Navigate);
     }
 
     /// A page-wide form: `submits` SUBMIT rows, then text fields, `rows` in all.
