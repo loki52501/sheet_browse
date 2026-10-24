@@ -14,6 +14,11 @@
 # proposals item:         reflect writes forge proposals, _generic merges, pinned-tool retirements
 
 blockers:
+  - id: B-31
+    task: T-11
+    question: "Supreme second-opinion review of swarm/store (approve after D-74) left four should-fix items for toolstore. (1) valid_name allows upper case, so on NTFS `Register` and `register` are one file but two tools.health rows, and reforge never checks that the new @name equals the name it was called with (lifecycle.rs reforge, invariants.rs). (2) check_repair accepts a re-forge from @phase 2 to @phase 1 (gains page.api) and a change of @kind. (3) accept_t11 g4_no_new_vault_key's canary is never fed into any input, so that check cannot fail. (4) archive renames then sets mtime; if set_mtime fails the archived copy keeps its old mtime and the next sweep can delete it before 90 days (D-303). Also: tool_path/archive_path #[deprecated] per D-72."
+    default_taken: "Not merge blockers. Area store fixes all five in its next task before toolforge (T-28) consumes reforge and check_repair: lower-case-only names (or case-folded health keys) plus a @name check in reforge, reject @phase lowering and @kind changes in check_repair, feed the canary, and record the archive time in the archive row (or fail the archive) instead of relying on mtime."
+    needs_user: false
   - id: B-311
     task: T-11
     question: "check_repair's ?s count (invariants::stop_count) is a text heuristic and can be gamed (a dead `const x = \"?s\"` keeps the count; a regex literal can confuse the comment stripper). Is a static count enough for T-9?"

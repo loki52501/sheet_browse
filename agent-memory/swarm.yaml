@@ -27,7 +27,7 @@ areas:
     tasks: [T-11]
     docs: [docs/03-TOOL-STORE.md]
     status: pr_open
-    merged: false
+    merged: true   # f493fd3, 2026-10-23 17:33: gate ok T-11, cargo test --workspace 135 passed 0 failed
   page:
     wave: 1
     crates: [injected, sb-act]
