@@ -1,0 +1,18 @@
+from: page/rust-coder
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "D-409 applied in commit 361b28d (crates/sb-act/src/classify.rs, lib.rs), raise-only, no pub signature change (I-10). (1) Ctx::key_press = key_base (the old path, Enter branch first) then merge Delete when the key holds U+007F or any segment split at '+', whitespace or control chars is delete/del, on a non-text row. Enter+Delete, Enter+Del, Control+Enter+Delete, Return+Shift+Delete, Enter\\u{7f}, \\u{7f}Enter, Delete+Enter on a formless mail row are Delete; on non-text rows of a form at least Delete (Pay in a card form). names_enter became names_segment(key, names). (2) Ctx::click: a button or menuitem (not a link) whose own name matches pay_words is Pay with or without a form (formless 'Pay now', 'Pay $20.00' under 'Order summary', 'Complete purchase' with the card form in frame 2). 'Back to top', 'Show details', a formless 'Confirm' and a link 'Pay' stay Navigate. (3) lib.rs classify_step doc rewrapped, no line over 100 columns. New unit test d409_chord_max_and_formless_pay. Gates (unpiped, TMP on F:): fmt --check clean, clippy --all-targets -D warnings clean, cargo test -p sb-act all green (lib 60, classify 16, forms 11, quote_fuzz 6, round2 18, round3 15, round4 8, wire 3). Item 22 guard: 3078 probes, 381 raised, 0 lowered."
+not_done: "1) Reviewer and tester on 361b28d. 2) Split-heading 2SV set-up stays Submit (D-409 (3), no change). 3) Nit 'New password' field without autocomplete still open. 4) tests/accept_t19_round3.rs 250 ms wall-clock bound (tester-owned) unchanged."
+gotchas:
+  - "A non-Enter chord with Delete (Delete+a) on a card-form checkbox is Delete, not Pay: only Enter chords take the form max."
+  - "Enter+Delete inside a text field is still the Enter class (Account/Submit), Delete is never merged on text fields."
+  - "pay_words on a formless menuitem now raises 'Payment methods' or 'Buy' menu entries to Pay: one extra ask, per D-409 (2)."
+  - "A pre-commit hook (dotpals) blocks commits after another agent edits injected/test/*.js until the JS tests are rerun; node --test injected/test/ takes about 135 s."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-act/src/classify.rs
+  - crates/sb-act/src/lib.rs
+  - agent-memory/handoffs/T-19-rust-coder-8.yaml
+verify: "cargo fmt -p sb-act --check && cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act"
