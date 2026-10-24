@@ -115,3 +115,99 @@ D-402-sanctioned gap (non-submit Pay buttons), a key-chord contract that sb-driv
 match, and word-list synonyms. All three are Should under D-407.
 
 Verdict: approve
+
+# Round 4 (reviewer-6): 0554c29, D-408
+
+Scope: 0554c29 (`crates/sb-act/src/classify.rs`, `lib.rs`), with main merged in (73e2aa0).
+Tester files under `crates/sb-act/tests/` were not reviewed.
+
+Gates (unpiped, TMP on F:): `cargo fmt -p sb-act --check` is clean. `cargo clippy -p sb-act
+--all-targets -- -D warnings` is clean. `cargo test -p sb-act` passes: lib 59, classify 16,
+forms 11, quote_fuzz 6, round2 18, round3 15 and wire 3, with 0 failed.
+
+Method: I exported 0554c29^ and HEAD with `git archive` into my scratchpad. I ran one probe
+on both (separate target dirs). It covered every row of `common::ALL` plus 17 extra rows, as
+`c#` and 31 key values, so 4,480 steps. I diffed the classes. Nothing was written to the
+worktree.
+
+## Round 3 items
+
+- R3 Should 1, non-submit Pay/Account buttons: **resolved within D-408 scope**
+  (`Ctx::form_button`, classify.rs:273-303). "Complete purchase", Confirm, Place bid,
+  Order now, Top up, Renew, Create account and a passkey Add are raised. Show details and
+  Back to top stay Navigate. Links are untouched. Test at classify.rs:2561.
+- R3 Should 2, Enter not last or with control chars: **resolved** (`names_enter`,
+  classify.rs:388-395). Enter+Shift, Enter+, Enter+a, `Enter\t`, `\tEnter` and `Enter\0`
+  in a card form now give Pay. Enterprise is not Enter. But see Blocking 1.
+- R3 Should 3: Leave group and Wipe device are **resolved** (classify.rs:801-802). The
+  split-heading 2SV set-up is still open (Should 3 below).
+- R3 Nits: the 146-column doc line is wrapped, and the unit-test time bounds are 5 s.
+  **Resolved.**
+
+## Blocking
+
+1. classify.rs:203-205: **D-408 (2) lowers Enter+Delete chords from Delete.** The new
+   `names_enter` branch returns `self.enter(row)` before the D-404 (3) Delete merge
+   (classify.rs:234-238) and the DEL-character merge (classify.rs:208-210) can run.
+   Old->new probe on a formless mail `row` "Invoice" (the Gmail case D-404 (3) exists for):
+   `Enter+Delete`, `Enter+Del`, `Control+Enter+Delete`, `Return+Shift+Delete`,
+   `Enter\u{7f}` and `\u{7f}Enter` go from Delete to Navigate. On non-text rows in a form
+   they go from Delete to Submit or Account. The probe found 378 lowered steps over the
+   fixtures, all from these 7 key shapes, and no other lowering. D-408 is raise-only, and
+   D-407 makes a key-path lowering Blocking (hard rule 4). Fix: in the Enter branch, merge
+   the old result. For example, merge Delete when any segment is delete/del or the key
+   holds U+007F on a non-text row, or `merge(&mut out, <pre-D-408 path>)`. Add these
+   chords to a lowering test.
+
+## Should fix
+
+1. classify.rs:277-288: **the heading-shared lookup is same-frame only, and a formless
+   button with no form near it is never raised.** Probes: a formless "Complete purchase"
+   under heading "Payment", with the cc-number field in a Stripe-style iframe (frame 2,
+   heading "Payment"), gives Navigate. A formless "Pay $20.00" or "Place order" button with
+   no form gives Navigate. D-408 scopes the raise to form context, so this is per spec.
+   Hosted card iframes plus a formless parent-frame Pay button are a common checkout
+   shape. Proposed raise-only rule for suborch: apply `pay_words` (the strict phrase list,
+   not `PAY_TOKENS`) to any button or menuitem's own name, whatever its form context.
+2. classify.rs:213-216 (pre-existing, not from D-408): **Delete in a non-last chord
+   segment is lost.** `Delete+Enter` on the mail row is Navigate before and after this
+   commit. This is the mirror of R3 Should 2 for Delete. Fix it in the same change as
+   Blocking 1: any delete/del segment on a non-text row merges Delete.
+3. Carried from R3 Should 3: the 2SV phone set-up is Submit when "2-Step Verification" and
+   "Set up your phone" are on different heading rows. This is a word gap, Should per D-407.
+
+## Notes
+
+- Raise-only check for (1) and (3): with a click, the probe found no lowering. Every class
+  that changed went up, and `form_button` only feeds `class.max` (classify.rs:261). The
+  Class order is Pay > Delete > Account (core/src/class.rs:15-25), so returning Pay before
+  checking Account never hides a higher class. No existing fixture lowers on any step
+  except the Blocking 1 key shapes.
+- `PAY_TOKENS` (classify.rs:660-679) includes order, place, submit, confirm and transfer.
+  So in a form with Pay evidence, an "Order details" toggle or a "Transfer" tab button asks
+  for Pay. That is a false-positive ask and only raises. "Continue" and "Next" in a card
+  form stay Navigate, which matches D-408's "any Pay word".
+- Spec ids: the commit implements D-408 (1)-(3) as written. Two extras go beyond the text,
+  and both only raise. (a) Pay evidence is `ev.pay`, meaning card or IBAN field or checkout
+  text, where D-408 says "card evidence". (b) Menuitems are covered too. The coder's note
+  that a type=button "Create account" in a login form is now Account also only raises.
+- Interface I-10: no pub item changed (lib.rs diff is docs only). Main's I-10 with
+  `ChallengeTarget{step}` matches the code.
+- Hard rules: the crate is still pure, with no I/O, sleeps or env. `form_button` and
+  `names_enter` take no unwrap or index on input. Rules 1, 2, 3, 5 and 7 do not apply.
+- Tests: `d408_form_buttons_enter_chords_delete_words` (classify.rs:2561) asserts exact
+  classes, with negatives (Show details, Back to top, links, formless, Enterprise). It does
+  not cover a Delete chord, which is how Blocking 1 got through. The tester's item-18
+  lowering guard missed it too, because its fixtures lack Enter+Delete keys.
+- Nit: lib.rs:132 is a 126-column doc line, and lib.rs:127 ends a doc line early at
+  "(D-408 (1)); Fill on".
+- The tester-owned `accept_t19_round3.rs` still has a 250 ms wall-clock bound (coder
+  handoff not_done 2).
+
+## Round 4 verdict
+
+D-408 (1) and (3) are correct and raise-only. D-408 (2) closes the round-3 Enter gap but
+opens a structural lowering: Enter+Delete chords and Enter plus DEL drop from Delete. That
+breaks D-408's raise-only rule and hard rule 4.
+
+Verdict: request changes
