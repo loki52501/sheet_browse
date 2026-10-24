@@ -393,7 +393,6 @@ fn r2_4_debug_spelling_with_control_char() {
 // went into JSON (a serialized ledger/jsonl line scrubbed as a whole) or into {:?} again
 // (`Result<_, String>::unwrap()` where the String already holds a {:?}).
 #[test]
-#[ignore = "red-first T-05 round 2"]
 fn r2_4b_debug_control_char_nested_in_json() {
     let c = canary();
     let d = format!("{c}\u{1}x");
@@ -408,7 +407,6 @@ fn r2_4b_debug_control_char_nested_in_json() {
 }
 
 #[test]
-#[ignore = "red-first T-05 round 2"]
 fn r2_4c_debug_control_char_nested_in_debug() {
     let c = canary();
     let d = format!("{c}\u{1}x");
@@ -855,7 +853,6 @@ fn r2_7_panic_with_broken_stderr_does_not_abort() {
 // R2-4d (probe, end to end for R2-4c): the panic hook prints the nested-{:?} unwrap
 // message with the value in it.
 #[test]
-#[ignore = "red-first T-05 round 2"]
 fn r2_4d_panic_hook_nested_debug_unwrap_is_scrubbed() {
     if std::env::var_os(CHILD_ENV).is_some() {
         return;

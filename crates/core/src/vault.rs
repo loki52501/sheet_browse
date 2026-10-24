@@ -17,7 +17,15 @@
 //! and its encoded spellings (JSON, Rust Debug, every common percent-encoding including
 //! the browser's WHATWG URL sets, double percent-encoding, and Unicode case forms; see
 //! [`spellings`]). All overlapping matches are found and the union of their spans is
-//! replaced, so two entries that overlap in the text leave no fragment behind.
+//! replaced, so two entries that overlap in the text leave no fragment behind. A match
+//! lying wholly inside an `@vault(name)` literal of an existing entry (or inside the
+//! `@vault(` of any opener) is ignored, so scrub output stays parseable and
+//! `scrub(scrub(s)) == scrub(s)` (D-118).
+//!
+//! Value floor (D-118): `set` refuses, and `open` refuses a file holding, a non-empty
+//! value shorter than [`MIN_VALUE_CHARS`] characters. Matched case-insensitively, such a
+//! value (a middle initial, a state code) hits ordinary words everywhere and protects
+//! almost nothing. Empty values are allowed and scrub nothing.
 //!
 //! Plaintext hygiene: values, decrypted plaintext, the serialized TOML and every
 //! scrub spelling live in `Zeroizing` buffers sized up front so they never reallocate
@@ -28,7 +36,7 @@
 //! non-ASCII values, and the aho-corasick automaton's pattern store, which holds every
 //! spelling for the scrubber's lifetime.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
@@ -53,6 +61,28 @@ pub enum VaultError {
     Io(#[from] std::io::Error),
     #[error("vault decrypt or parse failed")]
     Decrypt,
+    /// A non-empty value shorter than `min` characters (D-118). The name only.
+    #[error(
+        "vault entry {name:?} is shorter than {min} characters; a value that short cannot be scrubbed without destroying ordinary text"
+    )]
+    ValueTooShort { name: String, min: usize },
+    /// The scrub automaton could not be built; `set` wrote nothing (D-118).
+    #[error("vault scrubber could not be built; the vault was not changed")]
+    ScrubUnavailable,
+}
+
+/// The shortest non-empty value `set` and `open` accept, in characters (D-118).
+pub const MIN_VALUE_CHARS: usize = 4;
+
+/// `ValueTooShort` when `value` is non-empty and under [`MIN_VALUE_CHARS`] characters.
+fn check_value(name: &str, value: &str) -> Result<(), VaultError> {
+    if !value.is_empty() && value.chars().nth(MIN_VALUE_CHARS - 1).is_none() {
+        return Err(VaultError::ValueTooShort {
+            name: name.to_owned(),
+            min: MIN_VALUE_CHARS,
+        });
+    }
+    Ok(())
 }
 
 /// `kind` of an entry (H-2): credentials vs. the user's form data.
@@ -166,6 +196,8 @@ impl fmt::Debug for Vault {
 impl Vault {
     /// Opens and decrypts `path` (`vault.toml.age`).
     /// A missing file opens as an empty vault without touching the key (D-101).
+    /// A file holding a value under [`MIN_VALUE_CHARS`] characters is `ValueTooShort`; a
+    /// scrubber that cannot be built is `ScrubUnavailable` (D-118).
     pub fn open(path: &Path, key: &KeySource) -> Result<Vault, VaultError> {
         let entries = match std::fs::read(path) {
             Ok(ciphertext) => {
@@ -176,7 +208,7 @@ impl Vault {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(e) => return Err(VaultError::Io(e)),
         };
-        let scrubber = Arc::new(Scrubber::build(&entries));
+        let scrubber = Arc::new(Scrubber::try_build(&entries)?);
         Ok(Vault {
             entries,
             backing: Some(Backing {
@@ -189,6 +221,9 @@ impl Vault {
 
     /// In-memory vault for tests. Fixtures must use a planted canary (`SB_VAULT_CANARY`), never a real value.
     /// A later entry with the same name replaces an earlier one. `set` on it writes no file.
+    /// Unlike `open`, it accepts values under [`MIN_VALUE_CHARS`] (fixtures pick their
+    /// values), and if the scrubber cannot be built every scrub withholds its whole input
+    /// as `@vault(?) [output withheld: ...]` (fail closed).
     pub fn in_memory(entries: impl IntoIterator<Item = (String, String, EntryKind)>) -> Vault {
         let entries: BTreeMap<String, Entry> = entries
             .into_iter()
@@ -213,40 +248,45 @@ impl Vault {
     /// `harness vault set <name> [--personal]`: add or replace an entry and re-encrypt.
     ///
     /// `name` must be `[A-Za-z0-9_.-]+` so that `@vault(name)` can reference it; otherwise
-    /// `BadReference(byte offset of the first bad char in name)`. For a file-backed vault
+    /// `BadReference(byte offset of the first bad char in name)`. A non-empty `value`
+    /// under [`MIN_VALUE_CHARS`] characters is `ValueTooShort` (D-118). For a file-backed vault
     /// the whole read-modify-write runs under an exclusive lock on `<vault file>.lock`:
     /// the current file is re-read and decrypted (so entries set by other processes since
     /// `open` are kept and picked up), the change applied, and the file rewritten
     /// atomically (temp file + rename). When neither the vault file nor the identity
     /// exists yet, a fresh identity is generated and stored in the key source first,
-    /// also under the lock. If the vault is the installed global one, the global scrub
-    /// follows.
+    /// also under the lock. The new scrubber is built before the file is written: if it
+    /// cannot be built, `ScrubUnavailable` and nothing changes. If the vault is the
+    /// installed global one, the global scrub follows.
     pub fn set(&mut self, name: &str, value: &str, kind: EntryKind) -> Result<(), VaultError> {
         if let Some(bad) = invalid_name_at(name) {
             return Err(VaultError::BadReference(bad));
         }
+        check_value(name, value)?;
         let entry = Entry {
             value: Zeroizing::new(value.to_owned()),
             kind,
         };
-        let next = match &self.backing {
+        let (next, scrubber) = match &self.backing {
             None => {
                 let mut next = clone_entries(&self.entries);
                 next.insert(name.to_owned(), entry);
-                next
+                let scrubber = Scrubber::try_build(&next)?;
+                (next, scrubber)
             }
             Some(backing) => {
                 let lock = lock_exclusive(&backing.path)?;
                 let (identity, mut next) = current_locked(backing, &self.entries)?;
                 next.insert(name.to_owned(), entry);
+                let scrubber = Scrubber::try_build(&next)?;
                 let ciphertext = encrypt_entries(&identity, &next)?;
                 write_atomic(&backing.path, &ciphertext)?;
                 // Closing the handle releases the lock.
                 drop(lock);
-                next
+                (next, scrubber)
             }
         };
-        let scrubber = Arc::new(Scrubber::build(&next));
+        let scrubber = Arc::new(scrubber);
         replace_global_if_installed(&self.scrubber, &scrubber);
         self.entries = next;
         self.scrubber = scrubber;
@@ -382,7 +422,10 @@ fn parse_refs(s: &str) -> Result<Vec<Ref<'_>>, VaultError> {
 // Scrubbing (D-102)
 
 /// What [`Scrubber::scrub`] returns when the automaton could not be built: the whole
-/// string is withheld (fail closed) rather than passed through unscrubbed.
+/// string is withheld (fail closed) rather than passed through unscrubbed. Only an
+/// [`Vault::in_memory`] vault can get here; `open` and `set` return `ScrubUnavailable`
+/// instead (D-118). `@vault(?)` is itself a malformed reference, so `vault_refs` and
+/// `resolve_into` on text holding the marker give `BadReference`: still fail closed.
 const SCRUB_WITHHELD: &str = "@vault(?) [output withheld: vault scrubber unavailable]";
 
 enum Matcher {
@@ -397,6 +440,43 @@ struct Scrubber {
     matcher: Matcher,
     /// Replacement literal per pattern id.
     literals: Vec<String>,
+    /// Names of the entries with a value, for [`literal_ranges`].
+    names: BTreeSet<String>,
+}
+
+/// Byte ranges scrub never matches inside, sorted and disjoint: every `@vault(name)`
+/// literal whose `name` is in `names` (what scrub itself writes), and the fixed
+/// `@vault(` text of any other opener. The name inside an unknown or malformed literal
+/// is not protected: a value someone else wrapped in `@vault(...)` is still scrubbed.
+fn literal_ranges(s: &str, names: &BTreeSet<String>) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(i) = s[from..].find(REF_OPEN) {
+        let start = from + i;
+        let name_start = start + REF_OPEN.len();
+        let name_len = s.as_bytes()[name_start..]
+            .iter()
+            .position(|&b| !is_name_byte(b))
+            .unwrap_or(s.len() - name_start);
+        let close = name_start + name_len;
+        if name_len > 0
+            && s.as_bytes().get(close) == Some(&b')')
+            && names.contains(&s[name_start..close])
+        {
+            out.push((start, close + 1));
+            from = close + 1;
+        } else {
+            out.push((start, name_start));
+            from = name_start;
+        }
+    }
+    out
+}
+
+/// True when `[start, end)` lies wholly inside one of `ranges` (sorted, disjoint).
+fn inside_literal(ranges: &[(usize, usize)], start: usize, end: usize) -> bool {
+    let i = ranges.partition_point(|&(s, _)| s <= start);
+    i > 0 && end <= ranges[i - 1].1
 }
 
 /// A redacted byte range of the scrubbed text and the match that names it.
@@ -478,13 +558,27 @@ fn merge_spans(matches: impl Iterator<Item = Span>) -> Vec<Span> {
 }
 
 impl Scrubber {
+    /// [`Scrubber::build`] for `open` and `set`: a failed build is an error (D-118).
+    fn try_build(entries: &BTreeMap<String, Entry>) -> Result<Scrubber, VaultError> {
+        Scrubber::build(entries).checked()
+    }
+
+    fn checked(self) -> Result<Scrubber, VaultError> {
+        match self.matcher {
+            Matcher::Failed => Err(VaultError::ScrubUnavailable),
+            _ => Ok(self),
+        }
+    }
+
     fn build(entries: &BTreeMap<String, Entry>) -> Scrubber {
         let mut patterns: Vec<Zeroizing<String>> = Vec::new();
         let mut literals = Vec::new();
+        let mut names = BTreeSet::new();
         for (name, e) in entries {
             if e.value.is_empty() {
                 continue;
             }
+            names.insert(name.clone());
             let literal = vault_literal(name);
             for sp in spellings(&e.value) {
                 patterns.push(sp);
@@ -495,6 +589,7 @@ impl Scrubber {
             return Scrubber {
                 matcher: Matcher::Empty,
                 literals,
+                names,
             };
         }
         // Standard semantics for the overlapping search. ASCII case-insensitive because
@@ -508,18 +603,28 @@ impl Scrubber {
             Ok(ac) => Matcher::Ready(ac),
             Err(_) => Matcher::Failed,
         };
-        Scrubber { matcher, literals }
+        Scrubber {
+            matcher,
+            literals,
+            names,
+        }
     }
 
-    /// Redacts the union of all (overlapping) match spans, see [`merge_spans`].
+    /// Redacts the union of all (overlapping) match spans, see [`merge_spans`]. A match
+    /// wholly inside an existing entry's `@vault(name)` literal, or inside the `@vault(`
+    /// of any opener, is not a value: the literal is what scrub itself writes, and it
+    /// stays intact (D-118, [`literal_ranges`]). A match that only overlaps such a range
+    /// is kept, so a value can never hide behind one.
     fn scrub(&self, s: &str) -> String {
         let ac = match &self.matcher {
             Matcher::Empty => return s.to_owned(),
             Matcher::Failed => return SCRUB_WITHHELD.to_owned(),
             Matcher::Ready(ac) => ac,
         };
+        let protected = literal_ranges(s, &self.names);
         let spans = merge_spans(
             ac.find_overlapping_iter(s)
+                .filter(|m| !inside_literal(&protected, m.start(), m.end()))
                 .map(|m| Span::new(m.start(), m.end(), m.pattern().as_usize())),
         );
         let mut out = String::with_capacity(s.len());
@@ -598,14 +703,18 @@ const OUTER_PCT_SETS: &[PctSet] = &[
 /// The spellings of `v` that scrub replaces. Base texts: `v`, plus for a value with
 /// non-ASCII characters its lower- and upper-cased forms (ASCII case is handled by the
 /// case-insensitive automaton). For each base text: raw; JSON-escaped (serde style,
-/// with `\/`, ASCII-only, and escaped twice for JSON inside a JSON string); Rust `{:?}`
-/// without quotes, `escape_debug` and `escape_default`; percent-encoded in every
-/// [`PCT_SETS`] set (space as `%20` and as `+`), and each of those percent-encoded once
-/// more in every [`OUTER_PCT_SETS`] set (double encoding, `%25XX`). Duplicates up to ASCII case are dropped,
-/// so upper and lower hex are one pattern.
+/// with `\/`, ASCII-only, HTML-safe as Go/Rails and System.Text.Json write it, and
+/// escaped twice for JSON inside a JSON string); Rust `{:?}` without quotes,
+/// `escape_debug` and `escape_default`; `{:?}` inside JSON, and `{:?}` or JSON inside
+/// `{:?}` (an error string formatted twice); percent-encoded in every [`PCT_SETS`] set
+/// (space as `%20` and as `+`), and each of those percent-encoded once more in every
+/// [`OUTER_PCT_SETS`] set (double encoding, `%25XX`). Duplicates up to ASCII case are
+/// dropped, so upper and lower hex are one pattern.
 ///
-/// Not covered (known limit): values a site reformats (input masks for phone, card and
-/// date numbers), base64.
+/// Not covered (known limits, tracked with deadlines): base64 and base64url (B-151,
+/// before step 2); input masks for phone, card and date numbers, values split across
+/// DOM nodes or ellipsis-truncated, and mixed Unicode case such as CSS `capitalize`
+/// (B-152, before step 3).
 ///
 /// Every temporary is a `Zeroizing<String>` sized up front so it never reallocates.
 fn spellings(v: &str) -> Vec<Zeroizing<String>> {
@@ -633,9 +742,15 @@ fn push_spellings(t: &str, out: &mut Vec<Zeroizing<String>>) {
         out.push(json_escape_slash(&json));
     }
     out.push(json_escape(&json, false));
+    out.push(debug_inner(&json));
     out.push(json);
     out.push(json_escape(t, true));
-    out.push(debug_inner(t));
+    out.push(json_escape_with(t, JSON_HTML));
+    out.push(json_escape_with(t, JSON_DOTNET));
+    let debug = debug_inner(t);
+    out.push(json_escape(&debug, false));
+    out.push(debug_inner(&debug));
+    out.push(debug);
     out.push(collect_chars(t, t.escape_debug()));
     out.push(collect_chars(t, t.escape_default()));
     let mut single = Vec::new();
@@ -694,13 +809,52 @@ fn pct_encode(t: &str, set: PctSet, plus: bool) -> Zeroizing<String> {
     out
 }
 
+/// How a JSON encoder escapes a string, beyond what every encoder escapes.
+#[derive(Clone, Copy)]
+struct JsonStyle {
+    /// Every non-ASCII char as `\uXXXX` (Python `ensure_ascii`, System.Text.Json).
+    ascii: bool,
+    /// `<`, `>`, `&`, U+2028 and U+2029 as `\uXXXX` (Go `encoding/json`, Rails).
+    html: bool,
+    /// Also `"`, `'`, `+` and `` ` `` as `\u00XX` (System.Text.Json's default encoder).
+    dotnet: bool,
+}
+
+const JSON_HTML: JsonStyle = JsonStyle {
+    ascii: false,
+    html: true,
+    dotnet: false,
+};
+const JSON_DOTNET: JsonStyle = JsonStyle {
+    ascii: true,
+    html: true,
+    dotnet: true,
+};
+
 /// JSON string escaping without the surrounding quotes. With `ascii`, every non-ASCII
 /// char is `\uXXXX` (Python `ensure_ascii`); without, this is exactly `serde_json`.
 fn json_escape(t: &str, ascii: bool) -> Zeroizing<String> {
+    json_escape_with(
+        t,
+        JsonStyle {
+            ascii,
+            html: false,
+            dotnet: false,
+        },
+    )
+}
+
+/// JSON string escaping in `style`, without the surrounding quotes.
+fn json_escape_with(t: &str, style: JsonStyle) -> Zeroizing<String> {
     // Worst case 6 bytes out per byte in (`\u001f`; a 4-byte char is 12 as a pair).
     let mut out = Zeroizing::new(String::with_capacity(t.len() * 6));
     for c in t.chars() {
+        let html = style.html && matches!(c, '<' | '>' | '&' | '\u{2028}' | '\u{2029}');
+        let dotnet = style.dotnet && matches!(c, '"' | '\'' | '+' | '`');
         match c {
+            _ if html || dotnet => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
@@ -708,7 +862,7 @@ fn json_escape(t: &str, ascii: bool) -> Zeroizing<String> {
             '\t' => out.push_str("\\t"),
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 || (ascii && !c.is_ascii()) => {
+            c if (c as u32) < 0x20 || (style.ascii && !c.is_ascii()) => {
                 let mut buf = [0u16; 2];
                 for unit in c.encode_utf16(&mut buf) {
                     let _ = write!(out, "\\u{unit:04x}");
@@ -840,7 +994,7 @@ fn decrypt_entries(
     let text = std::str::from_utf8(&plain[..len]).map_err(|_| VaultError::Decrypt)?;
     // The parse error is dropped unread: its message can quote the offending line.
     let raw: BTreeMap<String, FileEntry> = toml::from_str(text).map_err(|_| VaultError::Decrypt)?;
-    Ok(raw
+    let entries: BTreeMap<String, Entry> = raw
         .into_iter()
         .map(|(name, e)| {
             (
@@ -851,7 +1005,13 @@ fn decrypt_entries(
                 },
             )
         })
-        .collect())
+        .collect();
+    // A file written by hand or by an older build may hold a value under the floor
+    // (D-118); `open` and `set` refuse it rather than over-scrub every output.
+    for (name, e) in &entries {
+        check_value(name, &e.value)?;
+    }
+    Ok(entries)
 }
 
 /// Serializes the entries as TOML by hand into one `Zeroizing` buffer sized for the
@@ -907,9 +1067,6 @@ fn encrypt_entries(
 /// Opens (creating if needed) `<path>.lock` and takes an exclusive OS lock on it,
 /// blocking until other `set`s release theirs. Dropping the file releases the lock. The
 /// lock file is left in place: deleting it would let two lockers hold different files.
-// File::lock is stable since 1.89; the toolchain is newer than the workspace
-// rust-version (1.85). A bump is proposed in the T-05 fix handoff.
-#[allow(clippy::incompatible_msrv)]
 fn lock_exclusive(path: &Path) -> Result<std::fs::File, VaultError> {
     let dir = parent_dir(path);
     std::fs::create_dir_all(dir)?;
@@ -1283,11 +1440,158 @@ mod tests {
 
     #[test]
     fn failed_build_withholds_output() {
-        let sc = Scrubber {
+        let failed = || Scrubber {
             matcher: Matcher::Failed,
             literals: Vec::new(),
+            names: BTreeSet::new(),
         };
-        assert_eq!(sc.scrub("anything"), SCRUB_WITHHELD);
+        // in_memory's backstop: everything withheld, and the marker is a malformed ref.
+        assert_eq!(failed().scrub("anything"), SCRUB_WITHHELD);
+        assert!(matches!(
+            vault_refs(SCRUB_WITHHELD),
+            Err(VaultError::BadReference(0))
+        ));
+        // open and set: a failed build is reported, never silently withheld.
+        assert!(matches!(
+            failed().checked(),
+            Err(VaultError::ScrubUnavailable)
+        ));
+        let ok = Scrubber::try_build(&BTreeMap::new());
+        assert!(ok.is_ok_and(|sc| matches!(sc.matcher, Matcher::Empty)));
+    }
+
+    #[test]
+    fn set_refuses_values_under_the_floor() {
+        let c = canary();
+        let mut v = vault_with(&[("test", c.clone())]);
+        // 3 characters (8 bytes) is still under the floor: the floor counts characters.
+        for short in ["a", "a1z", "\u{e9}\u{65e5}\u{672c}"] {
+            match v.set("st", short, EntryKind::Personal) {
+                Err(VaultError::ValueTooShort { name, min }) => {
+                    assert_eq!(name, "st");
+                    assert_eq!(min, MIN_VALUE_CHARS);
+                }
+                other => panic!("expected ValueTooShort, got {other:?}"),
+            }
+        }
+        assert_eq!(v.names().len(), 1, "a refused set changed the vault");
+        v.set("four", "a1z9", EntryKind::Personal).unwrap();
+        v.set("blank", "", EntryKind::Personal).unwrap();
+        assert_eq!(v.scrub("x a1z9 y"), "x @vault(four) y");
+        // A bad name is reported before the value is looked at.
+        assert!(matches!(
+            v.set("bad name", "a", EntryKind::Secret),
+            Err(VaultError::BadReference(3))
+        ));
+        let msg = VaultError::ValueTooShort {
+            name: "st".into(),
+            min: MIN_VALUE_CHARS,
+        }
+        .to_string();
+        assert!(msg.contains("\"st\"") && msg.contains('4'), "{msg}");
+    }
+
+    #[test]
+    fn open_refuses_a_file_holding_a_short_value() {
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+        let mut v = Vault::open(&path, &key).unwrap();
+        v.set("test", &canary(), EntryKind::Secret).unwrap();
+        // Rewrite the file as a hand edit or an older build could have left it.
+        let id = load_identity(&key).unwrap().unwrap();
+        let mut entries = clone_entries(&v.entries);
+        entries.insert(
+            "st".into(),
+            Entry {
+                value: Zeroizing::new("a1z".into()),
+                kind: EntryKind::Personal,
+            },
+        );
+        write_atomic(&path, &encrypt_entries(&id, &entries).unwrap()).unwrap();
+        assert!(matches!(
+            Vault::open(&path, &key),
+            Err(VaultError::ValueTooShort { name, .. }) if name == "st"
+        ));
+        // set re-reads the file under its lock and refuses it too, writing nothing.
+        let before = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            v.set("other", &canary(), EntryKind::Secret),
+            Err(VaultError::ValueTooShort { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn short_values_never_touch_vault_literals() {
+        // in_memory accepts values under the floor; literals must still survive them.
+        let v = Vault::in_memory([
+            ("x".to_owned(), "a".to_owned(), EntryKind::Personal),
+            ("st".to_owned(), "ca".to_owned(), EntryKind::Personal),
+            ("v".to_owned(), "vault".to_owned(), EntryKind::Personal),
+            ("name".to_owned(), canary(), EntryKind::Secret),
+        ]);
+        let once = v.scrub("fill @vault(name) then @vault(st) for @vault(x)");
+        assert_eq!(once, "fill @vault(name) then @vault(st) for @vault(x)");
+        assert_eq!(vault_refs(&once).unwrap(), ["name", "st", "x"]);
+        // Unknown names keep their `@vault(` intact; the name itself is still scrubbed.
+        let unknown = v.scrub("@vault(zzz) @vault(cab)");
+        assert_eq!(unknown, "@vault(zzz) @vault(@vault(st)b)");
+        // Idempotent: scrubbing scrub output changes nothing.
+        let s = format!("Call the cache in CA, {} vault", canary());
+        let once = v.scrub(&s);
+        assert!(!once.contains(&canary()));
+        assert_eq!(v.scrub(&once), once);
+        assert!(vault_refs(&once).is_ok());
+        // A value that only overlaps a literal is still scrubbed (it cannot hide).
+        let w = Vault::in_memory([
+            ("k".to_owned(), "zz@vault".to_owned(), EntryKind::Secret),
+            ("name".to_owned(), canary(), EntryKind::Secret),
+        ]);
+        assert_eq!(w.scrub("zz@vault(name)"), "@vault(k)(name)");
+    }
+
+    #[test]
+    fn literal_ranges_and_inside() {
+        let names: BTreeSet<String> = ["ab".to_owned()].into();
+        let s = "x @vault(ab) @vault(cd) @vault( @vault(ab";
+        let r = literal_ranges(s, &names);
+        assert_eq!(r, vec![(2, 12), (13, 20), (24, 31), (32, 39)]);
+        assert!(inside_literal(&r, 2, 12));
+        assert!(inside_literal(&r, 4, 8));
+        assert!(!inside_literal(&r, 1, 5));
+        assert!(!inside_literal(&r, 10, 14));
+        assert!(!inside_literal(&r, 20, 22), "name of an unknown literal");
+        assert!(!inside_literal(&r, 0, 1));
+    }
+
+    #[test]
+    fn html_safe_and_nested_json_debug_spellings() {
+        let c = canary();
+        let d = format!("{c} A&B <x> 'q' +1 \u{e9}\u{2028}\"\u{1}");
+        let v = vault_with(&[("d", d.clone())]);
+        // Go encoding/json and Rails: <, >, & and U+2028 as \u00XX /  .
+        let go = format!("{c} A\\u0026B \\u003cx\\u003e 'q' +1 \u{e9}\\u2028\\\"\\u0001");
+        // System.Text.Json default: also ' + " as \u00XX, every non-ASCII char escaped.
+        let dotnet = format!(
+            "{c} A\\u0026B \\u003Cx\\u003E \\u0027q\\u0027 \\u002B1 \\u00E9\\u2028\\u0022\\u0001"
+        );
+        let dbg = format!("{d:?}");
+        let dbg_in_json = serde_json::to_string(&dbg).unwrap();
+        let dbg_in_dbg = format!("{dbg:?}");
+        let json = serde_json::to_string(&d).unwrap();
+        let json_in_dbg = format!("{json:?}");
+        for (label, s) in [
+            ("go", format!("{{\"a\":\"{go}\"}}")),
+            ("dotnet", format!("{{\"a\":\"{dotnet}\"}}")),
+            ("debug in json", dbg_in_json),
+            ("debug in debug", dbg_in_dbg),
+            ("json in debug", json_in_dbg),
+        ] {
+            let out = v.scrub(&s);
+            assert!(!out.contains(&c), "{label}: value survived");
+            assert!(out.contains("@vault(d)"), "{label}: no literal");
+        }
     }
 
     #[test]

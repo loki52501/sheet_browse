@@ -394,7 +394,6 @@ fn child_dirty_panic_with_broken_stderr() {
 }
 
 #[test]
-#[allow(clippy::incompatible_msrv)] // std::io::pipe is 1.87; the toolchain is newer (see blockers)
 fn panic_hook_survives_broken_stderr() {
     if std::env::var_os(CHILD_ENV).is_some() {
         return;
@@ -459,4 +458,59 @@ fn file_round_trip_awkward_names_and_values() {
             .unwrap();
         assert!(ok, "entry {n} did not round-trip");
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// 9. Round 3 (D-118): the value floor, and scrub output that stays parseable.
+
+#[test]
+fn set_refuses_a_short_value_and_leaves_the_file_alone() {
+    use harness_core::vault::{vault_refs, VaultError, MIN_VALUE_CHARS};
+    let c = canary();
+    let dir = TempDir::new("floor");
+    let path = dir.0.join("vault.toml.age");
+    let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+    let mut v = Vault::open(&path, &key).unwrap();
+    v.set("test", &c, EntryKind::Secret).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let short: String = c.chars().take(MIN_VALUE_CHARS - 1).collect();
+    assert!(matches!(
+        v.set("st", &short, EntryKind::Personal),
+        Err(VaultError::ValueTooShort { ref name, min }) if name == "st" && min == MIN_VALUE_CHARS
+    ));
+    assert!(
+        std::fs::read(&path).unwrap() == before,
+        "a refused set rewrote the file"
+    );
+    let names: Vec<String> = Vault::open(&path, &key)
+        .unwrap()
+        .names()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(names, ["test"]);
+    // Scrub output of the file-backed vault is a fixed point and parses.
+    let once = v.scrub(&format!("q={c}&r=@vault(test)"));
+    check(&v, &once, "q=@vault(test)&r=@vault(test)", "fixed point");
+    assert_eq!(vault_refs(&once).unwrap(), ["test", "test"]);
+}
+
+#[test]
+fn short_in_memory_values_leave_literals_and_text_parseable() {
+    let c = canary();
+    // in_memory is exempt from the floor; a middle initial and a state code.
+    let v = vault(&[("mi", "Q"), ("st", "ca"), ("test", &c)]);
+    check(
+        &v,
+        "type @vault(test) then @vault(st) then @vault(mi)",
+        "type @vault(test) then @vault(st) then @vault(mi)",
+        "literals of known names untouched",
+    );
+    let once = v.scrub(&format!("Quit: {c} in CA"));
+    assert!(!once.contains(&c), "value survived");
+    assert!(v.scrub(&once) == once, "scrub is not idempotent");
+    assert!(
+        harness_core::vault::vault_refs(&once).is_ok(),
+        "scrub output has a malformed ref"
+    );
 }

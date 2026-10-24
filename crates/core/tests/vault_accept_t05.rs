@@ -388,6 +388,12 @@ fn row5_debug_and_errors_contain_no_value() {
         "Io",
         Vault::open(&dir.0, &KeySource::IdentityFile(dir.0.join("vault.key"))).unwrap_err(),
     ));
+    // ValueTooShort (D-118): the value is the canary's first 3 characters.
+    let short: String = c.chars().take(3).collect();
+    errs.push((
+        "ValueTooShort",
+        fv.set("st", &short, EntryKind::Personal).unwrap_err(),
+    ));
 
     let seen: Vec<&str> = errs
         .iter()
@@ -397,9 +403,20 @@ fn row5_debug_and_errors_contain_no_value() {
             VaultError::Key(_) => "Key",
             VaultError::Io(_) => "Io",
             VaultError::Decrypt => "Decrypt",
+            VaultError::ValueTooShort { .. } => "ValueTooShort",
+            // Not reachable from outside (aho-corasick size limits); the vault.rs unit
+            // test failed_build_withholds_output covers it.
+            VaultError::ScrubUnavailable => "ScrubUnavailable",
         })
         .collect();
-    for want in ["Unknown", "BadReference", "Key", "Io", "Decrypt"] {
+    for want in [
+        "Unknown",
+        "BadReference",
+        "Key",
+        "Io",
+        "Decrypt",
+        "ValueTooShort",
+    ] {
         assert!(seen.contains(&want), "variant {want} not exercised");
     }
     for (label, e) in &errs {
