@@ -44,33 +44,6 @@ blockers:
     question: "A SUBMIT/submitish row with no form id (SPA forms built without <form>) gets no form context, so card, password and heading evidence elsewhere on the page is not used. Should injected.js assign a pseudo form id to such groups, or should sb-act use the same frame's formless rows as context?"
     default_taken: "Button-only context (D-433). Preferred fix is in injected.js: give formless field groups a synthetic form id so sheets, fingerprints and sb-act agree."
     needs_user: false
-
-interface_changes:
-  - id: B-401
-    from: page/suborch
-    interface: I-10
-    change: "sb_act::PlannerError gains ChallengeTarget { step: usize }: check_planner rejects any step whose target row is CHALLENGE, with or without ?s, before the ?s rule (D-404 (4)). MissingStop { class: Challenge } no longer occurs."
-    why: "D-5: a planner may never target a challenge; consumers matching on PlannerError (toolstore, toolforge G-2) need the new variant."
-  - id: B-400
-    from: page/suborch
-    interface: I-10
-    change: "sb_act adds pub const MAX_WAIT: Duration (30 s): w(n) longer than this is clamped (D-431). No I-10 signature changed."
-    why: "Draft-tier addition recorded so consumers (sb-driver, toolforge) see it; sb-driver's settle cap for w() should read it."
-  - id: B-410
-    from: page/js-coder
-    interface: I-11
-    change: "New in-page API for sb-media (B-9), next to __sb: injected/media.js installs globalThis.__sbMedia {list, cues, frames, frame} in world sb (shapes in its header and D-420). Video ids are __sb ids."
-    why: "B-9's in-page seek + canvas path and video.list facts need a page API that I-11 does not name; sb-media (an I-9 consumer) calls it."
-  - id: B-411
-    from: page/js-coder
-    interface: I-11
-    change: "Additive details, no rename: act(id) returns a Promise; walk also accepts walk(true) and {dirty: [ids]}; frames() entries carry extra fields (challenge, and id/name on child entries with frame:null); text() emits an iframe placeholder block (kind other, elem = iframe row); index() omits State fields equal to State::default() (D-421)."
-    why: "Recorded so sb-driver codes against what the page really returns."
-  - id: B-412
-    from: page/js-coder
-    interface: I-11
-    change: "Return-shape changes (D-405, D-423..D-425): before the first walk({base}) in a document, id(), index(), text(), fingerprint(), state(), name() and frames() return {why: \"no base\"} (array-returning calls return that object instead), walk() without a base returns it too, and resolve() answers stale; sb-driver must walk with a base after every navigation before any read. A challenge page returns index() = [one CHALLENGE row, role document], text() = [one other block linking it], frames() = [self with challenge: true]. __sbMedia (B-410): list() and cues() may return {why}, frames() entries may carry truncated: true and opts gains budgetMs (default 8000)."
-    why: "The un-based first call reused ids across document generations (review Blocking 2) and an empty index for a challenge page was an unreported stop; consumers (sb-driver, sb-media) must handle the new shapes."
   - id: B-31
     task: T-11
     question: "Supreme second-opinion review of swarm/store (approve after D-74) left four should-fix items for toolstore. (1) valid_name allows upper case, so on NTFS `Register` and `register` are one file but two tools.health rows, and reforge never checks that the new @name equals the name it was called with (lifecycle.rs reforge, invariants.rs). (2) check_repair accepts a re-forge from @phase 2 to @phase 1 (gains page.api) and a change of @kind. (3) accept_t11 g4_no_new_vault_key's canary is never fed into any input, so that check cannot fail. (4) archive renames then sets mtime; if set_mtime fails the archived copy keeps its old mtime and the next sweep can delete it before 90 days (D-303). Also: tool_path/archive_path #[deprecated] per D-72."
@@ -163,6 +136,31 @@ interface_changes:
     needs_user: false
 
 interface_changes:
+  - id: B-401
+    from: page/suborch
+    interface: I-10
+    change: "sb_act::PlannerError gains ChallengeTarget { step: usize }: check_planner rejects any step whose target row is CHALLENGE, with or without ?s, before the ?s rule (D-404 (4)). MissingStop { class: Challenge } no longer occurs."
+    why: "D-5: a planner may never target a challenge; consumers matching on PlannerError (toolstore, toolforge G-2) need the new variant."
+  - id: B-400
+    from: page/suborch
+    interface: I-10
+    change: "sb_act adds pub const MAX_WAIT: Duration (30 s): w(n) longer than this is clamped (D-431). No I-10 signature changed."
+    why: "Draft-tier addition recorded so consumers (sb-driver, toolforge) see it; sb-driver's settle cap for w() should read it."
+  - id: B-410
+    from: page/js-coder
+    interface: I-11
+    change: "New in-page API for sb-media (B-9), next to __sb: injected/media.js installs globalThis.__sbMedia {list, cues, frames, frame} in world sb (shapes in its header and D-420). Video ids are __sb ids."
+    why: "B-9's in-page seek + canvas path and video.list facts need a page API that I-11 does not name; sb-media (an I-9 consumer) calls it."
+  - id: B-411
+    from: page/js-coder
+    interface: I-11
+    change: "Additive details, no rename: act(id) returns a Promise; walk also accepts walk(true) and {dirty: [ids]}; frames() entries carry extra fields (challenge, and id/name on child entries with frame:null); text() emits an iframe placeholder block (kind other, elem = iframe row); index() omits State fields equal to State::default() (D-421)."
+    why: "Recorded so sb-driver codes against what the page really returns."
+  - id: B-412
+    from: page/js-coder
+    interface: I-11
+    change: "Return-shape changes (D-405, D-423..D-425): before the first walk({base}) in a document, id(), index(), text(), fingerprint(), state(), name() and frames() return {why: \"no base\"} (array-returning calls return that object instead), walk() without a base returns it too, and resolve() answers stale; sb-driver must walk with a base after every navigation before any read. A challenge page returns index() = [one CHALLENGE row, role document], text() = [one other block linking it], frames() = [self with challenge: true]. __sbMedia (B-410): list() and cues() may return {why}, frames() entries may carry truncated: true and opts gains budgetMs (default 8000)."
+    why: "The un-based first call reused ids across document generations (review Blocking 2) and an empty index for a challenge page was an unreported stop; consumers (sb-driver, sb-media) must handle the new shapes."
   - id: IC-300
     from: store
     interface: I-7
