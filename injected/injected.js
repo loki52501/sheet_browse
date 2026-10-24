@@ -108,8 +108,14 @@
   const CHALLENGE_FRAME_RE =
     /captcha|turnstile|cloudflare security challenge|verify you are human|human verification|verification challenge|arkose|funcaptcha|geetest/i;
   const CHALLENGE_BOX_RE = /captcha|turnstile|geetest|funcaptcha|arkose/i;
+  // A human-check prompt on its own (D-422). "Press and hold" counts only next to a human, robot
+  // or bot word, and "are you (a) human" only with a challenge widget, response field or
+  // challenge frame in the document (D-429 (2)): file pickers, voice buttons and quizzes say them.
   const CHALLENGE_TEXT_RE =
-    /verify (that )?you(['’]re| are) (a )?human|verify you are not a (ro)?bot|are you (a robot|a human|human)|i(['’]m| am) not a robot|human verification|press (and|&) hold/i;
+    /verify (that )?you(['’]re| are) (a )?human|verify you are not a (ro)?bot|are you a robot|i(['’]m| am) not a robot|human verification/i;
+  const HOLD_TEXT_RE = /press (and|&) hold/i;
+  const HUMAN_WORD_RE = /\b(human|robot|bot)s?\b/i;
+  const WEAK_TEXT_RE = /\bare you (a )?human\b/i;
   const CHALLENGE_TEXT_MAX = 200; // a prompt is short; a paragraph about captchas is not
   const RESPONSE_SEL =
     '[name="g-recaptcha-response"],[name="h-captcha-response"],[name="cf-turnstile-response"]';
@@ -125,7 +131,7 @@
   const SENSITIVE_AC_RE =
     /\b(cc-number|cc-csc|cc-exp|cc-exp-month|cc-exp-year|one-time-code|current-password|new-password)\b/;
   const SENSITIVE_NAME_RE =
-    /pass(word|wd|code)?|pwd|secret|token|otp|cvc|cvv|csc|ssn|iban|card.?(num|no)|security.?code|\bpin\b/i;
+    /pass(word|wd|code)?|pwd|\bpw\b|pw[_-]|secret|token|otp|cvc|cvv|csc|ssn|iban|card.?(num|no)|security.?code|\bpin\b/i;
 
   // In-page copy of the D-49 alias table (sb-sheet data/roles.txt), used only by fingerprint().
   // Keep it in step with data/roles.txt.
@@ -169,6 +175,7 @@
     selfCh: false, // this document is a challenge page (set by each walk)
     sens: new WeakSet(), // elements ever seen as sensitive: only empty|filled, forever (D-405 (1))
     respBox: new WeakSet(), // parents of captcha response fields (D-405 (4))
+    chCtx: false, // the document holds a challenge widget, response field or frame (D-429 (2))
     lastFill: new WeakMap(), // sensitive element -> last empty|filled evidence (D-426)
     ids: new WeakMap(), // Element -> id
     refs: new Map(), // id -> WeakRef<Element>
@@ -364,7 +371,25 @@
     if (!any) return "";
     t = t.replace(/\s+/g, " ").trim();
     if (t.length < 8 || t.length > CHALLENGE_TEXT_MAX) return "";
-    return CHALLENGE_TEXT_RE.test(t) ? t : "";
+    return challengeWords(t) ? t : "";
+  }
+  // Short text that asks for a human check (D-422, D-429 (2)).
+  function challengeWords(t) {
+    if (CHALLENGE_TEXT_RE.test(t)) return true;
+    if (HOLD_TEXT_RE.test(t) && HUMAN_WORD_RE.test(t)) return true;
+    return S.chCtx && WEAK_TEXT_RE.test(t);
+  }
+  // Challenge context for the weak prompts: a response field, a named widget box or a challenge
+  // frame in the light DOM (one querySelector plus a pass over the frames, once per walk).
+  const CTX_SEL = RESPONSE_SEL + ',[data-sitekey],[data-hcaptcha-widget-id],#px-captcha,' +
+    '[class*="captcha" i],[id*="captcha" i],[class*="turnstile" i],[id*="turnstile" i],' +
+    '[class*="geetest" i],[id*="arkose" i],[id*="funcaptcha" i]';
+  function challengeContext() {
+    try {
+      if (doc.querySelector(CTX_SEL)) return true;
+    } catch (e) { /* an engine without the i flag: the frames below still count */ }
+    for (const fr of doc.querySelectorAll("iframe,frame")) if (challengeFrameEl(fr)) return true;
+    return false;
   }
   // This document is a challenge page: a challenge host or path, the Cloudflare interstitial
   // title, or a frame whose owner element (same origin) is a challenge widget.
@@ -1085,7 +1110,7 @@
     const ac = attr(el, "autocomplete").trim().toLowerCase();
     if (ac && ac !== "on" && ac !== "off") row.autocomplete = ac;
     if (!row.challenge) {
-      if ((row.isHeading || row.role === "dialog" || row.role === "alertdialog") && CHALLENGE_TEXT_RE.test(row.name)) {
+      if ((row.isHeading || row.role === "dialog" || row.role === "alertdialog") && challengeWords(row.name)) {
         row.challenge = true;
       } else if (/captcha/i.test(attr(el, "name") + " " + el.id) && tag !== "form") {
         row.challenge = true;
@@ -1155,6 +1180,14 @@
   }
 
   function doWalk(incremental) {
+    // Records the observer has not delivered yet (same task as the change) count now, so a
+    // rebuilt password field is marked before anything reads it (D-429 (1)).
+    flushMut();
+    if (S.full) incremental = false;
+    // A challenge widget that appears or goes away changes what the weak prompts mean.
+    const ctx = challengeContext();
+    if (ctx !== S.chCtx) incremental = false;
+    S.chCtx = ctx;
     S.layout = hasLayout();
     S.lm = new Map();
     S.rows = [];
@@ -1195,8 +1228,9 @@
     if (!S.based) {
       // The first walk adopts the base sb-driver gives this document generation; without one
       // no id is issued, so ids can never restart below a later base (D-405 (2)).
-      const b = Number(opts.base);
-      if (!(Number.isInteger(b) && b > 0)) return NO_BASE();
+      // I-11: the base is an integer; a numeric string ("5") is not one.
+      const b = opts.base;
+      if (!(typeof b === "number" && Number.isSafeInteger(b) && b > 0)) return NO_BASE();
       S.base = b;
       S.next = b;
       S.based = true;
@@ -1215,6 +1249,7 @@
 
   // Callers check S.based first: ensure() never runs the first walk itself.
   function ensure() {
+    flushMut();
     if (!S.walked) doWalk(false);
     else if (S.full) doWalk(false);
     else if (S.dirty.size) doWalk(true);
@@ -1757,6 +1792,44 @@
     if (S.recent.length > 300) S.recent.splice(0, S.recent.length - 300);
   }
 
+  // input and textarea elements in a node (itself or its light-DOM subtree).
+  function fieldsIn(n) {
+    if (!n || n.nodeType !== 1) return [];
+    const own = n.localName === "input" || n.localName === "textarea" ? [n] : [];
+    return n.firstElementChild ? own.concat(Array.from(n.querySelectorAll("input,textarea"))) : own;
+  }
+
+  // A show-password toggle that rebuilds the element (replaceWith, a re-render) hands the value
+  // to a new node. Every input or textarea added by the same batch that removed a sensitive
+  // field, in the parent it was removed from (or inside that parent), inherits sensitivity
+  // (D-429 (1)). The wider net (a re-render that swaps a whole form) only costs text values
+  // shown as empty|filled; a missed field would leak a password (rule 5).
+  function inheritSensitive(recs) {
+    let from = null;
+    for (const m of recs) {
+      if (m.type !== "childList" || !m.removedNodes.length) continue;
+      for (const r of m.removedNodes) {
+        if (fieldsIn(r).some(sensitive)) {
+          (from || (from = new Set())).add(m.target);
+          break;
+        }
+      }
+    }
+    if (!from) return;
+    for (const m of recs) {
+      if (m.type !== "childList" || !m.addedNodes.length) continue;
+      let hit = from.has(m.target);
+      if (!hit) for (const p of from) if (p !== m.target && p.contains && p.contains(m.target)) hit = true;
+      if (!hit) continue;
+      for (const a of m.addedNodes) for (const f of fieldsIn(a)) S.sens.add(f);
+    }
+  }
+
+  function flushMut() {
+    const recs = mo.takeRecords();
+    if (recs.length) onMut(recs);
+  }
+
   function onMut(recs) {
     const t = now();
     S.lastMut = t;
@@ -1766,6 +1839,9 @@
         SENS_ATTR[m.attributeName].test(m.oldValue) && m.target.nodeType === 1) {
         S.sens.add(m.target);
       }
+    }
+    inheritSensitive(recs);
+    for (const m of recs) {
       if (S.walked && !S.full) markDirty(m.target);
       if (m.type === "childList") for (const a of m.addedNodes) remember(t, a, false);
       else remember(t, m.target, true);

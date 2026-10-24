@@ -353,6 +353,125 @@ test("sensitivity is sticky: type swap before the walk, masked text field, sensi
   same(byName(again, "Code").state.value, { kind: "filled" });
 });
 
+// An input whose value getter counts calls (the value is set through the native setter).
+function spied(win, el, value, counter) {
+  const proto = el.localName === "textarea" ? win.HTMLTextAreaElement.prototype : win.HTMLInputElement.prototype;
+  const desc = Object.getOwnPropertyDescriptor(proto, "value");
+  desc.set.call(el, value);
+  Object.defineProperty(el, "value", {
+    get() {
+      counter.reads++;
+      return desc.get.call(this);
+    },
+    set(v) {
+      desc.set.call(this, v);
+    },
+  });
+  return el;
+}
+
+test("a rebuilt password field inherits sensitivity (D-429 (1)): replaceWith, remove+append, wrapper swap", async () => {
+  const CANARY = "rebuilt-canary-429";
+  const c = { reads: 0 };
+  const { doc, win, sb } = jsdom('<form id="f"><div id="w1"><input id="p1" type="password" aria-label="Password one"></div>' +
+    '<div id="w2"><input id="p2" type="password" aria-label="Password two"></div>' +
+    '<div id="outer"><div id="w3"><input id="p3" type="password" aria-label="Password three"></div></div>' +
+    '<div id="other"></div></form>');
+  for (const id of ["p1", "p2", "p3"]) spied(win, doc.getElementById(id), CANARY, c);
+  sb.walk({ base: 1 });
+  same(byName(sb.index(), "Password one").state.value, { kind: "filled" });
+  const mk = (html) => {
+    const t = doc.createElement("template");
+    t.innerHTML = html;
+    return t.content.firstElementChild;
+  };
+  // 1. the review repro: replaceWith a type=text input carrying the value (a neutral name, so
+  // only inheritance can mark it); the walk runs in the same task, before the observer callback
+  const t1 = spied(win, mk('<input id="t1" type="text" name="shown" aria-label="Password one">'), CANARY, c);
+  doc.getElementById("p1").replaceWith(t1);
+  // an unrelated field added by the same batch elsewhere is not sensitive
+  const n1 = mk('<input id="n1" aria-label="Nickname">');
+  n1.value = "ada";
+  doc.getElementById("other").appendChild(n1);
+  sb.walk({ dirty: true });
+  // 2. remove, then append a new field into the same parent (two records in one batch)
+  const t2 = spied(win, mk('<input id="t2" type="text" aria-label="Password two">'), CANARY, c);
+  doc.getElementById("p2").remove();
+  doc.getElementById("w2").appendChild(t2);
+  // 3. the wrapper is rebuilt: the removed subtree held the field
+  const w3 = mk('<div id="w3b"><span>Shown</span><input id="t3" type="text" aria-label="Password three"></div>');
+  spied(win, w3.querySelector("input"), CANARY, c);
+  doc.getElementById("w3").replaceWith(w3);
+  await tick(); // this batch reaches the observer callback the normal way
+  sb.walk({ dirty: true });
+  const rows = sb.index();
+  let out = JSON.stringify(rows) + JSON.stringify(sb.text());
+  for (const id of ["t1", "t2", "t3"]) out += JSON.stringify(sb.state(doc.getElementById(id)));
+  sb.walk({});
+  out += JSON.stringify(sb.index());
+  assert.equal(c.reads, 0, "the value getter of a rebuilt field was called");
+  assert.ok(!out.includes(CANARY), out);
+  for (const n of ["Password one", "Password two", "Password three"]) {
+    same(byName(sb.index(), n).state.value, { kind: "filled" }, n);
+  }
+  same(byName(rows, "Nickname").state.value, { kind: "text", text: "ada" });
+});
+
+test("pw_ and pw- names are sensitive (D-429 (1))", () => {
+  const c = { reads: 0 };
+  const { doc, win, sb } = jsdom('<input id="a" name="pw_plain" aria-label="A"><input id="b" name="pw-confirm" aria-label="B">' +
+    '<input id="d" name="pw" aria-label="D"><input id="e" name="newpw_2" aria-label="E"><input id="n" name="power" aria-label="N">');
+  for (const id of ["a", "b", "d", "e"]) spied(win, doc.getElementById(id), "pwcanary", c);
+  doc.getElementById("n").value = "max";
+  sb.walk({ base: 1 });
+  const rows = sb.index();
+  assert.equal(c.reads, 0);
+  assert.ok(!JSON.stringify(rows).includes("pwcanary"));
+  for (const n of ["A", "B", "D", "E"]) same(byName(rows, n).state.value, { kind: "filled" }, n);
+  same(byName(rows, "N").state.value, { kind: "text", text: "max" });
+});
+
+test("challenge text (D-429 (2)): ordinary press-and-hold and quiz text are not CHALLENGE, real prompts are", () => {
+  const neg = walked('<main><p>Press and hold Shift to select several files.</p>' +
+    '<p>Press and hold the mic button to talk</p><p>Press &amp; hold to record a voice message.</p>' +
+    '<section><h2>Are you human?</h2><p>Take our quiz about what makes us human.</p>' +
+    '<button type="button">Start the quiz</button></section></main>');
+  const nr = neg.sb.index();
+  assert.ok(!nr.some((r) => r.flags.challenge), JSON.stringify(nr));
+  assert.ok(byName(nr, "Are you human?", "heading"));
+  const nt = neg.sb.text().map((b) => b.spans.map((x) => x.text).join("")).join(" / ");
+  assert.match(nt, /Press and hold Shift/);
+  assert.match(nt, /mic button/);
+  // the PerimeterX prompt still is one, and so is its widget
+  const px = walked('<div><p>Press &amp; Hold to confirm you are a human (and not a bot).</p><div id="px-captcha"></div></div>');
+  const pr = px.sb.index().filter((r) => r.flags.challenge);
+  assert.equal(pr.length, 2, JSON.stringify(px.sb.index()));
+  assert.equal(pr[0].name, "Press & Hold to confirm you are a human (and not a bot).");
+  const hold = walked('<p>Press and hold to confirm you are a human (and not a bot).</p><button>Help</button>');
+  assert.ok(byName(hold.sb.index(), "Press and hold to confirm you are a human (and not a bot).").flags.challenge);
+  // "Are you human?" next to a real widget, a response field or a challenge frame is CHALLENGE
+  for (const w of ['<div class="g-recaptcha" data-sitekey="k"></div>',
+    '<div><textarea name="h-captcha-response" style="display:none"></textarea></div>',
+    '<iframe title="Widget containing a Cloudflare security challenge" src="https://challenges.cloudflare.com/x"></iframe>']) {
+    const it = walked('<form><h2>Are you human?</h2>' + w + '<button>Send</button></form>');
+    assert.ok(byName(it.sb.index(), "Are you human?", "heading").flags.challenge, w);
+  }
+  // the widget shows up later: the heading becomes CHALLENGE on the next dirty walk
+  const late = walked('<form id="f"><h2>Are you human?</h2><button>Send</button></form>');
+  assert.ok(!byName(late.sb.index(), "Are you human?").flags.challenge);
+  const box = late.doc.createElement("div");
+  box.className = "h-captcha";
+  box.setAttribute("data-sitekey", "k");
+  late.doc.getElementById("f").appendChild(box);
+  late.sb.walk({ dirty: true });
+  assert.ok(byName(late.sb.index(), "Are you human?").flags.challenge);
+  // the strong prompts need no widget
+  for (const p of ["Verify you are human", "I'm not a robot", "Are you a robot?", "Human verification"]) {
+    const it = walked("<p>" + p + "</p>");
+    assert.ok(it.sb.index().some((r) => r.flags.challenge), p);
+  }
+});
+
 test("no ids before walk({base}) (D-405 (2)): the review repro", () => {
   const { doc, sb } = jsdom(page("register.html"));
   const btn = Array.from(doc.querySelectorAll("button")).find((b) => b.textContent === "Register");
@@ -366,6 +485,7 @@ test("no ids before walk({base}) (D-405 (2)): the review repro", () => {
   same(sb.name(btn), NB);
   same(sb.walk({}), NB, "a walk without a base issues nothing");
   same(sb.walk({ dirty: true }), NB);
+  for (const b of ["5", 0, -1, 2.5, NaN, Infinity, 2 ** 60, null, true]) same(sb.walk({ base: b }), NB, "base " + String(b));
   assert.equal(sb.role(btn), "button", "role issues no id and works");
   same(sb.resolve(1), { why: "stale" }, "nothing was issued in this document yet");
   assert.equal(sb.walk({ base: 100 }).count > 0, true);

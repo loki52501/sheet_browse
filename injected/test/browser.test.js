@@ -28,6 +28,18 @@ const EXTRA = {
     '<form><input id="pin" class="pin" type="text" aria-label="PIN">' +
     '<input id="pw" type="password" aria-label="Password">' +
     '<button id="show" type="button" onclick="document.getElementById(\'pw\').type = \'text\'">Show</button></form>'),
+  // a show-password toggle that rebuilds the element and hands it the value (D-429 (1))
+  "/rebuild.html": html("<title>Rebuild</title><script>function rebuildPw() { const o = document.getElementById('pw');" +
+    " const n = document.createElement('input'); n.type = 'text'; n.id = 'plain-copy'; n.name = 'shown';" +
+    " n.setAttribute('aria-label', 'Password'); n.value = o.value; o.replaceWith(n); }</script>",
+    '<form><input id="user" aria-label="Username"><span id="slot"><input id="pw" type="password" aria-label="Password"></span>' +
+    '<button id="show" type="button" onclick="rebuildPw()">Show</button><button>Sign in</button></form>'),
+  // challenge text false positives and the real prompt (D-429 (2))
+  "/hold.html": html("<title>Hold</title>",
+    '<main><p>Press and hold Shift to select several files.</p><input type="file" aria-label="Files">' +
+    '<p>Press and hold the mic button to talk</p><button type="button">Mic</button>' +
+    '<section><h2>Are you human?</h2><p>A short quiz.</p><button type="button">Start</button></section>' +
+    '<div id="px"><p>Press &amp; Hold to confirm you are a human (and not a bot).</p><div id="px-captcha" style="width:300px;height:50px"></div></div></main>'),
 };
 
 before(async () => {
@@ -354,6 +366,65 @@ test("masked and toggled password fields stay empty|filled in Chromium (D-405 (1
   const blob = JSON.stringify(after) + JSON.stringify(await o.ev(() => globalThis.__sb.text())) +
     JSON.stringify(await o.ev(() => globalThis.__sb.state(document.getElementById("pw"))));
   assert.ok(!blob.includes("canary"), blob);
+});
+
+test("a password field rebuilt by a show toggle stays empty|filled in Chromium (D-429 (1))", async () => {
+  const o = await open("rebuild.html");
+  await o.page.fill("#user", "ada");
+  await o.page.fill("#pw", "rebuilt-canary-3");
+  const before = fill(await o.ev(() => globalThis.__sb.index()));
+  assert.deepEqual(byName(before, "Password").state.value, { kind: "filled" });
+  await o.page.click("#show"); // replaceWith a type=text input that carries the value
+  assert.equal(await o.page.evaluate(() => document.getElementById("plain-copy").value), "rebuilt-canary-3");
+  // count value getter calls on the rebuilt field inside world sb while it reads
+  const r = await o.ev(() => {
+    const proto = HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    let reads = 0;
+    Object.defineProperty(proto, "value", {
+      configurable: true,
+      get() {
+        if (this.id === "plain-copy") reads++;
+        return desc.get.call(this);
+      },
+      set: desc.set,
+    });
+    try {
+      globalThis.__sb.walk({ dirty: true });
+      const index = globalThis.__sb.index();
+      const text = globalThis.__sb.text();
+      const state = globalThis.__sb.state(document.getElementById("plain-copy"));
+      globalThis.__sb.walk({});
+      const full = globalThis.__sb.index();
+      return { reads, blob: JSON.stringify([index, text, state, full]), index };
+    } finally {
+      Object.defineProperty(proto, "value", desc);
+    }
+  });
+  assert.equal(r.reads, 0, "the value getter of the rebuilt field was called");
+  assert.ok(!r.blob.includes("canary"), r.blob);
+  assert.deepEqual(byName(r.index, "Password").state.value, { kind: "filled" });
+  assert.deepEqual(byName(r.index, "Username").state.value, { kind: "text", text: "ada" });
+});
+
+test("challenge text in Chromium (D-429 (2)): press-and-hold UI and a quiz heading are not CHALLENGE, PerimeterX is", async () => {
+  const o = await open("hold.html");
+  const rows = fill(await o.ev(() => globalThis.__sb.index()));
+  const ch = rows.filter((r) => r.flags.challenge);
+  const px = await o.ev(() => globalThis.__sb.id(document.querySelector("#px p")));
+  const box = await o.ev(() => globalThis.__sb.id(document.getElementById("px-captcha")));
+  assert.ok(ch.some((r) => r.id === px) && ch.some((r) => r.id === box), JSON.stringify(ch));
+  // with the #px-captcha widget on the page "Are you human?" counts as a prompt; once the
+  // widget is gone nothing on the page is CHALLENGE
+  assert.ok(byName(rows, "Are you human?", "heading").flags.challenge);
+  assert.ok(!ch.some((r) => /Shift|mic/i.test(r.name)), JSON.stringify(ch));
+  await o.page.evaluate(() => document.getElementById("px").remove());
+  await o.ev(() => globalThis.__sb.walk({ dirty: true }));
+  const after = fill(await o.ev(() => globalThis.__sb.index()));
+  assert.ok(!after.some((r) => r.flags.challenge), JSON.stringify(after.filter((r) => r.flags.challenge)));
+  assert.ok(byName(after, "Are you human?", "heading"));
+  const text = (await o.ev(() => globalThis.__sb.text())).map((b) => b.spans.map((x) => x.text).join("")).join(" / ");
+  assert.match(text, /Press and hold Shift/);
 });
 
 test("register fixtures (D-405 (10)) match the live index() and text()", async () => {
