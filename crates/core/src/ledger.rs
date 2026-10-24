@@ -35,10 +35,17 @@
 //!   outcomes, `class` and `tool` of the asked call, `why` (or `result_summary`) = the
 //!   card's what line;
 //! * a stop (gate Stop, Challenge mid-call): `server = core`, `mode = stop`, `why` = the
-//!   reason, `tool` and `args` of the call. One stop is listed once under `Not done`: a
-//!   mid-call challenge writes a core stop from `ToolCtx::ask`, then the tool event with
-//!   `mode = stop` and a second core stop, and only the first core stop of a (tool, args)
-//!   pair is listed (its why is also the `Result: stopped (...)` text).
+//!   reason, `tool` and `args` of the call. Each stopped *call* is listed once under
+//!   `Not done` (D-121). A gate Stop is one core stop. A call the handler stops writes the
+//!   tool event with `mode = stop` and then a trailing core stop; a mid-call challenge adds
+//!   a core stop from `ToolCtx::ask` before them, written while the call ran. A tool stop
+//!   event is grouped with the next event of the same (tool, args) when that is a core
+//!   stop (the trailing one), and with the core stops of the same (tool, args) right
+//!   before it whose `ts` lies inside the call (`ts - duration_ms`, plus
+//!   [`CALL_SPAN_SLACK_MS`]). Every other core stop is a call of its own, so a resumed run
+//!   (H-1.4) that is stopped again on the same tool and args lists a second stop. A group
+//!   shows its first core stop's why (the tool event's when it has none), and
+//!   `Result: stopped (...)` shows the why of the last group.
 //! * core events with any other mode (`allow`, `ask` gate decisions) are not read.
 //!
 //! Known limits (no fix needed): an integral f64 of 1e16 or more comes back from jsonb as
@@ -46,7 +53,10 @@
 //! between the insert and the append leaves a row without a jsonl line; the D-117
 //! fail-closed check reads the data fields only, so a vault value that coincides with a
 //! harness field (`ts`, a duration) can appear there, and one containing the JSON glue
-//! between two top-level fields is not seen across them.
+//! between two top-level fields is not seen across them; when a call's trailing core stop
+//! was never written and the next event of the same (tool, args) is the next call's
+//! `ToolCtx::ask` stop, that stop is taken as the trailing one (both calls are still
+//! listed, the first with that ask stop's why).
 
 use crate::class::Class;
 use crate::memory::{LedgerEvent, LedgerId, LedgerMode, MemoryError, MemoryStore, RunStatus, Ts};
@@ -203,8 +213,10 @@ const SCRUB_ROUNDS: usize = 4;
 
 /// Passes every string field, every JSON string and object key, and every JSON number's
 /// decimal text through [`scrub`], and replaces U+0000 with U+FFFD, until nothing changes
-/// (at most a few passes). `run_id` is left alone: [`Ledger::write`] only accepts its own
-/// run, and the serialized check catches anything else.
+/// (at most a few passes). `run_id` is left alone and, since D-117, the fail-closed check
+/// does not read it either: [`Ledger::write`] only accepts its own run, whose slug was
+/// scrubbed against the vault when the run was created (`run::slugify`). A vault value
+/// added later is not re-checked against it; the run folder's name holds the slug anyway.
 pub fn scrub_event(e: LedgerEvent) -> LedgerEvent {
     let mut cur = scrub_event_once(e);
     for _ in 1..SCRUB_ROUNDS {
@@ -811,35 +823,94 @@ fn read_line(events: &[LedgerEvent]) -> String {
     read
 }
 
-fn needs_line(events: &[LedgerEvent]) -> String {
-    // One stop, one listing. A challenge-stopped call is written as a tool event with
-    // mode=stop plus a core stop event, and a mid-call challenge (`ToolCtx::ask`) adds a
-    // core stop of its own before them, all with the call's tool and args: list the first
-    // core stop of a (tool, args) pair only, and a tool stop event only when no core stop
-    // has its tool.
-    let core_stops: Vec<&str> = events
-        .iter()
-        .filter(|e| is_core(e) && is_stop(e))
-        .map(|e| e.tool.as_str())
+/// Slack on a tool call's span (`ts - duration_ms .. ts`) when deciding that a core stop
+/// was written while the call ran: `duration_ms` is rounded down to whole milliseconds and
+/// `ts` comes from the wall clock, not the call's `Instant`. A core stop of an earlier call
+/// with the same tool and args is at least a model turn earlier, far outside it.
+pub const CALL_SPAN_SLACK_MS: i64 = 100;
+
+fn same_call_key(a: &LedgerEvent, b: &LedgerEvent) -> bool {
+    a.tool == b.tool && a.args == b.args
+}
+
+/// Whether core stop `c` was written while tool call `t` ran (a `ToolCtx::ask` stop).
+fn inside_call(c: &LedgerEvent, t: &LedgerEvent) -> bool {
+    let span =
+        chrono::TimeDelta::milliseconds(i64::from(t.duration_ms.max(0)) + CALL_SPAN_SLACK_MS);
+    match t.ts.checked_sub_signed(span) {
+        Some(start) => c.ts >= start,
+        None => true,
+    }
+}
+
+/// One listing per stopped call (H-1.4, Q-4, D-121; grouping rules in the module header).
+/// `at[i] = Some(l)` when a stopped call's listing goes at event `i` and shows event `l`.
+fn stop_listings(events: &[LedgerEvent]) -> Vec<Option<usize>> {
+    let n = events.len();
+    let is_core_stop = |j: usize| is_core(&events[j]) && is_stop(&events[j]);
+    let tool_stops: Vec<usize> = (0..n)
+        .filter(|&i| is_stop(&events[i]) && !is_core(&events[i]))
         .collect();
-    let mut listed: Vec<(&str, &Value)> = Vec::new();
+    // owner[j]: the tool stop event that core stop j belongs to.
+    let mut owner: Vec<Option<usize>> = vec![None; n];
+    // The trailing core stop is the next event of the same call key.
+    for &t in &tool_stops {
+        if let Some(j) = (t + 1..n).find(|&j| same_call_key(&events[t], &events[j])) {
+            if is_core_stop(j) && owner[j].is_none() {
+                owner[j] = Some(t);
+            }
+        }
+    }
+    // Core stops written while the call ran, right before its tool event.
+    for &t in &tool_stops {
+        for j in (0..t).rev() {
+            if !same_call_key(&events[t], &events[j]) {
+                continue;
+            }
+            if is_core_stop(j) && owner[j].is_none() && inside_call(&events[j], &events[t]) {
+                owner[j] = Some(t);
+            } else {
+                break;
+            }
+        }
+    }
+    // Per group (keyed by its tool stop, or by a lone core stop): first index and the
+    // event shown (first core stop, else the tool stop).
+    let mut pos = vec![usize::MAX; n];
+    let mut shown: Vec<Option<usize>> = vec![None; n];
+    for i in (0..n).filter(|&i| is_stop(&events[i])) {
+        let g = if is_core(&events[i]) {
+            owner[i].unwrap_or(i)
+        } else {
+            i
+        };
+        pos[g] = pos[g].min(i);
+        if is_core(&events[i]) && shown[g].is_none() {
+            shown[g] = Some(i);
+        }
+    }
+    let mut at = vec![None; n];
+    for g in (0..n).filter(|&g| pos[g] != usize::MAX) {
+        at[pos[g]] = Some(shown[g].unwrap_or(g));
+    }
+    at
+}
+
+fn needs_line(events: &[LedgerEvent]) -> String {
+    let stops = stop_listings(events);
     let mut first = Vec::new();
     let mut fails = Vec::new();
     for (i, e) in events.iter().enumerate() {
         if is_stop(e) {
-            if !is_core(e) && core_stops.contains(&e.tool.as_str()) {
+            let Some(l) = stops[i] else {
                 continue;
-            }
-            let key = (e.tool.as_str(), &e.args);
-            if listed.contains(&key) {
-                continue;
-            }
-            listed.push(key);
+            };
+            let s = &events[l];
             first.push(format!(
                 "stopped at {} ({}): {}; handed back to you",
-                clip(&e.tool, ITEM_MAX),
-                class_str(e.class),
-                why_text(e)
+                clip(&s.tool, ITEM_MAX),
+                class_str(s.class),
+                why_text(s)
             ));
         } else if is_skip(e.mode) && is_core(e) {
             let how = if e.mode == Some(LedgerMode::TimeoutSkip) {
@@ -900,10 +971,13 @@ fn build_report(
 
     let result = match run_status(events) {
         RunStatus::Stopped => {
-            let stop = events
-                .iter()
-                .find(|e| is_stop(e) && is_core(e))
-                .or_else(|| events.iter().find(|e| is_stop(e)));
+            // The latest stopped call is why the run is stopped now (H-1.4 resumes).
+            let stop = stop_listings(events)
+                .into_iter()
+                .rev()
+                .flatten()
+                .next()
+                .map(|l| &events[l]);
             format!("stopped ({})", stop.map(why_text).unwrap_or_default())
         }
         RunStatus::Partial => "partial".into(),
@@ -1327,6 +1401,9 @@ mod tests {
             Some(LedgerMode::Stop),
         );
         core_stop.ok = false;
+        // The wrapper writes both with the call's args (a tool stop is only folded into a
+        // core stop of the same tool and args).
+        core_stop.args = tool_ev.args.clone();
         core_stop.why = Some("hCaptcha on lu.ma".into());
         let mut skipped = send("a@x.com", LedgerMode::AnsweredSkip);
         skipped.ok = true;
@@ -1385,6 +1462,149 @@ Did: 0 actions
         let mut more = events.clone();
         more.push(other);
         assert_eq!(report("Register", &more).matches("stopped at").count(), 2);
+    }
+
+    /// Round 3: a stop event of `act.click {"ref":"9"}` at `ms` after 09:00:00, with the
+    /// call's real timing (`duration_ms` only matters on the tool event).
+    fn stop_at(server: &str, ms: i64, dur: i32, why: &str) -> LedgerEvent {
+        let mut e = ev(
+            server,
+            "act.click",
+            Class::Challenge,
+            Some(LedgerMode::Stop),
+        );
+        e.ts = chrono::Utc.with_ymd_and_hms(2026, 10, 23, 9, 0, 0).unwrap()
+            + chrono::TimeDelta::milliseconds(ms);
+        e.duration_ms = dur;
+        e.args = json!({ "ref": "9" });
+        e.why = Some(why.into());
+        if server == "core" {
+            e.ok = false;
+        }
+        e
+    }
+
+    fn stopped_lines(r: &str) -> Vec<&str> {
+        line_of(r, "Not done")
+            .trim_start_matches("Not done / needs you: ")
+            .split("; handed back to you")
+            .map(|s| s.trim_start_matches("; "))
+            .filter(|s| s.starts_with("stopped at"))
+            .collect()
+    }
+
+    fn line_of<'a>(r: &'a str, prefix: &str) -> &'a str {
+        r.lines()
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_default()
+    }
+
+    /// Review round 2, item 1 (H-1.4): the user clears an hCaptcha, resumes, and the same
+    /// call (same tool, same args) is stopped again by Turnstile. Two calls, two listings,
+    /// each with its own why; `Result:` carries the latest one.
+    #[test]
+    fn resumed_run_same_call_stopped_twice_lists_both() {
+        let events = vec![
+            // Call 1: mid-call challenge (ToolCtx::ask stop, tool stop, trailing stop).
+            stop_at(
+                "core",
+                30,
+                0,
+                "challenge during act.click: hCaptcha appeared",
+            ),
+            stop_at("sheetbrowse", 60, 50, "hCaptcha on lu.ma"),
+            stop_at("core", 62, 0, "hCaptcha on lu.ma"),
+            fetch("https://lu.ma/e"),
+            // Call 2, after the resume: the same tool and args.
+            stop_at(
+                "core",
+                180_030,
+                0,
+                "challenge during act.click: Turnstile appeared",
+            ),
+            stop_at("sheetbrowse", 180_070, 60, "Turnstile on lu.ma"),
+            stop_at("core", 180_071, 0, "Turnstile on lu.ma"),
+        ];
+        let r = report("Register", &events);
+        assert_eq!(
+            stopped_lines(&r),
+            vec![
+                "stopped at act.click (Challenge): challenge during act.click: hCaptcha appeared",
+                "stopped at act.click (Challenge): challenge during act.click: Turnstile appeared",
+            ],
+            "{r}"
+        );
+        assert_eq!(
+            line_of(&r, "Result:"),
+            "Result: stopped (challenge during act.click: Turnstile appeared)",
+            "{r}"
+        );
+
+        // Two gate Stops of the same call (no tool events): two listings, latest why.
+        let gate = vec![
+            stop_at("core", 0, 0, "blocked: hCaptcha on lu.ma"),
+            stop_at("core", 120_000, 0, "blocked: Turnstile on lu.ma"),
+        ];
+        let r = report("Register", &gate);
+        assert_eq!(stopped_lines(&r).len(), 2, "{r}");
+        assert_eq!(
+            line_of(&r, "Result:"),
+            "Result: stopped (blocked: Turnstile on lu.ma)"
+        );
+
+        // A gate Stop, then a retry the handler stops without an ask: the earlier core stop
+        // lies outside the retry's span, so it is not folded into it.
+        let retry = vec![
+            stop_at("core", 0, 0, "blocked: hCaptcha on lu.ma"),
+            stop_at("sheetbrowse", 90_040, 40, "Turnstile on lu.ma"),
+            stop_at("core", 90_041, 0, "Turnstile on lu.ma"),
+        ];
+        let r = report("Register", &retry);
+        assert_eq!(
+            stopped_lines(&r),
+            vec![
+                "stopped at act.click (Challenge): blocked: hCaptcha on lu.ma",
+                "stopped at act.click (Challenge): Turnstile on lu.ma",
+            ],
+            "{r}"
+        );
+        assert_eq!(
+            line_of(&r, "Result:"),
+            "Result: stopped (Turnstile on lu.ma)"
+        );
+
+        // One call is still one listing with real timing (ask stop inside the span).
+        let r = report("Register", &events[..3]);
+        assert_eq!(stopped_lines(&r).len(), 1, "{r}");
+    }
+
+    /// Review round 2, item 2: a tool stop event is dropped only for a core stop of the
+    /// same (tool, args). Here `act.click {ref:9}` got a gate Stop and later
+    /// `act.click {ref:12}` was challenge-stopped, but its trailing core stop was never
+    /// written (write_or_diag only logs a failed write).
+    #[test]
+    fn tool_stop_kept_when_core_stop_has_other_args() {
+        let mut later = stop_at("sheetbrowse", 60_050, 40, "Turnstile at #12");
+        later.args = json!({ "ref": "12" });
+        let events = vec![stop_at("core", 0, 0, "blocked: hCaptcha on lu.ma"), later];
+        let r = report("Register", &events);
+        assert_eq!(
+            stopped_lines(&r),
+            vec![
+                "stopped at act.click (Challenge): blocked: hCaptcha on lu.ma",
+                "stopped at act.click (Challenge): Turnstile at #12",
+            ],
+            "{r}"
+        );
+        assert_eq!(line_of(&r, "Result:"), "Result: stopped (Turnstile at #12)");
+
+        // Same args, trailing stop missing, and the earlier core stop is another call: the
+        // tool stop is still its own listing.
+        let mut same = stop_at("sheetbrowse", 60_050, 40, "Turnstile at #9");
+        same.ok = true;
+        let events = vec![stop_at("core", 0, 0, "blocked: hCaptcha on lu.ma"), same];
+        let r = report("Register", &events);
+        assert_eq!(stopped_lines(&r).len(), 2, "{r}");
     }
 
     /// Item 10: stops and skipped asks come first and are never cut by the list cap.
