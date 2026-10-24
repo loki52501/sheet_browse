@@ -1,0 +1,36 @@
+from: rust-coder-1 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-23"
+state: "crates/toolstore implemented apart from runner.rs (rust-coder-2): header (T-2, I-12), domain (T-1, D-300), loader (T-3, D-306), fingerprint + relocate (T-4, D-304, B-300), lifecycle record/reforge/confirm/pin/sweep (T-5, T-7, D-302, D-303), invariants check_repair + planner_class with PlannerCheck/SbAct (T-9, G-4, D-301, D-307), archive moves + git commit helper. Seeds tools/ashbyhq.com/list_jobs.js and tools/_generic/read_table.js load and run through the runner with fake PageHost/ApiFetch. cargo test -p toolstore: 68 pass (51 mine, 17 runner); clippy --all-targets -D warnings clean; fmt clean; cargo check --workspace green."
+not_done: "1. G-5: a hand-edited tool file should reset status to saved with version += 1 on the next load; needs a stored content hash that tools.health lacks (not built). 2. T-5 auto @expects after 3 clean runs, T-6 growth and T-8 promotion are reflect's (toolforge). 3. Swap the built-in role alias table (fingerprint.rs ROLE_ALIASES, B-300) for sb-sheet's data/roles.txt when area sheet merges. 4. invariants::vault_keys duplicates harness_core::vault::vault_refs (todo!() in core); switch when core lands. 5. SbAct calls sb_act::parse/check_planner, which are todo!() until area page merges: callers must pass a fake PlannerCheck until then. 6. folder_for reads every _site.yaml when no folder matches the host directly; cache if profiling shows it."
+gotchas:
+  - "record(), reforge() and sweep() change files under tools/ but never commit: the caller runs ToolStore::git_commit(&[root.join(domain), root.join(\"_archive\").join(domain)], \"... (T-xx)\"). git_commit refuses a message without a task id and any path outside the root, and stages with `git add -A -- <paths>` + `git commit -- <paths>` so nothing else staged is committed."
+  - "load()/scan() accept a host or a folder (they call folder_for first) and a path or a full URL (query and fragment dropped)."
+  - "fingerprint() Partial requires at least half the items found exactly AND every missing item relocatable; relocate() alone has no half rule (useful for reflect on a fully changed page)."
+  - "Archive clock is file mtime (B-308): sweep(now) compares archived files' mtime with `now`, so tests that fake `now` far ahead also age freshly archived files."
+  - "cargo fmt -p toolstore also formats runner.rs; `git show --name-only` folds a move into the new path unless --no-renames."
+  - "Ledger events from toolstore: server core, tool tools.{relocate,reforge,retire,archive,delete}, class/mode None, run_id None."
+decisions_made: []
+blockers_opened: [B-302, B-303, B-304, B-305, B-306, B-307, B-308, B-309, B-310]
+interface_changes_to_record:
+  - "I-7/I-12 pub modules: toolstore::{header, domain, loader, fingerprint, invariants, lifecycle, archive}; all old names re-exported at the crate root (ToolHeader, ToolKind, ArgSpec, FpItem, Tool, StoreError, RunOutcome, ToolRunResult, ToolStore, FingerprintResult, parse_header, fingerprint, skeleton_line)."
+  - "StoreError gains Git(String)."
+  - "ToolStore gains scan(domain, path) -> LoadReport{tools, skipped: Vec<(PathBuf, String)>} (D-306), tool_path, archive_path, archive(domain, name, version) -> Option<PathBuf>, git_commit(paths, message) -> commit hash, health(store, domain, name), register_forged(store, domain, name), reforge(store, domain, name, new_src, at), confirm(store, domain, name), set_pinned(store, domain, name, bool), log_invariant(store, domain, name, &err), sweep(store, now, visits: &(dyn Fn(&ToolHealth) -> u32 + Sync)) -> Vec<SweepAction{Retired|Archived|Deleted}>."
+  - "Free fns: relocate(tool, index) -> Option<Vec<FpItem>>, fingerprint_items, role_matches, parse_fingerprint, render_fingerprint, patch_fingerprint, check_repair(old_src, new_src, RepairKind{Relocate|Reforge}), planner_class(tool, program, index, &dyn PlannerCheck) -> Result<Class>, planner_act_class (same, -> ActClass with hints, so D-39 hint rules can fire), vault_keys, stop_count, glob_match, namespace, url_path, normalize_host, registrable, has_task_id; trait PlannerCheck: Send + Sync { check(program, index) -> Result<ActClass, String> } with SbAct; SiteConfig{aliases, pinned}; consts CLEAN_RUNS_TO_SAVE=3, MISSES_TO_RETIRE=5, EPHEMERAL_IDLE_DAYS=14, EPHEMERAL_IDLE_VISITS=10, ARCHIVE_DELETE_DAYS=90, GENERIC, ARCHIVE, SITE_FILE."
+files_touched:
+  - crates/toolstore/Cargo.toml
+  - crates/toolstore/src/lib.rs
+  - crates/toolstore/src/header.rs
+  - crates/toolstore/src/domain.rs
+  - crates/toolstore/src/loader.rs
+  - crates/toolstore/src/fingerprint.rs
+  - crates/toolstore/src/invariants.rs
+  - crates/toolstore/src/lifecycle.rs
+  - crates/toolstore/src/archive.rs
+  - crates/toolstore/src/tests.rs
+  - tools/ashbyhq.com/list_jobs.js
+  - tools/_generic/read_table.js
+  - agent-memory/blockers.yaml
+  - agent-memory/handoffs/T-11-rust-coder-1.yaml
+verify: "cargo test -p toolstore"
