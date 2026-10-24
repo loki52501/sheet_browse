@@ -9,6 +9,16 @@ publish.workspace = true
 [dependencies]
 chrono.workspace = true
 harness-core.workspace = true
+# eTLD+1 with the public suffix list compiled in (D-300).
+psl = "2"
+# Tool runner (D-305): embedded JS engine, default features only (no loader, no dyn-load).
+rquickjs.workspace = true
 sb-act.workspace = true
 sb-sheet.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile = "3"
+tokio.workspace = true

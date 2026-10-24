@@ -1,0 +1,16 @@
+from: reviewer-1 (area store)
+to: store/sub-orchestrator
+task: T-11
+date: "2026-10-23"
+state: "Reviewed commit e5305f7 (toolstore::runner, D-305/D-53/T-9 inv 2/D-52 q). Verdict approve, Blocking none. In a detached worktree at e5305f7: 17 runner tests pass, clippy -D warnings clean, fmt clean. Sandbox probes (out-of-tree crate) confirmed globals are exactly the allowlist + q; no eval/Function/import/FinalizationRegistry escape; interrupt cap hits inside C loops (indexOf on length 2^53-1, ReDoS); unsafe erase is sound as written. Report: bench/results/review-T-11-runner.md."
+not_done: "Six should-fix items for the coder, in this order: 1. make runner::erase an unsafe fn. 2. give ApiFetch::api a deadline (the wall cap is not enforced across host calls, B-323). 3. cap reader output size (RunOpts.max_output). 4. fix OutOfMemory typing: OOM in json_stringify becomes BadReturn, and a tool throwing 'out of memory' becomes OutOfMemory. 5. record the D-305 deviation (poisoned Function kept, Eval intrinsic loaded) and the runner public API plus the B-320 table shape under interface_changes for I-7/I-12. 6. make the globals test assert ownKeys(globalThis) == ALLOWED_GLOBALS + q. merge_gate.py reads bench/results/review-T-11.md, so fold this runner review into the task review."
+gotchas:
+  - "Building rquickjs-sys from cold takes about 45 s; use a separate CARGO_TARGET_DIR when testing a detached worktree so the area's target dir is not touched."
+  - "sb_act::parse and sb_sheet::find/read are still todo!(): the injection test uses a local splitter, and SheetPage find/text panic until T-10/T-19 land."
+  - "quickjs-ng exposes Error.prepareStackTrace/captureStackTrace; tool JS can run during error description, but the absolute deadline bounds it."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-11-runner.md
+  - agent-memory/handoffs/T-11-reviewer-1.yaml
+verify: "cargo test -p toolstore runner"

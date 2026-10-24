@@ -1,0 +1,18 @@
+from: tester-2 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-23"
+state: "Re-ran T-11 acceptance on swarm/store HEAD 37ab7b0 (after fix commits f67a09f runner and 4a61935 core). Added 6 tests to crates/toolstore/tests/accept_t11.rs (now 29). D-310: hostile domain/name refused with BadPath by record, reforge, register_forged, confirm, set_pinned, log_invariant and archive. Sweep never acts on 68 poisoned rows and still retires the good stale row. folder_for of 37 hostile hosts never yields a path outside the root. git_commit refuses 23 pathspec-magic, glob and escape path lists and commits nothing outside tools/ (real git, temp repo). D-308: a slow ApiFetch gives Timeout and the spent budget never reaches the host; output over max_output gives OutputTooLarge. tester-1's 3 failures now pass (concatenated vault key, ask held until confirm, @match backslash and percent-encoding). fmt --check, clippy -p toolstore --all-targets -D warnings, cargo test -p toolstore (lib 91/91, accept 29/29), cargo test --workspace (131 passed, 0 failed) and cargo check --workspace are all clean. bench/results/accept-T-11.md has 34 rows, all pass. Verdict: green."
+not_done: "1. Vault canary row is deferred, not in the table: core::vault (T-05, area core) is still todo!() (Vault::in_memory at crates/core/src/vault.rs:87), so the canary cannot be planted as a vault value. Substitute check done: SB_VAULT_CANARY set in the env, asserted absent by g4_no_new_vault_key (fake ledger, health rows, temp tools dir, error text), and 0 hits in the full output of cargo test -p toolstore --nocapture and cargo test --workspace and in the worktree. Re-run with a real planted value when T-05 lands. 2. G-5 hand-edit reset, T-5 auto @expects, T-6 and T-8 are not built and have no row (reflect/toolforge work)."
+gotchas:
+  - "Bash heredocs fail in this Git Bash (unexpected EOF while looking for matching quote) when the body has JS single quotes. Append Rust tests with the Edit tool."
+  - "scripts/swarm/merge_gate.py splits table cells on every pipe character, so a note containing a literal pipe (even inside backticks) breaks the row. It also imports yaml, which is not installed for the system python here; I replicated check_accept inline to verify the report."
+  - "The git test panics, not skips, when git is missing, so a missing git can never look like a pass."
+  - "g4_vault_key_built_by_concatenation_is_rejected passes on either branch (re-forge Err or planner_class Err) and does not say which one fired."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/toolstore/tests/accept_t11.rs
+  - bench/results/accept-T-11.md
+  - agent-memory/handoffs/T-11-tester-2.yaml
+verify: "cargo test -p toolstore --test accept_t11"

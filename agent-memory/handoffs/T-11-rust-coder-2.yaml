@@ -1,0 +1,21 @@
+from: rust-coder-2 (area store)
+to: store/sub-orchestrator
+task: T-11
+date: "2026-10-23"
+state: "crates/toolstore/src/runner.rs (+ src/runner/tests.rs) implements the D-305 runner: rquickjs 0.14 (quickjs-ng) builds on MSVC; fresh Runtime+Context per run; globals pruned to an allowlist; Function/AsyncFunction/GeneratorFunction/AsyncGeneratorFunction constructors poisoned; no module loader; interrupt-handler wall cap (default 2 s) and memory cap (32 MiB) and stack cap (512 KiB) via RunOpts; PageHost / ApiFetch traits; SheetPage default host over sb_sheet::find/read (stubs) with a real table(); run_reader / run_planner (+ _with variants); typed RunError. 17 runner tests pass; clippy clean on the lib target."
+not_done: "1. Reviewer + tester on the runner. 2. Suborch to record runner API under interface_changes for I-12 (toolstore::runner::{run_reader, run_reader_with, run_planner, run_planner_with, PageHost, ApiFetch, SheetPage, RunOpts, RunError, table_json, ALLOWED_GLOBALS, FIND_ALL_K}). 3. srv-web/sb-mcp wiring per B-322 (spawn_blocking + Handle::block_on for ApiFetch). 4. SheetPage find/findAll/text are only exercised once sb-sheet T-10 lands."
+gotchas:
+  - "rquickjs host closures must be 'js (HRTB), so a borrowed &dyn PageHost cannot be captured; runner::erase transmutes the borrow to 'static and stores it in an Rc<Cell<Option<..>>> that a guard clears before run() returns. This is the only unsafe in the crate; see its SAFETY comment."
+  - "The Eval intrinsic is required for Rust to compile the module at all (quickjs-ng); the JS-visible eval and Function constructors are removed by the prelude instead."
+  - "Timeouts are detected by the interrupt handler's flag, not by error text: the interrupt is uncatchable, so `try { while(true){} } catch {}` still times out."
+  - "Fake hosts in tests: a substring like '/jobs' also matches 'https://jobs.example' - match on a longer path."
+decisions_made: []
+blockers_opened: [B-320, B-321, B-322, B-323]
+files_touched:
+  - crates/toolstore/src/runner.rs
+  - crates/toolstore/src/runner/tests.rs
+  - crates/toolstore/src/lib.rs (pub mod runner + re-exports only)
+  - crates/toolstore/Cargo.toml (rquickjs, serde_json)
+  - agent-memory/blockers.yaml
+  - agent-memory/handoffs/T-11-rust-coder-2.yaml
+verify: "cargo test -p toolstore runner"

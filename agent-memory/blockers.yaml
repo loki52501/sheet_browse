@@ -41,5 +41,122 @@ interface_changes:
     interface: I-2
     change: "Additive pub items in harness_core::mcp: serve_io(server, registry, harness, reader, writer), PROTOCOL_VERSION, scrub_value(vault, &Value); new module harness_core::ask (FileAsker, answer, asks_dir, card_path, answer_path). Behaviour: tools/call for a name not in the registry answers JSON-RPC error -32602 (MCP 2025-06-18 'Unknown tool'), not isError; dispatch() still returns ToolError::Args for it."
     why: "Listed so the contract file can name them; serve_io is the test seam for the stdio transport, answer() is what T-08's `harness ask` calls. Default: as implemented in T-07."
+  - id: B-31
+    task: T-11
+    question: "Supreme second-opinion review of swarm/store (approve after D-74) left four should-fix items for toolstore. (1) valid_name allows upper case, so on NTFS `Register` and `register` are one file but two tools.health rows, and reforge never checks that the new @name equals the name it was called with (lifecycle.rs reforge, invariants.rs). (2) check_repair accepts a re-forge from @phase 2 to @phase 1 (gains page.api) and a change of @kind. (3) accept_t11 g4_no_new_vault_key's canary is never fed into any input, so that check cannot fail. (4) archive renames then sets mtime; if set_mtime fails the archived copy keeps its old mtime and the next sweep can delete it before 90 days (D-303). Also: tool_path/archive_path #[deprecated] per D-72."
+    default_taken: "Not merge blockers. Area store fixes all five in its next task before toolforge (T-28) consumes reforge and check_repair: lower-case-only names (or case-folded health keys) plus a @name check in reforge, reject @phase lowering and @kind changes in check_repair, feed the canary, and record the archive time in the archive row (or fail the archive) instead of relying on mtime."
+    needs_user: false
+  - id: B-311
+    task: T-11
+    question: "check_repair's ?s count (invariants::stop_count) is a text heuristic and can be gamed (a dead `const x = \"?s\"` keeps the count; a regex literal can confuse the comment stripper). Is a static count enough for T-9?"
+    default_taken: "No: the authoritative ?s check is sb_act::check_planner on the emitted program through PlannerCheck (D-301, D-50) at planner_class time; stop_count is only an early filter for G-2. Callers must not run a planner's program without planner_class. Revisit with a JS tokenizer if toolforge (T-28) needs a stronger static check."
+    needs_user: false
+  - id: B-312
+    task: T-11
+    question: "The D-309 vault-key check and vault_keys() are case-sensitive (`@VAULT(k)` is not seen). Does core's vault syntax accept other cases?"
+    default_taken: "Switch both to harness_core::vault::vault_refs when T-05 lands so toolstore matches exactly what core resolves; until then core's resolver is todo!() and resolves nothing."
+    needs_user: false
+  - id: B-300
+    task: T-11
+    question: "D-49 says toolstore::fingerprint reads sb-sheet's data/roles.txt, which does not exist yet (area sheet, T-10). What does toolstore use for role aliases meanwhile?"
+    default_taken: "toolstore carries a small built-in alias map (input textbox searchbox, button, select combobox listbox, checkbox, radio, link, form); swap to sb-sheet's table in the merge that brings both."
+    needs_user: false
+  - id: B-301
+    task: T-11
+    question: "docs/03 acceptance says an unused ephemeral tool 'is deleted by reflect', but T-7 says deletion is always retire -> archive -> delete. Which?"
+    default_taken: "D-303: retire and archive at 14 days (ledger event), delete the archived file at 90 days."
+    needs_user: false
+  - id: B-320
+    task: T-11
+    question: "T-2/D-53 name page.table(id) but no return shape or id syntax."
+    default_taken: "id is `3` or `f2.3` (table number within a frame, leading # ignored). Returns {header: [cells], rows: [[cells]]}, plus refs: [[ref|null]] (refs without #) only when some cell links an element; null when the table has no rows. Cells are trimmed span text. Built directly from TextBlock TableRow blocks in toolstore::runner::table_json."
+    needs_user: false
+  - id: B-321
+    task: T-11
+    question: "T-2 lists `url` and `title` without parentheses; the brief for the runner wrote url() and title(). Properties or methods on page?"
+    default_taken: "Properties (strings read once from PageHost at run start; a run is synchronous so they cannot change). PageHost itself has url() and title() methods."
+    needs_user: false
+  - id: B-322
+    task: T-11
+    question: "PageHost and ApiFetch are synchronous (JS host calls are synchronous); srv-web's api tool and sb-mcp are async (tokio). How do callers bridge?"
+    default_taken: "Callers run run_reader/run_planner inside tokio::task::spawn_blocking and implement ApiFetch with Handle::block_on on the gated api call. The runner is !Send internally (fresh Runtime per call), so nothing crosses threads."
+    needs_user: false
+  - id: B-323
+    task: T-11
+    question: "The 2 s wall cap includes time spent inside page.api() host calls. A @phase 1 reader making several network calls can hit it."
+    default_taken: "Keep 2 s as RunOpts::default(); srv-web passes a larger RunOpts.timeout for @phase 1 readers if acceptance shows it is needed. The cap is checked by the interrupt handler, so a slow api call is only detected when JS resumes."
+    needs_user: false
+  - id: B-302
+    task: T-11
+    question: "T-2 gives no default when a tool file has no @phase line."
+    default_taken: "@phase defaults to 2 (needs the browser), the safe side: a file only runs on srv-web's fetched index when it says @phase 1. Missing @match defaults to /*; missing @name, @kind or @gate is a header error."
+    needs_user: false
+  - id: B-303
+    task: T-11
+    question: "record() on a tool with no tools.health row: which status does the new row get? T-7 starts forged tools as ephemeral, but G-5 seeds sites with hand-written tools that must not be swept after 14 idle days."
+    default_taken: "ephemeral when the file's header has @forged (or the file is missing), saved otherwise (hand-written). toolforge calls ToolStore::register_forged at G-2 step 5, which always creates an ephemeral row."
+    needs_user: false
+  - id: B-304
+    task: T-11
+    question: "T-1 says folder = eTLD+1, but docs/07 uses tools/mail.google.com/ and tools/calendar.google.com/, whose eTLD+1 is google.com."
+    default_taken: "folder_for picks the most specific existing folder among the host and its parents down to eTLD+1 (mail.google.com/ wins over google.com/), then _site.yaml aliases, then eTLD+1. The namespace is the folder's first label, so mail.google.com tools are mail.<name>."
+    needs_user: false
+  - id: B-305
+    task: T-11
+    question: "T-3's skeleton line example shows luma.register(name,email) although register also takes plan?:string. Are optional args shown?"
+    default_taken: "Shown with a trailing ?: luma.register(name,email,plan?). Two tokens per optional arg buy the model knowledge of the arg without a wasted turn (CLAUDE.md priorities)."
+    needs_user: false
+  - id: B-306
+    task: T-11
+    question: "How are _generic tools namespaced (T-3 shows only site namespaces)?"
+    default_taken: "generic.<name> (bare names could collide with harness tools such as read or find). A site tool of the same name shadows the generic one and the generic one is not loaded."
+    needs_user: false
+  - id: B-307
+    task: T-11
+    question: "@match glob semantics: does * cross / ?"
+    default_taken: "Yes: * matches any run of characters including /, ? matches one character, the rest is literal, matched against the URL path without query or fragment. /* is the whole site. Hand-rolled, no globset dependency."
+    needs_user: false
+  - id: B-308
+    task: T-11
+    question: "D-303 deletes archived files after 90 days, but tools.health has no archived-at column. Where does the archive clock come from?"
+    default_taken: "The archived file's mtime, set to now by ToolStore::archive. A fresh clone resets mtimes, which only delays deletion. Ledger events for file actions use server core and tool tools.relocate | tools.reforge | tools.retire | tools.archive | tools.delete with args {domain, name, version}."
+    needs_user: false
+  - id: B-309
+    task: T-11
+    question: "D-304 compares fingerprint names case- and space-insensitively. Labels like 'Email *' or 'Sign-up' then miss."
+    default_taken: "Names are compared after lowercasing and replacing every non-alphanumeric character with a space (so 'Email *' = 'email', 'Sign-up' = 'sign up'). Relocate uses the same normalisation plus a built-in synonym table and token overlap >= 0.5."
+    needs_user: false
+  - id: B-310
+    task: T-11
+    question: "What if a tool file's @name differs from its file name?"
+    default_taken: "The loader skips it with why '@name x does not match file name y.js' (D-306 report). tools.health, the archive and record() all key on the file name, so the two must agree."
+    needs_user: false
+
+interface_changes:
+  - id: IC-300
+    from: store
+    interface: I-7
+    change: "toolstore is split into pub modules header, domain, loader, fingerprint, invariants, lifecycle, archive, runner; every wave-0 name stays re-exported at the root. ToolStore gains scan(domain, path) -> LoadReport{tools, skipped} (D-306), tool_path, archive_path, archive, git_commit(paths, msg) -> hash (msg must carry a task id), health, register_forged, reforge, confirm, set_pinned, log_invariant, sweep(store, now, visits) -> Vec<SweepAction> (D-303). load() and scan() accept a host or folder and a path or full URL. Free fns relocate(tool, index), planner_class / planner_act_class(tool, program, index, &dyn PlannerCheck) (D-301), check_repair(old_src, new_src, RepairKind) (D-307). StoreError gains Git(String). record/reforge/sweep change files but never commit: the caller commits with its task id."
+    why: "T-4 relocate, T-7 sweep, T-9/G-4 invariants and T-1 git commits need entry points the wave-0 draft did not name; consumers srv-web, sb-mcp, toolforge and harness (reflect) call them."
+  - id: IC-301
+    from: store
+    interface: I-12
+    change: "toolstore::runner (D-305): traits PageHost {find, find_all, text(Option<&str>), table, url, title} and ApiFetch {api(url)}, both synchronous; run_reader(tool, host, args, Option<&dyn ApiFetch>) and run_planner(tool, host, args) plus *_with(&RunOpts); RunOpts{timeout 2 s, memory_limit 32 MiB, max_stack}; RunError; SheetPage over (&[IndexRow], &[TextBlock], url, title). In JS `page.url` and `page.title` are properties (B-321); `page.api` exists only for @phase 1 readers. Callers run it inside spawn_blocking (B-322)."
+    why: "D-53 named a page API and runtime that no interface defined; srv-web (T-12/T-13) and sb-mcp need the exact shape."
+  - id: IC-302
+    from: store
+    interface: I-12
+    change: "Amends IC-301 (accepted as D-61) per D-308: ApiFetch::api(&self, url: &str, remaining: Duration) gets the run's remaining wall time and must return within it (a late return, Ok or Err, makes the run RunError::Timeout); RunOpts gains max_output (default 64 KiB of reader JSON or planner program text) and RunError gains OutputTooLarge { max, got }; q(undefined|null) throws TypeError."
+    why: "review-T-11-runner should-fix 2 and 3: a hung host fetch outlived the T-9 wall cap, and reader output had no size cap (CLAUDE.md rule 5). srv-web and sb-mcp ApiFetch impls must honour `remaining`."
+  - id: IC-303
+    from: store
+    interface: I-7
+    change: "Amends IC-300 (accepted as D-60) per D-310/D-311: StoreError gains BadPath; new pub fns try_tool_path, try_archive_path, valid_domain, valid_name, check_tool_id; folder_for returns \"\" for hosts that cannot be a folder and every mutator refuses it; planner_class/planner_act_class reject an @vault(k) the tool source does not contain literally (D-309)."
+    why: "review-T-11-core blocking 1-3 (path traversal, git pathspec magic, vault key bypass)."
+  - id: IC-304
+    from: store
+    interface: I-7
+    change: "Completes IC-300..IC-303 (review-T-11 should-fix 5). Further pub items: runner::{ALLOWED_GLOBALS, FIND_ALL_K, table_json}; invariants::{stop_count, vault_keys}; archive::has_task_id; domain::{normalize_host, registrable, SiteConfig}; fingerprint::{fingerprint_items, role_matches, norm, parse_fingerprint, render_fingerprint, patch_fingerprint}; loader::{namespace, glob_match, url_path}; skeleton_line; lifecycle consts CLEAN_RUNS_TO_SAVE, MISSES_TO_RETIRE, EPHEMERAL_IDLE_DAYS, EPHEMERAL_IDLE_VISITS, ARCHIVE_DELETE_DAYS. Behaviour: tool_path/archive_path return an empty PathBuf on bad input (try_* return BadPath); record(Relocated) on a retired row is an error; a reforge of an ask row stays ask (D-310)."
+    why: "Consumers (srv-web, sb-mcp, toolforge, harness) should see the whole surface before coding against it; these helpers are what toolforge's G-2 static check reuses."
 
 proposals:
