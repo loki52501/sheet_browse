@@ -60,7 +60,11 @@ tasks:
     step: 2
     title: "sb-sheet (pure): index row types, skeleton, find scorer (BM25 + synonyms + roles + group), sheet lines, read renderer with chunking"
     docs: [docs/05-BROWSER.md, docs/04-TOOL-SERVERS-PHASE1.md]
-    status: todo
+    status: done
+    owner: sheet/suborch
+    claimed_at: "2026-10-23"
+    done_at: "2026-10-23"
+    evidence: [bench/results/review-T-10.md, bench/results/accept-T-10.md]
   - id: T-11
     step: 2
     title: "toolstore: layout, header parser, loader, fingerprint check, lifecycle updates, git commit helper"

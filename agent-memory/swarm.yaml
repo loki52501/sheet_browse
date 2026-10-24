@@ -19,7 +19,7 @@ areas:
     crates: [sb-sheet]
     tasks: [T-10]
     docs: [docs/05-BROWSER.md#B-6, docs/04-TOOL-SERVERS-PHASE1.md#W-5]
-    status: not_started
+    status: pr_open
     merged: false
   store:
     wave: 1

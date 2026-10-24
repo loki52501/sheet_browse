@@ -106,6 +106,11 @@ blockers:
     needs_user: false
 
 interface_changes:
+  - id: B-200
+    from: sheet
+    interface: I-6
+    change: "Draft additions, no existing signature changed: sb_sheet::sheet_line(&IndexRow) -> String, sb_sheet::find_lines(&[IndexRow], &[FindHit]) -> String, sb_sheet::data::{aria_roles(alias) -> &[String], alias_for(aria_role) -> &str, role_prior(word) -> &[String], synonyms(word) -> &[String]}, sb_sheet::tokens::estimate(&str) -> usize, and an example binary `cargo run -p sb-sheet --example skeleton -- <index.json>`."
+    why: "srv-web and sb-mcp must render find and sheet lines identically (D-203), toolstore::fingerprint must read the same alias table (D-49, D-201), and servers need a smoke test that needs no browser."
   - id: IC-300
     from: store
     interface: I-7

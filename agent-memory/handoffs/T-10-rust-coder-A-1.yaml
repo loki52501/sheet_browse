@@ -1,0 +1,28 @@
+from: rust-coder-A
+to: next
+task: T-10
+date: "2026-10-23"
+state: "sb-sheet coder-A modules done and uncommitted (integrator commits): data/roles.txt, data/synonyms.txt (~200 groups), src/data.rs (aria_roles, alias_for, role_prior, synonyms per B-200), src/tokens.rs (estimate = ceil(chars/4), scoring tokenizer), src/find.rs (B-6.2 per D-54, D-202, D-205; find_lines), src/sheet.rs (sheet_line, sheet(region) per D-203, D-206), src/skeleton.rs (B-6.1 per D-207; register fixture renders about 98 tokens), examples/skeleton.rs + examples/register.index.json, tests/common/mod.rs (hand-built register.html index), tests/find_register.rs (acceptance 6 at k=1 and k=3), tests/skeleton_sheet.rs. cargo fmt clean, cargo clippy -p sb-sheet --all-targets -- -D warnings clean, cargo test -p sb-sheet all green (lib 37, find_register 8, skeleton_sheet 8, read_article 11)."
+not_done: "1) Reviewer and tester pass on T-10. 2) Acceptance 6 against the live browser walk (sb-driver, later wave): the live index must match tests/common/mod.rs in shape (one CHALLENGE row for .g-recaptcha + iframe, D-55). 3) lib.rs untouched: no re-exports added."
+gotchas:
+  - "BM25 IDF is tiny on tiny corpora (N=2 gives ln 2), so a lone exact match in a 2-row test is weak (lexical < 3). Unit tests that assert not-weak need 4+ rows."
+  - "Synonyms at full weight, or role priors fired by synonyms, make `Accept all` outrank the agree checkbox on register.html; D-205 (synonyms 0.5, priors from typed words only) is what keeps acceptance 6 stable. Changing synonyms.txt for agree/accept/confirm can move it: rerun tests/find_register.rs."
+  - "examples/register.index.json is checked against tests/common/mod.rs by example_json_matches_hand_built_fixture; edit both together."
+  - "Coder B took D-210..D-212; coder A used D-205..D-208."
+decisions_made: [D-205, D-206, D-207, D-208]
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/data/roles.txt
+  - crates/sb-sheet/data/synonyms.txt
+  - crates/sb-sheet/src/data.rs
+  - crates/sb-sheet/src/tokens.rs
+  - crates/sb-sheet/src/find.rs
+  - crates/sb-sheet/src/sheet.rs
+  - crates/sb-sheet/src/skeleton.rs
+  - crates/sb-sheet/examples/skeleton.rs
+  - crates/sb-sheet/examples/register.index.json
+  - crates/sb-sheet/tests/common/mod.rs
+  - crates/sb-sheet/tests/find_register.rs
+  - crates/sb-sheet/tests/skeleton_sheet.rs
+  - agent-memory/decisions.yaml
+verify: "cargo test -p sb-sheet --test find_register --test skeleton_sheet"
