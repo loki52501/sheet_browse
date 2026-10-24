@@ -20,14 +20,14 @@ interfaces:
     rust: "harness_core::mcp::{serve, dispatch, Harness, ToolRegistry, ToolSpec, ToolHandler, Classified, ToolCtx, ToolOutput, ToolError} + harness_core::mcp::{serve_io, PROTOCOL_VERSION, scrub_value}; harness_core::ask::{FileAsker, answer, asks_dir, card_path, answer_path} (D-71)"
     consumers: [srv-web, srv-files, srv-cli, sb-mcp]
     spec: docs/01-HARNESS-CORE.md#H-6
-    notes: "D-48: deps arrive as a Harness (built by core_pg::bootstrap in each server main); dispatch() is the H-6 pipeline without transport, for tests; site tools join through ToolCtx::registry(). classify(ctx, args) is async and side-effect free; handlers reach the vault only via ToolCtx::resolve_into and never call MemoryStore::append. tools/call for a name not in the registry answers JSON-RPC error -32602 (MCP 2025-06-18 Unknown tool), not an isError result; dispatch() still returns ToolError::Args for it. serve_io is the stdio test seam; harness ask (T-08) calls ask::answer (D-71)."
+    notes: "D-48: deps arrive as a Harness (built by core_pg::bootstrap in each server main); dispatch() is the H-6 pipeline without transport, for tests; site tools join through ToolCtx::registry(). classify(ctx, args) is async and side-effect free; handlers reach the vault only via ToolCtx::resolve_into and never call MemoryStore::append. tools/call for a name not in the registry answers JSON-RPC error -32602 (MCP 2025-06-18 Unknown tool), not an isError result; dispatch() still returns ToolError::Args for it. serve_io is the stdio test seam; harness ask (T-08) calls ask::answer (D-71). D-79 (B-177): ask::answer returns io::ErrorKind::AlreadyExists with a plain message once an ask is closed (answered or timed out; both sides claim <n>.answer no-clobber); FileAsker::ask returns TimeoutSkip when it cannot write the card; a missing runs row reads as strict; every Asker is capped at card.timeout + 5 s; a handler or classifier panic becomes ToolError::Failed plus an ok=false tool event; ToolCtx::ask cards pass Gate::check; serve_io answers -32700 for a non-UTF-8 line and scrubs only payload strings."
   - id: I-3
     name: "Gate::check(call) -> Allow | Ask(card) | Stop(reason)"
     tier: contract
     crate: core
     rust: "harness_core::gate::{Gate, Call, Decision, AskCard, OnTimeout, StopReason, AskOutcome, Asker, HINT_JOB_APPLICATION, HINT_SIGNATURE}; harness_core::class::{Class, Mode} + harness_core::gate::clean_card(AskCard) -> AskCard (D-70)"
     spec: docs/01-HARNESS-CORE.md#H-1
-    notes: "Class order D-36; rule lookup D-39; Challenge stops before any rule; empty Send recipients = Send(new); strict = run OR rule (D-48). check is async. Every ask card, from the gate or from ToolCtx::ask, goes through gate::clean_card (D-110 (5) control strip and caps); there is no second sanitiser (D-70)."
+    notes: "Class order D-36; rule lookup D-39; Challenge stops before any rule; empty Send recipients = Send(new); strict = run OR rule (D-48). check is async. Every ask card, from the gate or from ToolCtx::ask, goes through gate::clean_card (D-110 (5) control strip and caps); there is no second sanitiser (D-70). D-81 (B-191): rule domains are stored as Punycode A-labels (non-mappable Unicode refused); rule hints use only ASCII a-z 0-9 _ - .; a Send card's values[0] is always the gate-written (\"new recipients (N)\", list) row and any other value under that key is dropped; blank recipients are ignored and duplicates count once."
   - id: I-4
     name: "Vault::resolve_into(sink), scrub(&str)"
     tier: contract
@@ -99,3 +99,11 @@ interfaces:
     consumers: [srv-web, sb-mcp]
     spec: docs/03-TOOL-STORE.md#T-2
     notes: "Runner per D-305 and D-308: PageHost {find, find_all, text(Option<&str>), table, url, title} and ApiFetch {api(url)} are synchronous; callers run the runner inside spawn_blocking and bridge ApiFetch with Handle::block_on (B-322). In JS page.url and page.title are properties (B-321); page.api exists only for @phase 1 readers; page.table returns {header, rows, refs?} (B-320). RunOpts defaults: 2 s wall cap including api time (B-323), 32 MiB memory. SheetPage implements PageHost over (&[IndexRow], &[TextBlock], url, title). Accepted as IC-301 (D-61). IC-302 (D-64): ApiFetch::api(&self, url, remaining: Duration) must return within the run's remaining wall time or the run is RunError::Timeout; RunOpts.max_output (64 KiB default) caps reader JSON and planner text with RunError::OutputTooLarge{max, got}; q(undefined|null) throws TypeError."
+  - id: I-13
+    name: "harness_core::sched: Scheduler, Launcher, Clock, Runner, notify_changed"
+    tier: draft
+    crate: core
+    rust: "harness_core::sched::{Scheduler, Launcher, LaunchRequest, LaunchExit, LaunchError, Clock, SystemClock, ManualClock, Runner, RunSpec, Finished, Fired, parse_cron, next_after, changed_dir, notify_changed, CHANGED_DIR, FIRE_TOOL, LAUNCH_TOOL, SchedError}"
+    consumers: [harness, srv-cli]
+    spec: docs/01-HARNESS-CORE.md#H-5
+    notes: "Accepted as B-185 (D-80). Scheduler{runner, wake, fired}::run_loop(shutdown) replaces sched::run_loop(store). The Launcher trait lives in core because the loop calls it (D-116); harness implements it as ClaudeLauncher. Cron is 5 fields in UTC. Anything that adds or removes a schedule outside the harness CLI (a future srv-cli tool) must call sched::notify_changed so harnessd re-reads. ManualClock is the test seam for the step-1 scheduler acceptance."
