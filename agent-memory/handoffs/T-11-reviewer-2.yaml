@@ -1,0 +1,15 @@
+from: reviewer-2 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-23"
+state: "Reviewed 955ce52 (toolstore core + seeds). cargo test -p toolstore 68 pass, clippy -D warnings clean, fmt clean. Verdict: request changes, 4 blocking: git pathspec magic escapes tools root (archive.rs:97-118); domain/name path traversal in tool_path/archive_path/record/reforge and folder_for returning separator strings (archive.rs:16-31, domain.rs:145-173); vault-key invariant bypass by string concatenation, no runtime vault-ref check in planner_act_class (invariants.rs:29-46,142-159); Ask status escapable without confirm (lifecycle.rs:272-303,349-360)."
+not_done: "1. rust-coder fixes the 4 blocking items with tests. 2. Should-fix: ?s textual count, sweep idle uses max(last_ok,last_fail), @match rejects backslash and %2e/%2f, folder_for IDNA/non-ASCII lowercase and no _x/.git folders, narrow claimed spec ids (T-6, T-8, T-5 auto @expects not done), read_table output caps, persist health row before file moves. 3. Re-review."
+gotchas:
+  - "git pathspec magic (':/', ':(top)') are Normal path components to Rust; use --literal-pathspecs."
+  - 'On Windows root.join("\windows") is C:\windows; folder_for("\windows") returns it.'
+  - "An untracked crates/toolstore/tests/ appeared during review; not part of 955ce52."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-11-core.md
+verify: "cargo test -p toolstore && cargo clippy -p toolstore --all-targets -- -D warnings"
