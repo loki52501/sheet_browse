@@ -1,0 +1,23 @@
+from: page/tester-6
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Round-5 acceptance of the sb-act half of T-19 (B-7, I-10) after D-409 (361b28d), at af7f3b2 (rechecked at 64d2e89): Verdict green, 28 of 28 rows pass, none skipped or ignored. Items 1-23 re-run; item 20 updated for D-409 (2) (#f1.362 'Complete' stays Navigate, being a single PAY_TOKENS word, and the same row renamed 'Complete purchase' is Pay). New crates/sb-act/tests/accept_t19_round5.rs (7 tests, items 24-28): Enter+Delete chord max on non-text rows and Enter class in text fields, formless pay_words buttons and menuitems Pay (incl. card form in frame 2), negatives (Back to top, Show details, formless Confirm and Complete, Pay links, Pay-named checkables, Delegate, Shift+Delete in text fields), properties over every row of all 14 fixtures, and a raise-only guard vs a 0554c29 baseline (6930 probes, 1155 raised, 0 lowered). Item 22 vs pre-D-408 (3122050): 3780 probes, 519 raised, 0 lowered. Gates: fmt --check exit 0, clippy --all-targets -D warnings exit 0, cargo test -p sb-act exit 0 (144 passed: lib 60, classify 16, forms 11, quote_fuzz 6, round2 18, round3 15, round4 8, round5 7, wire 3)."
+not_done: "1) Reviewer round 5 approved in 0f3d6e6; suborch merges T-19 sb-act. 2) sb-driver rejecting '-' chords (D-429, area driver, I-9); until then 'Enter-Delete' on a mail row is Navigate. 3) D-409 (3) split-heading 2SV set-up stays Submit by decision. 4) Bare 'Expiry' field not card evidence (D-407 Should, carried over)."
+gotchas:
+  - "common::ALL feeds both raise-only baselines: adding a fixture to ALL breaks item 22 and item 28 until both bench/fixtures/t19_pre_d408_classes.txt (src at 3122050, round4 raise_only with T19_WRITE_BASELINE) and t19_pre_d409_classes.txt (src at 0554c29, round5 raise_only with T19_WRITE_BASELINE_D409) are regenerated in a temp worktree with its own CARGO_TARGET_DIR."
+  - "The guard_write hook blocks writes outside the worktree, including the session scratchpad on F:/sb-swarm/tmp-page; put helper scripts under runs/ (gitignored) and delete them."
+  - "Shell heredocs with mixed quotes and backticks failed in the Bash tool; writing a script file and running it is more reliable."
+  - "merge_gate.py imports yaml from the user site, so python -I cannot load it; check the report with plain python and m.check_accept(path)."
+  - "Item 16 timings rose to 24-41 ms debug (round 4: 13-27 ms), still inside the 250 ms D-406 (5) target."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-act/tests/accept_t19_round5.rs
+  - crates/sb-act/tests/accept_t19_round4.rs
+  - crates/sb-act/tests/common/mod.rs
+  - bench/fixtures/t19_pre_d408_classes.txt
+  - bench/fixtures/t19_pre_d409_classes.txt
+  - bench/results/accept-T-19-sb-act.md
+  - agent-memory/handoffs/T-19-tester-6.yaml
+verify: "cargo fmt -p sb-act --check && cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act"

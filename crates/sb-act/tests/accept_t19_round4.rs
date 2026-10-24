@@ -173,7 +173,21 @@ fn d408_negatives_stay_navigate() {
         );
     }
     // A button with the card form's heading text but in another frame shares no form.
+    // Round 5 (D-409 (2)): a formless button named with a pay_words phrase is Pay in any
+    // frame, so the same row renamed "Complete purchase" is Pay. "Complete" alone is a
+    // single PAY_TOKENS word, not a pay_words phrase, so #f1.362 itself stays Navigate.
     assert_eq!(class_of("c#f1.362", &idx), Class::Navigate);
+    let mut renamed = idx.clone();
+    renamed
+        .iter_mut()
+        .find(|r| r.frame == 1 && r.id == 362)
+        .expect("#f1.362")
+        .name = "Complete purchase".to_string();
+    assert_eq!(class_of("c#f1.362", &renamed), Class::Pay);
+    assert_eq!(
+        key_class(row(&renamed, 1, 362), "Space", &renamed),
+        Class::Pay
+    );
     // A checkbox is not a button: toggling "Subscribe to offers" in a card form is Fill.
     assert_eq!(class_of("c#308", &idx), Class::Fill);
     // Enter in the card form is still the form max (D-406 (2)), even on Show details.

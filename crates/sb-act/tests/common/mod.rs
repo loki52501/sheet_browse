@@ -1,7 +1,8 @@
 //! Shared I-5 wire-JSON index fixtures for the T-19 sb-act acceptance tests. Items 1-6
 //! (accept_t19_classify.rs), items 7-11 (accept_t19_round2.rs) and items 12-18
-//! (accept_t19_round3.rs) and items 19-23 (accept_t19_round4.rs) use the same rows, and
-//! the lowering guards (items 11, 18 and 22) walk every fixture listed in [`ALL`].
+//! (accept_t19_round3.rs), items 19-23 (accept_t19_round4.rs) and items 24-28
+//! (accept_t19_round5.rs) use the same rows, and the lowering guards (items 11, 18, 22,
+//! 27 and 28) walk every fixture listed in [`ALL`].
 #![allow(dead_code)]
 
 /// bench/pages/register.html as the live walk would ship it (B-5): nav links, #signup (f1)
@@ -362,7 +363,69 @@ pub const D408: &str = r#"[
   {"id":379,"frame":0,"role":"button","name":"Device settings","heading":"Devices"}
 ]"#;
 
-/// Every fixture in the acceptance suite, for the lowering guards (items 11 and 18).
+/// D-409 (1)(2). #400..#404: a formless Inbox (mail row, Archive button, selection
+/// checkbox, search box, nav link); f80: a card form with a "Save card" checkbox and a
+/// neutral SUBMIT; f81: signup with a "Remember me" checkbox. #420..#429: formless buttons
+/// and menuitems named with a pay_words phrase (#422 sits under "Checkout" while the card
+/// form #f2.423 is in frame 2, Stripe-style); #430..#447: negatives (generic names, single
+/// Pay words without a form, Pay links, Pay-named checkables, look-alike words).
+pub const D409: &str = r#"[
+  {"id":400,"frame":0,"role":"row","name":"Bob Jones | Invoice 1042 | 09:14","heading":"Inbox",
+   "landmark":"main"},
+  {"id":401,"frame":0,"role":"button","name":"Archive","heading":"Inbox","landmark":"main"},
+  {"id":402,"frame":0,"role":"checkbox","name":"Select conversation","heading":"Inbox",
+   "state":{"checked":false,"input_type":"checkbox"},"landmark":"main"},
+  {"id":403,"frame":0,"role":"textbox","name":"Search mail","state":{"input_type":"text"},
+   "landmark":"header"},
+  {"id":404,"frame":0,"role":"link","name":"Drafts","landmark":"nav"},
+  {"id":405,"frame":0,"role":"textbox","name":"Card number","heading":"Payment",
+   "state":{"input_type":"text","autocomplete":"cc-number"},"form":"f80"},
+  {"id":406,"frame":0,"role":"checkbox","name":"Save card","heading":"Payment",
+   "state":{"checked":false,"input_type":"checkbox"},"form":"f80"},
+  {"id":407,"frame":0,"role":"button","name":"Continue","heading":"Payment",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f80"},
+  {"id":408,"frame":0,"role":"textbox","name":"Email","heading":"Sign up",
+   "state":{"input_type":"email","autocomplete":"email"},"form":"f81"},
+  {"id":409,"frame":0,"role":"checkbox","name":"Remember me","heading":"Sign up",
+   "state":{"checked":false,"input_type":"checkbox"},"form":"f81"},
+  {"id":410,"frame":0,"role":"button","name":"Create account","heading":"Sign up",
+   "state":{"submitish":true},"flags":{"submit":true},"form":"f81"},
+  {"id":420,"frame":0,"role":"button","name":"Pay now"},
+  {"id":421,"frame":0,"role":"button","name":"Pay $20.00","heading":"Order summary"},
+  {"id":422,"frame":0,"role":"button","name":"Complete purchase","heading":"Checkout"},
+  {"id":423,"frame":2,"role":"textbox","name":"Card number","heading":"Checkout",
+   "state":{"input_type":"text","autocomplete":"cc-number"},"form":"f1"},
+  {"id":424,"frame":0,"role":"menuitem","name":"Buy now"},
+  {"id":425,"frame":0,"role":"button","name":"Place your order","heading":"Order summary"},
+  {"id":426,"frame":0,"role":"button","name":"Checkout","landmark":"header"},
+  {"id":427,"frame":0,"role":"button","name":"Subscribe for $9.99/month","heading":"Plans"},
+  {"id":428,"frame":0,"role":"menuitem","name":"Payment methods","heading":"Account"},
+  {"id":429,"frame":0,"role":"button","name":"Donate","heading":"Support us"},
+  {"id":430,"frame":0,"role":"button","name":"Back to top"},
+  {"id":431,"frame":0,"role":"button","name":"Show details","heading":"Order summary"},
+  {"id":432,"frame":0,"role":"button","name":"Confirm","heading":"Checkout"},
+  {"id":433,"frame":0,"role":"link","name":"Pay","heading":"Order summary"},
+  {"id":434,"frame":0,"role":"link","name":"Pay now"},
+  {"id":435,"frame":0,"role":"link","name":"Checkout","landmark":"nav"},
+  {"id":436,"frame":0,"role":"button","name":"Complete","heading":"Checkout"},
+  {"id":437,"frame":0,"role":"radio","name":"Pay with PayPal","heading":"Order summary",
+   "state":{"checked":false,"input_type":"radio"}},
+  {"id":438,"frame":0,"role":"checkbox","name":"Pay later","heading":"Order summary",
+   "state":{"checked":false,"input_type":"checkbox"}},
+  {"id":439,"frame":0,"role":"tab","name":"Payment","heading":"Account"},
+  {"id":440,"frame":0,"role":"button","name":"Repay later","heading":"Loans"},
+  {"id":441,"frame":0,"role":"button","name":"Payroll settings","heading":"Account"},
+  {"id":442,"frame":0,"role":"button","name":"Order history","heading":"Account"},
+  {"id":443,"frame":0,"role":"button","name":"Display options","heading":"Account"},
+  {"id":444,"frame":0,"role":"button","name":"Subscribe","heading":"Newsletter"},
+  {"id":445,"frame":0,"role":"button","name":"Book now","heading":"Hotel"},
+  {"id":446,"frame":0,"role":"button","name":"Delegate","heading":"Inbox"},
+  {"id":447,"frame":0,"role":"button","name":"Top","heading":"Order summary"}
+]"#;
+
+/// Every fixture in the acceptance suite, for the lowering guards (items 11, 18, 22, 27
+/// and 28). Adding a fixture means regenerating both raise-only baselines in
+/// `bench/fixtures/` (see the round-5 section of `bench/results/accept-T-19-sb-act.md`).
 pub const ALL: &[(&str, &str)] = &[
     ("REGISTER", REGISTER),
     ("LOGIN", LOGIN),
@@ -377,6 +440,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("PLANNER", PLANNER),
     ("D407", D407),
     ("D408", D408),
+    ("D409", D409),
 ];
 
 /// Item 22 (raise-only, hard rule 4): the key values every row is probed with, besides a
@@ -416,6 +480,42 @@ pub fn raise_programs(r: &sb_sheet::IndexRow) -> Vec<(String, String)> {
     ];
     for (i, k) in RAISE_KEYS.iter().enumerate() {
         out.push((format!("k{i}"), format!("k{rf}={}", sb_act::quote(k))));
+    }
+    out
+}
+
+/// Item 28 (D-409): key values added to [`RAISE_KEYS`] for the raise-only guard
+/// against the 0554c29 baseline `bench/fixtures/t19_pre_d409_classes.txt`. Changing this
+/// list means regenerating that baseline with `crates/sb-act/src` at 0554c29.
+pub const RAISE_KEYS_D409: &[&str] = &[
+    "Enter+Delete",
+    "Enter+Del",
+    "Control+Enter+Delete",
+    "Return+Shift+Delete",
+    "Enter\u{7f}",
+    "\u{7f}Enter",
+    "Delete+Enter",
+    "Del Enter",
+    "\rDelete",
+    "Shift+Delete",
+    "Control+Delete",
+    "Del",
+    "\u{7f}",
+    "Delete+a",
+    "Delegate",
+];
+
+/// Item 28: [`raise_programs`] plus one `k` probe per [`RAISE_KEYS_D409`] value,
+/// labelled `d0`, `d1`...
+pub fn raise_programs_d409(r: &sb_sheet::IndexRow) -> Vec<(String, String)> {
+    let rf = if r.frame == 0 {
+        format!("#{}", r.id)
+    } else {
+        format!("#f{}.{}", r.frame, r.id)
+    };
+    let mut out = raise_programs(r);
+    for (i, k) in RAISE_KEYS_D409.iter().enumerate() {
+        out.push((format!("d{i}"), format!("k{rf}={}", sb_act::quote(k))));
     }
     out
 }
