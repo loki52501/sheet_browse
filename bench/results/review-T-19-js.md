@@ -124,3 +124,121 @@ Two blocking items: a password value can still reach index(), and id/base handli
 call order. The rest is solid and well tested.
 
 Verdict: changes
+
+# Round 2 (reviewer-5): 4d1c76d "injected.js review fixes" (D-405, D-422..D-428, B-412 / D-73)
+
+Scope: `git diff b973fb4..4d1c76d` on injected/, bench/pages/ and
+crates/sb-act/tests/wire_from_injected.rs. No later commit touches these paths. I checked against
+I-11 as it stands on this branch (main is merged, so D-73 is present).
+
+Runs (TMP/TEMP/TMPDIR on F:, 2026-10-23):
+- `node --test injected/test/`: 56/56 pass in 135.6 s (jsdom, browser, media, accept-t19). The
+  A3b busy cap held on the first run, so no rerun was needed.
+- `cargo test -p sb-act --test wire_from_injected`: 3/3 pass.
+- `cargo clippy -p sb-act --tests -- -D warnings` is clean, and so is `rustfmt --check` on
+  wire_from_injected.rs.
+- The fixtures register.index.json and register.text.json contain no canary or secret strings. The
+  password row's value is `{"kind":"empty"}`.
+
+I reproduced every finding below with jsdom probes in my session scratchpad. No repo files were
+written for them.
+
+## Round-1 items
+
+| Round-1 item | Status | Where / test |
+|---|---|---|
+| B1: password value after a type swap | Fixed (D-405 (1), D-426). The WeakSet `S.sens`, `masked()` for -webkit-text-security and sensitive autocomplete all mark a field. The MutationObserver records `attributeOldValue`, so an old type of password is caught even before any walk. | injected.js:773, 1760-1767; jsdom.test.js:268 (instrumented getter, toggle, full re-walk), :310 (swap before the walk, masked field, OTP, masking removed); browser.test.js:343; accept A5b |
+| B2: ids depend on call order | Fixed (D-405 (2), D-425, D-73). No id is issued before `walk({base})`, and every read returns `{why:"no base"}`. A later base is ignored. resolve answers stale below base and gone at or above next. | injected.js:254-283, 1192-1206; jsdom.test.js:356 replays the round-1 repro exactly; media.test.js:181 |
+| S: URL substring "captcha" | Fixed (D-405 (3), D-424). Pages are matched by host, path or title. A challenge page yields one `document` CHALLENGE row, one text block and the self frame. | jsdom.test.js:398, :435; browser.test.js:303 |
+| S: detection gaps (interstitial text, Arkose, GeeTest, response fields, title) | Fixed (D-405 (4), D-422). | jsdom.test.js:448; browser.test.js:303 (closed shadow root) |
+| S: v3 badge over-flag | Fixed, and closed by B-402 / D-405 (5). A hidden bframe becomes CHALLENGE once it is visible. | browser.test.js:303 |
+| S: aria-level not clamped | Fixed (D-405 (6)). The list_item level is also clamped to u8. | injected.js:966; jsdom.test.js:486 |
+| S: no serde round-trip | Fixed (D-405 (10), D-428). The fixtures are committed, and a browser test diffs them against live output. The Rust test deserializes them, classifies Register as Account and classifies the CHALLENGE row as Challenge. | wire_from_injected.rs; browser.test.js:359 |
+| S: settle runs to the cap on blank and PDF pages | Fixed (D-405 (8), D-427). | injected.js:1842; browser.test.js:268 (about:blank, script-less page, PDF embed, content_ms 1000 and 300) |
+| S: html/body class toggle plus an infinite animation | Fixed (D-427). Attribute and text changes count only the node's own animations, and infinite animations are ignored. | browser.test.js:268 (anim.html) |
+| S: media frames() has no budget | Fixed (D-405 (9), D-423). budgetMs defaults to 8000, truncated entries stay aligned to times, the loop stops after the first seek timeout, and load() runs for preload=none. | media.js:253; media.test.js:202 |
+| S: media challenged() copy | Fixed. CHALLENGE and ids come only from `__sb`. | media.js:44-77; media.test.js:181 |
+| S: form landmark | Fixed (D-405 (7)). | jsdom.test.js:494 |
+| S: D-412 order vs B-5 | Closed by blocker B-403 (a proposal for supreme). | blockers.yaml |
+| S: in-page copy of the D-49 aliases | Closed by blocker B-404 (a drift test once data/roles.txt exists). | blockers.yaml |
+| N: act ignored row.challenge | Fixed. row.challenge now sets rec.challenge. | injected.js finishRow |
+| N: S.recent held strong refs | Fixed with WeakRef and a 5 s prune. | injected.js remember / runningAnims |
+| N: closest() for aria-disabled | Fixed with closestComposed. | injected.js isDisabled |
+| N: delta index API, aria-labelledby re-dirty | Not taken. Both are listed in js-coder-2 not_done. | handoff |
+
+I-11 fidelity: every shape in the I-11 notes and D-73 matches what the code returns:
+- `{why:"no base"}` from id, index, text, fingerprint, state, name, frames and an un-based walk.
+- resolve answers stale.
+- The challenge-page shapes of index, text and frames.
+- `__sbMedia`: list and cues may return `{why}`, frames entries may carry `truncated: true`, and
+  budgetMs defaults to 8000.
+
+Rules:
+- No fixed sleeps. The new content-deadline timer and the media timers are capped condition
+  deadlines, and each has a comment.
+- No new value reads. The only `.value` reads are in fieldValue, behind `sensitive()`. The new
+  `input` listener reads only caret and validity.
+- No DOM writes and no main-world globals (A6 is green).
+- A challenge page is never read inside: rowFor, nameApi and act all check selfCh.
+
+## Blocking
+
+- none
+
+## Should fix
+
+- injected.js:773, 1760 (D-405 (1) scope): a show-password that replaces the element still leaks,
+  because sensitivity follows the element.
+  - Repro: walk a page with `<input type=password name=pw>` holding a value. Then call
+    `p.replaceWith(t)`, where `t` is a new `type=text name=pw_plain` input with the same value.
+    The dirty walk's index() contains the value.
+  - Older plugins and some React toggles do this.
+  - Cheap partial fix: in onMut, a childList record that removes a sensitive input (or a subtree
+    holding one) marks the inputs it adds as sensitive. replaceWith produces a single record.
+  - Also extend SENSITIVE_NAME_RE with `\bpw\b|pw[_-]`.
+  - Not Blocking: D-405 (1) is implemented and tested as written, and the outgoing vault scrub
+    (rule 2) is the backstop for `@vault` values.
+- injected.js:111 (D-422): "press and hold" and "are you human" over-flag ordinary UI text.
+  - Repro: `<p>Press and hold Shift to select several files.</p>`,
+    `<p>Press and hold the mic button to record a voice message.</p>` and
+    `<h2>Are you human?</h2>` (a quiz) each produce a CHALLENGE row.
+  - Cost: a normal page gets a challenge marker in the skeleton (D-404 (4)), which wastes a stop
+    or a turn (D-7).
+  - Fix: require a human, robot or bot word in the prompt for "press and hold". The PerimeterX
+    prompt "Press & Hold to confirm you are a human" still matches, and `#px-captcha` is already
+    caught as a box. Treat a lone "are you human" heading the same way, or require a widget nearby.
+
+## Notes
+
+- Two cases that nothing observes still leak the value (both reproduced):
+  - a password input in an open shadow root whose type changes before the first walk (a shadow
+    root is observed only once a walk reaches it);
+  - an input created detached as `type=password`, given a value, switched to text, then inserted.
+
+  Both need the value to be present before sb-driver's first walk, or the field to be built off
+  the document, so they are rare. A one-line handoff note for sb-driver is enough.
+- injected.js:1019 / D-422: when a challenge text block wraps more than two controls, it only sets
+  rec.challenge. The controls stay ordinary rows in index() (flags.challenge false). act refuses
+  them in the page, but sb-act classifies them by their own class. This is as ruled. The planner
+  learns of the stop one turn later.
+- injected.js:106: the title regex also matches "Just a moment" without the ellipsis. That
+  over-flags, which is the safe direction.
+- injected.js:1198: `walk({base: "5"})` is accepted because Number("5") is an integer. Harmless,
+  though I-11 says the base is an integer.
+- injected.js:901: `<search>` maps to landmark `form`. The IndexRow vocabulary has no `search`, so
+  this is reasonable, but the D-405 (7) text does not mention it. Add it when D-414 is next amended.
+- media.js:44: challengeRoots() runs a full `__sb.index()` on every list, cues and frames call
+  (about 28 ms at 1 600 rows). That is fine at video.* call rates.
+- media.js:210, 253: `load()` on a preload=none video, and a caller budgetMs above 10 s, are left
+  to sb-media (B-4 #11). The default budget stays under the command timeout.
+- Out of scope: reviewer-4 noted that injected.js SUBMIT_WORDS_RE does not carry the D-407 words.
+  That still needs the sb-act/injected ruling.
+
+## Verdict
+
+Both round-1 Blocking items are fixed, and each has a test that replays the original repro. Every
+round-1 Should item is fixed and tested, or closed by B-402..B-404. The code matches I-11 / D-73.
+The two new Should items are a leak path outside the D-405 (1) ruling and over-flagging of
+challenge text. Neither breaks a hard rule as ruled.
+
+Verdict: approve
