@@ -1,0 +1,22 @@
+from: rust-coder-5 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-23"
+state: "review-T-11 should-fix 1-3 are fixed, each with a regression test that fails on the previous commit (7b44132). (1) runner: RunOpts.memory_limit 0 now means the 32 MiB default. CappedAlloc's limit is a shared Rc<Cell<usize>> (struct Caps) that starts at usize::MAX, is armed after the runtime, context, prelude, page object and the compiled tool module exist (just before module.eval(), so the tool's top level, call and result serialization are capped), and is lifted before teardown. Tests: runner_small_memory_caps_never_crash spawns this test binary filtered to runner_memory_cap_child once per limit (0, 1024, 16384, 40000, 165000, 168000, 300000, 1 MiB), so a crash shows up as a failed child exit status. The child runs 7 readers and the register planner per limit and accepts only Ok or OutOfMemory (limit 0 must be Ok for every non-hog tool). On the old code limit 0 exits 0xC0000005. (2) read_table.js steps the 199-unit cell cut back by one when it lands after a high surrogate; read_table_cell_cut_keeps_surrogate_pairs_whole covers 198 a + U+1F600 (pair dropped) and 197 a + U+1F600 (pair kept). (3) reforge's undo removes the archived copy only when writing the old content back succeeded; otherwise it keeps it and returns StoreError::Io naming the original error, the restore error and the archive path. reforge_keeps_the_archive_when_the_rollback_fails injects the fault through the fake store: its tool_health_set replaces tools/luma.com/register.js with a directory and then fails. cargo test -p toolstore: 95 lib (91 before + 4 new) + 29 integration tests pass; cargo test --workspace is green (135 passed, 0 failed); clippy -p toolstore --all-targets -D warnings and fmt are clean."
+not_done: "Review should-fix 4-6 (stop_count, IC surface, spec-id over-claim) belong to the sub-orchestrator; its uncommitted edits to agent-memory/blockers.yaml (B-311, B-312, IC-304) and tasks.yaml (shipped/deferred) were left unstaged and untouched. Everything in T-11-rust-coder-4 not_done 2 still stands."
+gotchas:
+  - "Arming the cap before Module::declare is NOT safe: at limits just above the ~159 KiB baseline (165000-168000) a refused allocation inside the quickjs-ng parser trips `assert(JS_REF_COUNT(p) > 0)` in gc_decref_child (debug build abort, 0xC0000409; memory corruption in release). So compiling the tool source is uncapped. Compile memory is bounded by the length of a repo tool file, not by anything the tool computes. A fine sweep after the move (159000..230000 step 24 plus 0..2 MB coarse, 7 readers each, ~20k runs) gave only Ok or OutOfMemory."
+  - "Once armed the cap counts the engine's own baseline (~159 KiB plus the compiled module), so any limit below that is OutOfMemory on the tool's first allocation. No floor clamp was needed."
+  - "A tool that catches the engine's OOM and returns normally yields Ok (the oom flag only turns an Err into OutOfMemory). This is the pre-existing behaviour and the child test accepts it."
+  - "The C: drive (TEMP) filled up during this round; cargo and test tempdirs worked with TMP/TEMP pointed at target/tmp on F:."
+  - "The double-failure error of reforge is StoreError::Io (no new variant), so the I-7 error surface is unchanged; the original cause (e.g. a Memory error) is in the message, not the variant."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/toolstore/src/runner.rs
+  - crates/toolstore/src/runner/tests.rs
+  - crates/toolstore/src/lifecycle.rs
+  - crates/toolstore/src/tests_review.rs
+  - tools/_generic/read_table.js
+  - agent-memory/handoffs/T-11-rust-coder-5.yaml
+verify: "cargo test -p toolstore"

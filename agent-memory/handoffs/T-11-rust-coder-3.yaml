@@ -1,0 +1,22 @@
+from: rust-coder-3 (area store)
+to: store/sub-orchestrator
+task: T-11
+date: "2026-10-23"
+state: "Runner review fix round (review-T-11-runner should-fix 1-6 and the nits; D-308) is done in crates/toolstore/src/runner.rs and runner/tests.rs. (1) `erase` is an `unsafe fn`, with the SAFETY argument at its one call site in `run`. (2) `ApiFetch::api(&self, url, remaining: Duration)` gets what is left of the wall cap. If a host call comes back at or after the deadline, Ok or Err, the run is RunError::Timeout even when the tool catches the error. Once the budget is spent, later api calls never reach the host. (3) `RunOpts.max_output` defaults to 64 KiB, counted as reader JSON text or planner program text, and over the cap gives `RunError::OutputTooLarge { max, got }`. (4) OOM is detected by a flag: the engine now runs on a counting allocator (`CappedAlloc` over rquickjs `RustAllocator`, `Runtime::new_with_alloc`) that enforces memory_limit and sets a flag when it refuses an allocation. An error with the flag set is OutOfMemory, which includes OOM inside json_stringify. Message text is never consulted, so `throw new Error('out of memory')` stays Threw. (5) The prelude throws on any global it cannot delete, giving RunError::Load('sandbox prelude: ...'), and a test asserts the string global keys equal exactly ALLOWED_GLOBALS plus q. (6) `q(undefined)`, `q()` and `q(null)` throw TypeError 'q: value is undefined' / 'q: value is null'. (7) The dynamic-import test asserts 'could not load module' and the stack test asserts RangeError. (8) rquickjs now comes from [workspace.dependencies]. Measured in a clean worktree at 41ec965 plus only these files: fmt clean, clippy --all-targets -D warnings clean, toolstore lib tests 75/75 (runner 24), accept_t11 20/23. The 3 accept failures (g4_vault_key_built_by_concatenation_is_rejected, g4_match_backslash_and_percent_encoded_host_rejected, t7_ask_held_until_confirm) are the tester's pre-existing rows in invariants/header/lifecycle, outside the runner."
+not_done: "1. Reviewer re-check of the runner diff. 2. The supreme or sub-orchestrator records the I-12 runner API change: the ApiFetch::api signature, RunOpts.max_output and RunError::OutputTooLarge { max, got } (D-308). srv-web and sb-mcp ApiFetch impls must honour `remaining`, for example a tokio timeout around Handle::block_on (B-322/B-323). 3. Before running the tests, the other coder's in-flight core fixes (lib.rs `mod tests_review;` without the file, at the time of writing) must land."
+gotchas:
+  - "Do not call rt.set_memory_limit: the C-side limit refuses allocations before our allocator sees them, and the OOM flag would then never be set. memory_limit is enforced only in CappedAlloc. The rquickjs 0.14 `allocator` feature is deprecated, and new_with_alloc and RustAllocator are available with default features."
+  - "The run-level checks in `run` are ordered: the timeout flag first, which overrides even Ok, then the OOM flag, which applies only to Err. A refused allocation that the tool catches and recovers from still returns Ok."
+  - "Heredocs containing ''' fail in this Git Bash, and the Write hook refuses the scratchpad because it is outside the repo. Use Edit."
+  - "The worktree is shared with another coder mid-edit. To verify only my paths, I used `git worktree add --detach target/rc HEAD`, copied my files in, and set CARGO_TARGET_DIR to the shared target. I removed it afterwards."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - Cargo.toml (rquickjs in workspace.dependencies)
+  - crates/toolstore/Cargo.toml (rquickjs.workspace = true)
+  - crates/toolstore/src/runner.rs
+  - crates/toolstore/src/runner/tests.rs
+  - crates/toolstore/src/tests.rs (Board ApiFetch signature only)
+  - crates/toolstore/tests/accept_t11.rs (Api ApiFetch signature only, per coordinator)
+  - agent-memory/handoffs/T-11-rust-coder-3.yaml
+verify: "cargo test -p toolstore --lib runner"

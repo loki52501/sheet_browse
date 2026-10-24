@@ -1,0 +1,24 @@
+from: tester-1 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-23"
+state: "Acceptance for docs/03 (T-3, T-4, T-7, T-9, G-4) written as crates/toolstore/tests/accept_t11.rs (23 tests) with fixtures under crates/toolstore/tests/fixtures/, report in bench/results/accept-T-11.md. Run on committed HEAD d6b52df (crates/ and tools/ identical to 955ce52 + e5305f7) in a git-archive export, because the worktree had another agent's uncommitted runner.rs edits that did not compile (E0061 runner.rs:490). Result: 20 pass, 3 fail, 1 not-run. docs/03 acceptance rows 1-3, all four T-9 invariants, static G-4 vault-key and @match checks, and every T-7 transition including the ask -> confirm happy path pass. fmt --check, clippy -p toolstore --all-targets -D warnings and check --workspace are clean. Verdict: red."
+not_done: "1. Fix the three failing items, which match review-T-11-core blocking 3 and 4 plus a should-fix: (a) g4_vault_key_built_by_concatenation_is_rejected: planner_act_class (invariants.rs:142-159) must reject a program whose @vault(k) refs are not literal in tool.source (D-309). (b) t7_ask_held_until_confirm: second reforge at the same raised gate (lifecycle.rs:354-358), record(Relocated) on Ask (lifecycle.rs:301-302), and a miss then Ok (lifecycle.rs:267, :275) all leave ask without confirm (D-310). (c) g4_match_backslash_and_percent_encoded_host_rejected: match_violation (header.rs:128-140) accepts `/\\host`, `%2e`, `%2f`. 2. When D-308 lands, ApiFetch::api gains `remaining: Duration`: update the one `impl ApiFetch for Api` in accept_t11.rs (fn api(&self, url, _remaining)). That is a test signature change, not an assertion change. 3. Re-run `cargo test -p toolstore --test accept_t11` on the fixed commit and rewrite bench/results/accept-T-11.md. 4. Vault canary row is not-run until core T-05 provides Vault::in_memory/resolve_into. Plant SB_VAULT_CANARY as a vault value then. toolstore itself only handles key names."
+gotchas:
+  - "Do not run acceptance in a worktree another agent is editing. `git archive HEAD | tar -x -C <scratch>` plus copying the tests in, with its own CARGO_TARGET_DIR, gives a clean committed tree (first build about 2.5 min for rquickjs)."
+  - "Archive deletion uses real file mtime (B-308). A sweep at fake now+N days also deletes files archived during the same test run. In sweep tests, keep other ephemerals 'used' (bump last_ok) or they get retired and deleted along the way, and the ledger order changes."
+  - "`/tools/` in a path triggers the post_write hook: node --check plus @name/@kind/@gate/@match required, and planners need ?s. Bad-header fixtures for the loader test are therefore written by the test into the tempdir, not committed as files."
+  - "sb_act::parse/classify/check_planner are todo!(), so planner_class tests need a fake PlannerCheck (D-301). SbAct would panic."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/toolstore/tests/accept_t11.rs
+  - crates/toolstore/tests/fixtures/ashby_job_board_acme.json
+  - crates/toolstore/tests/fixtures/tools/luma.com/_site.yaml
+  - crates/toolstore/tests/fixtures/tools/luma.com/register.js
+  - crates/toolstore/tests/fixtures/tools/luma.com/list_events.js
+  - crates/toolstore/tests/fixtures/tools/example.com/probe.js
+  - crates/toolstore/tests/fixtures/tools/example.com/probe_api.js
+  - bench/results/accept-T-11.md
+  - agent-memory/handoffs/T-11-tester-1.yaml
+verify: "cargo test -p toolstore --test accept_t11"
