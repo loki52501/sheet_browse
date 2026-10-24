@@ -20,18 +20,36 @@
 //! * ask outcome: `server = core`, `tool`, `class`, `mode` = one of the four outcomes,
 //!   `args` scrubbed, `result_summary` = `why` = the card's what line, `duration_ms` = how
 //!   long the ask waited, `consequences = {"site", "on_timeout"}`;
-//! * stop (gate Stop before the call, or a handler's stopped output after it):
-//!   `server = core`, `mode = stop`, `why` = the reason, `consequences = {"element"}`.
+//! * stop (gate Stop before the call or before a mid-call ask, or a handler's stopped
+//!   output after it): `server = core`, `mode = stop`, `why` = the reason,
+//!   `consequences = {"element"}`.
+//!
+//! # Fail closed (rule 4, D-119)
+//!
+//! Before the handler runs, any error (run lookup, gate, ledger on the ask path) means it
+//! does not run. A run with no `runs` row reads as strict. Every `Asker` call is capped at
+//! `card.timeout` + [`ASK_CAP_MARGIN`]; a cap hit is `TimeoutSkip`. A handler or
+//! classifier panic is caught: the model gets `isError` and the ledger an `ok = false` tool
+//! event. One gap is accepted: on the Allow path the tool event is written after the
+//! handler ran (the event needs the result), so if the store fails right then the side
+//! effect is recorded on stderr only. Probing the store before every allowed call would add
+//! a round trip per call (CLAUDE.md priorities), and the ask path already writes first.
 //!
 //! # Transport (D-104)
 //!
 //! Newline-delimited JSON-RPC 2.0 on stdin/stdout, protocol `2025-06-18`: `initialize`,
 //! `notifications/initialized`, `ping`, `tools/list`, `tools/call`, and the server's
 //! `notifications/tools/list_changed` when the registry changes. Nothing but JSON-RPC goes
-//! to stdout; diagnostics go to stderr, scrubbed.
+//! to stdout; diagnostics go to stderr, scrubbed. Outgoing messages scrub their payload
+//! strings only (D-119 (6)): the envelope (`id`, `jsonrpc`, `protocolVersion`) is ours and
+//! a short vault value must not rewrite it. A line that is not UTF-8 or not JSON answers
+//! -32700 and the server keeps reading.
 
 use crate::class::Class;
-use crate::gate::{AskCard, AskOutcome, Asker, Call, Decision, Gate, OnTimeout, StopReason};
+use crate::gate::{
+    clean_card, AskCard, AskOutcome, Asker, Call, Decision, Gate, OnTimeout, StopReason,
+    ASK_TIMEOUT,
+};
 use crate::ledger::Ledger;
 use crate::memory::{ts_now, LedgerEvent, LedgerMode, MemoryStore};
 use crate::run::{RunFolder, RunId};
@@ -40,9 +58,13 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
-use std::time::Instant;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 
@@ -54,6 +76,10 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// Cap on `ledger.events.result_summary` when it is taken from the output text.
 const SUMMARY_MAX_CHARS: usize = 300;
+
+/// How long past `card.timeout` the wrapper waits for an `Asker` before it counts the ask
+/// as `TimeoutSkip` (an asker that ignores its timer must not hang the call).
+pub(crate) const ASK_CAP_MARGIN: Duration = Duration::from_secs(5);
 
 /// One tool a server exposes: the I-2 fields plus `description` (D-48).
 #[derive(Clone)]
@@ -193,9 +219,12 @@ pub struct Harness {
 /// The call a [`ToolCtx`] belongs to, for the events a mid-call ask writes.
 #[derive(Default)]
 struct CallInfo {
+    server: String,
     tool: String,
     /// Scrubbed.
     args: Value,
+    /// The classifier's hints: a mid-call ask meets the same hint rules as its call.
+    hints: Vec<String>,
 }
 
 /// Per-call context handed to a handler. Holds the vault privately: a handler can resolve
@@ -260,35 +289,70 @@ impl ToolCtx {
     /// An ask that arises mid-call (download about to land, dialog, a step whose live class
     /// exceeds `self.class`). The wrapper logs the card and outcome as `server = core` events.
     ///
-    /// The card is sanitised like a gate card: scrubbed, control-stripped and capped, the
-    /// timer is [`crate::gate::ASK_TIMEOUT`], and `on_timeout` can only be tightened (a
-    /// card may proceed on timeout only where [`Gate::on_timeout`] allows it for its class
-    /// and the run's `strict`). A `Challenge` card is never shown: it is logged as a stop
-    /// and returns `TimeoutSkip` (D-5; the handler should return `ToolOutput::stopped`).
-    /// If the outcome cannot be written to the ledger, a proceed becomes a skip: nothing
-    /// runs that the ledger does not show.
+    /// The card is sanitised like a gate card (scrubbed, [`clean_card`], scrubbed again), the
+    /// timer is [`crate::gate::ASK_TIMEOUT`], and the card's class and site go through
+    /// [`Gate::check`] with the call's hints and the run's `strict` (D-119 (1), rule 4):
+    ///
+    /// * a `Challenge` card or a gate `Stop` is never shown: it is logged as a core stop and
+    ///   returns `TimeoutSkip` (D-5; the handler should return `ToolOutput::stopped`);
+    /// * otherwise `on_timeout` can only be tightened: the card proceeds on timeout only if
+    ///   the handler's card, the gate's card (a strict or hint rule makes it skip) and
+    ///   [`Gate::on_timeout`] for the class and the run's `strict` all proceed. A gate
+    ///   error makes it skip.
+    ///
+    /// The asker is capped at the card's timer plus a margin (then `TimeoutSkip`). If the
+    /// outcome cannot be written to the ledger, a proceed becomes a skip: nothing runs that
+    /// the ledger does not show.
     pub async fn ask(&self, card: AskCard) -> AskOutcome {
         if card.class == Class::Challenge {
-            let why = self.vault.scrub(&card_line(
+            let why = clean_line(
+                &self.vault,
                 &format!("challenge during {}: {}", self.call.tool, card.what),
-                WHAT_MAX_CHARS,
-            ));
-            let mut e = self.event(CORE, Some(Class::Challenge), Some(LedgerMode::Stop));
-            e.result_summary = why.clone();
-            e.why = Some(why);
-            if let Err(err) = self.ledger.write(e).await {
-                diag(&self.vault, &format!("ledger write failed (stop): {err}"));
-            }
+            );
+            self.write_stop(&StopReason {
+                class: Class::Challenge,
+                why,
+                element: None,
+            })
+            .await;
             return AskOutcome::TimeoutSkip;
         }
-        let strict = match self.store.run_get(&self.run_id).await {
-            Ok(run) => run.is_some_and(|r| r.strict),
-            // Unknown strictness: the safe reading.
-            Err(_) => true,
+        let strict = run_strict(&self.store, &self.run_id).await;
+        let mut card = sanitise_card(&self.vault, card);
+
+        // Rule 4: the escalation is a side effect like any call, so the gate sees it.
+        let call = Call {
+            run_id: Some(self.run_id.clone()),
+            server: self.call.server.clone(),
+            tool: self.call.tool.clone(),
+            class: card.class,
+            domain: card.site.clone(),
+            recipients: Vec::new(),
+            hints: self.call.hints.clone(),
+            args: self.call.args.clone(),
+            what: Some(card.what.clone()),
+            values: card.values.clone(),
+            strict,
         };
-        let card = clean_card(&self.vault, card, strict);
+        let gate_timeout = match Gate::new(self.store.clone()).check(&call).await {
+            Ok(Decision::Stop(reason)) => {
+                self.write_stop(&scrub_stop(&self.vault, reason)).await;
+                return AskOutcome::TimeoutSkip;
+            }
+            Ok(Decision::Ask(g)) => g.on_timeout,
+            Ok(Decision::Allow) => OnTimeout::Proceed,
+            Err(err) => {
+                diag(&self.vault, &format!("gate (mid-call ask): {err}"));
+                OnTimeout::Skip
+            }
+        };
+        card.on_timeout = tighter(
+            card.on_timeout,
+            tighter(gate_timeout, Gate::on_timeout(card.class, strict)),
+        );
+
         let started = Instant::now();
-        let outcome = self.asker.ask(&card).await;
+        let outcome = ask_capped(&*self.asker, &card, &self.vault).await;
         let e = self.outcome_event(&card, outcome, started);
         match self.ledger.write(e).await {
             Ok(_) => outcome,
@@ -348,6 +412,110 @@ impl ToolCtx {
         });
         e
     }
+
+    /// A core stop event; a ledger failure goes to stderr (the caller skips anyway).
+    async fn write_stop(&self, reason: &StopReason) {
+        if let Err(err) = self.ledger.write(self.stop_event(reason)).await {
+            diag(&self.vault, &format!("ledger write failed (stop): {err}"));
+        }
+    }
+}
+
+/// `runs.strict` of the run. A missing `runs` row or a failed lookup reads as strict: the
+/// safe reading when strictness is unknown (D-119 (2)).
+async fn run_strict(store: &Arc<dyn MemoryStore>, run: &RunId) -> bool {
+    match store.run_get(run).await {
+        Ok(Some(r)) => r.strict,
+        Ok(None) | Err(_) => true,
+    }
+}
+
+/// Skip if either says skip.
+fn tighter(a: OnTimeout, b: OnTimeout) -> OnTimeout {
+    match (a, b) {
+        (OnTimeout::Proceed, OnTimeout::Proceed) => OnTimeout::Proceed,
+        _ => OnTimeout::Skip,
+    }
+}
+
+/// Asks with a cap of `card.timeout` + [`ASK_CAP_MARGIN`]. A cap hit, or a `TimeoutProceed`
+/// on a card that says skip, is `TimeoutSkip`: an asker cannot loosen the card.
+async fn ask_capped(asker: &dyn Asker, card: &AskCard, vault: &Vault) -> AskOutcome {
+    ask_capped_with(asker, card, vault, ASK_CAP_MARGIN).await
+}
+
+async fn ask_capped_with(
+    asker: &dyn Asker,
+    card: &AskCard,
+    vault: &Vault,
+    margin: Duration,
+) -> AskOutcome {
+    let cap = card.timeout.saturating_add(margin);
+    match tokio::time::timeout(cap, asker.ask(card)).await {
+        Ok(AskOutcome::TimeoutProceed) if card.on_timeout == OnTimeout::Skip => {
+            AskOutcome::TimeoutSkip
+        }
+        Ok(o) => o,
+        Err(_) => {
+            diag(
+                vault,
+                &format!("ask: no outcome within {}s; skipped", cap.as_secs()),
+            );
+            AskOutcome::TimeoutSkip
+        }
+    }
+}
+
+/// A mid-call card through the one card sanitiser (D-70): scrubbed first so cleaning
+/// cannot cut or reshape a vault value past the scrubber, then [`clean_card`], then
+/// scrubbed again. The timer is always [`ASK_TIMEOUT`].
+fn sanitise_card(vault: &Vault, card: AskCard) -> AskCard {
+    let scrub = |s: &str| vault.scrub(s);
+    let class = card.class;
+    let on_timeout = card.on_timeout;
+    let cleaned = clean_card(AskCard {
+        class,
+        what: scrub(&card.what),
+        site: card.site.as_deref().map(scrub),
+        values: card
+            .values
+            .iter()
+            .map(|(k, v)| (scrub(k), scrub(v)))
+            .collect(),
+        timeout: ASK_TIMEOUT,
+        on_timeout,
+    });
+    let what = scrub(&cleaned.what);
+    AskCard {
+        class,
+        what: if what.trim().is_empty() {
+            format!("{class} step needs your answer")
+        } else {
+            what
+        },
+        site: cleaned.site.as_deref().map(scrub),
+        values: cleaned
+            .values
+            .iter()
+            .map(|(k, v)| (scrub(k), scrub(v)))
+            .collect(),
+        timeout: ASK_TIMEOUT,
+        on_timeout,
+    }
+}
+
+/// One clean line for stderr or a ledger `why` (D-119 (7)): scrubbed, cleaned by
+/// [`clean_card`] (one line, controls stripped, capped), scrubbed again.
+pub(crate) fn clean_line(vault: &Vault, s: &str) -> String {
+    let cleaned = clean_card(AskCard {
+        class: Class::Read,
+        what: vault.scrub(s),
+        site: None,
+        values: Vec::new(),
+        timeout: ASK_TIMEOUT,
+        on_timeout: OnTimeout::Skip,
+    });
+    vault.scrub(&cleaned.what)
 }
 
 /// One `Ledger` per (store, run folder) while any call holds it, so concurrent calls in one
@@ -437,23 +605,36 @@ where
     let mut tx = Some(tx);
     let mut changes = registry.changes();
     changes.borrow_and_update();
-    let mut lines = reader.lines();
+    let mut reader = reader;
+    // Raw bytes, so one bad line is a -32700 instead of a dead server. `read_until` is
+    // cancel safe: bytes read before another branch wins stay in `buf`.
+    let mut buf: Vec<u8> = Vec::new();
     let mut initialized = false;
     let mut watching = true;
 
     loop {
         tokio::select! {
-            line = lines.next_line(), if tx.is_some() => match line {
-                Ok(Some(line)) => {
-                    let Some(sender) = tx.as_ref() else { continue };
-                    let reply = handle_line(&server, &registry, &harness, &line, sender, &mut initialized);
-                    if let Some(reply) = reply {
-                        write_message(&mut writer, &harness.vault, reply).await?;
+            read = reader.read_until(b'\n', &mut buf), if tx.is_some() => match read {
+                Ok(n) => {
+                    let eof = n == 0;
+                    if !buf.is_empty() {
+                        let raw = std::mem::take(&mut buf);
+                        if let Some(sender) = tx.as_ref() {
+                            let reply = match std::str::from_utf8(&raw) {
+                                Ok(line) => handle_line(&server, &registry, &harness, line, sender, &mut initialized),
+                                Err(_) => Some(rpc_error(Value::Null, -32700, "parse error: not UTF-8")),
+                            };
+                            if let Some(reply) = reply {
+                                write_message(&mut writer, &harness.vault, reply).await?;
+                            }
+                        }
+                    }
+                    // EOF: stop reading; answer the calls in flight, then return.
+                    if eof {
+                        tx = None;
                     }
                 }
-                // EOF: stop reading; answer the calls in flight, then return.
-                Ok(None) => tx = None,
-                Err(e) => return Err(ServeError::Transport(harness.vault.scrub(&e.to_string()))),
+                Err(e) => return Err(ServeError::Transport(clean_line(&harness.vault, &e.to_string()))),
             },
             msg = rx.recv() => match msg {
                 Some(msg) => write_message(&mut writer, &harness.vault, msg).await?,
@@ -478,18 +659,47 @@ where
     Ok(())
 }
 
-/// One whole line, scrubbed value by value (strings, keys, numbers), then flushed.
+/// One whole line with its payload scrubbed ([`scrub_payload`]), then flushed.
 async fn write_message<W: AsyncWrite + Unpin>(
     writer: &mut W,
     vault: &Vault,
     msg: Value,
 ) -> Result<(), ServeError> {
-    let msg = scrub_value(vault, &msg);
+    let msg = scrub_payload(vault, msg);
     let mut line = serde_json::to_vec(&msg).map_err(|e| ServeError::Transport(e.to_string()))?;
     line.push(b'\n');
-    let io = |e: std::io::Error| ServeError::Transport(vault.scrub(&e.to_string()));
+    let io = |e: std::io::Error| ServeError::Transport(clean_line(vault, &e.to_string()));
     writer.write_all(&line).await.map_err(io)?;
     writer.flush().await.map_err(io)
+}
+
+/// Scrubs what carries outside text (D-119 (6)): `result.content[*].text`, each
+/// `result.tools[*]` name, description and inputSchema, and `error.message`. The envelope
+/// (`jsonrpc`, `id`, `method`, `protocolVersion`, capability keys) is the server's own and is
+/// left alone, so a short vault value (a PIN `2025`) cannot rewrite the id or the handshake.
+fn scrub_payload(vault: &Vault, mut msg: Value) -> Value {
+    if let Some(result) = msg.get_mut("result") {
+        if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) {
+            for item in content {
+                if let Some(t) = item.get_mut("text") {
+                    *t = scrub_value(vault, t);
+                }
+            }
+        }
+        if let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut) {
+            for tool in tools {
+                for key in ["name", "description", "inputSchema"] {
+                    if let Some(v) = tool.get_mut(key) {
+                        *v = scrub_value(vault, v);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(m) = msg.get_mut("error").and_then(|e| e.get_mut("message")) {
+        *m = scrub_value(vault, m);
+    }
+    msg
 }
 
 fn rpc_result(id: Value, result: Value) -> Value {
@@ -591,7 +801,8 @@ fn handle_line(
             let name = name.to_string();
             tokio::spawn(async move {
                 let vault = harness.vault.clone();
-                // Inner task: a panicking handler becomes an error reply, not a lost request.
+                // Backstop: dispatch already catches handler panics; a panic anywhere else in
+                // the pipeline still becomes an error reply, not a lost request.
                 let call = tokio::spawn(async move {
                     dispatch(&server, &registry, &harness, &name, args).await
                 });
@@ -605,7 +816,7 @@ fn handle_line(
                         "isError": true,
                     }),
                     Err(_) => json!({
-                        "content": [{"type": "text", "text": "the tool failed unexpectedly (panic); see the server log"}],
+                        "content": [{"type": "text", "text": PANICKED}],
                         "isError": true,
                     }),
                 };
@@ -671,15 +882,20 @@ pub async fn dispatch(
     );
     let args_scrubbed = scrub_value(vault, &args);
     ctx.call = CallInfo {
+        server: server.to_string(),
         tool: spec.name.clone(),
         args: args_scrubbed.clone(),
+        hints: Vec::new(),
     };
 
-    // Classify: the declared class is the floor (rule 4, H-1.5).
-    let classified = match spec.handler.classify(&ctx, &args).await {
-        Ok(c) => c,
-        Err(err) => {
-            let err = scrub_error(vault, err);
+    // Classify: the declared class is the floor (rule 4, H-1.5). A panic is an error here.
+    let classified = match CatchUnwind(spec.handler.classify(&ctx, &args)).await {
+        Ok(Ok(c)) => c,
+        res => {
+            let err = match res {
+                Ok(Err(err)) => scrub_error(vault, err),
+                _ => ToolError::Failed(PANICKED.into()),
+            };
             let mut e = ctx.event(server, Some(spec.class), None);
             e.ok = false;
             e.result_summary = clip(&format!("error: {}", first_line(&err.to_string())));
@@ -689,13 +905,15 @@ pub async fn dispatch(
         }
     };
     let class = classified.class.map_or(spec.class, |c| c.max(spec.class));
+    ctx.call.hints = classified.hints.clone();
 
+    // A missing `runs` row reads as strict (D-119 (2)); a failed lookup runs nothing.
     let strict = harness
         .store
         .run_get(&run_id)
         .await
-        .map_err(|e| ToolError::Failed(vault.scrub(&format!("run lookup: {e}"))))?
-        .is_some_and(|r| r.strict);
+        .map_err(|e| ToolError::Failed(clean_line(vault, &format!("run lookup: {e}"))))?
+        .is_none_or(|r| r.strict);
     let scrub = |s: &str| vault.scrub(s);
     let call = Call {
         run_id: Some(run_id.clone()),
@@ -717,19 +935,19 @@ pub async fn dispatch(
     let decision = Gate::new(harness.store.clone())
         .check(&call)
         .await
-        .map_err(|e| ToolError::Failed(vault.scrub(&format!("gate: {e}"))))?;
+        .map_err(|e| ToolError::Failed(clean_line(vault, &format!("gate: {e}"))))?;
 
     let mode = match decision {
         Decision::Allow => LedgerMode::Allow,
         Decision::Ask(card) => {
             let started = Instant::now();
-            let outcome = harness.asker.ask(&card).await;
+            let outcome = ask_capped(&*harness.asker, &card, vault).await;
             let e = ctx.outcome_event(&card, outcome, started);
-            // Nothing runs that the ledger does not show.
+            // On the ask path nothing runs that the ledger does not show.
             ctx.ledger
                 .write(e)
                 .await
-                .map_err(|e| ToolError::Failed(vault.scrub(&format!("ledger: {e}"))))?;
+                .map_err(|e| ToolError::Failed(clean_line(vault, &format!("ledger: {e}"))))?;
             if !outcome.proceeds() {
                 let reason = match outcome {
                     AskOutcome::AnsweredSkip => "you said no",
@@ -750,7 +968,7 @@ pub async fn dispatch(
             ctx.ledger
                 .write(ctx.stop_event(&reason))
                 .await
-                .map_err(|e| ToolError::Failed(vault.scrub(&format!("ledger: {e}"))))?;
+                .map_err(|e| ToolError::Failed(clean_line(vault, &format!("ledger: {e}"))))?;
             return Ok(ToolOutput {
                 text: model_text(&ToolOutput {
                     stopped: Some(reason.clone()),
@@ -767,7 +985,10 @@ pub async fn dispatch(
     // Run at the approved class.
     ctx.class = class;
     let started = Instant::now();
-    let result = spec.handler.call(&ctx, args).await;
+    // A panic may come after the side effect: it is a failed call the ledger shows.
+    let result = CatchUnwind(spec.handler.call(&ctx, args))
+        .await
+        .unwrap_or_else(|_| Err(ToolError::Failed(PANICKED.into())));
     let duration_ms = millis(started);
 
     let mut e = ctx.event(server, Some(class), Some(mode));
@@ -827,7 +1048,7 @@ async fn write_or_diag(ctx: &ToolCtx, e: LedgerEvent) {
 
 /// One scrubbed line on stderr (stdout carries only JSON-RPC).
 fn diag(vault: &Vault, msg: &str) {
-    eprintln!("{}", vault.scrub(&card_line(msg, 1000)));
+    eprintln!("{}", clean_line(vault, msg));
 }
 
 fn outcome_mode(o: AskOutcome) -> LedgerMode {
@@ -919,152 +1140,23 @@ fn scrub_error(vault: &Vault, e: ToolError) -> ToolError {
     }
 }
 
-// ---- mid-call ask cards: sanitised like gate cards (D-110 (5)) ----
+/// The text a caught panic leaves: the payload is never shown (it could carry a value).
+const PANICKED: &str = "the tool failed unexpectedly (panic); see the server log";
 
-const WHAT_MAX_CHARS: usize = 200;
-const VALUE_MAX_CHARS: usize = 200;
-const KEY_MAX_CHARS: usize = 64;
-const SITE_MAX_CHARS: usize = 253;
-const MAX_VALUES: usize = 32;
+/// Polls a handler future and turns a panic into `Err` (`futures::FutureExt::catch_unwind`
+/// without the dependency). The future is not polled again after it panicked.
+struct CatchUnwind<'a, T>(Pin<Box<dyn Future<Output = T> + Send + 'a>>);
 
-fn clean_card(vault: &Vault, card: AskCard, strict: bool) -> AskCard {
-    let what = card_line(&vault.scrub(&card.what), WHAT_MAX_CHARS);
-    let what = if what.is_empty() {
-        format!("{} step needs your answer", card.class)
-    } else {
-        what
-    };
-    let more = card.values.len().saturating_sub(MAX_VALUES);
-    let mut values: Vec<(String, String)> = card
-        .values
-        .iter()
-        .take(MAX_VALUES)
-        .map(|(k, v)| {
-            (
-                card_line(&vault.scrub(k), KEY_MAX_CHARS),
-                card_line(&vault.scrub(v), VALUE_MAX_CHARS),
-            )
-        })
-        .collect();
-    if more > 0 {
-        values.push(("...".to_string(), format!("{more} more values not shown")));
-    }
-    let on_timeout = match (card.on_timeout, Gate::on_timeout(card.class, strict)) {
-        (OnTimeout::Proceed, OnTimeout::Proceed) => OnTimeout::Proceed,
-        _ => OnTimeout::Skip,
-    };
-    AskCard {
-        class: card.class,
-        what,
-        site: card
-            .site
-            .as_deref()
-            .map(|s| card_line(&vault.scrub(s), SITE_MAX_CHARS)),
-        values,
-        timeout: crate::gate::ASK_TIMEOUT,
-        on_timeout,
-    }
-}
+impl<T> Future for CatchUnwind<'_, T> {
+    type Output = std::thread::Result<T>;
 
-/// Invisible characters that can reorder or hide text on a terminal or in a notification.
-fn invisible(c: char) -> bool {
-    matches!(
-        c,
-        '\u{00ad}'
-            | '\u{061c}'
-            | '\u{180e}'
-            | '\u{200b}'..='\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{2069}'
-            | '\u{feff}'
-            | '\u{fff9}'..='\u{fffb}'
-    )
-}
-
-/// Skips an escape sequence after ESC (`intro = None`) or an 8-bit introducer. CSI runs to
-/// its final byte; string sequences (OSC, DCS, ...) run to BEL or ST and are kept as text
-/// when unterminated; any other `ESC x` is two characters.
-fn skip_escape(it: &mut std::iter::Peekable<std::str::Chars<'_>>, intro: Option<char>) {
-    let kind = match intro {
-        Some(k) => k,
-        None => match it.peek().copied() {
-            Some(k @ ('[' | ']' | 'P' | 'X' | '^' | '_')) => {
-                it.next();
-                k
-            }
-            Some(k) if ('\u{20}'..='\u{7e}').contains(&k) => {
-                it.next();
-                return;
-            }
-            _ => return,
-        },
-    };
-    if matches!(kind, '[' | '\u{9b}') {
-        while let Some(&c) = it.peek() {
-            if ('\u{20}'..='\u{3f}').contains(&c) {
-                it.next();
-            } else {
-                if ('\u{40}'..='\u{7e}').contains(&c) {
-                    it.next();
-                }
-                return;
-            }
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let fut = self.0.as_mut();
+        match std::panic::catch_unwind(AssertUnwindSafe(move || fut.poll(cx))) {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
+            Err(payload) => Poll::Ready(Err(payload)),
         }
-        return;
-    }
-    let mut probe = it.clone();
-    while let Some(c) = probe.next() {
-        match c {
-            '\u{07}' | '\u{9c}' => {
-                *it = probe;
-                return;
-            }
-            '\u{1b}' => {
-                if probe.peek() == Some(&'\\') {
-                    probe.next();
-                    *it = probe;
-                }
-                return;
-            }
-            _ => {}
-        }
-    }
-}
-
-/// One clean line: escape sequences, control characters and invisible marks become one
-/// space, whitespace runs collapse, capped at `max` characters with a trailing `...`.
-fn card_line(s: &str, max: usize) -> String {
-    let mut out = String::with_capacity(s.len().min(max * 4));
-    let mut space = false;
-    let mut it = s.chars().peekable();
-    while let Some(c) = it.next() {
-        let sep = match c {
-            '\u{1b}' => {
-                skip_escape(&mut it, None);
-                true
-            }
-            '\u{9b}' | '\u{9d}' | '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
-                skip_escape(&mut it, Some(if c == '\u{9b}' { c } else { ']' }));
-                true
-            }
-            c => c.is_control() || c.is_whitespace() || invisible(c),
-        };
-        if sep {
-            space = true;
-            continue;
-        }
-        if space && !out.is_empty() {
-            out.push(' ');
-        }
-        space = false;
-        out.push(c);
-    }
-    if out.chars().count() > max {
-        let mut cut: String = out.chars().take(max.saturating_sub(3)).collect();
-        cut.push_str("...");
-        cut
-    } else {
-        out
     }
 }
 
@@ -1115,32 +1207,157 @@ mod tests {
         assert!(rx.has_changed().unwrap(), "clones share the notifier");
     }
 
-    #[test]
-    fn card_lines_are_clean() {
-        assert_eq!(card_line("a\r\n\x1b[31mb\x1b[0m  c", 50), "a b c");
-        assert_eq!(card_line("x\u{202e}y", 50), "x y");
-        assert_eq!(card_line(&"z".repeat(10), 5), "zz...");
-        assert_eq!(card_line("\x1b]0;title\x07ok", 50), "ok");
+    fn addr_vault() -> Vault {
+        Vault::in_memory([(
+            "addr".to_string(),
+            "1 Main St\nSpringfield".to_string(),
+            crate::vault::EntryKind::Personal,
+        )])
     }
 
     #[test]
-    fn mid_call_cards_cannot_loosen_the_timeout() {
-        let v = Vault::in_memory([]);
-        let card = |class, on_timeout| AskCard {
-            class,
+    fn clean_line_scrubs_before_it_reshapes() {
+        let v = addr_vault();
+        // Whitespace collapse would turn the value into "1 Main St Springfield".
+        let line = clean_line(&v, "ship to 1 Main St\nSpringfield\x1b[31m now");
+        assert_eq!(line, "ship to @vault(addr) now");
+        // Truncation at the cap would cut the value in half.
+        let long = format!("{}1 Main St\nSpringfield", "x".repeat(195));
+        let line = clean_line(&v, &long);
+        assert!(
+            !line.contains("Main") && !line.contains("Springfield"),
+            "{line}"
+        );
+        assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn sanitised_cards_keep_the_timer_and_the_value_out() {
+        let v = addr_vault();
+        let card = AskCard {
+            class: Class::Account,
+            what: "update address to 1 Main St\nSpringfield\r".into(),
+            site: Some("shop.example".into()),
+            values: vec![("address".into(), "1 Main St\nSpringfield".into())],
+            timeout: std::time::Duration::from_millis(1),
+            on_timeout: OnTimeout::Proceed,
+        };
+        let c = sanitise_card(&v, card);
+        assert_eq!(c.timeout, ASK_TIMEOUT);
+        assert_eq!(
+            c.on_timeout,
+            OnTimeout::Proceed,
+            "tightening is the gate's job"
+        );
+        assert_eq!(c.what, "update address to @vault(addr)");
+        assert_eq!(c.values, vec![("address".into(), "@vault(addr)".into())]);
+        assert_eq!(
+            tighter(OnTimeout::Proceed, OnTimeout::Proceed),
+            OnTimeout::Proceed
+        );
+        assert_eq!(
+            tighter(OnTimeout::Proceed, OnTimeout::Skip),
+            OnTimeout::Skip
+        );
+        assert_eq!(
+            tighter(OnTimeout::Skip, OnTimeout::Proceed),
+            OnTimeout::Skip
+        );
+    }
+
+    /// An asker that never answers and ignores its timer.
+    struct Hang;
+    #[async_trait]
+    impl Asker for Hang {
+        async fn ask(&self, _card: &AskCard) -> AskOutcome {
+            std::future::pending().await
+        }
+    }
+
+    /// An asker that claims a timeout proceeded whatever the card says.
+    struct Loose;
+    #[async_trait]
+    impl Asker for Loose {
+        async fn ask(&self, _card: &AskCard) -> AskOutcome {
+            AskOutcome::TimeoutProceed
+        }
+    }
+
+    fn short_card(on_timeout: OnTimeout) -> AskCard {
+        AskCard {
+            class: Class::Send,
             what: "w".into(),
             site: None,
             values: Vec::new(),
-            timeout: std::time::Duration::from_millis(1),
+            timeout: Duration::from_millis(20),
             on_timeout,
-        };
-        let pay = clean_card(&v, card(Class::Pay, OnTimeout::Proceed), false);
-        assert_eq!(pay.on_timeout, OnTimeout::Skip);
-        assert_eq!(pay.timeout, crate::gate::ASK_TIMEOUT);
-        let acct = clean_card(&v, card(Class::Account, OnTimeout::Proceed), false);
-        assert_eq!(acct.on_timeout, OnTimeout::Proceed);
-        let strict = clean_card(&v, card(Class::Account, OnTimeout::Proceed), true);
-        assert_eq!(strict.on_timeout, OnTimeout::Skip);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hung_asker_is_capped_to_skip() {
+        let v = Vault::in_memory([]);
+        let card = short_card(OnTimeout::Proceed);
+        let started = Instant::now();
+        let o = tokio::time::timeout(
+            Duration::from_secs(20),
+            ask_capped_with(&Hang, &card, &v, Duration::from_millis(30)),
+        )
+        .await
+        .expect("the cap ends the ask");
+        assert_eq!(o, AskOutcome::TimeoutSkip, "a cap hit never proceeds");
+        assert!(started.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn an_asker_cannot_loosen_the_card() {
+        let v = Vault::in_memory([]);
+        let skip = short_card(OnTimeout::Skip);
+        assert_eq!(ask_capped(&Loose, &skip, &v).await, AskOutcome::TimeoutSkip);
+        let proceed = short_card(OnTimeout::Proceed);
+        assert_eq!(
+            ask_capped(&Loose, &proceed, &v).await,
+            AskOutcome::TimeoutProceed
+        );
+    }
+
+    #[test]
+    fn payload_scrub_leaves_the_envelope_alone() {
+        let v = Vault::in_memory([(
+            "pin".to_string(),
+            "2025".to_string(),
+            crate::vault::EntryKind::Secret,
+        )]);
+        let msg = json!({"jsonrpc": "2.0", "id": 2025, "result": {
+            "protocolVersion": "2025-06-18",
+            "content": [{"type": "text", "text": "pin 2025"}],
+            "tools": [{"name": "t2025", "description": "d 2025",
+                       "inputSchema": {"type": "object", "default": 2025}}],
+        }});
+        let out = scrub_payload(&v, msg);
+        assert_eq!(out["id"], json!(2025));
+        assert_eq!(out["jsonrpc"], json!("2.0"));
+        assert_eq!(out["result"]["protocolVersion"], json!("2025-06-18"));
+        assert_eq!(
+            out["result"]["content"][0]["text"],
+            json!("pin @vault(pin)")
+        );
+        assert_eq!(out["result"]["tools"][0]["name"], json!("t@vault(pin)"));
+        assert_eq!(
+            out["result"]["tools"][0]["description"],
+            json!("d @vault(pin)")
+        );
+        assert_eq!(
+            out["result"]["tools"][0]["inputSchema"]["default"],
+            json!("@vault(pin)")
+        );
+        let err = scrub_payload(
+            &v,
+            json!({"jsonrpc": "2.0", "id": 2025, "error": {"code": -32602, "message": "unknown tool: x2025"}}),
+        );
+        assert_eq!(err["id"], json!(2025));
+        assert_eq!(err["error"]["code"], json!(-32602));
+        assert_eq!(err["error"]["message"], json!("unknown tool: x@vault(pin)"));
     }
 
     #[test]

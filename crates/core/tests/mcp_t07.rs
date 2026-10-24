@@ -7,20 +7,25 @@
 //! `cargo test -p harness-core --test mcp_t07`.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use harness_core::ask::{self, FileAsker};
 use harness_core::class::Class;
+use harness_core::class::Mode;
 use harness_core::gate::{AskCard, AskOutcome, OnTimeout, StopReason};
 use harness_core::ledger::read_jsonl;
 use harness_core::mcp::{
     dispatch, serve_io, Classified, Harness, ToolCtx, ToolError, ToolHandler, ToolOutput,
     ToolRegistry, ToolSpec,
 };
-use harness_core::memory::{ts_now, LedgerEvent, LedgerMode, MemoryStore, Run, RunStatus};
+use harness_core::memory::{
+    ts_now, Baseline, Contact, Fact, FactId, Filter, GateRule, Hit, LedgerEvent, LedgerId,
+    LedgerMode, MemoryError, MemoryStore, Node, NodeId, Result as MemResult, Review, ReviewId, Run,
+    RunStatus, Schedule, Source, ToolHealth, Ts,
+};
 use harness_core::run::{RunFolder, RunId};
 use harness_core::testing::{MemStore, ScriptedAsker};
 use harness_core::vault::{EntryKind, Vault};
@@ -74,6 +79,10 @@ struct Behaviour {
     stop: Option<StopReason>,
     /// Ask mid-call with this card.
     mid_ask: Option<AskCard>,
+    /// Panic inside `call` (after the "side effect" counted in `calls`).
+    panic: bool,
+    /// Wait for this before returning (concurrency tests).
+    hold: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[derive(Default)]
@@ -104,6 +113,12 @@ impl ToolHandler for Handler {
         if let Some(card) = &self.b.mid_ask {
             let o = ctx.ask(card.clone()).await;
             *self.probe.mid_outcome.lock().unwrap() = Some(o);
+        }
+        if self.b.panic {
+            panic!("handler fell over");
+        }
+        if let Some(hold) = &self.b.hold {
+            hold.notified().await;
         }
         let template = args
             .get("secret")
@@ -888,4 +903,704 @@ async fn file_asker_numbers_asks_and_answer_checks_the_card() {
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     let err = ask::answer(&root.0, &RunId("../x".into()), 1, true).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+// ---- round 2 (review-T-07): gate rules on mid-call asks, fail-closed paths, panics,
+// concurrency, transport robustness, FileAsker closing (D-119) ----
+
+fn mid_ask(class: Class, site: &str, what: &str) -> AskCard {
+    AskCard {
+        class,
+        what: what.into(),
+        site: Some(site.into()),
+        values: Vec::new(),
+        timeout: Duration::from_millis(1),
+        on_timeout: OnTimeout::Proceed,
+    }
+}
+
+fn asking(card: AskCard) -> Behaviour {
+    Behaviour {
+        mid_ask: Some(card),
+        ..Behaviour::default()
+    }
+}
+
+#[tokio::test]
+async fn mid_call_challenge_is_logged_as_a_stop_and_never_shown() {
+    let e = env(ScriptedAsker::new()).await;
+    let b = asking(mid_ask(Class::Challenge, "x.example", "turnstile on login"));
+    let (spec, probe) = tool("act", Class::Navigate, b);
+    let reg = ToolRegistry::new(vec![spec]);
+    dispatch(SERVER, &reg, &e.harness, "act", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        *probe.mid_outcome.lock().unwrap(),
+        Some(AskOutcome::TimeoutSkip)
+    );
+    assert!(
+        e.asker.cards().is_empty(),
+        "a challenge is never asked (D-5)"
+    );
+    let ev = events(&e);
+    assert_eq!(ev.len(), 2, "{ev:?}");
+    assert_eq!(ev[0].server, "core");
+    assert_eq!(ev[0].tool, "act");
+    assert_eq!(ev[0].class, Some(Class::Challenge));
+    assert_eq!(ev[0].mode, Some(LedgerMode::Stop));
+    assert_eq!(
+        ev[0].why.as_deref(),
+        Some("challenge during act: turnstile on login")
+    );
+    assert_eq!(ev[1].server, SERVER);
+    assert_mirror(&e);
+}
+
+#[tokio::test]
+async fn mid_call_ask_meets_a_stop_rule() {
+    let e = env(ScriptedAsker::new()).await;
+    e.store
+        .add_rule("x.example", "Account", Mode::Stop, false)
+        .unwrap();
+    let b = asking(mid_ask(Class::Account, "x.example", "change the email"));
+    let (spec, probe) = tool("act", Class::Navigate, b);
+    let reg = ToolRegistry::new(vec![spec]);
+    dispatch(SERVER, &reg, &e.harness, "act", json!({"element": "#9"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        *probe.mid_outcome.lock().unwrap(),
+        Some(AskOutcome::TimeoutSkip)
+    );
+    assert!(e.asker.cards().is_empty(), "a stop rule shows no card");
+    let ev = events(&e);
+    assert_eq!(ev.len(), 2, "{ev:?}");
+    assert_eq!(ev[0].server, "core");
+    assert_eq!(ev[0].class, Some(Class::Account));
+    assert_eq!(ev[0].mode, Some(LedgerMode::Stop));
+    assert!(
+        ev[0].why.as_deref().unwrap_or("").contains("x.example"),
+        "{:?}",
+        ev[0].why
+    );
+    assert_eq!(ev[0].consequences, json!({"element": "#9"}));
+    assert_mirror(&e);
+}
+
+#[tokio::test]
+async fn mid_call_ask_meets_strict_and_hint_rules() {
+    // Control: Account on a site with only the seed ('*', Account, ask) may proceed.
+    let e = env(ScriptedAsker::new()).await;
+    let b = asking(mid_ask(Class::Account, "y.example", "change the email"));
+    let (spec, probe) = tool("act", Class::Navigate, b);
+    let reg = ToolRegistry::new(vec![spec]);
+    dispatch(SERVER, &reg, &e.harness, "act", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(e.asker.cards()[0].on_timeout, OnTimeout::Proceed);
+    assert_eq!(
+        *probe.mid_outcome.lock().unwrap(),
+        Some(AskOutcome::TimeoutProceed)
+    );
+
+    // A strict rule on the card's site: skips on timeout (H-1.3 "or a rule").
+    let e = env(ScriptedAsker::new()).await;
+    e.store
+        .add_rule("x.example", "Account", Mode::Ask, true)
+        .unwrap();
+    let b = asking(mid_ask(Class::Account, "x.example", "change the email"));
+    let (spec, probe) = tool("act", Class::Navigate, b);
+    let reg = ToolRegistry::new(vec![spec]);
+    dispatch(SERVER, &reg, &e.harness, "act", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(e.asker.cards()[0].on_timeout, OnTimeout::Skip);
+    assert_eq!(
+        *probe.mid_outcome.lock().unwrap(),
+        Some(AskOutcome::TimeoutSkip)
+    );
+    assert_eq!(events(&e)[0].mode, Some(LedgerMode::TimeoutSkip));
+
+    // A hint rule hit through the call's classifier hints: skips on timeout (D-110 (4)).
+    let e = env(ScriptedAsker::new()).await;
+    e.store
+        .add_rule("*", "Account:wire", Mode::Ask, false)
+        .unwrap();
+    let mut b = asking(mid_ask(Class::Account, "y.example", "change the email"));
+    b.classify.hints = vec!["wire".into()];
+    let (spec, probe) = tool("act", Class::Navigate, b);
+    let reg = ToolRegistry::new(vec![spec]);
+    dispatch(SERVER, &reg, &e.harness, "act", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(e.asker.cards()[0].on_timeout, OnTimeout::Skip);
+    assert_eq!(
+        *probe.mid_outcome.lock().unwrap(),
+        Some(AskOutcome::TimeoutSkip)
+    );
+}
+
+/// A harness over a fresh MemStore whose run row is `strict` (or absent when `None`).
+async fn with_run_row(e: &Env, strict: Option<bool>) -> (Harness, Arc<MemStore>) {
+    let store = Arc::new(MemStore::new());
+    if let Some(strict) = strict {
+        let mut run = e.store.run_get(&e.run.id).await.unwrap().unwrap();
+        run.strict = strict;
+        store.run_start(run).await.unwrap();
+    }
+    let mut h = e.harness.clone();
+    h.store = store.clone();
+    (h, store)
+}
+
+#[tokio::test]
+async fn strict_run_send_to_a_stranger_times_out_to_skip() {
+    let e = env(ScriptedAsker::new()).await;
+    let (h, store) = with_run_row(&e, Some(true)).await;
+    let (spec, probe) = tool("echo.send", Class::Send, send_to("stranger@example.com"));
+    let reg = ToolRegistry::new(vec![spec]);
+    let out = dispatch(
+        SERVER,
+        &reg,
+        &h,
+        "echo.send",
+        json!({"to": "stranger@example.com"}),
+    )
+    .await
+    .unwrap();
+    assert!(out.text.starts_with("skipped: no answer"), "{}", out.text);
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(e.asker.cards()[0].on_timeout, OnTimeout::Skip);
+    let ev: Vec<_> = store.ledger().into_iter().map(|(_, x)| x).collect();
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].mode, Some(LedgerMode::TimeoutSkip));
+}
+
+#[tokio::test]
+async fn a_run_without_a_runs_row_reads_as_strict() {
+    let e = env(ScriptedAsker::new()).await;
+    let (h, _store) = with_run_row(&e, None).await;
+    let (spec, probe) = tool("echo.send", Class::Send, send_to("stranger@example.com"));
+    let reg = ToolRegistry::new(vec![spec]);
+    let out = dispatch(
+        SERVER,
+        &reg,
+        &h,
+        "echo.send",
+        json!({"to": "stranger@example.com"}),
+    )
+    .await
+    .unwrap();
+    assert!(out.text.starts_with("skipped: "), "{}", out.text);
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(e.asker.cards()[0].on_timeout, OnTimeout::Skip);
+}
+
+// -- a store with switchable failures --
+
+#[derive(Default)]
+struct Flaky {
+    inner: MemStore,
+    fail_append: AtomicBool,
+    fail_run_get: AtomicBool,
+    fail_gate: AtomicBool,
+}
+
+fn injected(what: &str) -> MemoryError {
+    MemoryError::Backend(format!("injected {what} failure").into())
+}
+
+#[async_trait]
+impl MemoryStore for Flaky {
+    async fn remember(&self, f: Fact) -> MemResult<FactId> {
+        self.inner.remember(f).await
+    }
+    async fn forget(&self, id: FactId) -> MemResult<()> {
+        self.inner.forget(id).await
+    }
+    async fn link(&self, src: NodeId, rel: &str, dst: NodeId, source: Source) -> MemResult<()> {
+        self.inner.link(src, rel, dst, source).await
+    }
+    async fn node(&self, kind: &str, name: &str) -> MemResult<NodeId> {
+        self.inner.node(kind, name).await
+    }
+    async fn neighbors(&self, n: NodeId, rel: Option<&str>, depth: u8) -> MemResult<Vec<Node>> {
+        self.inner.neighbors(n, rel, depth).await
+    }
+    async fn recall(&self, q: &str, k: usize, filter: Option<Filter>) -> MemResult<Vec<Hit>> {
+        self.inner.recall(q, k, filter).await
+    }
+    async fn search(&self, q: &str, k: usize) -> MemResult<Vec<Hit>> {
+        self.inner.search(q, k).await
+    }
+    async fn contact(&self, person: &str) -> MemResult<Option<Contact>> {
+        self.inner.contact(person).await
+    }
+    async fn touch_contact(&self, person: &str, channel: &str, note: &str) -> MemResult<()> {
+        self.inner.touch_contact(person, channel, note).await
+    }
+    async fn due_reviews(&self, now: Ts, k: usize) -> MemResult<Vec<Review>> {
+        self.inner.due_reviews(now, k).await
+    }
+    async fn grade_review(&self, id: ReviewId, grade: u8) -> MemResult<()> {
+        self.inner.grade_review(id, grade).await
+    }
+    async fn baseline_get(&self, watch: &str) -> MemResult<Option<Baseline>> {
+        self.inner.baseline_get(watch).await
+    }
+    async fn baseline_set(&self, watch: &str, b: Baseline) -> MemResult<()> {
+        self.inner.baseline_set(watch, b).await
+    }
+    async fn append(&self, e: LedgerEvent) -> MemResult<LedgerId> {
+        if self.fail_append.load(Ordering::SeqCst) {
+            return Err(injected("append"));
+        }
+        self.inner.append(e).await
+    }
+    async fn tool_health(&self, domain: &str) -> MemResult<Vec<ToolHealth>> {
+        self.inner.tool_health(domain).await
+    }
+    async fn tool_health_set(&self, h: ToolHealth) -> MemResult<()> {
+        self.inner.tool_health_set(h).await
+    }
+    async fn gate_rule(&self, domain: &str, class: &str) -> MemResult<Option<GateRule>> {
+        if self.fail_gate.load(Ordering::SeqCst) {
+            return Err(injected("gate rule"));
+        }
+        self.inner.gate_rule(domain, class).await
+    }
+    async fn run_start(&self, run: Run) -> MemResult<()> {
+        self.inner.run_start(run).await
+    }
+    async fn run_end(&self, id: &RunId, status: RunStatus, ended: Ts) -> MemResult<()> {
+        self.inner.run_end(id, status, ended).await
+    }
+    async fn run_get(&self, id: &RunId) -> MemResult<Option<Run>> {
+        if self.fail_run_get.load(Ordering::SeqCst) {
+            return Err(injected("run lookup"));
+        }
+        self.inner.run_get(id).await
+    }
+    async fn schedule_add(&self, s: Schedule) -> MemResult<i32> {
+        self.inner.schedule_add(s).await
+    }
+    async fn schedule_list(&self) -> MemResult<Vec<Schedule>> {
+        self.inner.schedule_list().await
+    }
+    async fn schedule_rm(&self, id: i32) -> MemResult<()> {
+        self.inner.schedule_rm(id).await
+    }
+    async fn schedule_fired(&self, id: i32, at: Ts) -> MemResult<()> {
+        self.inner.schedule_fired(id, at).await
+    }
+    async fn gate_rule_set(
+        &self,
+        domain: &str,
+        class: &str,
+        rule: GateRule,
+        note: &str,
+    ) -> MemResult<()> {
+        self.inner.gate_rule_set(domain, class, rule, note).await
+    }
+    async fn review_add(&self, item: &str, answer: &str) -> MemResult<ReviewId> {
+        self.inner.review_add(item, answer).await
+    }
+    async fn ledger_events(&self, run: &RunId) -> MemResult<Vec<(LedgerId, LedgerEvent)>> {
+        self.inner.ledger_events(run).await
+    }
+}
+
+/// An env plus a harness over a `Flaky` store with the same run row and contact.
+async fn flaky_env(asker: ScriptedAsker) -> (Env, Arc<Flaky>, Harness) {
+    let e = env(asker).await;
+    let flaky = Arc::new(Flaky::default());
+    let run = e.store.run_get(&e.run.id).await.unwrap().unwrap();
+    flaky.run_start(run).await.unwrap();
+    flaky.inner.add_contact("friend@example.com");
+    let mut h = e.harness.clone();
+    h.store = flaky.clone();
+    (e, flaky, h)
+}
+
+#[tokio::test]
+async fn ledger_failure_on_the_ask_path_runs_nothing() {
+    let (_e, flaky, h) = flaky_env(ScriptedAsker::with([AskOutcome::AnsweredProceed])).await;
+    flaky.fail_append.store(true, Ordering::SeqCst);
+    let (spec, probe) = tool("echo.send", Class::Send, send_to("stranger@example.com"));
+    let reg = ToolRegistry::new(vec![spec]);
+    let err = dispatch(
+        SERVER,
+        &reg,
+        &h,
+        "echo.send",
+        json!({"to": "stranger@example.com"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, ToolError::Failed(_)), "{err}");
+    assert_eq!(
+        probe.calls.load(Ordering::SeqCst),
+        0,
+        "a yes nobody logged runs nothing"
+    );
+}
+
+#[tokio::test]
+async fn gate_or_run_lookup_errors_run_nothing() {
+    for which in ["gate", "run"] {
+        let (_e, flaky, h) = flaky_env(ScriptedAsker::new()).await;
+        match which {
+            "gate" => flaky.fail_gate.store(true, Ordering::SeqCst),
+            _ => flaky.fail_run_get.store(true, Ordering::SeqCst),
+        }
+        let (spec, probe) = tool("echo.send", Class::Send, send_to("stranger@example.com"));
+        let reg = ToolRegistry::new(vec![spec]);
+        let err = dispatch(
+            SERVER,
+            &reg,
+            &h,
+            "echo.send",
+            json!({"to": "stranger@example.com"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ToolError::Failed(_)), "{which}: {err}");
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 0, "{which}");
+        assert!(flaky.inner.ledger().is_empty(), "{which}");
+    }
+}
+
+#[tokio::test]
+async fn mid_call_ledger_failure_turns_proceed_into_skip() {
+    let (_e, flaky, h) = flaky_env(ScriptedAsker::with([AskOutcome::AnsweredProceed])).await;
+    flaky.fail_append.store(true, Ordering::SeqCst);
+    let b = asking(mid_ask(Class::Account, "y.example", "change the email"));
+    let (spec, probe) = tool("act", Class::Navigate, b);
+    let reg = ToolRegistry::new(vec![spec]);
+    dispatch(SERVER, &reg, &h, "act", json!({})).await.unwrap();
+    assert_eq!(
+        *probe.mid_outcome.lock().unwrap(),
+        Some(AskOutcome::AnsweredSkip),
+        "a yes the ledger cannot show is a skip"
+    );
+}
+
+#[tokio::test]
+async fn panicking_handler_is_an_error_and_a_failed_tool_event() {
+    let e = env(ScriptedAsker::new()).await;
+    let b = Behaviour {
+        panic: true,
+        ..Behaviour::default()
+    };
+    let (spec, probe) = tool("echo.panic", Class::Fill, b);
+    let reg = ToolRegistry::new(vec![spec]);
+    let err = dispatch(SERVER, &reg, &e.harness, "echo.panic", json!({}))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("panic"), "{err}");
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    let ev = events(&e);
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].server, SERVER);
+    assert_eq!(ev[0].mode, Some(LedgerMode::Allow));
+    assert!(!ev[0].ok);
+    assert!(ev[0].result_summary.starts_with("error: "));
+    assert_mirror(&e);
+
+    // Over the transport: an isError result for that id, and a second failed event.
+    let input = format!(
+        "{}\n",
+        json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": "echo.panic", "arguments": {}}})
+    );
+    let mut out = Vec::new();
+    tokio::time::timeout(
+        CAP,
+        serve_io(SERVER, reg, e.harness.clone(), input.as_bytes(), &mut out),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let reply: Value = serde_json::from_str(String::from_utf8(out).unwrap().trim()).unwrap();
+    assert_eq!(reply["id"], json!(5));
+    assert_eq!(reply["result"]["isError"], json!(true));
+    let ev = events(&e);
+    assert_eq!(ev.len(), 2);
+    assert!(!ev[1].ok);
+}
+
+#[tokio::test]
+async fn concurrent_calls_answer_out_of_order() {
+    let e = env(ScriptedAsker::new()).await;
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let (slow, slow_probe) = tool(
+        "echo.slow",
+        Class::Read,
+        Behaviour {
+            hold: Some(hold.clone()),
+            ..Behaviour::default()
+        },
+    );
+    let (fast, _) = tool("echo.fast", Class::Read, Behaviour::default());
+    let reg = ToolRegistry::new(vec![slow, fast]);
+    let (client, server_end) = tokio::io::duplex(1 << 16);
+    let (sr, sw) = tokio::io::split(server_end);
+    let task = tokio::spawn(serve_io(
+        SERVER,
+        reg,
+        e.harness.clone(),
+        BufReader::new(sr),
+        sw,
+    ));
+    let (cr, mut cw) = tokio::io::split(client);
+    let mut lines = BufReader::new(cr).lines();
+    for (id, name) in [(1, "echo.slow"), (2, "echo.fast")] {
+        let mut s = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": name, "arguments": {}}})
+        .to_string();
+        s.push('\n');
+        cw.write_all(s.as_bytes()).await.unwrap();
+    }
+    let first = next_msg(&mut lines).await;
+    assert_eq!(
+        first["id"],
+        json!(2),
+        "the fast call is not queued behind the slow one"
+    );
+    assert_eq!(
+        slow_probe.calls.load(Ordering::SeqCst),
+        1,
+        "both run at once"
+    );
+    hold.notify_one();
+    let second = next_msg(&mut lines).await;
+    assert_eq!(second["id"], json!(1));
+    assert_eq!(second["result"]["isError"], json!(false));
+    cw.shutdown().await.unwrap();
+    tokio::time::timeout(CAP, task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(events(&e).len(), 2);
+    assert_mirror(&e);
+}
+
+#[tokio::test]
+async fn a_bad_line_is_a_parse_error_and_the_server_keeps_reading() {
+    let e = env(ScriptedAsker::new()).await;
+    let reg = ToolRegistry::new(Vec::new());
+    let mut input: Vec<u8> = vec![0xff, 0xfe, b'{', b'}', b'\n'];
+    // The last line has no newline: it is answered at EOF.
+    let ping = json!({"jsonrpc": "2.0", "id": "p", "method": "ping"}).to_string();
+    input.extend_from_slice(ping.as_bytes());
+    let mut out = Vec::new();
+    tokio::time::timeout(
+        CAP,
+        serve_io(SERVER, reg, e.harness.clone(), &input[..], &mut out),
+    )
+    .await
+    .unwrap()
+    .expect("a bad line does not end the server");
+    let text = String::from_utf8(out).unwrap();
+    let replies: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(replies.len(), 2, "{text}");
+    assert_eq!(replies[0]["error"]["code"], json!(-32700));
+    assert_eq!(replies[0]["id"], Value::Null);
+    assert_eq!(
+        replies[1],
+        json!({"jsonrpc": "2.0", "id": "p", "result": {}})
+    );
+}
+
+#[tokio::test]
+async fn a_short_vault_value_does_not_rewrite_the_envelope() {
+    let mut e = env(ScriptedAsker::new()).await;
+    e.harness.vault = Arc::new(Vault::in_memory([(
+        "pin".to_owned(),
+        "2025".to_owned(),
+        EntryKind::Secret,
+    )]));
+    let reg = ToolRegistry::new(Vec::new());
+    let input = format!(
+        "{}\n{}\n",
+        json!({"jsonrpc": "2.0", "id": 2025, "method": "initialize", "params": {}}),
+        json!({"jsonrpc": "2.0", "id": 2025, "method": "tools/call", "params": {"name": "x2025"}})
+    );
+    let mut out = Vec::new();
+    tokio::time::timeout(
+        CAP,
+        serve_io(SERVER, reg, e.harness.clone(), input.as_bytes(), &mut out),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let text = String::from_utf8(out).unwrap();
+    let replies: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(replies[0]["id"], json!(2025));
+    assert_eq!(replies[0]["result"]["protocolVersion"], json!("2025-06-18"));
+    assert_eq!(replies[1]["id"], json!(2025));
+    assert_eq!(
+        replies[1]["error"]["code"],
+        json!(-32602),
+        "D-71 unknown tool"
+    );
+    assert_eq!(
+        replies[1]["error"]["message"],
+        json!("unknown tool: x@vault(pin)")
+    );
+}
+
+// -- FileAsker closing and failing closed --
+
+#[tokio::test]
+async fn file_asker_fails_closed_when_the_card_cannot_be_written() {
+    let root = Tmp::new();
+    let run = RunFolder::create(&root.0, "ask", "ask test").unwrap();
+    // `asks` is a file: the folder cannot be created, so nobody can see a card.
+    std::fs::write(run.dir.join("asks"), "not a folder").unwrap();
+    let asker = FileAsker::new(&root.0, run.id.clone(), Arc::new(Vault::in_memory([])));
+    let o = tokio::time::timeout(CAP, asker.ask(&card(CAP, OnTimeout::Proceed, "send")))
+        .await
+        .expect("returns at once, not at the card's timer");
+    assert_eq!(o, AskOutcome::TimeoutSkip, "an unseen card never proceeds");
+
+    // Through dispatch: Send(new) would proceed on timeout, but the handler does not run.
+    let mut e = env(ScriptedAsker::new()).await;
+    std::fs::write(e.run.dir.join("asks"), "not a folder").unwrap();
+    e.harness.asker = Arc::new(FileAsker::new(
+        &e.root.0,
+        e.run.id.clone(),
+        e.harness.vault.clone(),
+    ));
+    let (spec, probe) = tool("echo.send", Class::Send, send_to("stranger@example.com"));
+    let reg = ToolRegistry::new(vec![spec]);
+    let out = tokio::time::timeout(
+        CAP,
+        dispatch(
+            SERVER,
+            &reg,
+            &e.harness,
+            "echo.send",
+            json!({"to": "stranger@example.com"}),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(out.text.starts_with("skipped: "), "{}", out.text);
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    let ev = events(&e);
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].mode, Some(LedgerMode::TimeoutSkip));
+}
+
+#[tokio::test]
+async fn file_asker_refuses_an_answer_after_the_ask_closed() {
+    // Timed out: the asker claimed the answer file, so a late yes is refused.
+    let root = Tmp::new();
+    let run = RunFolder::create(&root.0, "ask", "ask test").unwrap();
+    let asker = FileAsker::new(&root.0, run.id.clone(), Arc::new(Vault::in_memory([])));
+    let o = asker
+        .ask(&card(
+            Duration::from_millis(100),
+            OnTimeout::Proceed,
+            "late",
+        ))
+        .await;
+    assert_eq!(o, AskOutcome::TimeoutProceed);
+    let err = ask::answer(&root.0, &run.id, 1, true).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(err.to_string().contains("timed out"), "{err}");
+
+    // Answered: a second answer is refused and the first stands.
+    let root = Tmp::new();
+    let run = RunFolder::create(&root.0, "ask", "ask test").unwrap();
+    let asker = FileAsker::new(&root.0, run.id.clone(), Arc::new(Vault::in_memory([])));
+    let twice = card(CAP, OnTimeout::Skip, "twice");
+    let asking = asker.ask(&twice);
+    let answering = async {
+        wait_for(&ask::card_path(&run.dir, 1)).await;
+        ask::answer(&root.0, &run.id, 1, true).unwrap();
+        let err = ask::answer(&root.0, &run.id, 1, false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(err.to_string().contains("already answered"), "{err}");
+    };
+    let (o, ()) = tokio::time::timeout(CAP, async { tokio::join!(asking, answering) })
+        .await
+        .unwrap();
+    assert_eq!(o, AskOutcome::AnsweredProceed);
+    let ans = std::fs::read_to_string(ask::answer_path(&run.dir, 1)).unwrap();
+    assert_eq!(ans.trim(), "yes");
+}
+
+/// Set in the child process `file_asker_stderr_has_no_canary` starts.
+const STDERR_CHILD: &str = "SB_MCP_T07_STDERR_CHILD";
+
+/// Prints FileAsker notices (a card with the canary in every field, then the fail-closed
+/// path) to the real stderr. Runs only as the child of `file_asker_stderr_has_no_canary`.
+#[tokio::test]
+#[ignore = "child of file_asker_stderr_has_no_canary"]
+async fn file_asker_stderr_child() {
+    if std::env::var_os(STDERR_CHILD).is_none() {
+        return;
+    }
+    let c = canary();
+    let vault = Arc::new(Vault::in_memory([(
+        "test".to_owned(),
+        c.clone(),
+        EntryKind::Secret,
+    )]));
+    let root = Tmp::new();
+    let run = RunFolder::create(&root.0, "ask", "ask test").unwrap();
+    let asker = FileAsker::new(&root.0, run.id.clone(), vault);
+    let k = AskCard {
+        class: Class::Send,
+        what: format!("send {c}\nto new"),
+        site: Some(format!("{c}.example")),
+        values: vec![("body".into(), c.clone())],
+        timeout: Duration::from_millis(50),
+        on_timeout: OnTimeout::Skip,
+    };
+    assert_eq!(asker.ask(&k).await, AskOutcome::TimeoutSkip);
+    std::fs::remove_dir_all(run.dir.join("asks")).unwrap();
+    std::fs::write(run.dir.join("asks"), "not a folder").unwrap();
+    assert_eq!(asker.ask(&k).await, AskOutcome::TimeoutSkip);
+}
+
+#[test]
+fn file_asker_stderr_has_no_canary() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "file_asker_stderr_child",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(STDERR_CHILD, "1")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "child failed ({:?})", out.status);
+    assert!(stdout.contains("1 passed"), "the child test ran");
+    let c = canary();
+    assert!(!err.contains(&c), "FileAsker stderr must be scrubbed");
+    assert!(!stdout.contains(&c), "child stdout must be scrubbed");
+    assert!(
+        err.contains("ask 1 (Send): send @vault(test) to new"),
+        "the notice line is printed"
+    );
+    assert!(
+        err.contains("nobody saw"),
+        "the fail-closed line is printed"
+    );
 }

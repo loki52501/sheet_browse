@@ -34,6 +34,16 @@ blockers:
     question: "Known scrub limits that must close before step 3 (browser readers): (a) values a site reformats with an input mask (phone, card, date: `(415) 555-0100` for 4155550100); (b) values split across DOM nodes or truncated with an ellipsis (`canary-7f3…`); (c) mixed Unicode case from CSS text-transform: capitalize (`Émile Ærø` for `émile ærø`; only the all-lower and all-upper bases exist). Owner?"
     default_taken: "Area core closes them in step 3 together with page's readers: (a) digit-normalised matching for personal entries (match the value's digits with any non-digit separators between them, for values with at least 7 digits); (b) readers scrub their joined text, never per node, and core adds a prefix-of-value rule for an ellipsis-truncated tail of at least 8 characters; (c) add a capitalised base (first letter of each word upper-cased) for non-ASCII values. Accepted for Phase 1 without a fix: HTML entities (readers return decoded text, rule 5), quoted-printable (mail is read through the browser UI), punycode (IDN hosts only), unzeroed library internals (memory hygiene, documented in vault.rs)."
     needs_user: false
+  - id: B-175
+    task: T-07
+    question: "core_pg::bootstrap() accepts SB_RUN_ID when only the run folder exists (review-T-07 should-fix). With no runs row the wrapper now reads the run as strict (D-119 (2)), so every Send(new) or Account ask skips on timeout for that server. Should bootstrap refuse a run id with no runs row?"
+    default_taken: "The mcp side fails closed (missing row = strict). core-pg is not in the T-07 round-2 brief, so bootstrap is unchanged: its owner should make SB_RUN_ID require run_get(id) = Some (else MemoryError::Invalid), and the tester should run a server main with and without SB_RUN_ID against Postgres."
+    needs_user: false
+  - id: B-176
+    task: T-07
+    question: "harness-core has no tokio test-util dev-dependency (paused clock), so the ask cap (card.timeout + 5 s on a 60 s card) cannot be tested through dispatch without a 65 s wait. Add tokio features [test-util] to crates/core dev-dependencies?"
+    default_taken: "The cap is unit-tested on mcp::ask_capped_with with a 30 ms margin (a hung asker gives TimeoutSkip) plus an asker that claims TimeoutProceed on a Skip card. crates/core/Cargo.toml is not touched by T-07 round 2."
+    needs_user: false
 
 interface_changes:
   - id: B-101
@@ -173,5 +183,10 @@ interface_changes:
     interface: I-7
     change: "Completes IC-300..IC-303 (review-T-11 should-fix 5). Further pub items: runner::{ALLOWED_GLOBALS, FIND_ALL_K, table_json}; invariants::{stop_count, vault_keys}; archive::has_task_id; domain::{normalize_host, registrable, SiteConfig}; fingerprint::{fingerprint_items, role_matches, norm, parse_fingerprint, render_fingerprint, patch_fingerprint}; loader::{namespace, glob_match, url_path}; skeleton_line; lifecycle consts CLEAN_RUNS_TO_SAVE, MISSES_TO_RETIRE, EPHEMERAL_IDLE_DAYS, EPHEMERAL_IDLE_VISITS, ARCHIVE_DELETE_DAYS. Behaviour: tool_path/archive_path return an empty PathBuf on bad input (try_* return BadPath); record(Relocated) on a retired row is an error; a reforge of an ask row stays ask (D-310)."
     why: "Consumers (srv-web, sb-mcp, toolforge, harness) should see the whole surface before coding against it; these helpers are what toolforge's G-2 static check reuses."
+  - id: B-177
+    from: core
+    interface: I-2
+    change: "Behaviour only, no signature change (D-119). harness_core::ask::answer returns io::ErrorKind::AlreadyExists with a plain message when the ask is closed: already answered, or timed out (FileAsker claims <n>.answer with `timeout`; both sides claim it no-clobber via a temp file and hard_link). FileAsker::ask returns TimeoutSkip when it cannot write the card. dispatch and ToolCtx::ask read a missing runs row as strict, cap every Asker at card.timeout + 5 s (TimeoutSkip), and dispatch catches a handler or classifier panic (ToolError::Failed + an ok=false tool event). ToolCtx::ask runs its card through Gate::check (Stop: no card, a core stop, TimeoutSkip). serve_io answers -32700 for a non-UTF-8 line and scrubs only payload strings."
+    why: "review-T-07 blocking and should-fix items. `harness ask` (T-08) should print the AlreadyExists message to the user as is; every other change only makes the wrapper stricter."
 
 proposals:
