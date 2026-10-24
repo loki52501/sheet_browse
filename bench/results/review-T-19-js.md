@@ -242,3 +242,122 @@ The two new Should items are a leak path outside the D-405 (1) ruling and over-f
 challenge text. Neither breaks a hard rule as ruled.
 
 Verdict: approve
+
+# Round 3 (reviewer-8): 9ed9218 "injected.js D-429 rebuilt password fields, challenge text"
+
+Scope: injected/injected.js, injected/test/jsdom.test.js, injected/test/browser.test.js against
+D-429, B-5, I-11 / D-73, hard rules 3, 5 and 6. Runs (TMP=F:/sb-swarm/tmp-page):
+`node --test injected/test/` 61/61 pass, `cargo test -p sb-act --test wire_from_injected` 3/3 pass.
+Probes were kept in F:/sb-swarm/tmp-page/r8 (not committed).
+
+## Round-2 items
+
+| Round-2 item | Status | Where |
+|---|---|---|
+| S1: replaceWith rebuild leaks the password | Fixed for same-batch rebuilds; tested in jsdom (getter never called) and Chromium (rebuild.html, getter counted in world sb) | injected.js:1807 inheritSensitive, 1828 flushMut |
+| S2: press and hold / are you human over-flag | Fixed as ruled; jsdom and Chromium (hold.html) negatives and positives | injected.js:116-117, 377, 384 |
+| N: walk({base: "5"}) | Fixed: typeof number and safe positive integer | injected.js:1233 |
+| N: "Just a moment" title | Left as is (safe direction) | handoff not_done 1 |
+
+Same-batch paths that are now closed (each probed, no canary in index/text/state/name/fingerprint):
+replaceWith, remove + append into the same parent, insertBefore then remove, wrapper replaceWith,
+`outerHTML =`, wrapper `innerHTML =`, cloneNode + detached type change + replaceWith, moving the old
+node and then changing its type (sticky), replaceWith inside a walked open shadow root, and a
+same-task read through state(el) or name(el) with no walk (rowFor -> ensure -> flushMut).
+
+takeRecords: flushMut runs the taken records through onMut, so markDirty, remember, mutCount and
+lastMut all still see them; nothing is dropped. It runs before the S.full check in doWalk, so a
+flushed record that sets S.full still forces a full walk. The waiters it wakes only re-arm timers,
+so there is no re-entry. The observer belongs to world sb, and A6 stays green.
+
+## Blocking
+
+- none
+
+## Should fix
+
+- injected.js:1807-1826 (D-429 (1) is too wide): the net breaks state on a common SPA flow.
+  - Repro (Chromium): `#app` holds a login form (email plus password, both typed). Sign in
+    calls `app.replaceChildren(main)`, where `main` has a search box, `<input value="1 Main St">`
+    and `<textarea>gift</textarea>`.
+  - After the dirty walk, Shipping address and Note read `{kind:"empty"}`, and a field the page
+    filled reads `filled` instead of its text. They stay that way for the element's lifetime
+    (S.sens is sticky).
+  - So the planner sees a filled field as empty. It retypes the field or misreports it, which
+    costs a turn and can corrupt data if type appends. The handoff gotcha says the cost is "only
+    text values". It is also wrong `empty` evidence, because filledNoRead has no evidence on an
+    untouched pre-filled field.
+  - Proposed D-429 amendment for supreme: an added field inherits only if it looks like the
+    removed sensitive field. Either it shares its id, name, aria-label, placeholder, autocomplete
+    or label text, or it is a 1:1 input-for-input swap in one record. A show toggle copies those
+    attributes; a route swap does not.
+- injected.js:1807 (D-429 (1) scope): a same-task rebuild split by a microtask still leaks.
+  - Repro (Chromium, reproduced): `o.remove(); await null; n.value = v; p.appendChild(n)`. The
+    observer delivers the removal in its own batch before the append, so `n` is not inherited and
+    the dirty walk's index() carries the value. Same in jsdom with queueMicrotask.
+  - A later task fails the same way (setTimeout, or a Vue `<Transition mode="out-in">`). The
+    handoff lists that case as out of scope.
+  - Fix, once the identity match above is in: remember the parent and identity of each removed
+    sensitive field for a short window (about 2 s, or N batches), and match later adds against
+    it. That covers both cases cheaply.
+  - Not Blocking: this is outside "same mutation batch" as ruled, async toggles are uncommon,
+    and the vault scrub covers `@vault` values. A value the user typed has no backstop.
+
+## Notes
+
+- Other leak paths, by realism:
+  - Two inputs toggled by display (moderate). A hidden text twin kept in sync by site JS
+    and shown in place of the password: no node is removed, so nothing is inherited. Only the
+    name pattern guards it. Old jQuery show-password plugins did this.
+  - A sibling parent (low). The field is removed from one wrapper and added to a sibling
+    wrapper.
+  - A swapped custom element host (low). fieldsIn uses the light-DOM querySelectorAll, so an
+    `<x-pw>` host whose shadow root held the password, replaced by a new host with a text
+    input in its shadow, is not matched. Real components such as sl-input toggle the type
+    internally, which is covered.
+  - All three were reproduced in jsdom.
+- injected.js:133: the new `\bpw\b|pw[_-]` only hits rare names beyond the intended ones
+  (kpw-color, cpw_x, npw_2). Probed common names (power, upwork, pwa-install, spw, pw2) are not
+  sensitive.
+  - The older alternatives over-match far more: `otp` in footprint and hotpink, `ssn` in
+    businessName, addressNumber and classname, `pass` in passenger, passport and compass.
+  - Given the empty-evidence problem above, a pre-filled businessName reads `empty`. This is not
+    new in this commit; word boundaries on otp and ssn would fix most of it.
+- injected.js:116-117, 377 (D-429 (2)):
+  - Lost: a bare "Press and hold the button" next to an unrecognised widget is no longer
+    CHALLENGE. Before this commit it was. An Akamai-style "Let us know you're human" + "Press and
+    hold" page with `#sec-cpt-if` now has no CHALLENGE row.
+  - Over-flagged: "Press and hold the mic to talk to our chat bot" and "...to a human agent"
+    still flag.
+  - Cheap middle ground: accept hold text when `HUMAN_WORD_RE || S.chCtx`.
+  - The real prompts still flag: Cloudflare "Verify you are human...", Arkose "Verify you're
+    a human", PerimeterX "Press & Hold to confirm you are a human (and not a bot)", and the
+    challenge-interstitial.html and challenge-widgets.html fixtures.
+- injected.js:384: chCtx is true on every site that has a reCAPTCHA v3 badge or a
+  `[data-sitekey]` submit (challenge-widgets.html #login). There, a quiz "Are you human?" heading
+  is still CHALLENGE. Rare, and the safe direction.
+  - challengeContext() runs a substring-attribute querySelector plus a pass over the frames on
+    every walk, incremental ones included. That is cheap next to the walk.
+  - It looks only at the light DOM. A widget inside a shadow root is still caught as a box.
+- Pre-existing, not a regression: Amazon's "make sure you're not a robot" text is not in
+  CHALLENGE_TEXT_RE. The `captchacharacters` id rule still flags its field.
+- Rules 3, 5 and 6, and isolation:
+  - No new timers or sleeps.
+  - No new `.value` reads; fieldValue is still the only reader, behind sensitive().
+  - No DOM writes and no new globals.
+  - The handoff says each new test fails with its fix removed. I did not re-run those mutation
+    checks, but reading the tests confirms each one asserts zero getter calls and no canary, not
+    only that nothing panics.
+
+## Verdict
+
+Both round-2 Should items are fixed as D-429 rules them. Each has a jsdom test and a Chromium test
+that replay the repro and count value-getter calls. No hard rule is broken as ruled, and I-11 /
+D-73 shapes are unchanged.
+
+Two Should items need one D-429 amendment from supreme:
+- The inheritance net is wide enough to misreport every pre-filled field after an SPA login as
+  `empty`.
+- A rebuild split by an `await` still leaks a typed password.
+
+Verdict: approve

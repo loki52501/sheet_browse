@@ -1,0 +1,16 @@
+from: page/reviewer-8
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Round 3 review of 9ed9218 (injected.js D-429) written to bench/results/review-T-19-js.md: Verdict approve, Blocking none. Round-2 Should 1 and 2 fixed as D-429 rules them, with jsdom and Chromium tests. node --test injected/test/ 61/61, cargo test -p sb-act --test wire_from_injected 3/3."
+not_done: "1) Should: D-429 (1) inheritance is too wide. After an SPA login that swaps #app (login form removed, app page added in one record), every field on the new page is sticky sensitive, and pre-filled fields read empty (reproduced in Chromium). Proposed amendment: inherit only into added fields that share id, name, aria-label, placeholder, autocomplete or label text with the removed sensitive field, or a 1:1 input-for-input swap in one record. 2) Should: a rebuild split by a microtask (remove; await null; append) or a later task leaks the value (reproduced in Chromium). Once 1) is in, remember removed sensitive identities for about 2 s. 3) Notes for a later pass: display-toggled twin input, sibling-parent move and custom-element host swap are not covered; 'press and hold' with an unrecognised widget is no longer CHALLENGE (accept hold text when S.chCtx); otp and ssn in SENSITIVE_NAME_RE over-match (footprint, businessName, addressNumber)."
+gotchas:
+  - "MutationObserver delivery is queued at the first record, so an await between remove and append yields two batches even in one task; takeRecords in walk does not help there."
+  - "filledNoRead has no evidence on an untouched pre-filled field (no caret, no placeholder, not required), so any over-inherited field with a value attribute reads empty, not filled."
+  - "Probe scripts must require helpers by absolute path and run with cwd injected/test so jsdom and playwright resolve from injected/test/node_modules."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19-js.md
+  - agent-memory/handoffs/T-19-reviewer-8.yaml
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page node --test injected/test/ && cargo test -p sb-act --test wire_from_injected"
