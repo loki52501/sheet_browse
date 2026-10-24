@@ -943,6 +943,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "red-first T-03 fake parity"]
     async fn rules_are_stored_under_the_canonical_key() {
         // D-110 (1): stored verbatim before, so the gate's canonical lookup never hit.
         let s = MemStore::empty();
@@ -961,8 +962,8 @@ mod tests {
                 Some(ask),
                 "{d:?} {k:?}"
             );
-            // The verbatim key is not stored.
-            assert!(s.gate_rule(d, k).await.unwrap().is_none(), "{d:?} {k:?}");
+            // The lookup canonicalises too, as PgStore's does, so the verbatim key finds it.
+            assert_eq!(s.gate_rule(d, k).await.unwrap(), Some(ask), "{d:?} {k:?}");
         }
         for (d, k) in [
             ("", "Submit"),
@@ -1137,4 +1138,178 @@ mod tests {
             assert!(s.search(q, 5).await.unwrap().is_empty(), "{q:?}");
         }
     }
+
+    // ---- Round-2 review regressions: fake parity with PgStore (each failed on c22ece0) ----
+
+    #[tokio::test]
+    #[ignore = "red-first T-03 fake parity"]
+    async fn gate_rule_canonicalises_its_lookup_like_pgstore() {
+        let s = MemStore::empty();
+        let stop = GateRule {
+            mode: Mode::Stop,
+            strict: false,
+        };
+        s.gate_rule_set("bank.com", "Submit:wire", stop, "")
+            .await
+            .unwrap();
+        for (d, k) in [
+            ("Bank.COM.", "submit : WIRE"),
+            (" bank.com", "SUBMIT:wire"),
+            ("BANK.com", "Submit:Wire"),
+        ] {
+            assert_eq!(s.gate_rule(d, k).await.unwrap(), Some(stop), "{d:?} {k:?}");
+        }
+        // A lookup that does not canonicalise matches nothing (PgStore: Ok(None)).
+        for (d, k) in [("bank.com:443", "Submit:wire"), ("bank.com", "Nope")] {
+            assert_eq!(s.gate_rule(d, k).await.unwrap(), None, "{d:?} {k:?}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "red-first T-03 fake parity"]
+    async fn recall_since_compares_micros_on_both_sides() {
+        // seen_at was truncated on write but `since` kept its nanoseconds, so a fact seen
+        // in the same microsecond as `since` was dropped; PgStore truncates the bind too.
+        let ns = DateTime::from_timestamp(1_700_000_000, 123_456_789).unwrap();
+        let s = MemStore::new();
+        let mut f = Fact::new("acme", "k", "v", src());
+        f.seen_at = ns;
+        s.remember(f).await.unwrap();
+        let since = Filter {
+            since: Some(DateTime::from_timestamp(1_700_000_000, 123_456_999).unwrap()),
+            ..Filter::default()
+        };
+        assert_eq!(s.recall("acme", 5, Some(since)).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "red-first T-03 fake parity"]
+    async fn timestamps_truncate_toward_zero_from_2000_like_sqlx() {
+        // sqlx sends (t - 2000-01-01).num_microseconds(): toward zero, so before 2000 a
+        // sub-microsecond remainder rounds *up*; flooring Unix micros rounded it down.
+        let s = MemStore::new();
+        for (t, want) in [
+            (
+                DateTime::from_timestamp(946_684_799, 999_999_500).unwrap(),
+                DateTime::from_timestamp(946_684_800, 0).unwrap(),
+            ),
+            (
+                DateTime::from_timestamp(-1, 999_999_999).unwrap(),
+                DateTime::from_timestamp(0, 0).unwrap(),
+            ),
+            (
+                DateTime::from_timestamp(1_700_000_000, 123_456_789).unwrap(),
+                DateTime::from_timestamp(1_700_000_000, 123_456_000).unwrap(),
+            ),
+        ] {
+            let mut e = event(None);
+            e.ts = t;
+            s.append(e).await.unwrap();
+            assert_eq!(s.ledger().last().unwrap().1.ts, want, "{t:?}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "red-first T-03 fake parity"]
+    async fn search_follows_d115() {
+        let s = MemStore::new();
+        let t = |secs| DateTime::from_timestamp(secs, 0).unwrap();
+        let put = |subject: &str, key: &str, value: &str, at: i64| {
+            let mut f = Fact::new(subject, key, value, src());
+            f.seen_at = t(at);
+            f
+        };
+        let company = s
+            .remember(put("Foo-Bar Inc", "kind", "company", 1_000))
+            .await
+            .unwrap();
+        let mention = s
+            .remember(put("note", "text", "we met Foo-Bar Inc staff", 2_000))
+            .await
+            .unwrap();
+        let person = s
+            .remember(put("Vasanth Raghavan", "works_at", "acme", 3_000))
+            .await
+            .unwrap();
+
+        // Case/punctuation-insensitive equality on subject: Exact 1.0, ahead of a substring.
+        let hits = s.search("foo bar INC", 5).await.unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            (hits[0].id, hits[0].why, hits[0].score),
+            (company, Why::Exact, 1.0)
+        );
+        let hits = s.search("Foo-Bar Inc", 5).await.unwrap();
+        let got: Vec<(FactId, Why, f32)> = hits.iter().map(|h| (h.id, h.why, h.score)).collect();
+        assert_eq!(
+            got,
+            [(company, Why::Exact, 1.0), (mention, Why::Exact, 0.9)]
+        );
+        // Equality on key or value is only a substring hit.
+        let hits = s.search("acme", 5).await.unwrap();
+        assert_eq!(
+            (hits[0].id, hits[0].why, hits[0].score),
+            (person, Why::Exact, 0.9)
+        );
+
+        // A typo inside a longer subject: word-trigram tier with pg_trgm's word_similarity.
+        let hits = s.search("Vasanh", 5).await.unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!((hits[0].id, hits[0].why), (person, Why::Trigram));
+        assert!(
+            (hits[0].score - 5.0 / 7.0).abs() < 1e-6,
+            "{}",
+            hits[0].score
+        );
+        assert!(s.search("Zebra", 5).await.unwrap().is_empty());
+
+        // Ordered by score; tier only on ties; newest seen_at breaks the remaining ties.
+        let older = s.remember(put("old", "k", "acme", 10)).await.unwrap();
+        let ids: Vec<FactId> = s
+            .search("acme", 5)
+            .await
+            .unwrap()
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        assert_eq!(ids, [person, older]);
+        let exact_word = s.remember(put("Vasanh", "k", "v", 5)).await.unwrap();
+        let ids: Vec<FactId> = s
+            .search("vasanh", 5)
+            .await
+            .unwrap()
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        assert_eq!(ids, [exact_word, person]);
+    }
+
+    #[test]
+    #[ignore = "red-first T-03 fake parity"]
+    fn word_similarity_matches_pg_trgm() {
+        // Values from the pg_trgm documentation and by hand from its algorithm.
+        assert!((word_similarity("word", "two words") - 0.8).abs() < 1e-6);
+        assert!((word_similarity("vasnth", "Vasanth Raghavan") - 0.5).abs() < 1e-6);
+        assert_eq!(word_similarity("", "x"), 0.0);
+        assert_eq!(word_similarity("acme", "acme"), 1.0);
+    }
+
+    #[tokio::test]
+    #[ignore = "red-first T-03 fake parity"]
+    async fn sm2_rounds_the_interval_up() {
+        // D-115: 6 days x ease 2.7 = 16.2 days -> 17 (round() gave 16).
+        let s = MemStore::new();
+        let id = s.review_add("q", "a").await.unwrap();
+        for _ in 0..3 {
+            s.grade_review(id, 5).await.unwrap();
+        }
+        let far = Utc::now() + ChronoDuration::days(400);
+        let r = &s.due_reviews(far, 1).await.unwrap()[0];
+        assert_eq!(r.interval_days, 17.0);
+    }
 }
+
+#[cfg(test)]
+fn word_similarity(_: &str, _: &str) -> f32 {
+    0.0
+} // TEMP-HEAD-STUB

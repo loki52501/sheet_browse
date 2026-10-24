@@ -18,6 +18,7 @@ age.workspace = true
 aho-corasick.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+croner.workspace = true
 dirs.workspace = true
 keyring.workspace = true
 notify.workspace = true

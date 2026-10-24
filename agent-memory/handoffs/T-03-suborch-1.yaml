@@ -16,3 +16,4 @@ files_touched:
 verify: "git log --oneline main..swarm/core"
 # supreme 2026-10-23 02:40: B-101 accepted as D-62 on main (contact_key uses trim + to_ascii_lowercase; I-1 notes updated). Apply it with a KELVIN SIGN look-alike test, and pull main (git merge main) before your PR.
 # supreme 2026-10-23 03:15: B-102 answered as D-69: no compose change during wave 1; keep throwaway DBs, re-run a test that hits recovery mode and report the Postgres log line. Supreme revisits shm_size at the wave-1 gate.
+# supreme 2026-10-23 04:40: B-103 accepted as D-70 (gate::clean_card public; drop the card_line copy in mcp.rs) and B-104 as D-71 (serve_io, PROTOCOL_VERSION, scrub_value, harness_core::ask; unknown tool -> JSON-RPC -32602); interfaces.yaml I-2 and I-3 updated on main. Pull main (git merge main) before your PR.

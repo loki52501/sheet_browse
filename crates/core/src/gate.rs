@@ -1223,4 +1223,229 @@ mod tests {
         assert_eq!(card3.values.len(), MAX_VALUES + 1);
         assert_eq!(card3.values[MAX_VALUES].1, "8 more values not shown");
     }
+
+    // ---- Round-2 review regressions (each failed on commit c22ece0) ----
+
+    fn row<'a>(c: &'a AskCard, key_prefix: &str) -> Option<&'a (String, String)> {
+        c.values.iter().find(|(k, _)| k.starts_with(key_prefix))
+    }
+
+    #[tokio::test]
+    #[ignore = "red-first T-04 round 3"]
+    async fn escapes_cannot_span_card_components() {
+        // what_line joined recipients before cleaning: an OSC opened in one recipient and
+        // closed (BEL) in the next ate the new address from a card that proceeds on timeout.
+        let (s, g) = gate(MemStore::new());
+        s.add_contact("boss@company.com");
+        let mut c = send(&["\u{1b}]attacker@evil.example", "\u{7}boss@company.com"]);
+        c.args = json!({"subject": "hi"});
+        let sc = card(g.check(&c).await.unwrap());
+        assert!(sc.what.contains("attacker@evil.example"), "{}", sc.what);
+        assert!(sc.what.contains("boss@company.com"), "{}", sc.what);
+        // The recipient is not shown as written, so silence must not send.
+        assert_eq!(sc.on_timeout, OnTimeout::Skip);
+
+        // The same across args and from the tool name into the args.
+        let mut p = call(Class::Pay, Some("shop.example"));
+        p.args = json!({"a": "\u{1b}]x", "b": "\u{7}to evil"});
+        let pc = card(g.check(&p).await.unwrap());
+        assert!(pc.what.contains("b=to evil"), "{}", pc.what);
+        p.tool = "shop.pay\u{1b}]".into();
+        p.args = json!({"to": "\u{7}evil"});
+        let pc = card(g.check(&p).await.unwrap());
+        assert!(pc.what.contains("to=evil"), "{}", pc.what);
+
+        // A stop's reason carries the tool name cleaned.
+        let mut ch = call(Class::Challenge, Some("x.example"));
+        ch.tool = "page.click\u{1b}[2K\rok".into();
+        let r = stop(g.check(&ch).await.unwrap());
+        assert!(!r.why.chars().any(char::is_control), "{:?}", r.why);
+    }
+
+    #[tokio::test]
+    #[ignore = "red-first T-04 round 3"]
+    async fn send_card_lists_every_new_recipient() {
+        // 8 known + 1 new pushed the new address past the 200-char what cap.
+        let (s, g) = gate(MemStore::new());
+        let known: Vec<String> = (0..8)
+            .map(|i| format!("colleague{i}@a-company-with-a-long-name.example"))
+            .collect();
+        for k in &known {
+            s.add_contact(k);
+        }
+        let mut to: Vec<&str> = known.iter().map(String::as_str).collect();
+        to.push("new@evil.example");
+        let c = card(g.check(&send(&to)).await.unwrap());
+        assert_eq!(
+            c.values[0],
+            (
+                "new recipients (1)".to_string(),
+                "new@evil.example".to_string()
+            )
+        );
+        assert_eq!(c.on_timeout, OnTimeout::Proceed);
+
+        // One 250-char recipient: capped with a visible marker, domain kept, card skips.
+        let long = format!("{}@evil.example", "a".repeat(237));
+        assert_eq!(long.chars().count(), 250);
+        let c = card(g.check(&send(&[&long])).await.unwrap());
+        let (k, v) = &c.values[0];
+        assert_eq!(k, "new recipients (1)");
+        assert!(v.contains("…(+130 chars)…"), "{v}");
+        assert!(v.ends_with("@evil.example"), "{v}");
+        assert_eq!(c.on_timeout, OnTimeout::Skip);
+
+        // 40 new recipients and 40 classifier values: the row is first, never dropped by
+        // the row cap, lists what fits and says how many more; the card skips.
+        let many: Vec<String> = (0..40).map(|i| format!("n{i}@x.example")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        let mut m = send(&refs);
+        m.values = (0..40)
+            .map(|i| (format!("k{i}"), "v".to_string()))
+            .collect();
+        let c = card(g.check(&m).await.unwrap());
+        let (k, v) = &c.values[0];
+        assert_eq!(k, "new recipients (40)");
+        assert!(
+            v.contains("n0@x.example") && v.contains("n31@x.example"),
+            "{v}"
+        );
+        assert!(!v.contains("n32@x.example"), "{v}");
+        assert!(v.ends_with("…(+8 more)"), "{v}");
+        assert_eq!(c.on_timeout, OnTimeout::Skip);
+        assert!(c.values.len() <= MAX_VALUES + 1, "{}", c.values.len());
+
+        // Duplicates (by contact key) count once; a classifier row cannot fake the row.
+        let mut d = send(&["New@X.example", "new@x.example"]);
+        d.values = vec![("new recipients (0)".into(), "none".into())];
+        let c = card(g.check(&d).await.unwrap());
+        assert_eq!(
+            c.values,
+            vec![(
+                "new recipients (1)".to_string(),
+                "New@X.example".to_string()
+            )]
+        );
+        assert_eq!(c.on_timeout, OnTimeout::Proceed);
+    }
+
+    #[tokio::test]
+    #[ignore = "red-first T-04 round 3"]
+    async fn blank_recipients_are_not_recipients() {
+        // [""] or ["  "] counted as one new recipient and proceeded on timeout.
+        let (s, g) = gate(MemStore::new());
+        s.add_contact("known@example.com");
+        for to in [&[""][..], &["  "], &["", " \t "]] {
+            let c = card(g.check(&send(to)).await.unwrap());
+            assert_eq!(c.on_timeout, OnTimeout::Skip, "{to:?}");
+            assert_eq!(
+                row(&c, "new recipients"),
+                Some(&("new recipients (0)".to_string(), "none".to_string())),
+                "{to:?}"
+            );
+        }
+        // A blank beside a known contact is a Send to a known contact.
+        assert_eq!(
+            g.check(&send(&[" ", "known@example.com"])).await.unwrap(),
+            Decision::Allow
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "red-first T-04 round 3"]
+    async fn a_hint_overruled_by_the_class_level_does_not_force_skip() {
+        // D-113 raise-only: the class level decided, yet the ask was marked as from a hint
+        // and a Send(new) / Account ask timed out to skip.
+        let (s, g) = gate(MemStore::new());
+        s.add_rule("*", "Read:newsletter", Mode::Allow, false)
+            .unwrap();
+        let mut sn = send(&["new@x.com"]);
+        sn.hints = vec!["newsletter".into()];
+        assert_eq!(
+            card(g.check(&sn).await.unwrap()).on_timeout,
+            OnTimeout::Proceed
+        );
+        let mut a = call(Class::Account, Some("shop.example"));
+        a.hints = vec!["newsletter".into()];
+        assert_eq!(
+            card(g.check(&a).await.unwrap()).on_timeout,
+            OnTimeout::Proceed
+        );
+        // A hint that matches the class level's mode still counts (D-110 (2)).
+        a.hints = vec!["newsletter".into(), HINT_JOB_APPLICATION.into()];
+        assert_eq!(card(g.check(&a).await.unwrap()).on_timeout, OnTimeout::Skip);
+        // A hint that raises counts.
+        s.add_rule("*", "Read:urgent", Mode::Ask, false).unwrap();
+        s.add_rule("*", "Send", Mode::Allow, false).unwrap();
+        sn.hints = vec!["urgent".into()];
+        assert_eq!(
+            card(g.check(&sn).await.unwrap()).on_timeout,
+            OnTimeout::Skip
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "red-first T-04 round 3"]
+    async fn unicode_domains_and_hints_are_canonical_or_rejected() {
+        // BÜCHER.DE was stored as "bücher.de" and never matched the A-label call domain.
+        for (rule, calls) in [
+            (
+                "BÜCHER.DE",
+                &["xn--bcher-kva.de", "bücher.de", "Bücher.de."][..],
+            ),
+            ("bücher\u{3002}de", &["xn--bcher-kva.de"]),
+            ("xn--bcher-kva.de", &["BÜCHER.DE", "bücher\u{ff0e}de"]),
+        ] {
+            let (s, g) = gate(MemStore::empty());
+            s.add_rule(rule, "Submit", Mode::Stop, false).unwrap();
+            for d in calls {
+                let c = call(Class::Submit, Some(d));
+                assert_eq!(
+                    mode_of(&g.check(&c).await.unwrap()),
+                    Mode::Stop,
+                    "rule {rule:?} call {d:?}"
+                );
+            }
+        }
+        assert_eq!(rule_domain("BÜCHER.DE").unwrap(), "xn--bcher-kva.de");
+        for bad in [
+            "bank\u{200b}.com",
+            "\u{feff}bank.com",
+            "bank.com\u{2060}",
+            "ba\u{00ad}nk.com",
+            "bank\u{202e}.com",
+            "bank\u{e0041}.com",
+            "ban\u{034f}k.com",
+            "bank\u{fe0f}.com",
+            "bank\u{3164}.com",
+            "bank\u{2800}.com",
+            "bank\u{115f}.com",
+            "bank%2e.com",
+        ] {
+            assert!(
+                matches!(rule_domain(bad), Err(MemoryError::Invalid(_))),
+                "{bad:?}"
+            );
+        }
+        for bad in [
+            "job\u{200b}_application",
+            "job_application\u{feff}",
+            "\u{2060}signature",
+            "job\u{e0041}",
+            "ｊｏｂ_application",
+            "signatu\u{0301}re",
+        ] {
+            assert!(
+                matches!(rule_hint(bad), Err(MemoryError::Invalid(_))),
+                "{bad:?}"
+            );
+        }
+        // Cards drop the same invisible characters.
+        let mut c = call(Class::Pay, Some("shop.example"));
+        c.what = Some(
+            "pay\u{2800}1\u{3164}0\u{e0041}0\u{034f}0\u{fe0f} EUR\u{115f}\u{1160}\u{ffa0}".into(),
+        );
+        let pc = card(decide(MemStore::new(), &c).await);
+        assert_eq!(pc.what, "pay 1 0 0 0 EUR");
+    }
 }

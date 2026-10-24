@@ -11,6 +11,7 @@ pub use embed::model_dir;
 
 use async_trait::async_trait;
 use harness_core::class::{Class, Mode};
+use harness_core::gate;
 use harness_core::memory::*;
 use harness_core::run::RunId;
 use harness_core::Harness;
@@ -270,52 +271,6 @@ pub fn sm2(reps: i32, interval_days: f32, ease: f32, grade: u8) -> (i32, f32, f3
     };
     let ease = (ease + (0.1 - (5.0 - q) * (0.08 + (5.0 - q) * 0.02))).max(1.3);
     (reps, interval, ease)
-}
-
-/// D-110: a `gate.rules.domain` key is trimmed, lowercased, trailing dot removed, or `*`.
-/// `None` when nothing canonical is left (empty, or whitespace or `/` inside).
-// TODO(T-03/D-110): call harness_core::gate's canonicalisers once they land, so every
-// backend and the gate share one definition.
-fn rule_domain(domain: &str) -> Option<String> {
-    let d = domain.trim().to_lowercase();
-    let d = d.strip_suffix('.').unwrap_or(&d);
-    if d.is_empty() || d.chars().any(|c| c.is_whitespace() || c == '/') {
-        return None;
-    }
-    Some(d.to_string())
-}
-
-/// D-110: a `gate.rules.class` key is `Class::as_str()`, optionally `:` and the trimmed,
-/// lowercased hint (D-39). `None` for an unknown class or an empty hint.
-fn rule_key(class: &str) -> Option<(Class, String)> {
-    let (base, hint) = match class.split_once(':') {
-        Some((b, h)) => (b, Some(h.trim().to_lowercase())),
-        None => (class, None),
-    };
-    let base: Class = base.trim().parse().ok()?;
-    match hint {
-        Some(h) if h.is_empty() => None,
-        Some(h) => Some((base, format!("{}:{h}", base.as_str()))),
-        None => Some((base, base.as_str().to_string())),
-    }
-}
-
-/// Canonicalises a rule's `(domain, class)` (D-110) and enforces D-5.
-fn check_rule(domain: &str, class: &str, rule: GateRule) -> Result<(String, String)> {
-    let d = rule_domain(domain).ok_or_else(|| {
-        MemoryError::Invalid(format!("gate rule domain {domain:?} is not a domain"))
-    })?;
-    let (base, key) = rule_key(class).ok_or_else(|| {
-        MemoryError::Invalid(format!(
-            "gate rule class {class:?} is not `Class` or `Class:hint`"
-        ))
-    })?;
-    if base == Class::Challenge && rule.mode != Mode::Stop {
-        return Err(MemoryError::Invalid(
-            "a Challenge rule must be stop (D-5)".into(),
-        ));
-    }
-    Ok((d, key))
 }
 
 fn limit(k: usize) -> i64 {
@@ -799,8 +754,10 @@ impl MemoryStore for PgStore {
     }
 
     async fn gate_rule(&self, domain: &str, class: &str) -> Result<Option<GateRule>> {
-        // Keys are stored canonical (D-110); a lookup that does not canonicalise matches nothing.
-        let (Some(domain), Some((_, class))) = (rule_domain(domain), rule_key(class)) else {
+        // Keys are stored canonical (D-110, D-113: the gate's own canonicalisers); a lookup
+        // that does not canonicalise matches nothing.
+        let (Ok(domain), Ok(class)) = (gate::rule_domain(domain), gate::rule_class_key(class))
+        else {
             return Ok(None);
         };
         let row =
@@ -928,7 +885,8 @@ impl MemoryStore for PgStore {
         rule: GateRule,
         note: &str,
     ) -> Result<()> {
-        let (domain, class) = check_rule(domain, class, rule)?;
+        // D-110/D-113: the same canonical key and D-5 check as every other backend.
+        let (domain, class) = gate::rule_key(domain, class, &rule)?;
         sqlx::query(
             "insert into gate.rules (domain, class, mode, note, strict) values ($1, $2, $3, $4, $5)
              on conflict (domain, class) do update set
@@ -1067,6 +1025,11 @@ mod tests {
         let (r, i, e) = sm2(7, 40.0, 1.35, 0);
         assert_eq!((r, i), (0, 1.0));
         assert!((e - 1.3).abs() < 1e-6);
+    }
+
+    /// The write path's canonical key (D-110, D-113): the gate's own `rule_key`.
+    fn check_rule(domain: &str, class: &str, rule: GateRule) -> Result<(String, String)> {
+        gate::rule_key(domain, class, &rule)
     }
 
     #[test]

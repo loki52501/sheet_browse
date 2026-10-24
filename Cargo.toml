@@ -21,6 +21,12 @@ tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt-mu
 # MCP wrapper, FileAsker (T-07, D-104, D-105)
 notify = "8"
 
+# harness CLI, harnessd, scheduler (T-08, D-107, D-116)
+clap = { version = "4", features = ["derive"] }
+croner = "3"
+rpassword = "7"
+tempfile = "3"
+
 # Memory store (T-03, D-32, D-103)
 fastembed = { version = "7", default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
 pgvector = { version = "0.4", features = ["sqlx"] }
