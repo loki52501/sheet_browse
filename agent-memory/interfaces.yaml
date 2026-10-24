@@ -32,9 +32,9 @@ interfaces:
     name: "Vault::resolve_into(sink), scrub(&str)"
     tier: contract
     crate: core
-    rust: "harness_core::vault::{Vault, Resolved, KeySource, EntryKind, VaultError, scrub, vault_refs, vault_literal}"
+    rust: "harness_core::vault::{Vault, Resolved, KeySource, EntryKind, VaultError, scrub, vault_refs, vault_literal} + harness_core::vault::{default_path, default_key, MIN_VALUE_CHARS}; VaultError::{ValueTooShort{name, min}, ScrubUnavailable} (D-76)"
     spec: docs/01-HARNESS-CORE.md#H-2
-    notes: "resolve_into(template, |r: &Resolved| -> R): the value exists only inside the sink closure; the sink stays synchronous (D-55). Process-wide scrub() uses the vault installed by install_global()."
+    notes: "resolve_into(template, |r: &Resolved| -> R): the value exists only inside the sink closure; the sink stays synchronous (D-55). Process-wide scrub() uses the vault installed by install_global(). D-76: default_path() is SB_VAULT_PATH else <config_dir>/sheetbrowse/vault.toml.age and default_key() is keychain service sheetbrowse, account vault (D-101); set or open refuses a non-empty value shorter than MIN_VALUE_CHARS = 4 (ValueTooShort, D-118); ScrubUnavailable means the scrub automaton could not be built and set wrote nothing. VaultError is #[non_exhaustive] so later variants do not break consumers. Scrub must cover base64/base64url encodings of every value before srv-web T-12 merges (D-77)."
   - id: I-5
     name: "IndexRow { id, frame, role, name, nearby, heading, state, flags, form, box } (+ landmark, child_frame)"
     tier: contract
