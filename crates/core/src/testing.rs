@@ -79,9 +79,12 @@ struct Inner {
 /// increasing ledger ids, append-only ledger, SM-2 reviews, every stored timestamp
 /// truncated to microseconds (what `timestamptz` keeps), `neighbors` walking both edge
 /// directions with M-5's caps ordered by (depth, node id), and the same `Invalid` checks
-/// (empty node kind/name, edge relation, tool domain/name, contact). `recall` and `search`
-/// are case-insensitive substring matches over subject, key and value (no embeddings); a
-/// blank query finds nothing.
+/// (empty node kind/name, edge relation, tool domain/name, contact). Timestamps are
+/// truncated toward zero from 2000-01-01 as sqlx sends them, on writes and on the
+/// `since` / `now` bounds. `gate_rule` canonicalises its lookup. `recall` is a
+/// case-insensitive substring match over subject, key and value (no embeddings, every hit
+/// `Why::Fts`); `search` follows D-115 with pg_trgm's `word_similarity` ported; SM-2
+/// rounds a fractional interval up. A blank query finds nothing.
 pub struct MemStore {
     inner: Mutex<Inner>,
 }
@@ -122,7 +125,13 @@ impl MemStore {
     }
 
     /// Adds (or bumps) a contact synchronously; same effect as `touch_contact(p, "test", "")`.
+    /// Panics on a blank `person`, which `touch_contact` (and PgStore) refuse as `Invalid`:
+    /// a test must not build a contact the real store could never hold.
     pub fn add_contact(&self, person: &str) {
+        assert!(
+            !contact_key(person).is_empty(),
+            "MemStore::add_contact: blank person {person:?} (touch_contact refuses it)"
+        );
         touch(&mut self.lock(), person, "test", "");
     }
 
@@ -165,9 +174,15 @@ impl MemStore {
     }
 }
 
-/// Truncated to the microsecond precision Postgres stores (`timestamptz`).
+/// Truncated to the microsecond precision Postgres stores (`timestamptz`), the way sqlx
+/// sends it: microseconds since 2000-01-01 truncated toward zero, so before 2000 a
+/// sub-microsecond remainder rounds up, not down.
 fn micros(t: Ts) -> Ts {
-    DateTime::from_timestamp_micros(t.timestamp_micros()).unwrap_or(t)
+    let pg_epoch = DateTime::from_timestamp(946_684_800, 0).unwrap_or_default();
+    (t - pg_epoch)
+        .num_microseconds()
+        .map(|us| pg_epoch + ChronoDuration::microseconds(us))
+        .unwrap_or(t)
 }
 
 fn touch(g: &mut Inner, person: &str, channel: &str, note: &str) {
@@ -205,7 +220,8 @@ fn matches_filter(f: &Fact, filter: &Option<Filter>) -> bool {
         }
     }
     if let Some(since) = filter.since {
-        if f.seen_at < since {
+        // PgStore binds `since` truncated to micros, like every stored timestamp.
+        if f.seen_at < micros(since) {
             return false;
         }
     }
@@ -223,10 +239,127 @@ fn contains_ci(f: &Fact, q: &str) -> bool {
         .any(|s| s.to_lowercase().contains(q))
 }
 
-fn equals_ci(f: &Fact, q: &str) -> bool {
-    [&f.subject, &f.key, &f.value]
-        .iter()
-        .any(|s| s.to_lowercase() == q)
+/// D-115's case- and punctuation-insensitive form, as PgStore computes it in SQL:
+/// lowercased, every run of non-alphanumeric characters one space, trimmed.
+fn normalised(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut gap = false;
+    for c in s.to_lowercase().chars() {
+        if c.is_alphanumeric() {
+            if gap && !out.is_empty() {
+                out.push(' ');
+            }
+            gap = false;
+            out.push(c);
+        } else {
+            gap = true;
+        }
+    }
+    out
+}
+
+/// pg_trgm's default `pg_trgm.word_similarity_threshold`, the cut-off of `<%`.
+const WORD_SIMILARITY_THRESHOLD: f32 = 0.6;
+
+/// pg_trgm's trigrams of `s` in order (`generate_trgm_only`): each word (a run of
+/// alphanumeric characters), lowercased and padded with two spaces before and one after,
+/// gives one trigram per window of three characters. Repeats are kept.
+fn trigrams(s: &str) -> Vec<[char; 3]> {
+    let mut out = Vec::new();
+    for word in s
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+    {
+        let padded: Vec<char> = "  ".chars().chain(word.chars()).chain([' ']).collect();
+        out.extend(padded.windows(3).map(|w| [w[0], w[1], w[2]]));
+    }
+    out
+}
+
+/// pg_trgm's `word_similarity(a, b)`, ported from its non-strict `calc_word_similarity` and
+/// `iterate_word_similarity`: the similarity `count / (|trgm(a)| + |extent| - count)`
+/// between the trigram set of `a` and a continuous extent of `b`'s ordered trigrams, with
+/// the extent found by pg_trgm's own greedy walk, so scores equal the server's.
+fn word_similarity(a: &str, b: &str) -> f32 {
+    let t1 = trigrams(a);
+    let t2 = trigrams(b);
+    if t1.is_empty() || t2.is_empty() {
+        return 0.0;
+    }
+    // Unique trigram ids over both strings; `found[id]`: the trigram occurs in `a`.
+    let mut ids: BTreeMap<[char; 3], usize> = BTreeMap::new();
+    for t in t1.iter().chain(&t2) {
+        let next = ids.len();
+        ids.entry(*t).or_insert(next);
+    }
+    let mut found = vec![false; ids.len()];
+    for t in &t1 {
+        found[ids[t]] = true;
+    }
+    let ulen1 = found.iter().filter(|f| **f).count();
+    let idx: Vec<usize> = t2.iter().map(|t| ids[t]).collect();
+    let sml = |count: usize, ulen2: usize| count as f32 / (ulen1 + ulen2 - count) as f32;
+
+    let mut lastpos: Vec<Option<usize>> = vec![None; ids.len()];
+    let (mut ulen2, mut count) = (0usize, 0usize);
+    let mut lower: Option<usize> = None;
+    let mut best = 0.0f32;
+    for (i, &t) in idx.iter().enumerate() {
+        if lower.is_some() || found[t] {
+            if lastpos[t].is_none() {
+                ulen2 += 1;
+                if found[t] {
+                    count += 1;
+                }
+            }
+            lastpos[t] = Some(i);
+        }
+        if !found[t] {
+            continue;
+        }
+        let prev_lower = match lower {
+            Some(l) => l,
+            None => {
+                ulen2 = 1;
+                i
+            }
+        };
+        let mut cur = sml(count, ulen2);
+        // Try moving the lower bound up for a greater similarity.
+        let (mut tmp_count, mut tmp_ulen2) = (count, ulen2);
+        let mut new_lower = prev_lower;
+        for (tmp_lower, &ti) in idx.iter().enumerate().take(i + 1).skip(prev_lower) {
+            let s = sml(tmp_count, tmp_ulen2);
+            if s > cur {
+                cur = s;
+                ulen2 = tmp_ulen2;
+                new_lower = tmp_lower;
+                count = tmp_count;
+            }
+            if lastpos[ti] == Some(tmp_lower) {
+                tmp_ulen2 -= 1;
+                if found[ti] {
+                    tmp_count -= 1;
+                }
+            }
+        }
+        best = best.max(cur);
+        // Trigrams last seen behind the new lower bound leave the extent.
+        for (tmp_lower, &ti) in idx.iter().enumerate().take(new_lower).skip(prev_lower) {
+            if lastpos[ti] == Some(tmp_lower) {
+                lastpos[ti] = None;
+            }
+        }
+        lower = Some(new_lower);
+    }
+    best
+}
+
+/// D-115: SM-2 rounds a fractional interval up. The small slack keeps float noise in
+/// `interval * ease` (15.000001) from adding a day; never below one day.
+fn ceil_days(days: f32) -> f32 {
+    (days - 1e-4).ceil().max(1.0)
 }
 
 #[async_trait]
@@ -359,28 +492,48 @@ impl MemoryStore for MemStore {
     }
 
     async fn search(&self, q: &str, k: usize) -> Result<Vec<Hit>> {
-        let q = q.trim().to_lowercase();
-        if q.is_empty() {
+        // D-115, as PgStore's SEARCH_SQL: exact tier = normalised equality on subject (1.0)
+        // or a case-insensitive substring of subject/key/value (0.9); trigram tier =
+        // `q <% subject` (word_similarity >= 0.6) with that score, for what exact missed.
+        // Ordered by score, then tier, then newest seen_at, then id.
+        let q = q.trim();
+        if q.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
+        let lower = q.to_lowercase();
+        let norm_q = normalised(q);
         let g = self.lock();
-        let mut hits: Vec<Hit> = g
-            .facts
-            .iter()
-            .filter(|(_, f)| contains_ci(f, &q))
-            .map(|(id, f)| {
-                let exact = equals_ci(f, &q);
+        let mut hits: Vec<(u8, Hit)> = Vec::new();
+        for (id, f) in &g.facts {
+            let (tier, score) = if !norm_q.is_empty() && normalised(&f.subject) == norm_q {
+                (0, 1.0)
+            } else if contains_ci(f, &lower) {
+                (0, 0.9)
+            } else {
+                let sim = word_similarity(q, &f.subject);
+                if sim < WORD_SIMILARITY_THRESHOLD {
+                    continue;
+                }
+                (1, sim)
+            };
+            hits.push((
+                tier,
                 Hit {
                     id: FactId(*id),
                     fact: f.clone(),
-                    score: if exact { 1.0 } else { 0.5 },
-                    why: if exact { Why::Exact } else { Why::Trigram },
-                }
-            })
-            .collect();
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        hits.truncate(k);
-        Ok(hits)
+                    score,
+                    why: if tier == 0 { Why::Exact } else { Why::Trigram },
+                },
+            ));
+        }
+        hits.sort_by(|(ta, a), (tb, b)| {
+            b.score
+                .total_cmp(&a.score)
+                .then(ta.cmp(tb))
+                .then(b.fact.seen_at.cmp(&a.fact.seen_at))
+                .then(a.id.cmp(&b.id))
+        });
+        Ok(hits.into_iter().take(k).map(|(_, h)| h).collect())
     }
 
     async fn contact(&self, person: &str) -> Result<Option<Contact>> {
@@ -400,7 +553,7 @@ impl MemoryStore for MemStore {
         let mut due: Vec<Review> = g
             .reviews
             .values()
-            .filter(|r| r.due <= now)
+            .filter(|r| r.due <= micros(now))
             .cloned()
             .collect();
         due.sort_by_key(|r| (r.due, r.id));
@@ -417,13 +570,13 @@ impl MemoryStore for MemStore {
             .reviews
             .get_mut(&id.0)
             .ok_or_else(|| MemoryError::NotFound(format!("review {}", id.0)))?;
-        // SM-2.
+        // SM-2; a fractional interval rounds up (D-115), as in PgStore's `sm2`.
         let q = f32::from(grade);
         if grade >= 3 {
             r.interval_days = match r.reps {
                 0 => 1.0,
                 1 => 6.0,
-                _ => (r.interval_days * r.ease).round(),
+                _ => ceil_days(r.interval_days * r.ease),
             };
             r.reps += 1;
         } else {
@@ -489,11 +642,12 @@ impl MemoryStore for MemStore {
     }
 
     async fn gate_rule(&self, domain: &str, class: &str) -> Result<Option<GateRule>> {
-        Ok(self
-            .lock()
-            .rules
-            .get(&(domain.to_string(), class.to_string()))
-            .map(|(r, _)| *r))
+        // Like PgStore: the lookup is canonicalised too, and one that does not canonicalise
+        // matches nothing (D-110 (1), D-113).
+        let (Ok(domain), Ok(class)) = (rule_domain(domain), rule_class_key(class)) else {
+            return Ok(None);
+        };
+        Ok(self.lock().rules.get(&(domain, class)).map(|(r, _)| *r))
     }
 
     async fn run_start(&self, run: Run) -> Result<()> {
@@ -943,7 +1097,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "red-first T-03 fake parity"]
     async fn rules_are_stored_under_the_canonical_key() {
         // D-110 (1): stored verbatim before, so the gate's canonical lookup never hit.
         let s = MemStore::empty();
@@ -1142,7 +1295,6 @@ mod tests {
     // ---- Round-2 review regressions: fake parity with PgStore (each failed on c22ece0) ----
 
     #[tokio::test]
-    #[ignore = "red-first T-03 fake parity"]
     async fn gate_rule_canonicalises_its_lookup_like_pgstore() {
         let s = MemStore::empty();
         let stop = GateRule {
@@ -1166,7 +1318,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "red-first T-03 fake parity"]
     async fn recall_since_compares_micros_on_both_sides() {
         // seen_at was truncated on write but `since` kept its nanoseconds, so a fact seen
         // in the same microsecond as `since` was dropped; PgStore truncates the bind too.
@@ -1183,7 +1334,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "red-first T-03 fake parity"]
     async fn timestamps_truncate_toward_zero_from_2000_like_sqlx() {
         // sqlx sends (t - 2000-01-01).num_microseconds(): toward zero, so before 2000 a
         // sub-microsecond remainder rounds *up*; flooring Unix micros rounded it down.
@@ -1210,7 +1360,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "red-first T-03 fake parity"]
     async fn search_follows_d115() {
         let s = MemStore::new();
         let t = |secs| DateTime::from_timestamp(secs, 0).unwrap();
@@ -1285,7 +1434,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "red-first T-03 fake parity"]
     fn word_similarity_matches_pg_trgm() {
         // Values from the pg_trgm documentation and by hand from its algorithm.
         assert!((word_similarity("word", "two words") - 0.8).abs() < 1e-6);
@@ -1294,8 +1442,29 @@ mod tests {
         assert_eq!(word_similarity("acme", "acme"), 1.0);
     }
 
+    #[test]
+    fn word_similarity_equals_the_server() {
+        // `select word_similarity(a, b)` on the compose Postgres 16 + pg_trgm (2026-10-23).
+        for (a, b, want) in [
+            ("Vasanh", "Vasanth Raghavan", 0.714_285_73),
+            ("foo bar", "Foo-Bar Inc", 1.0),
+            ("rapidflair", "Rapidflare", 0.727_272_75),
+            ("acme corp", "the acme corporation ltd", 0.9),
+            ("abcab", "xxabcabxx abab", 0.555_555_6),
+            ("banana", "bananas and ban ana", 0.833_333_3),
+            ("ab cd ef", "ef cd ab cd", 1.0),
+            (
+                "Rust CDP crate",
+                "chromiumoxide crate for rust cdp",
+                0.777_777_8,
+            ),
+        ] {
+            let got = word_similarity(a, b);
+            assert!((got - want).abs() < 1e-6, "{a:?} {b:?}: {got} vs {want}");
+        }
+    }
+
     #[tokio::test]
-    #[ignore = "red-first T-03 fake parity"]
     async fn sm2_rounds_the_interval_up() {
         // D-115: 6 days x ease 2.7 = 16.2 days -> 17 (round() gave 16).
         let s = MemStore::new();
@@ -1308,8 +1477,3 @@ mod tests {
         assert_eq!(r.interval_days, 17.0);
     }
 }
-
-#[cfg(test)]
-fn word_similarity(_: &str, _: &str) -> f32 {
-    0.0
-} // TEMP-HEAD-STUB

@@ -66,7 +66,9 @@ pub enum OnTimeout {
 
 /// An ask (H-1.3): what will happen, where, with which values, and the timer.
 /// Every string on a card built by [`Gate::check`] is control-stripped (C0/C1 controls,
-/// ANSI escape sequences, CR, bidi and zero-width marks) and length-capped (D-110 (5)).
+/// ANSI escape sequences, CR, bidi, zero-width and other default-ignorable marks) and
+/// length-capped (D-110 (5)). A Send card's first value is the gate's own
+/// `("new recipients (N)", list)` row (D-120).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AskCard {
     pub class: Class,
@@ -123,45 +125,195 @@ pub enum GateError {
 /// The `gate.rules.domain` value that matches every domain.
 pub const ANY_DOMAIN: &str = "*";
 
-/// D-110 (1): the canonical `gate.rules.domain`. Trimmed, lowercased, one trailing dot
-/// removed; `'*'` (after trimming) stays `'*'`. Rejects (`MemoryError::Invalid`) an empty
-/// value and anything that is not a bare host name: whitespace, control characters, a
-/// `*` other than the whole value, `/ : @ ? # \`, a leading dot, an empty label (`..`).
-/// `rule_domain(" Bank.COM. ") == Ok("bank.com")`.
+/// Longest DNS label and name, in ASCII (A-label) form.
+const MAX_LABEL: usize = 63;
+const MAX_HOST: usize = 253;
+
+/// D-110 (1), D-120: the canonical `gate.rules.domain`, in the ASCII (A-label) form URL
+/// hosts arrive in. Trimmed; the ideographic and full-width full stops (U+3002, U+FF0E,
+/// U+FF61) become `.` and full-width ASCII becomes ASCII (as UTS-46 maps them); lowercased;
+/// one trailing dot removed; each label with non-ASCII letters is Punycode-encoded as
+/// `xn--...` (RFC 3492). `'*'` (after trimming) stays `'*'`.
+/// Rejects (`MemoryError::Invalid`) an empty value and anything that is not a bare host
+/// name: a character other than ASCII letters, digits, `-`, `_` and non-ASCII letters or
+/// digits (so whitespace, control characters, `* / : @ ? # \ %`, invisible and
+/// default-ignorable characters, combining marks and compatibility forms are all refused),
+/// an empty label (`..`, a leading dot), a label over 63 or a name over 253 characters.
+/// `rule_domain(" Bank.COM. ") == Ok("bank.com")`,
+/// `rule_domain("BÜCHER.DE") == Ok("xn--bcher-kva.de")`.
 pub fn rule_domain(domain: &str) -> Result<String, MemoryError> {
-    let lower = domain.trim().to_lowercase();
-    if lower == ANY_DOMAIN {
-        return Ok(lower);
-    }
-    let d = lower.strip_suffix('.').unwrap_or(&lower);
-    let bad = d.is_empty()
-        || d.starts_with('.')
-        || d.ends_with('.')
-        || d.contains("..")
-        || d.chars().any(|c| {
-            c.is_whitespace()
-                || c.is_control()
-                || matches!(c, '*' | '/' | ':' | '@' | '?' | '#' | '\\')
-        });
-    if bad {
-        return Err(MemoryError::Invalid(format!(
+    let invalid = || {
+        MemoryError::Invalid(format!(
             "gate rule domain {domain:?} is not a host name or '*'"
-        )));
+        ))
+    };
+    let mapped = domain
+        .trim()
+        .chars()
+        .map(map_host_char)
+        .collect::<String>()
+        .to_lowercase();
+    if mapped == ANY_DOMAIN {
+        return Ok(mapped);
     }
-    Ok(d.to_string())
+    let d = mapped.strip_suffix('.').unwrap_or(&mapped);
+    if d.is_empty() {
+        return Err(invalid());
+    }
+    let mut labels = Vec::new();
+    for label in d.split('.') {
+        if label.is_empty() || !label.chars().all(host_char) {
+            return Err(invalid());
+        }
+        let ascii = if label.is_ascii() {
+            label.to_string()
+        } else {
+            let chars: Vec<char> = label.chars().collect();
+            format!("xn--{}", punycode(&chars).ok_or_else(invalid)?)
+        };
+        if ascii.len() > MAX_LABEL {
+            return Err(invalid());
+        }
+        labels.push(ascii);
+    }
+    let host = labels.join(".");
+    if host.len() > MAX_HOST {
+        return Err(invalid());
+    }
+    Ok(host)
 }
 
-/// D-110 (1): the canonical form of a classifier hint inside a rule key: trimmed and
-/// lowercased. Rejects (`MemoryError::Invalid`) an empty hint and one containing `:`,
-/// whitespace or control characters. `rule_hint(" Job_Application ") == Ok("job_application")`.
+/// The UTS-46 mappings [`rule_domain`] applies: alternative full stops to `.`, full-width
+/// ASCII (U+FF01..U+FF5E) to ASCII.
+fn map_host_char(c: char) -> char {
+    match c {
+        '\u{3002}' | '\u{ff0e}' | '\u{ff61}' => '.',
+        '\u{ff01}'..='\u{ff5e}' => char::from_u32(c as u32 - 0xfee0).unwrap_or(c),
+        _ => c,
+    }
+}
+
+/// A character a (lowercased) host label may hold.
+fn host_char(c: char) -> bool {
+    c.is_ascii_lowercase()
+        || c.is_ascii_digit()
+        || c == '-'
+        || c == '_'
+        || (!c.is_ascii() && c.is_alphanumeric() && !invisible(c) && !compatibility_form(c))
+}
+
+/// Letters and digits that UTS-46 (NFKC) maps to other characters: a rule written with one
+/// would be stored as a Punycode label no URL host ever has. Refused rather than mapped.
+fn compatibility_form(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00aa}'
+            | '\u{00b2}'
+            | '\u{00b3}'
+            | '\u{00b5}'
+            | '\u{00b9}'
+            | '\u{00ba}'
+            | '\u{00bc}'..='\u{00be}'
+            | '\u{2070}'..='\u{209f}'
+            | '\u{2100}'..='\u{214f}'
+            | '\u{2150}'..='\u{218f}'
+            | '\u{2460}'..='\u{24ff}'
+            | '\u{2c7c}'..='\u{2c7d}'
+            | '\u{3200}'..='\u{33ff}'
+            | '\u{fb00}'..='\u{fdff}'
+            | '\u{fe70}'..='\u{feff}'
+            | '\u{ff00}'..='\u{ffef}'
+            | '\u{1d400}'..='\u{1d7ff}'
+            | '\u{1f100}'..='\u{1f1ff}'
+    )
+}
+
+/// RFC 3492 Punycode of one label (without the `xn--` prefix). `None` on overflow.
+fn punycode(input: &[char]) -> Option<String> {
+    const BASE: u32 = 36;
+    const TMIN: u32 = 1;
+    const TMAX: u32 = 26;
+    const SKEW: u32 = 38;
+    const DAMP: u32 = 700;
+    fn digit(d: u32) -> char {
+        // d < 36: a..z then 0..9.
+        let b = if d < 26 {
+            b'a' + d as u8
+        } else {
+            b'0' + (d - 26) as u8
+        };
+        b as char
+    }
+    fn adapt(delta: u32, points: u32, first: bool) -> u32 {
+        let mut delta = if first { delta / DAMP } else { delta / 2 };
+        delta += delta / points;
+        let mut k = 0;
+        while delta > ((BASE - TMIN) * TMAX) / 2 {
+            delta /= BASE - TMIN;
+            k += BASE;
+        }
+        k + (BASE - TMIN + 1) * delta / (delta + SKEW)
+    }
+    let mut out: String = input.iter().filter(|c| c.is_ascii()).collect();
+    let basic = u32::try_from(out.len()).ok()?;
+    let total = u32::try_from(input.len()).ok()?;
+    if basic > 0 {
+        out.push('-');
+    }
+    let (mut n, mut delta, mut bias, mut h) = (128u32, 0u32, 72u32, basic);
+    while h < total {
+        let m = input.iter().map(|&c| c as u32).filter(|&c| c >= n).min()?;
+        delta = delta.checked_add((m - n).checked_mul(h + 1)?)?;
+        n = m;
+        for &c in input {
+            let c = c as u32;
+            if c < n {
+                delta = delta.checked_add(1)?;
+            }
+            if c == n {
+                let mut q = delta;
+                let mut k = BASE;
+                loop {
+                    let t = if k <= bias {
+                        TMIN
+                    } else if k >= bias + TMAX {
+                        TMAX
+                    } else {
+                        k - bias
+                    };
+                    if q < t {
+                        break;
+                    }
+                    out.push(digit(t + (q - t) % (BASE - t)));
+                    q = (q - t) / (BASE - t);
+                    k += BASE;
+                }
+                out.push(digit(q));
+                bias = adapt(delta, h + 1, h == basic);
+                delta = 0;
+                h += 1;
+            }
+        }
+        delta = delta.checked_add(1)?;
+        n = n.checked_add(1)?;
+    }
+    Some(out)
+}
+
+/// D-110 (1), D-120: the canonical form of a classifier hint inside a rule key: trimmed and
+/// ASCII-lowercased. Hints are classifier identifiers: only ASCII letters, digits, `_`, `-`
+/// and `.` are accepted. Rejects (`MemoryError::Invalid`) an empty hint and any other
+/// character (`:`, whitespace, control, invisible, full-width, combining, non-ASCII).
+/// `rule_hint(" Job_Application ") == Ok("job_application")`.
 pub fn rule_hint(hint: &str) -> Result<String, MemoryError> {
-    let h = hint.trim().to_lowercase();
+    let h = hint.trim().to_ascii_lowercase();
     if h.is_empty()
-        || h.chars()
-            .any(|c| c == ':' || c.is_whitespace() || c.is_control())
+        || !h
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.'))
     {
         return Err(MemoryError::Invalid(format!(
-            "gate rule hint {hint:?} is empty or has ':', whitespace or control characters"
+            "gate rule hint {hint:?} is empty or not ASCII letters, digits, '_', '-', '.'"
         )));
     }
     Ok(h)
@@ -215,7 +367,8 @@ pub struct Gate {
 struct Resolved {
     mode: Mode,
     strict: bool,
-    /// A hint rule matched: an ask under it never times out to proceed (D-110 (4)).
+    /// A hint rule decided (or tied) the mode: an ask under it never times out to proceed
+    /// (D-110 (4)). False when a lower-class hint lost to the class level (D-120).
     from_hint: bool,
     /// The deciding rule as `(domain, class)`; `None` = the H-1.1 default.
     name: Option<String>,
@@ -226,6 +379,14 @@ struct HintHit {
     class: Class,
     name: String,
     rule: GateRule,
+}
+
+/// A Send's recipients as the gate sees them (H-1.1, D-120).
+struct Recipients<'a> {
+    /// Non-blank recipients, as given.
+    all: Vec<&'a str>,
+    /// Those not in `memory.contacts`, one per [`contact_key`], first spelling kept.
+    new: Vec<&'a str>,
 }
 
 impl Gate {
@@ -246,39 +407,64 @@ impl Gate {
     ///    The domain is canonicalised by [`rule_domain`]; `None`, `'*'` or a value that does
     ///    not canonicalise skips the domain-scoped keys.
     /// 4. An ask times out per [`Gate::on_timeout`] with `strict = true` unless the run and
-    ///    the rule are not strict, no hint rule hit, and the class is Account, or Send with
-    ///    at least one recipient not in `memory.contacts` (D-110 (4)). So a user's ask rule
-    ///    on Send to known contacts, a hinted ask, and a Send with no recipients all skip.
+    ///    the rule are not strict, no hint rule decided the mode, and the class is Account,
+    ///    or Send with at least one recipient not in `memory.contacts` and every such
+    ///    recipient shown in full and as written on the card (D-110 (4), D-120). So a
+    ///    user's ask rule on Send to known contacts, a hinted ask, a Send with no
+    ///    recipients and a Send whose new recipients the card cannot show exactly all skip.
+    ///
+    /// Recipients that are blank after trimming are not recipients. A Send card's first
+    /// value is always `("new recipients (N)", list)` (D-120).
     pub async fn check(&self, call: &Call) -> Result<Decision, GateError> {
         if call.class == Class::Challenge {
             return Ok(Decision::Stop(StopReason {
                 class: Class::Challenge,
                 why: format!(
                     "challenge at {}: stopped, the user acts in the browser and says continue (D-5)",
-                    call.tool
+                    card_text(&call.tool, TOOL_MAX_CHARS)
                 ),
                 element: element_of(&call.args),
             }));
         }
 
-        let new_recipients = if call.class == Class::Send {
-            Some(self.new_recipients(&call.recipients).await?)
+        let recipients = if call.class == Class::Send {
+            let all: Vec<&str> = call
+                .recipients
+                .iter()
+                .map(String::as_str)
+                .filter(|r| !contact_key(r).is_empty())
+                .collect();
+            let new = self.new_recipients(&all).await?;
+            Some(Recipients { all, new })
         } else {
             None
         };
-        let r = self.resolve(call, new_recipients).await?;
+        let known = recipients
+            .as_ref()
+            .is_some_and(|r| !r.all.is_empty() && r.new.is_empty());
+        let r = self.resolve(call, known).await?;
 
         Ok(match r.mode {
             Mode::Allow => Decision::Allow,
             Mode::Ask => {
+                let row = recipients.as_ref().map(|r| recipients_row(&r.new));
                 let may_proceed = !r.from_hint
                     && match call.class {
                         Class::Account => true,
-                        Class::Send => new_recipients.is_some_and(|n| n > 0),
+                        Class::Send => {
+                            recipients.as_ref().is_some_and(|r| !r.new.is_empty())
+                                && row.as_ref().is_some_and(|row| row.complete)
+                        }
                         _ => false,
                     };
                 let strict = call.strict || r.strict || !may_proceed;
-                Decision::Ask(ask_card(call, Gate::on_timeout(call.class, strict)))
+                let shown = recipients.as_ref().map_or(&[][..], |r| r.all.as_slice());
+                Decision::Ask(ask_card(
+                    call,
+                    shown,
+                    row.map(|row| row.row),
+                    Gate::on_timeout(call.class, strict),
+                ))
             }
             Mode::Stop => Decision::Stop(StopReason {
                 class: call.class,
@@ -304,8 +490,8 @@ impl Gate {
 
     /// The H-1.3 table by class alone: Send and Account proceed, everything else skips;
     /// `strict` makes all skip. [`Gate::check`] passes `strict = true` for every ask that
-    /// must not proceed on its own (D-109, D-110 (4)): a strict run or rule, an ask from a
-    /// hint rule, and a Send whose recipients are all known (or empty).
+    /// must not proceed on its own (D-109, D-110 (4), D-120): a strict run or rule, an ask a
+    /// hint rule decided, and a Send whose new recipients are none or not all shown exactly.
     pub fn on_timeout(class: Class, strict: bool) -> OnTimeout {
         match class {
             Class::Send | Class::Account if !strict => OnTimeout::Proceed,
@@ -313,8 +499,8 @@ impl Gate {
         }
     }
 
-    /// Steps 2 and 3 of [`Gate::check`].
-    async fn resolve(&self, call: &Call, new: Option<usize>) -> Result<Resolved, GateError> {
+    /// Steps 2 and 3 of [`Gate::check`]. `known`: a Send whose recipients are all contacts.
+    async fn resolve(&self, call: &Call, known: bool) -> Result<Resolved, GateError> {
         let domain = call
             .domain
             .as_deref()
@@ -324,7 +510,7 @@ impl Gate {
 
         let hits = self.hint_hits(call.class, domain, &call.hints).await?;
         if hits.is_empty() {
-            return self.class_level(call, domain, new).await;
+            return self.class_level(call.class, domain, known).await;
         }
 
         let mut out: Option<Resolved> = None;
@@ -333,14 +519,18 @@ impl Gate {
             let mut mode = hit.rule.mode;
             let mut strict = hit.rule.strict;
             let mut name = Some(hit.name);
+            let mut from_hint = true;
             if hit.class < call.class {
                 if base.is_none() {
-                    base = Some(self.class_level(call, domain, new).await?);
+                    base = Some(self.class_level(call.class, domain, known).await?);
                 }
                 if let Some(b) = &base {
+                    // D-113 raise-only. When the class level is stricter it decided, not the
+                    // hint, so the ask times out as a class-level ask would (D-120).
                     if severity(b.mode) > severity(mode) {
                         mode = b.mode;
                         name = b.name.clone();
+                        from_hint = false;
                     }
                     strict |= b.strict;
                 }
@@ -350,7 +540,7 @@ impl Gate {
                     out = Some(Resolved {
                         mode,
                         strict,
-                        from_hint: true,
+                        from_hint,
                         name,
                     })
                 }
@@ -359,13 +549,16 @@ impl Gate {
                     if severity(mode) > severity(o.mode) {
                         o.mode = mode;
                         o.name = name;
+                        o.from_hint = from_hint;
+                    } else if severity(mode) == severity(o.mode) {
+                        o.from_hint |= from_hint;
                     }
                 }
             }
         }
         match out {
             Some(o) => Ok(o),
-            None => self.class_level(call, domain, new).await,
+            None => self.class_level(call.class, domain, known).await,
         }
     }
 
@@ -404,37 +597,43 @@ impl Gate {
     /// `(domain, Class)` → `('*', Class)` → H-1.1 default.
     async fn class_level(
         &self,
-        call: &Call,
+        class: Class,
         domain: Option<&str>,
-        new: Option<usize>,
+        known: bool,
     ) -> Result<Resolved, GateError> {
-        let class = call.class.as_str();
+        let key = class.as_str();
         for d in domain.into_iter().chain([ANY_DOMAIN]) {
-            if let Some(rule) = self.store.gate_rule(d, class).await? {
+            if let Some(rule) = self.store.gate_rule(d, key).await? {
                 return Ok(Resolved {
                     mode: rule.mode,
                     strict: rule.strict,
                     from_hint: false,
-                    name: Some(format!("({d}, {class})")),
+                    name: Some(format!("({d}, {key})")),
                 });
             }
         }
-        let known = !call.recipients.is_empty() && new == Some(0);
         Ok(Resolved {
-            mode: Gate::default_mode(call.class, known),
+            mode: Gate::default_mode(class, known),
             strict: false,
             from_hint: false,
             name: None,
         })
     }
 
-    /// How many recipients are not in `memory.contacts` (H-1.1).
-    async fn new_recipients(&self, recipients: &[String]) -> Result<usize, GateError> {
-        let mut new = 0;
+    /// The recipients not in `memory.contacts` (H-1.1), one per [`contact_key`] (the first
+    /// spelling is kept), in order. One lookup per distinct key.
+    async fn new_recipients<'a>(&self, recipients: &[&'a str]) -> Result<Vec<&'a str>, GateError> {
+        let mut seen: Vec<String> = Vec::new();
+        let mut new = Vec::new();
         for r in recipients {
-            if self.store.contact(&contact_key(r)).await?.is_none() {
-                new += 1;
+            let key = contact_key(r);
+            if seen.contains(&key) {
+                continue;
             }
+            if self.store.contact(&key).await?.is_none() {
+                new.push(*r);
+            }
+            seen.push(key);
         }
         Ok(new)
     }
@@ -457,6 +656,16 @@ const KEY_MAX_CHARS: usize = 64;
 const SITE_MAX_CHARS: usize = 253;
 /// At most this many values are shown; the rest are summarised in one extra row.
 const MAX_VALUES: usize = 32;
+/// Cap on the tool name inside a stop reason, in characters.
+const TOOL_MAX_CHARS: usize = 128;
+/// The Send card's new-recipients row (D-120): at most this many recipients, this many
+/// characters each (longer ones keep their head and their `@domain`), and this many
+/// characters in all; the rest are counted, never silently dropped.
+const ROW_MAX_RECIPIENTS: usize = 32;
+const RECIPIENT_MAX_CHARS: usize = 120;
+const ROW_MAX_CHARS: usize = 2000;
+/// The key prefix of that row; a classifier or arg value under it is dropped.
+const NEW_RECIPIENTS: &str = "new recipients";
 
 /// `args["element"]` when it is a string (`#31`).
 fn element_of(args: &Value) -> Option<String> {
@@ -482,18 +691,32 @@ fn shown(v: &Value) -> String {
     }
 }
 
-/// Invisible characters that can reorder or hide text on a terminal or in a notification.
+/// Invisible characters that can reorder or hide text on a terminal or in a notification:
+/// Unicode's Default_Ignorable_Code_Point set (soft hyphen, combining grapheme joiner,
+/// Hangul fillers, Mongolian and other variation selectors, zero-width and bidi marks, word
+/// joiner and invisible operators, BOM, tags), the interlinear annotation marks, and the
+/// blank-looking U+2800 BRAILLE PATTERN BLANK (D-120).
 fn invisible(c: char) -> bool {
     matches!(
         c,
         '\u{00ad}'
+            | '\u{034f}'
             | '\u{061c}'
-            | '\u{180e}'
+            | '\u{115f}'..='\u{1160}'
+            | '\u{17b4}'..='\u{17b5}'
+            | '\u{180b}'..='\u{180f}'
             | '\u{200b}'..='\u{200f}'
             | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{2069}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{2800}'
+            | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}'
             | '\u{feff}'
-            | '\u{fff9}'..='\u{fffb}'
+            | '\u{ffa0}'
+            | '\u{fff0}'..='\u{fffb}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e0fff}'
     )
 }
 
@@ -557,7 +780,7 @@ fn skip_escape(it: &mut std::iter::Peekable<std::str::Chars<'_>>, intro: Option<
 /// invisible marks become a single space; whitespace runs collapse; capped at `max`
 /// characters with a trailing `...`.
 fn card_text(s: &str, max: usize) -> String {
-    let mut out = String::with_capacity(s.len().min(max * 4));
+    let mut out = String::with_capacity(s.len().min(max.saturating_mul(4)));
     let mut space = false;
     let mut it = s.chars().peekable();
     while let Some(c) = it.next() {
@@ -592,43 +815,122 @@ fn card_text(s: &str, max: usize) -> String {
     }
 }
 
-/// "send to a@x.com: subject=Hi, body=..." before cleaning.
-fn what_line(call: &Call) -> String {
-    let mut line = call.tool.clone();
-    if !call.recipients.is_empty() {
+/// `s` cleaned without a length cap (one component of a longer line).
+fn clean_part(s: &str) -> String {
+    card_text(s, usize::MAX)
+}
+
+/// "send to a@x.com: subject=Hi, body=...". Each component (tool, every recipient, every
+/// arg key and value) is cleaned on its own before joining, so an escape sequence opened
+/// in one cannot swallow the next (D-110 (5)); the caller caps the joined line.
+fn what_line(call: &Call, recipients: &[&str]) -> String {
+    let mut line = clean_part(&call.tool);
+    if !recipients.is_empty() {
+        let to: Vec<String> = recipients.iter().map(|r| clean_part(r)).collect();
         line.push_str(" to ");
-        line.push_str(&call.recipients.join(", "));
+        line.push_str(&to.join(", "));
     }
     let args = flatten_args(&call.args);
     if !args.is_empty() {
-        let parts: Vec<String> = args.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let parts: Vec<String> = args
+            .iter()
+            .map(|(k, v)| format!("{}={}", clean_part(k), clean_part(v)))
+            .collect();
         line.push_str(": ");
         line.push_str(&parts.join(", "));
     }
     line
 }
 
-fn ask_card(call: &Call, on_timeout: OnTimeout) -> AskCard {
+/// One recipient as the new-recipients row shows it, and whether that is the recipient in
+/// full and as written. Over [`RECIPIENT_MAX_CHARS`] it keeps its head and its `@domain`
+/// (or its last characters) around a visible `…(+N chars)…` marker.
+fn shown_recipient(r: &str) -> (String, bool) {
+    let clean = clean_part(r);
+    let exact = clean == r.trim() && !clean.is_empty();
+    let chars: Vec<char> = clean.chars().collect();
+    let n = chars.len();
+    if clean.is_empty() {
+        return ("(unprintable)".to_string(), false);
+    }
+    if n <= RECIPIENT_MAX_CHARS {
+        return (clean, exact);
+    }
+    let max_tail = RECIPIENT_MAX_CHARS / 2;
+    let at = chars
+        .iter()
+        .rposition(|&c| c == '@')
+        .filter(|&i| n - i <= max_tail)
+        .unwrap_or(n - max_tail);
+    let tail: String = chars[at..].iter().collect();
+    let head_len = RECIPIENT_MAX_CHARS - (n - at);
+    let head: String = chars[..head_len].iter().collect();
+    let omitted = n - RECIPIENT_MAX_CHARS;
+    (format!("{head}…(+{omitted} chars)…{tail}"), false)
+}
+
+/// The Send card's first value (D-120).
+struct RecipientsRow {
+    row: (String, String),
+    /// Every new recipient is listed, in full and as written.
+    complete: bool,
+}
+
+/// `("new recipients (N)", "a@x.com, b@y.org")`, or `"none"`. Lists up to
+/// [`ROW_MAX_RECIPIENTS`] within [`ROW_MAX_CHARS`] and ends with `…(+K more)` for the rest.
+fn recipients_row(new: &[&str]) -> RecipientsRow {
+    let mut parts: Vec<String> = Vec::new();
+    let mut complete = true;
+    let mut used = 0;
+    for (i, r) in new.iter().enumerate() {
+        let (shown, exact) = shown_recipient(r);
+        let cost = shown.chars().count() + 2;
+        if i == ROW_MAX_RECIPIENTS || used + cost > ROW_MAX_CHARS {
+            complete = false;
+            parts.push(format!("…(+{} more)", new.len() - i));
+            break;
+        }
+        complete &= exact;
+        used += cost;
+        parts.push(shown);
+    }
+    let value = if new.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(", ")
+    };
+    RecipientsRow {
+        row: (format!("{NEW_RECIPIENTS} ({})", new.len()), value),
+        complete,
+    }
+}
+
+fn ask_card(
+    call: &Call,
+    recipients: &[&str],
+    row: Option<(String, String)>,
+    on_timeout: OnTimeout,
+) -> AskCard {
     let what = call
         .what
         .as_deref()
         .map(|w| card_text(w, WHAT_MAX_CHARS))
         .filter(|w| !w.is_empty())
-        .unwrap_or_else(|| card_text(&what_line(call), WHAT_MAX_CHARS));
+        .unwrap_or_else(|| card_text(&what_line(call, recipients), WHAT_MAX_CHARS));
     let raw = if call.values.is_empty() {
         flatten_args(&call.args)
     } else {
         call.values.clone()
     };
-    let more = raw.len().saturating_sub(MAX_VALUES);
-    let mut values: Vec<(String, String)> = raw
-        .iter()
-        .take(MAX_VALUES)
-        .map(|(k, v)| (card_text(k, KEY_MAX_CHARS), card_text(v, VALUE_MAX_CHARS)))
-        .collect();
-    if more > 0 {
-        values.push(("...".to_string(), format!("{more} more values not shown")));
-    }
+    let mut values: Vec<(String, String)> = Vec::new();
+    let room = match row {
+        Some(row) => {
+            values.push(row);
+            MAX_VALUES - 1
+        }
+        None => MAX_VALUES,
+    };
+    values.extend(clean_values(&raw, room));
     AskCard {
         class: call.class,
         what,
@@ -636,6 +938,38 @@ fn ask_card(call: &Call, on_timeout: OnTimeout) -> AskCard {
         values,
         timeout: ASK_TIMEOUT,
         on_timeout,
+    }
+}
+
+/// Each value's key and text cleaned and capped; at most `room` of them, then one summary
+/// row. A value under the gate's own `new recipients` key is dropped: only the gate writes
+/// that row (D-120).
+fn clean_values(raw: &[(String, String)], room: usize) -> Vec<(String, String)> {
+    let cleaned: Vec<(String, String)> = raw
+        .iter()
+        .map(|(k, v)| (card_text(k, KEY_MAX_CHARS), card_text(v, VALUE_MAX_CHARS)))
+        .filter(|(k, _)| !k.to_lowercase().starts_with(NEW_RECIPIENTS))
+        .collect();
+    let more = cleaned.len().saturating_sub(room);
+    let mut values: Vec<(String, String)> = cleaned.into_iter().take(room).collect();
+    if more > 0 {
+        values.push(("...".to_string(), format!("{more} more values not shown")));
+    }
+    values
+}
+
+/// D-70, D-110 (5): the gate's card sanitiser for a card built elsewhere (`ToolCtx::ask`,
+/// diagnostic lines). `what`, `site` and every value key and text are control-stripped
+/// (escape sequences, C0/C1 controls, CR/LF, bidi, zero-width and default-ignorable marks
+/// become one space) and capped (200 characters for `what` and each value, 64 for a key,
+/// 253 for the site; at most 32 values plus one summary row). A value under the gate's
+/// `new recipients` key is dropped (D-120). `class`, `timeout` and `on_timeout` are kept.
+pub fn clean_card(card: AskCard) -> AskCard {
+    AskCard {
+        what: card_text(&card.what, WHAT_MAX_CHARS),
+        site: card.site.as_deref().map(|s| card_text(s, SITE_MAX_CHARS)),
+        values: clean_values(&card.values, MAX_VALUES),
+        ..card
     }
 }
 
@@ -1131,9 +1465,13 @@ mod tests {
         c.hints = vec!["newsletter".into()];
         let pay = card(g.check(&c).await.unwrap());
         assert_eq!(pay.on_timeout, OnTimeout::Skip);
-        // ... nor an Account call; and from a hint, the ask skips.
+        // ... nor an Account call. The class level (the seeded Account ask) decided, not the
+        // hint, so it times out like any Account ask (review T-04 r2 item 1, D-120).
         c.class = Class::Account;
-        assert_eq!(card(g.check(&c).await.unwrap()).on_timeout, OnTimeout::Skip);
+        assert_eq!(
+            card(g.check(&c).await.unwrap()).on_timeout,
+            OnTimeout::Proceed
+        );
         // At its own class the allow applies.
         c.class = Class::Read;
         assert_eq!(g.check(&c).await.unwrap(), Decision::Allow);
@@ -1231,7 +1569,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "red-first T-04 round 3"]
     async fn escapes_cannot_span_card_components() {
         // what_line joined recipients before cleaning: an OSC opened in one recipient and
         // closed (BEL) in the next ate the new address from a card that proceeds on timeout.
@@ -1263,7 +1600,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "red-first T-04 round 3"]
     async fn send_card_lists_every_new_recipient() {
         // 8 known + 1 new pushed the new address past the 200-char what cap.
         let (s, g) = gate(MemStore::new());
@@ -1330,7 +1666,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "red-first T-04 round 3"]
     async fn blank_recipients_are_not_recipients() {
         // [""] or ["  "] counted as one new recipient and proceeded on timeout.
         let (s, g) = gate(MemStore::new());
@@ -1352,7 +1687,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "red-first T-04 round 3"]
     async fn a_hint_overruled_by_the_class_level_does_not_force_skip() {
         // D-113 raise-only: the class level decided, yet the ask was marked as from a hint
         // and a Send(new) / Account ask timed out to skip.
@@ -1385,7 +1719,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "red-first T-04 round 3"]
     async fn unicode_domains_and_hints_are_canonical_or_rejected() {
         // BÜCHER.DE was stored as "bücher.de" and never matched the A-label call domain.
         for (rule, calls) in [
@@ -1447,5 +1780,63 @@ mod tests {
         );
         let pc = card(decide(MemStore::new(), &c).await);
         assert_eq!(pc.what, "pay 1 0 0 0 EUR");
+    }
+
+    #[test]
+    fn punycode_matches_rfc_3492() {
+        for (u, a) in [
+            ("bücher", "bcher-kva"),
+            ("münchen", "mnchen-3ya"),
+            ("mañana", "maana-pta"),
+            ("例え", "r8jz45g"),
+            ("テスト", "zckzah"),
+        ] {
+            let chars: Vec<char> = u.chars().collect();
+            assert_eq!(punycode(&chars).as_deref(), Some(a), "{u}");
+        }
+        // UTS-46 full-width forms map; compatibility letters and oversize names refuse.
+        assert_eq!(rule_domain("Ｂａｎｋ．com").unwrap(), "bank.com");
+        assert_eq!(
+            rule_domain("例え.テスト").unwrap(),
+            "xn--r8jz45g.xn--zckzah"
+        );
+        let long_name = "a.".repeat(128);
+        for bad in [
+            "ｂａｎｋ／x.com",
+            "\u{1d41b}ank.com",
+            "\u{fb01}le.com",
+            "\u{2460}.com",
+            long_name.as_str(),
+        ] {
+            assert!(rule_domain(bad).is_err(), "{bad:?}");
+        }
+        assert!(rule_domain(&format!("{}.com", "a".repeat(64))).is_err());
+        // KELVIN SIGN must not fold into an ASCII hint (D-62's look-alike rule).
+        assert!(rule_hint("\u{212a}").is_err());
+    }
+
+    #[test]
+    fn clean_card_is_the_gate_sanitiser() {
+        // D-70: handler-built cards get the same strip and caps; the gate's row cannot be faked.
+        let c = clean_card(AskCard {
+            class: Class::Account,
+            what: "sign up\r\u{1b}[2Kas admin\u{200b}".into(),
+            site: Some("x.example\u{1b}[8m".into()),
+            values: vec![
+                ("New Recipients (0)".into(), "none".into()),
+                ("name\n".into(), "v".repeat(500)),
+            ],
+            timeout: Duration::from_secs(5),
+            on_timeout: OnTimeout::Proceed,
+        });
+        assert_eq!(c.what, "sign up as admin");
+        assert_eq!(c.site.as_deref(), Some("x.example"));
+        assert_eq!(c.values.len(), 1);
+        assert_eq!(c.values[0].0, "name");
+        assert_eq!(c.values[0].1.chars().count(), VALUE_MAX_CHARS);
+        assert_eq!(
+            (c.class, c.timeout, c.on_timeout),
+            (Class::Account, Duration::from_secs(5), OnTimeout::Proceed)
+        );
     }
 }

@@ -1,9 +1,9 @@
 //! T-04 acceptance: the gate unit (docs/01 H-1, H-1.1..H-1.4, I-3; docs/02 acceptance
 //! "touch_contact makes a Send to that person allow"; D-5, D-39, B-100).
 //!
-//! Every row goes through `Gate::check` with `harness_core::testing::MemStore`, so this
-//! file needs the `testing` feature (D-108):
-//! `cargo test -p harness-core --features testing --test gate_accept_t04`.
+//! Every row goes through `Gate::check` with `harness_core::testing::MemStore` (D-108).
+//! The `testing` feature comes from harness-core's self dev-dependency (D-111), so plain
+//! `cargo test -p harness-core --test gate_accept_t04` runs it.
 //! End-to-end `echo.send` through dispatch and the ledger is T-09's and is not here.
 
 use std::sync::Arc;
@@ -100,6 +100,8 @@ async fn t04_send_empty_recipients_asks() {
         s.add_contact("friend@example.com");
         let c = card(check(&g, &send(&[])).await);
         assert_eq!(c.class, Class::Send);
+        // D-113: no named recipient, so silence must not send.
+        assert_eq!(c.on_timeout, OnTimeout::Skip);
     }
 }
 
