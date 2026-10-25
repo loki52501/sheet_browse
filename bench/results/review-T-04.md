@@ -1,7 +1,30 @@
-# Review T-04 (round 2): core::gate + harness_core::testing (3cd304a, c22ece0)
+# Review T-04 (round 3): core::gate + harness_core::testing (bae6c45; at 15e09d3)
 
-Scope: crates/core/src/gate.rs, crates/core/src/testing.rs, crates/core/Cargo.toml, crates/core/tests/gate_accept_t04.rs at HEAD (7732264). Spec: H-1, H-1.1..H-1.5, I-3, I-1, D-5, D-19, D-36, D-39, D-109, D-110, D-111, D-113.
-Checked against a clean `git archive HEAD` export, so other coders' uncommitted WIP is excluded: `cargo test -p harness-core` with no features runs 5 binaries (lib 64, accept_t06 9, gate_accept_t04 14, ledger_t06 6, vault_accept_t05 9), all passing. `cargo clippy -p harness-core --all-targets -- -D warnings` and `--lib` are clean. `rustfmt --check` on the three files is clean.
+Scope: `git diff main...15e09d3 -- crates/core/src/gate.rs crates/core/src/testing.rs` (round-3 delta 7732264..15e09d3, which includes tests/gate_accept_t04.rs). Spec: H-1, H-1.1..H-1.4, I-3, I-1. Decisions checked: D-5, D-62, D-70, D-79, D-81, D-109, D-110, D-111, D-113, D-115, D-120. Blockers checked: B-190, B-191.
+
+Runs, in a detached worktree at 15e09d3 with its own target dir:
+- `cargo clippy -p harness-core --tests -- -D warnings`: clean (exit 0, clippy 0.1.99).
+- `cargo clippy -p harness-core --all-targets --all-features -- -D warnings`: clean.
+- `cargo fmt -p harness-core --check`: clean.
+- `cargo test -p harness-core`: lib 123, gate_accept_t04 14, gate_accept_t04_r2 7, and every other binary pass.
+
+The reported clippy failure ("items after a test module" in crates/core/src/testing.rs) does not reproduce at 15e09d3. `mod tests` is the last item (testing.rs:820-1479). It most likely came from uncommitted WIP in the shared checkout.
+
+## Round-2 items
+
+- Should fix 1 (`from_hint` set by a losing lower-class hint): resolved per D-120 (4).
+  - gate.rs:523-536: when the class level is stricter, the hit takes the class-level mode and name with `from_hint = false`.
+  - gate.rs:553-555: a tie keeps `from_hint`.
+  - Test `a_hint_overruled_by_the_class_level_does_not_force_skip` covers four cases: Account/Send(new) under `('*','Read:newsletter','allow')` proceed, a tying hint skips, a raising hint skips.
+- Should fix 2 (no IDNA): resolved by the D-120 subset (B-190). Changes:
+  - The full stops U+3002/U+FF0E/U+FF61 and full-width ASCII are mapped.
+  - Each label is Punycoded (RFC 3492, overflow-checked).
+  - Invisible, compatibility and combining input is refused.
+  - Tests: `unicode_domains_and_hints_are_canonical_or_rejected` and `punycode_matches_rfc_3492` (5 RFC vectors). Over PgStore: accept_t03.rs:347-362.
+  - Gaps remain; see Should fix 1.
+- Should fix 3 (`add_contact("")`): resolved. testing.rs:130-134 asserts a non-blank `contact_key`.
+- Should fix 4 (stale header, missing `on_timeout` check): resolved. gate_accept_t04.rs:4-6 now names D-111, and :103-104 asserts `OnTimeout::Skip`.
+- Note (StopReason embeds an uncleaned tool name): resolved. gate.rs:424 uses `card_text(&call.tool, 128)`, tested in `escapes_cannot_span_card_components`.
 
 ## Blocking
 
@@ -9,30 +32,49 @@ Checked against a clean `git archive HEAD` export, so other coders' uncommitted 
 
 ## Should fix
 
-1. gate.rs:336-355: `from_hint` is set to true whenever any hint hits, even when a lower-class hint loses to the class level. Example: an Account call with the hint `newsletter` and the rule `('*','Read:newsletter','allow')`. D-113 keeps the class-level ask (the Account default). That ask does not come from a hint rule, so D-110 (4) says it should time out to proceed. The code times it out to skip, and gate.rs:1134-1136 asserts that. The deviation is in the safe direction, but an unrelated allow rule makes Account stricter, and the spec does not say so. Fix one of two ways: set `from_hint` only when the hint's own mode decided the result, or record the stricter reading in D-113.
-2. gate.rs:131-152: `rule_domain` lowercases non-ASCII domains but does not run IDNA. A rule stored as `bücher.de` never matches a call domain `xn--bcher-kva.de`, which is the form URL hosts arrive in. That is the same silent dead rule that D-110 (1) set out to remove. Either reject non-ASCII or convert it to punycode. Write a blocker for supreme with a proposed default.
-3. testing.rs:125-127: `MemStore::add_contact` still skips the empty-person check that `touch_contact` does. This was round-1 item 5 and it is not fixed. A test can still create a `""` contact that PgStore would refuse.
-4. gate_accept_t04.rs:5-6: the header still says to run with `--features testing`, which is out of date after D-111. Also, `t04_send_empty_recipients_asks` (gate_accept_t04.rs:96-103) does not assert the D-113 `on_timeout == Skip`. The unit test gate.rs:760-762 covers it, so this is not blocking.
+1. crates/core/src/gate.rs:150-155 and :207-229: `rule_domain` still stores some keys that no URL host carries, which contradicts D-120 (1) ("refused, never mapped"). I checked each case with rustc 1.99:
+   - `str::to_lowercase` applies Final_Sigma, so `ΒΑΣ.gr` becomes `βας`, but UTS-46 maps Σ to σ (`βασ`).
+   - U+1E9E becomes `ß`, but UTS-46 maps it to `ss`.
+   - `compatibility_form` misses most CJK compatibility ideographs (U+F900..U+FAFF, U+2F800..U+2FA1F, which NFC maps) and the Hangul compatibility jamo (U+3131..U+318E, which NFKC maps). All of them are alphanumeric, so they are accepted and Punycoded as written.
+
+   Each case is the silent dead user rule D-110 (1) exists to prevent. The inputs are rare, so this is not blocking. Fix: lowercase per char (`char::to_lowercase`), refuse U+1E9E (or map it to `ss`), and add the ranges above to `compatibility_form`. Or take the `idna` crate as B-190 allows. Add these strings to the refusal or mapping tests.
+2. agent-memory/interfaces.yaml:28 (I-3 `rust:`): the list does not name `ANY_DOMAIN`, `rule_domain`, `rule_hint`, `rule_class_key` or `rule_key`. D-113 makes them the one canonicaliser, and core-pg now calls them (crates/core-pg/src/lib.rs:778, :908), so their behaviour is contract in fact. D-81/B-191 records the behaviour but not the names. File an `interface_changes` entry so supreme adds them to I-3 and lists core-pg as a consumer.
 
 ## Notes
 
-- D-110 (1): holds. `rule_domain`, `rule_hint`, `rule_class_key` and `rule_key` (gate.rs:131-207) are pub as D-113 names them. MemStore `set_rule` stores `rule_key`'s output (testing.rs:194-197). `resolve` canonicalises `call.domain` (gate.rs:318-322) and `hint_hits` canonicalises and dedups hints (gate.rs:382-399). If the domain does not canonicalise, only `'*'` rules apply (D-113). Tests: gate.rs:946-1042, testing.rs rules_are_stored_under_the_canonical_key. core-pg's own check_rule is out of scope.
-- D-110 (2): for each hint, the lookup runs C = call.class down to Read, and at each class tries `(domain, C:hint)` then `('*', C:hint)`, first hit only (gate.rs:386-397). Tests: gate.rs:1096-1122.
-- D-110 (3): across hints the most restrictive mode wins and strict is OR-ed (gate.rs:357-363), and any hint hit beats the class level. Tests: gate.rs:1044-1094. One combination is untested: a same-class hint `allow` together with a lower-class hint that the class level overrides. That case resolves to the more restrictive mode, which is the safe direction.
-- D-113 guard: a lower-class hit is max-ed with the class level and can never lower it (gate.rs:336-347). Test: gate.rs:1124-1140. Challenge rules are still refused on write (rule_key, gate.rs:199-205) and stopped before any lookup (gate.rs:253-262). Rule 3 / D-5 holds.
-- D-110 (4) / D-109: `may_proceed` requires no hint, and either Account, or Send with more than 0 new recipients. Strict is OR-ed from the run and the rule (gate.rs:274-281). So an empty-recipient Send asks and skips, and a user ask on Send(known) skips. Test: gate.rs:1142-1176. `on_timeout`/`default_mode` signatures are unchanged.
-- D-110 (5): `what` (from the classifier or generated), every value key and value, site and element pass through `card_text`. That covers CSI/OSC/DCS 7- and 8-bit, C0/C1, CR/LF, bidi and zero-width marks. Caps are 200/200/64/253 characters, plus 32 values and one summary row (gate.rs:452-640). An unterminated OSC keeps its text. Test: gate.rs:1178-1225. `StopReason.why` embeds `call.tool` without cleaning (gate.rs:256-258). D-110 (5) covers cards only, and tool names come from the registry, but T-07 should note it.
-- MemStore fidelity: timestamps truncated to micros, neighbors ordered (depth, id) then capped, blank recall/search returns empty, and the Invalid checks on node/edge/tool/contact all have tests in testing.rs.
-- ScriptedAsker: a queued `Timeout*` that contradicts `card.on_timeout` panics (testing.rs:649-662). Both directions are tested with `should_panic`.
-- D-111: a self dev-dependency (Cargo.toml) with no `required-features`. Plain `cargo test -p harness-core` ran all 5 binaries.
-- I-3: additions only (`ANY_DOMAIN`, the `rule_*` fns, all named by D-113). No I-3 signature changed. `check` is async.
-- Hard rules: no keys or .env. No vault value reaches a return value or a fixture (only the literal `@vault(card)`). No sleeps, no em dashes, no HTML or pixels. The gate runs no side effects. Every `unwrap` is in `#[cfg(test)]`.
-- Commit ids: c22ece0 claims H-1.2, H-1.3, D-110 and D-111, and all four are implemented. The D-113 guard shipped in c22ece0 and was recorded afterwards in 7732264.
-- Lookup cost: each hint can take up to 2 x (class rank + 1) `gate_rule` calls on PgStore. That costs local round trips, not model turns. A list-rules method would collapse them into one query later.
-- T-07: dispatch must pass eTLD+1 as `call.domain`. With `host:port` the code (as D-113 allows) silently skips a user's domain ask rule and falls back to `'*'` rules or the default.
+- D-120 (3) / D-81, the Send row (gate.rs:845-906, 908-942):
+  - `values[0]` is always the gate's `new recipients (N)` row.
+  - Blank recipients are dropped (gate.rs:431-436).
+  - New recipients are deduped by `contact_key`, first spelling kept (gate.rs:625-639).
+  - The caps are 32 recipients, 2000 characters, and a head + `…(+K chars)…` + `@domain` form for a recipient over 120 characters.
+  - `complete` requires every new recipient to be listed and `clean == r.trim()`. `may_proceed` requires `complete` (gate.rs:451-459).
+  - Tests: `send_card_lists_every_new_recipient` and `blank_recipients_are_not_recipients`. Both assert the row text and `on_timeout`.
+- Two spoof shapes the user can still see. Neither changes the decision, because the gate's own row stays first and keeps the true count:
+  - A classifier key with a homoglyph (Cyrillic `е` in `nеw recipients (0)`) passes the drop filter at gate.rs:951.
+  - One recipient string holding `a@x.com, b@y.com` is shown as written. It counts as one recipient and can proceed.
+- D-120 (2): `what_line` cleans every component before joining (gate.rs:826-843). This closes the OSC-across-recipients trick, and the test asserts both addresses survive and the card skips. `invisible` covers Default_Ignorable plus U+2800 (gate.rs:699-721).
+- D-110 (2)(3), D-113: unchanged apart from (4) above. A same-class hint `allow` combined with a lower-class hint that the class level raises still resolves to the class-level ask, which is the safe direction. Challenge stops before any lookup (gate.rs:419-428), and `rule_key` refuses a non-stop Challenge rule, hinted or not (gate.rs:351-357). D-5 holds.
+- D-109 / D-110 (4): `on_timeout` and `default_mode` keep their signatures. An ask proceeds only for a non-strict Account, or a non-strict Send(new) with a complete row, when no hint decided.
+- MemStore parity (testing.rs):
+  - `gate_rule` canonicalises its lookup like PgStore.
+  - `micros` truncates toward zero from 2000-01-01 as sqlx does, including the `since`/`now` bounds.
+  - `search` ports pg_trgm `word_similarity` with threshold 0.6 and matches PgStore's score (5/7) in both suites.
+  - SM-2 uses `ceil_days`.
+  - Each item has a regression test.
+- Hard rules:
+  - No keys and no sleeps.
+  - No vault value reaches a card. Args are scrubbed upstream, and only `@vault(...)` literals appear.
+  - No HTML or pixels.
+  - Non-test `unwrap`/`panic!` appear only in the ScriptedAsker test double (testing.rs:809).
+  - The `…` markers are U+2026, not em dashes, and cards are not user-sent drafts.
+- Commit ids: bae6c45 claims H-1, H-1.1..H-1.4, I-1, I-3, D-62, D-70, D-109, D-110, D-113, D-115 and D-120. All are implemented. `clean_card` is public as I-3 lists it (D-70). There is no unclaimed behaviour.
+- Lookup cost:
+  - Each distinct recipient takes one `contact` round trip.
+  - Each hint can take up to 2 x (class rank + 1) `gate_rule` calls.
+  - These are local round trips, not model turns.
 
 ## Verdict
 
-D-110 (1)-(5), D-113 and D-111 are implemented and the tests check real outcomes. There are no hard-rule breaks and I-3 is intact. The should-fix items are a deviation in the safe direction (1), a gap in IDN canonicalisation (2), and small leftovers in tests and the fake (3, 4).
+All round-2 should-fix items are resolved, and the D-120 behaviour is tested against real outcomes. There are no hard-rule breaks, I-3 signatures are intact, and clippy, fmt and the tests are green. What is left is a set of rare IDN mapping gaps and recording the canonicaliser names in I-3.
 
 Verdict: approve
