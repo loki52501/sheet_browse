@@ -300,3 +300,6 @@ decisions:
   - id: D-82
     text: "B-413 accepted (I-11 draft): __sbMedia frame() returns {t: null, why} and frames(id, times) returns a single {t: null, why} entry when the call is refused as a whole (no base, unknown id, challenge); per-time failures keep one entry per requested time."
     why: "I-11 named a bare {why} only for list() and cues(), so sb-media (wave 2) had no written shape for whole-call refusals of frame()/frames(); writing it down before sb-media exists costs nothing, and a single t:null entry is distinguishable from per-time failures."
+  - id: D-83
+    text: "B-193 accepted (I-3 contract, names only): harness_core::gate::{ANY_DOMAIN, rule_domain, rule_hint, rule_class_key, rule_key} join I-3's rust list as the one canonicaliser for gate.rules keys (D-113, behaviour per D-81), and I-3 gains consumers: [core-pg]. Any other code that writes or looks up gate.rules keys calls these instead of normalising on its own."
+    why: "core-pg's rule_set and lookup already call them (crates/core-pg/src/lib.rs, verified on swarm/core), so they are contract in fact; naming them lets wave-2 consumers find them, and a second normaliser would reopen the look-alike-key problem D-62 and D-81 closed."

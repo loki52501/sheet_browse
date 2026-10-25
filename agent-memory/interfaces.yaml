@@ -25,7 +25,8 @@ interfaces:
     name: "Gate::check(call) -> Allow | Ask(card) | Stop(reason)"
     tier: contract
     crate: core
-    rust: "harness_core::gate::{Gate, Call, Decision, AskCard, OnTimeout, StopReason, AskOutcome, Asker, HINT_JOB_APPLICATION, HINT_SIGNATURE}; harness_core::class::{Class, Mode} + harness_core::gate::clean_card(AskCard) -> AskCard (D-70)"
+    rust: "harness_core::gate::{Gate, Call, Decision, AskCard, OnTimeout, StopReason, AskOutcome, Asker, HINT_JOB_APPLICATION, HINT_SIGNATURE}; harness_core::class::{Class, Mode} + harness_core::gate::clean_card(AskCard) -> AskCard (D-70); harness_core::gate::{ANY_DOMAIN, rule_domain, rule_hint, rule_class_key, rule_key} (the one canonicaliser for gate.rules keys, D-113, D-83)"
+    consumers: [core-pg]
     spec: docs/01-HARNESS-CORE.md#H-1
     notes: "Class order D-36; rule lookup D-39; Challenge stops before any rule; empty Send recipients = Send(new); strict = run OR rule (D-48). check is async. Every ask card, from the gate or from ToolCtx::ask, goes through gate::clean_card (D-110 (5) control strip and caps); there is no second sanitiser (D-70). D-81 (B-191): rule domains are stored as Punycode A-labels (non-mappable Unicode refused); rule hints use only ASCII a-z 0-9 _ - .; a Send card's values[0] is always the gate-written (\"new recipients (N)\", list) row and any other value under that key is dropped; blank recipients are ignored and duplicates count once."
   - id: I-4
