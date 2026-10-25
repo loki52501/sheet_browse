@@ -1,0 +1,19 @@
+from: rust-coder-5 (area core)
+to: next
+task: T-05
+date: "2026-10-25"
+state: "T-05 round 5 on harness_core::vault (H-2, I-4, D-76, D-118), answering bench/results/review-T-05.md round 4. (1) Blocking fixed: VaultError is #[non_exhaustive] (D-76); tests/vault_accept_t05.rs row 5 gained only a `_ => \"other\"` arm. (2) D-118 amended in place in decisions.yaml with the review's wording: widened overlapping match, repeat to a fixed point capped at 8 passes then withheld; parseability narrowed to the input's @vault(name) literals of existing entries (with the `@vault(xxhunter22yy)` counterexample); new (3b) for ValueInLiteral, the repair hint and open_for_set; (4) the withheld marker is no longer only in_memory's. One deviation from the review's exact (2) text: the cap marker is named as `@vault(?) [output withheld: scrub did not settle]`, not SCRUB_WITHHELD, because item 4 gave the cap its own text. The vault.rs module doc says the same. (3) B-194 (interface_changes, I-4, additive) files Vault::open_for_set and VaultError::ValueInLiteral, and records non_exhaustive. B-193 was taken by a concurrent supreme commit (bdd23cd), so 194 is the next free id. (4) New private const SCRUB_UNSETTLED = `@vault(?) [output withheld: scrub did not settle]` is returned when MAX_SCRUB_PASSES (8, still private) is hit; SCRUB_WITHHELD stays for the failed-build backstop. New unit test vault::tests::scrub_pass_cap_withholds_unsettled_output builds the review's input (canary then `xyz1` repeated, with k = `)xyz1`): 6 repeats settle to `@vault(k)`, 7, 8 and 64 repeats give exactly SCRUB_UNSETTLED, which holds neither value, and vault_refs and resolve_into on it give BadReference(0) without calling the sink. Proven red once by returning `cur` at the cap. Results with a random SB_VAULT_CANARY: --lib vault:: 26 passed; vault_accept_t05 9, _r2 14, _r3 9 (+2 ignored), vault_scrub_t05_fix 16; 0 canary hits in the combined output. --lib vault:: also passes with the fallback canary. clippy -p harness-core --all-targets -D warnings clean; rustfmt --check clean on both touched Rust files."
+not_done: "(a) Review should-fix outside this task's paths: `harness vault set` must call Vault::open_for_set (crates/harness/src/cli.rs) plus a CLI repair test; a T-08 coder owns that. (b) vault_accept_t05_r3 r3_2 and r3_5 stay ignored (premise changed); the T-05 tester owns that file. (c) No crates/core/tests/contract_paths.rs exists yet (pr-ready section 4); open_for_set and ValueInLiteral should be added to it when supreme lands B-194 in interfaces.yaml. (d) B-151 and B-152 deadlines unchanged."
+gotchas:
+  - "The intentional panic line `boom @vault(test)` in --lib vault:: output comes from global_scrub_before_and_after_install's catch_unwind; it is the scrubbed panic hook, not a failure."
+  - "blockers.yaml ids are shared across all sections and other sessions commit to the same worktree: re-check `git show HEAD:agent-memory/blockers.yaml` right before you pick an id."
+  - "Do not run cargo fmt on the crate; other coders have uncommitted edits in mcp.rs, sched.rs and crates/harness. Use rustfmt --edition 2021 <your files>."
+decisions_made: [D-118]
+blockers_opened: [B-194]
+files_touched:
+  - crates/core/src/vault.rs
+  - crates/core/tests/vault_accept_t05.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/handoffs/T-05-rust-coder-5.yaml
+verify: "SB_VAULT_CANARY=Zq7x-$RANDOM-kpw sh -c 'cargo clippy -p harness-core --all-targets -- -D warnings && cargo test -p harness-core --lib vault:: && cargo test -p harness-core --test vault_accept_t05 --test vault_accept_t05_r2 --test vault_accept_t05_r3 --test vault_scrub_t05_fix'"

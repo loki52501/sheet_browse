@@ -422,6 +422,7 @@ fn row5_debug_and_errors_contain_no_value() {
             // Not reachable from outside (aho-corasick size limits); the vault.rs unit
             // test failed_build_withholds_output covers it.
             VaultError::ScrubUnavailable => "ScrubUnavailable",
+            _ => "other",
         })
         .collect();
     for want in [

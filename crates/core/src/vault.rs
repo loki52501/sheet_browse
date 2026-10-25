@@ -19,9 +19,14 @@
 //! [`spellings`]). All overlapping matches are found and the union of their spans is
 //! replaced, so two entries that overlap in the text leave no fragment behind. A match
 //! lying wholly inside an `@vault(name)` literal of an existing entry (or inside the
-//! `@vault(` of any opener) is ignored; a match that only overlaps one swallows the whole
-//! literal. Scrub repeats until nothing changes, so a literal it wrote cannot complete
-//! another value, the output stays parseable and `scrub(scrub(s)) == scrub(s)` (D-118).
+//! `@vault(` of any opener) is ignored; a match that only overlaps one is kept and widened
+//! to cover the whole literal. Scrub repeats until a pass changes nothing (at most
+//! 8 passes, after which the whole output is withheld), so a literal
+//! it wrote cannot complete another value and `scrub(scrub(s)) == scrub(s)`. The
+//! `@vault(name)` literals of existing entries in the input stay parseable by
+//! [`vault_refs`]; a well-formed reference to an unknown name whose name holds a value
+//! does not (`@vault(xx<v>yy)` scrubs to `@vault(xx@vault(n)yy)`), which leaks nothing
+//! (D-118).
 //!
 //! Value rules (D-118): `set` refuses, and `open` refuses a file holding, a non-empty
 //! value shorter than [`MIN_VALUE_CHARS`] characters (`ValueTooShort`), or one that
@@ -30,8 +35,11 @@
 //! initial, a state code) hits ordinary words everywhere and protects almost nothing,
 //! and a value inside a literal could not be told from it. Empty values are allowed and
 //! scrub nothing. Both errors name the entry, never the value, and tell the user to run
-//! `harness vault set <name>`; [`Vault::open_for_set`] opens such a file so that command
-//! can repair it.
+//! `harness vault set <name>`; [`Vault::open_for_set`] skips these rules so that command
+//! can repair such a file. `set` on that handle (and on [`Vault::in_memory`]) checks only
+//! the entry being set; `set` on a handle from `open` checks every entry of the re-read
+//! file. The withheld marker is the fail-closed output of an `in_memory` vault whose
+//! automaton could not be built, and of any scrub that hits the pass cap.
 //!
 //! Plaintext hygiene: values, decrypted plaintext, the serialized TOML and every
 //! scrub spelling live in `Zeroizing` buffers sized up front so they never reallocate
@@ -55,6 +63,7 @@ use aho_corasick::{AhoCorasick, MatchKind};
 use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum VaultError {
     /// The name only; never the value.
     #[error("no vault entry named {0:?}")]
@@ -543,6 +552,11 @@ fn parse_refs(s: &str) -> Result<Vec<Ref<'_>>, VaultError> {
 /// `resolve_into` on text holding the marker give `BadReference`: still fail closed.
 const SCRUB_WITHHELD: &str = "@vault(?) [output withheld: vault scrubber unavailable]";
 
+/// What [`Scrubber::scrub`] returns when [`MAX_SCRUB_PASSES`] passes did not reach a
+/// fixed point (text built to make every pass change one more span): the whole string
+/// is withheld, fail closed, with the same malformed `@vault(?)` reference (D-118).
+const SCRUB_UNSETTLED: &str = "@vault(?) [output withheld: scrub did not settle]";
+
 enum Matcher {
     /// No non-empty value: nothing to scrub.
     Empty,
@@ -746,7 +760,7 @@ impl Scrubber {
                 _ => return cur,
             }
         }
-        SCRUB_WITHHELD.to_owned()
+        SCRUB_UNSETTLED.to_owned()
     }
 
     /// One pass: redacts the union of all (overlapping) match spans, see
@@ -782,8 +796,10 @@ impl Scrubber {
     }
 }
 
-/// Bound on [`Scrubber::scrub`]'s passes. Ordinary text takes 1, a value completed by a
-/// literal scrub wrote takes 2 or 3; each pass changes at least one span.
+/// Bound on [`Scrubber::scrub`]'s passes, counting the confirming pass that changes
+/// nothing. Ordinary text takes 1, a value completed by a literal scrub wrote takes 2 or
+/// 3; each pass changes at least one span. Hitting the bound withholds the output as
+/// `@vault(?) [output withheld: scrub did not settle]` (D-118).
 const MAX_SCRUB_PASSES: usize = 8;
 
 /// `[start, end)` grown to cover every range of `ranges` (sorted, disjoint) it overlaps.
@@ -1630,6 +1646,39 @@ mod tests {
         ));
         let ok = Scrubber::try_build(&BTreeMap::new());
         assert!(ok.is_ok_and(|sc| matches!(sc.matcher, Matcher::Empty)));
+    }
+
+    #[test]
+    fn scrub_pass_cap_withholds_unsettled_output() {
+        // Every `xyz1` after the canary costs one pass: `)xyz1` (entry `k`) overlaps the
+        // `)` of the literal written before it, is widened over that literal, and writes
+        // `@vault(k)`, whose `)` completes the next repeat (review-T-05 round 4).
+        let c = canary();
+        let k = ")xyz1";
+        let v = vault_with(&[("test", c.clone()), ("k", k.to_owned())]);
+        let text = |repeats: usize| format!("{c}{}", "xyz1".repeat(repeats));
+        // One pass for the canary, one per repeat and one confirming pass: the most
+        // repeats that still settle within the cap.
+        let settles = MAX_SCRUB_PASSES - 2;
+        assert_eq!(v.scrub(&text(settles)), "@vault(k)");
+        assert_eq!(v.scrub(&format!("<{}>", text(settles))), "<@vault(k)>");
+        for repeats in [settles + 1, settles + 2, 64] {
+            let out = v.scrub(&text(repeats));
+            // Fail closed: the whole output is withheld, says why, and holds no value.
+            assert_eq!(out, SCRUB_UNSETTLED);
+            assert!(out.contains("did not settle"));
+            assert!(!out.contains(c.as_str()) && !out.contains(k));
+            assert!(matches!(vault_refs(&out), Err(VaultError::BadReference(0))));
+            let mut sunk = false;
+            assert!(matches!(
+                v.resolve_into(&out, |_| sunk = true),
+                Err(VaultError::BadReference(0))
+            ));
+            assert!(!sunk);
+        }
+        // The marker is a fixed point and differs from the failed-build marker.
+        assert_eq!(v.scrub(SCRUB_UNSETTLED), SCRUB_UNSETTLED);
+        assert_ne!(v.scrub(&text(settles + 1)), SCRUB_WITHHELD);
     }
 
     #[test]

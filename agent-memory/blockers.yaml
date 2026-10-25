@@ -152,6 +152,11 @@ blockers:
     default_taken: "ClaudeLauncher passes --disallowedTools for Bash(harness ask:*), Bash(harness gate:*) and Bash(harness vault:*) on every session it starts (scheduled and `harness run`), and a T-08 test asserts the argv. Answering asks, changing gate rules and vault entries stay user-only. Supreme may prefer a decision that moves the check into the CLI (e.g. refuse when SB_RUN_ID is set) as well."
     needs_user: false
 interface_changes:
+  - id: B-194
+    from: core
+    interface: I-4
+    change: "Additive pub items in harness_core::vault: Vault::open_for_set(path, key) -> Result<Vault, VaultError> (Vault::open without the D-118 value rules, for `harness vault set` only; set on that handle checks only the entry being set; never installed as the global scrubber) and VaultError::ValueInLiteral { name } (set or open of a value any of whose spellings occurs, ignoring ASCII case, inside `@vault(` or inside `@vault(n)` for an entry name n; names the entry only). VaultError is now #[non_exhaustive] as D-76 and the I-4 notes already say, so this and later variants break no downstream match; harness-core's own vault_accept_t05 row 5 gained a `_` arm."
+    why: "D-118 (3b): a value inside a literal is invisible to scrub, so set and open must refuse it by name; both refusals point the user to `harness vault set <name>`, which needs a way to open the file open refuses, or the repair hint loops (review-T-05 round 4). Default until supreme answers: as implemented in T-05 round 5."
   - id: B-101
     from: core
     interface: I-1
