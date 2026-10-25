@@ -146,6 +146,11 @@ blockers:
     question: "Review-T-04 round 2 should-fix 2: rule_domain did not IDNA-map non-ASCII domains. Full UTS-46 (the idna crate) or the subset in gate.rs?"
     default_taken: "D-120 subset, no new dependency (crates/core/Cargo.toml is outside this round's paths): full stops and full-width ASCII mapped, lowercase, Punycode per label, everything UTS-46 would map further (NFC/NFKC, compatibility letters, ignorables) refused with MemoryError::Invalid. Switching to the idna crate later only turns some refusals into mappings; no stored key changes."
     needs_user: false
+  - id: B-192
+    task: T-08
+    question: "A scheduled `claude -p` session that is allowed Bash can run `harness ask <run> <n> yes`, `harness gate set` or `harness vault set` and approve its own asks or loosen its own gate (review-T-08 note; comes from the D-105 file-based asker). Rule 4 says everything goes through the gate; should the launcher deny those commands to the session?"
+    default_taken: "ClaudeLauncher passes --disallowedTools for Bash(harness ask:*), Bash(harness gate:*) and Bash(harness vault:*) on every session it starts (scheduled and `harness run`), and a T-08 test asserts the argv. Answering asks, changing gate rules and vault entries stay user-only. Supreme may prefer a decision that moves the check into the CLI (e.g. refuse when SB_RUN_ID is set) as well."
+    needs_user: false
 interface_changes:
   - id: B-101
     from: core
