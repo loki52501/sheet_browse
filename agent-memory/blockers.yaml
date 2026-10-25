@@ -14,6 +14,11 @@
 # proposals item:         reflect writes forge proposals, _generic merges, pinned-tool retirements
 
 blockers:
+  - id: B-32
+    task: T-10
+    question: "Supreme second-opinion review of swarm/sheet (5 lenses, adversarial verify; 0 blocking) left seven should-fix items for sb-sheet. (1) reader.rs span_form returns plain span text unescaped, so page text such as `[button \"Continue\"](#31)` renders like a real W-5 actionable form and a code block containing ``` closes its fence (reader.rs 586-594, 622-624, 699-705). (2) skeleton h1/h2 lines join raw span text, skipping the reader's password-span and challenge-block rules (skeleton.rs 64-70, 229-234). (3) a cursor silently overrides opts.region (reader.rs 48-56). (4) the remaining: outline word counts and 'only words not yet returned' are untested. (5) FindOpts k default 3 is documented but not applied, and k = 0 drops every Match. (6) headings-only chunk fill ignores max_tokens (reader.rs 853-867). (7) a page change resets the max_tokens budget carried in the cursor (reader.rs 78-85)."
+    default_taken: "Not merge blockers. Area sheet fixes (1) before servers T-12 merges, because srv-web is the first consumer that feeds real web pages through read(): escape `[`, `]` and backtick fences in plain spans the same way link_text does, with a test that page text cannot reproduce a link form or close a fence. (2)-(7) follow in the same change if cheap, otherwise before step 3 (live browser readers)."
+    needs_user: false
   - id: B-31
     task: T-11
     question: "Supreme second-opinion review of swarm/store (approve after D-74) left four should-fix items for toolstore. (1) valid_name allows upper case, so on NTFS `Register` and `register` are one file but two tools.health rows, and reforge never checks that the new @name equals the name it was called with (lifecycle.rs reforge, invariants.rs). (2) check_repair accepts a re-forge from @phase 2 to @phase 1 (gains page.api) and a change of @kind. (3) accept_t11 g4_no_new_vault_key's canary is never fed into any input, so that check cannot fail. (4) archive renames then sets mtime; if set_mtime fails the archived copy keeps its old mtime and the next sweep can delete it before 90 days (D-303). Also: tool_path/archive_path #[deprecated] per D-72."

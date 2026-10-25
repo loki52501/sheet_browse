@@ -4,6 +4,8 @@ Launch sub-orchestrator sessions, one Windows Terminal tab per area, each in its
   scripts\swarm\launch.ps1 -Areas core,sheet,store,page          # wave 1
   scripts\swarm\launch.ps1 -Areas servers,driver                 # wave 2
   scripts\swarm\launch.ps1 -Areas core -Resume                   # reopen an existing worktree
+  scripts\swarm\launch.ps1 -Areas core,page -Restart             # fresh session on an existing worktree,
+                                                                  # told to commit WIP, merge main, resume
 
 Requires: git, Windows Terminal (wt), claude on PATH. Run from the repo root on main, with
 everything committed. Worktrees go to <drive>:\sb-swarm\wt\<area> (see below).
@@ -15,8 +17,10 @@ that tells claude to read prompts/suborch/<area>.md from its own worktree.
 #>
 param(
   [Parameter(Mandatory=$true)][string[]]$Areas,
-  [switch]$Resume
+  [switch]$Resume,
+  [switch]$Restart
 )
+if ($Restart) { $Resume = $true }
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location $root
@@ -34,6 +38,7 @@ $wtRoot = Join-Path (Split-Path $root -Qualifier) "\sb-swarm\wt"
 if (-not (Test-Path $wtRoot)) { New-Item -ItemType Directory -Force $wtRoot | Out-Null }
 
 # -Areas core,sheet arrives as one string when called via `powershell -File`; split it.
+$launched = @()
 $Areas = $Areas | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 
 foreach ($a in $Areas) {
@@ -54,13 +59,32 @@ foreach ($a in $Areas) {
   $stateDir = Join-Path $wt ".claude\state"
   New-Item -ItemType Directory -Force $stateDir | Out-Null
   $first = "Read prompts/suborch/$a.md completely. It is your launch brief from the supreme orchestrator; follow it as your instructions."
+  if ($Restart) {
+    # claude --continue finds no transcript in a worktree, so a restart is a fresh session told where it stopped.
+    $first += " This is a restart: an earlier session for this area was stopped. Before anything else run git status and git log --oneline main..HEAD, read your newest handoffs in agent-memory/handoffs/ including the supreme comment lines at their end, commit any work in progress you find, merge main into your branch, then continue from the first unfinished step. Use the pr-ready skill before you mark anything pr_open."
+  }
+  # Temp on the worktree's drive: four sessions' cargo and subagent temp filled C: once (B-405).
+  $tmp = Join-Path (Split-Path $wtRoot -Parent) "tmp-$a"
+  New-Item -ItemType Directory -Force $tmp | Out-Null
   @(
     "`$env:SB_AREA = '$a'"
+    "`$env:TMP = '$tmp'"
+    "`$env:TEMP = '$tmp'"
+    "`$env:TMPDIR = '$tmp'"
     "Set-Location -LiteralPath '$wt'"
-    "claude '$first'"
+    "claude '$($first -replace "'", "''")'"
   ) | Set-Content -Encoding ASCII (Join-Path $stateDir "launch.ps1")
 
-  wt -w 0 new-tab --title "swarm:$a" -d "$wt" powershell -NoExit -ExecutionPolicy Bypass -File ".claude\state\launch.ps1"
-  Start-Sleep -Milliseconds 800  # wt needs a moment between tab spawns; no event to wait on
+  # Start-Process with a named window, not `wt -w 0`: from a host that is not a terminal (the VS Code
+  # extension) -w 0 has no current window and wt spawns nothing, silently.
+  Start-Process wt.exe -ArgumentList @('-w','swarm','new-tab','--title',"swarm:$a",'-d',$wt,'powershell','-NoExit','-ExecutionPolicy','Bypass','-File','.claude\state\launch.ps1')
+  $launched += $a
+  Start-Sleep -Milliseconds 1500  # wt needs a moment between tab spawns; no event to wait on
 }
+Start-Sleep -Seconds 8
+$running = @(Get-CimInstance Win32_Process -Filter "Name='claude.exe'" | ForEach-Object { if ($_.CommandLine -match 'suborch/(\w+)\.md') { $matches[1] } })
+foreach ($a in $launched) {
+  if ($running -contains $a) { Write-Host "session up: $a" } else { Write-Host "NOT RUNNING: $a (check its tab in the swarm window)" -ForegroundColor Red }
+}
+Write-Host "New tabs may wait on the folder-trust prompt until accepted."
 Write-Host "`nSupreme stays in $root on main."
