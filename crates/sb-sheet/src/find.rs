@@ -358,6 +358,12 @@ fn group_form(index: &[IndexRow], top1: &[usize]) -> Option<String> {
 
 pub(crate) fn find(index: &[IndexRow], text_blocks: &[TextBlock], opts: &FindOpts) -> Vec<FindHit> {
     let _ = text_blocks;
+    // `k = 0` is the documented default, not "drop every Match" (D-221).
+    let k = if opts.k == 0 {
+        crate::DEFAULT_FIND_K
+    } else {
+        opts.k
+    };
     let scorer = Scorer::new(index);
     let parts: Vec<Part> = opts
         .query
@@ -388,7 +394,7 @@ pub(crate) fn find(index: &[IndexRow], text_blocks: &[TextBlock], opts: &FindOpt
             }
             rank(r);
         }
-        for &(i, lex, s) in r.iter().take(opts.k) {
+        for &(i, lex, s) in r.iter().take(k) {
             let e = best.entry(i).or_insert((s, lex, p));
             if s > e.0 {
                 e.0 = s;
@@ -955,5 +961,43 @@ mod tests {
         assert_eq!(ids(&h), [2]);
         assert_eq!(h[0].reason, HitReason::Overlay);
         assert_eq!(find_lines(&idx, &h), "#2 input \"Password\" OVERLAY");
+    }
+
+    #[test]
+    fn k_defaults_to_three_and_zero_means_the_default() {
+        // B-32 item 5, D-221
+        assert_eq!(FindOpts::default().k, 3);
+        assert!(FindOpts::default().query.is_empty());
+        let idx: Vec<IndexRow> = [
+            "Save draft",
+            "Save copy",
+            "Save all",
+            "Save page",
+            "Save as",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| row(i as u32 + 1, "button", n))
+        .collect();
+        let matches = |h: &[FindHit]| {
+            h.iter()
+                .filter(|h| matches!(h.reason, HitReason::Match { .. }))
+                .count()
+        };
+        let three = q(&idx, "save", 3);
+        assert_eq!(matches(&three), 3, "{three:?}");
+        let zero = q(&idx, "save", 0);
+        assert_eq!(zero, three, "k = 0 must behave as k = 3");
+        let dflt = find(
+            &idx,
+            &[],
+            &FindOpts {
+                query: "save".into(),
+                ..FindOpts::default()
+            },
+        );
+        assert_eq!(dflt, three);
+        assert_eq!(matches(&q(&idx, "save", 1)), 1);
+        assert_eq!(matches(&q(&idx, "save", 10)), 5);
     }
 }

@@ -45,14 +45,30 @@ pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpt
             }
         },
     };
+    let asked: Option<String> = opts
+        .region
+        .as_ref()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty());
+    // An explicit region that differs from the cursor's wins: the read restarts there at
+    // chunk 1, keeping only the cursor's max_tokens budget (D-220). The same region (or none)
+    // continues the cursor's read.
+    let switched = match (&parsed, &asked) {
+        (Some(p), Some(a)) => norm(a) != norm(&p.region),
+        _ => false,
+    };
+    if switched {
+        if let Some(a) = &asked {
+            notes.push(format!(
+                "region {a:?} is not the cursor's region, restarted at chunk 1"
+            ));
+        }
+    }
     let region: Option<String> = match &parsed {
+        Some(_) if switched => asked,
         Some(p) if p.region.is_empty() => None,
         Some(p) => Some(p.region.clone()),
-        None => opts
-            .region
-            .as_ref()
-            .map(|r| r.trim().to_string())
-            .filter(|r| !r.is_empty()),
+        None => asked,
     };
 
     // Document order; drop everything inside a CHALLENGE or OPAQUE frame (D-5, D-55, I-5).
@@ -76,11 +92,15 @@ pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpt
     let mut start = Pos { unit: 0, off: 0 };
     let mut used = 0usize;
     if let Some(p) = &parsed {
-        if p.hash != hash {
-            notes.push("page changed since the cursor, restarted at chunk 1".to_string());
-        } else {
-            used = p.used;
-            start = resolve_pos(&units, p.order, p.off);
+        // The budget survives a page change or a region switch; only the position resets
+        // (D-220: max_tokens caps the whole read sequence, fails closed).
+        used = p.used;
+        if !switched {
+            if p.hash != hash {
+                notes.push("page changed since the cursor, restarted at chunk 1".to_string());
+            } else {
+                start = resolve_pos(&units, p.order, p.off);
+            }
         }
     }
 
@@ -110,7 +130,7 @@ pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpt
     let (body, next) = if start.unit >= units.len() || budget == 0 {
         (String::new(), start)
     } else {
-        let (pieces, next) = next_chunk(&units, start, budget);
+        let (pieces, next) = next_chunk(&units, start, budget, left);
         (join_pieces(&units, &pieces), next)
     };
     // Units are scrubbed already; this pass is defence in depth.
@@ -187,7 +207,7 @@ pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpt
 // ---------------------------------------------------------------------------------------------
 // Context: row lookup, sealed frames, password values to scrub.
 
-struct Ctx<'a> {
+pub(crate) struct Ctx<'a> {
     rows: HashMap<ElemRef, &'a IndexRow>,
     /// The row hosting each child frame.
     hosts: HashMap<FrameId, &'a IndexRow>,
@@ -198,7 +218,7 @@ struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    fn new(index: &'a [IndexRow]) -> Ctx<'a> {
+    pub(crate) fn new(index: &'a [IndexRow]) -> Ctx<'a> {
         let rows: HashMap<ElemRef, &IndexRow> = index.iter().map(|r| (r.elem(), r)).collect();
 
         let sealed = sealed_frames(index);
@@ -293,13 +313,14 @@ impl<'a> Linked<'a> {
     }
 }
 
-/// `t` as the renderers may escape it: table cells turn `|` into `\|`, link labels turn `[`
-/// `]` into `(` `)`, and quoted labels turn `"` into `'`. The escapes touch different
-/// characters, so every combination is listed and a scrub catches the value however it was
-/// rendered (D-212).
+/// `t` as the renderers may escape it: table cells turn `|` into `\|`, link labels and plain
+/// spans turn `[` `]` into `(` `)`, quoted labels turn `"` into `'`, and inline text cuts runs
+/// of three or more backticks to two (D-219). The escapes touch different characters, so
+/// every combination is listed and a scrub catches the value however it was rendered (D-212,
+/// D-218).
 fn escaped_spellings(t: &str) -> Vec<String> {
     let mut out = vec![t.to_string()];
-    for mask in 1u8..8 {
+    for mask in 1u8..16 {
         let mut v = t.to_string();
         if mask & 1 != 0 {
             v = link_text(&v);
@@ -309,6 +330,9 @@ fn escaped_spellings(t: &str) -> Vec<String> {
         }
         if mask & 4 != 0 {
             v = v.replace('|', "\\|");
+        }
+        if mask & 8 != 0 {
+            v = cut_backticks(&v);
         }
         if !out.contains(&v) {
             out.push(v);
@@ -517,9 +541,9 @@ struct Unit {
     label: Option<String>,
 }
 
-fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
-    // A block that links a CHALLENGE row, or a row inside a challenge's frame, shows only the
-    // challenge's link form (D-55, D-212).
+/// A block that links a CHALLENGE row, or a row inside a challenge's frame, shows only the
+/// challenge's link forms (D-55, D-212). Empty when the block links no challenge.
+fn challenge_forms(b: &TextBlock, ctx: &Ctx<'_>) -> Vec<String> {
     let mut challenge: Vec<String> = Vec::new();
     for e in b.spans.iter().filter_map(|s| s.elem.as_ref()) {
         if let Some(r) = ctx.linked(e).challenge() {
@@ -529,6 +553,25 @@ fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
             }
         }
     }
+    challenge
+}
+
+impl Ctx<'_> {
+    /// One block's spans on one line under the reader's span rules: the challenge link forms
+    /// for a block linking a CHALLENGE row, else [`inline`] (password spans as link forms,
+    /// plain text escaped, D-219), scrubbed. Shared with the skeleton's h1/h2 line.
+    pub(crate) fn block_line(&self, b: &TextBlock) -> String {
+        let challenge = challenge_forms(b, self);
+        if challenge.is_empty() {
+            self.scrub(&inline(&b.spans, self))
+        } else {
+            self.scrub(&challenge.join(" "))
+        }
+    }
+}
+
+fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
+    let challenge = challenge_forms(b, ctx);
     let mut unit = Unit {
         order: b.order,
         kind: b.kind,
@@ -558,7 +601,9 @@ fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
             unit.level = level;
             unit.prefix = format!("{hashes} ");
             unit.cont_prefix = unit.prefix.clone();
-            unit.label = Some(format!("{hashes} {}", plain_text(b, ctx).trim()));
+            // The label is printed in the `remaining:` outline: escape it like plain spans.
+            let label = cut_backticks(&link_text(plain_text(b, ctx).trim()));
+            unit.label = Some(format!("{hashes} {label}"));
             unit.body = body;
         }
         BlockKind::ListItem => {
@@ -588,9 +633,12 @@ fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
             if body.trim().is_empty() {
                 return None;
             }
-            unit.prefix = "```\n".to_string();
+            // One backtick longer than any run in the body, so the body cannot close it
+            // (D-219). The scrub below only replaces text with `***`, never adds backticks.
+            let fence = "`".repeat(longest_backtick_run(&body).saturating_add(1).max(3));
+            unit.prefix = format!("{fence}\n");
             unit.cont_prefix = unit.prefix.clone();
-            unit.close = "\n```".to_string();
+            unit.close = format!("\n{fence}");
             unit.body = body;
         }
         BlockKind::Quote => {
@@ -617,10 +665,11 @@ fn heading_level(b: &TextBlock) -> u8 {
 }
 
 /// A span as it renders: plain text, `[text](#id)` for links, `[alias "name"](#id)` for
-/// other actionable things. Password fields never show span text.
+/// other actionable things. Password fields never show span text. Plain text goes through
+/// [`link_text`], so page text cannot forge a link form (D-219); it is scrubbed first.
 fn span_form(s: &Span, ctx: &Ctx<'_>) -> (String, bool) {
     let Some(e) = &s.elem else {
-        return (ctx.scrub(&s.text), false);
+        return (link_text(&ctx.scrub(&s.text)), false);
     };
     let text = collapse(&ctx.scrub(&s.text));
     let form = match ctx.linked(e) {
@@ -663,8 +712,42 @@ fn link_text(s: &str) -> String {
     s.replace('[', "(").replace(']', ")")
 }
 
+/// Runs of three or more backticks cut to two, so text outside a code block cannot open or
+/// close a fence (D-219).
+fn cut_backticks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut run = 0usize;
+    for c in s.chars() {
+        if c == '`' {
+            run += 1;
+            if run > 2 {
+                continue;
+            }
+        } else {
+            run = 0;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The longest run of consecutive backticks in `s`.
+fn longest_backtick_run(s: &str) -> usize {
+    let mut best = 0usize;
+    let mut run = 0usize;
+    for c in s.chars() {
+        if c == '`' {
+            run += 1;
+            best = best.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    best
+}
+
 /// Inline text: spans concatenated (a space inserted around link forms when the source has
-/// none), whitespace collapsed.
+/// none), whitespace collapsed, backtick runs cut after joining (spans may meet in a run).
 fn inline(spans: &[Span], ctx: &Ctx<'_>) -> String {
     let mut raw = String::new();
     let mut prev_link = false;
@@ -679,7 +762,7 @@ fn inline(spans: &[Span], ctx: &Ctx<'_>) -> String {
         raw.push_str(&form);
         prev_link = is_link;
     }
-    collapse(&raw)
+    cut_backticks(&collapse(&raw))
 }
 
 fn needs_space(before: &str, next: &str) -> bool {
@@ -799,10 +882,12 @@ fn join_pieces(units: &[Unit], pieces: &[Piece]) -> String {
 /// Fill one chunk from `pos` within `budget` tokens. Breaks between units; a unit that does
 /// not fit an empty chunk is cut at a sentence, else a word, else a char boundary (D-204).
 /// A chunk that holds only headings never ends there: the next unit is cut into the room
-/// left, at least a quarter of the chunk (D-211, D-216). Always makes progress.
-fn next_chunk(units: &[Unit], pos: Pos, budget: usize) -> (Vec<Piece>, Pos) {
+/// left, at least a quarter of the chunk, but never past `hard` tokens (what max_tokens
+/// leaves, D-222). Always makes progress.
+fn next_chunk(units: &[Unit], pos: Pos, budget: usize, hard: Option<usize>) -> (Vec<Piece>, Pos) {
     // `budget` is a caller option: a huge value saturates instead of overflowing.
     let cap = budget.max(1).saturating_mul(CHARS_PER_TOKEN);
+    let hard_cap = hard.map_or(usize::MAX, |h| h.saturating_mul(CHARS_PER_TOKEN));
     let mut used = 0usize;
     let mut pieces: Vec<Piece> = Vec::new();
     let mut cur = pos;
@@ -851,12 +936,23 @@ fn next_chunk(units: &[Unit], pos: Pos, budget: usize) -> (Vec<Piece>, Pos) {
         };
         let overhead = chars(prefix) + chars(&u.close);
         let avail = if headings_only {
-            cap.saturating_sub(used + sep + overhead).max(cap / 4)
+            // The quarter-chunk floor only where max_tokens leaves room for it (D-222).
+            let taken = used + sep + overhead;
+            let room = cap.saturating_sub(taken).max(cap / 4);
+            let room = room.min(hard_cap.saturating_sub(taken));
+            let suffix_only =
+                used + sep + whole_chars > hard_cap && chars(rest_of(u, start)) <= room;
+            if room == 0 || suffix_only {
+                // No room under max_tokens for a piece of this unit (or only for the body
+                // without its table suffix): end the chunk on the headings.
+                break;
+            }
+            room
         } else {
             cap.saturating_sub(overhead)
         }
         .max(1);
-        let rest = &u.body[start..];
+        let rest = rest_of(u, start);
         if chars(rest) <= avail {
             // Only the suffix overflowed; take the whole unit.
             pieces.push(whole);
@@ -905,6 +1001,11 @@ fn next_chunk(units: &[Unit], pos: Pos, budget: usize) -> (Vec<Piece>, Pos) {
         pieces.pop();
     }
     (pieces, cur)
+}
+
+/// The body of `u` from byte `start` (a char boundary from [`skip_lead`]); empty if not.
+fn rest_of(u: &Unit, start: usize) -> &str {
+    u.body.get(start..).unwrap_or("")
 }
 
 fn skip_ws(s: &str, off: usize) -> usize {
@@ -1003,7 +1104,7 @@ fn plan_starts(units: &[Unit], from: Pos, chunk_tokens: usize) -> Vec<Pos> {
     let mut starts = Vec::new();
     let mut pos = from;
     while pos.unit < units.len() {
-        let (pieces, next) = next_chunk(units, pos, chunk_tokens);
+        let (pieces, next) = next_chunk(units, pos, chunk_tokens, None);
         if pieces.is_empty() && next == pos {
             break;
         }
@@ -1628,5 +1729,333 @@ let x"
             );
             assert!(out.cursor.is_none());
         }
+    }
+
+    /// The body of a read: without the first-line notes and the trailers.
+    fn body_of(md: &str) -> &str {
+        let md = md.split("\n\nremaining:").next().unwrap_or("");
+        let md = md.split("\n\ntruncated:").next().unwrap_or("");
+        let first = md.lines().next().unwrap_or("");
+        let is_note = first.starts_with("chunk ")
+            || first.contains("restarted at chunk 1")
+            || first.contains("not found")
+            || first.contains("cursor not understood");
+        if is_note {
+            md.split_once('\n').map(|x| x.1).unwrap_or("")
+        } else {
+            md
+        }
+    }
+
+    /// `n` distinct words `<p>00 <p>01 ...`.
+    fn words(p: &str, n: usize) -> String {
+        (0..n)
+            .map(|i| format!("{p}{i:02}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn heading(order: u32, t: &str) -> TextBlock {
+        block(order, 0, BlockKind::Heading, vec![text(t)])
+    }
+
+    #[test]
+    fn page_text_cannot_forge_a_link_form_or_close_a_fence() {
+        // B-32 item 1, D-219
+        let btn = row(31, "button", "Delete account");
+        let blocks = vec![
+            block(
+                1,
+                0,
+                BlockKind::Paragraph,
+                vec![
+                    text("Click [button \"Continue\"](#31) or [here](#f2.7), then "),
+                    link("Delete", btn.elem()),
+                    text(" it."),
+                ],
+            ),
+            block(
+                2,
+                0,
+                BlockKind::Code,
+                vec![text("x = 1\n```\nnot code ```` still [link \"y\"](#31)\n")],
+            ),
+            para(3, "```js"),
+            block(4, 0, BlockKind::Paragraph, vec![text("``"), text("`end")]),
+            block(5, 0, BlockKind::ListItem, vec![text("item ```` four")]),
+            heading(6, "Step [button \"Pay\"](#31)"),
+            para(7, &words("w", 5)),
+        ];
+        let md = read(std::slice::from_ref(&btn), &blocks, &opts(0)).markdown;
+        // the only link form is the real one
+        assert_eq!(md.matches("](#").count(), 1, "{md}");
+        assert!(md.contains("[button \"Delete\"](#31)"), "{md}");
+        assert!(
+            md.contains("Click (button \"Continue\")(#31) or (here)(#f2.7), then"),
+            "{md}"
+        );
+        // the fence is one longer than the longest run in the body, so the body cannot close it
+        let code = "`````\nx = 1\n```\nnot code ```` still (link \"y\")(#31)\n`````";
+        assert!(md.contains(code), "{md}");
+        let outside = md.replace(code, "");
+        assert!(!outside.contains("```"), "{outside}");
+        assert!(
+            outside.contains("``js") && outside.contains("``end"),
+            "{md}"
+        );
+        assert!(outside.contains("- item `` four"), "{md}");
+        assert!(md.contains("## Step (button \"Pay\")(#31)"), "{md}");
+
+        // outline labels are escaped too
+        let blocks = vec![
+            para(1, &words("a", 60)),
+            heading(2, "Next [button \"Pay\"](#31) ```"),
+            para(3, &words("b", 10)),
+        ];
+        let out = read(&[], &blocks, &opts(20));
+        assert_eq!(
+            out.remaining.last().map(|e| e.heading.as_str()),
+            Some("## Next (button \"Pay\")(#31) ``")
+        );
+        assert!(!out.markdown.contains("[button"), "{}", out.markdown);
+        assert!(!out.markdown.contains("```"), "{}", out.markdown);
+    }
+
+    #[test]
+    fn password_is_scrubbed_after_backtick_and_bracket_escapes() {
+        // D-219 escapes: a value split across spans meets in a backtick run that is then cut
+        let mut pw = row(5, "textbox", "Password");
+        pw.state.input_type = Some("password".into());
+        pw.state.value = Some(FieldValue::Text("pa```s[s]".into()));
+        let blocks = vec![
+            block(
+                1,
+                0,
+                BlockKind::Paragraph,
+                vec![text("my pa``"), text("`s[s] here")],
+            ),
+            block(
+                2,
+                0,
+                BlockKind::Code,
+                vec![text("let p = \"pa``"), text("`s[s]\";")],
+            ),
+        ];
+        let md = read(&[pw], &blocks, &opts(0)).markdown;
+        for leak in ["pa``s", "s(s)", "s[s]"] {
+            assert!(!md.contains(leak), "{leak} in {md}");
+        }
+        assert!(md.contains("my *** here"), "{md}");
+        assert!(md.contains("let p = \"***\";"), "{md}");
+    }
+
+    fn two_sections() -> Vec<TextBlock> {
+        vec![
+            heading(1, "Alpha"),
+            para(2, &words("a", 60)),
+            heading(3, "Beta"),
+            para(4, &words("b", 60)),
+        ]
+    }
+
+    #[test]
+    fn explicit_region_that_differs_from_the_cursor_wins() {
+        // B-32 item 3, D-220
+        let blocks = two_sections();
+        let first = read(
+            &[],
+            &blocks,
+            &ReadOpts {
+                region: Some("Alpha".into()),
+                ..opts(20)
+            },
+        );
+        assert!(body_of(&first.markdown).starts_with("## Alpha"));
+        let c = first.cursor.clone().expect("more alpha to read");
+
+        let other = read(
+            &[],
+            &blocks,
+            &ReadOpts {
+                region: Some("Beta".into()),
+                cursor: Some(c.clone()),
+                ..opts(20)
+            },
+        );
+        assert_eq!(other.chunk, 1, "{}", other.markdown);
+        assert!(
+            other
+                .markdown
+                .contains("region \"Beta\" is not the cursor's region, restarted at chunk 1"),
+            "{}",
+            other.markdown
+        );
+        assert!(
+            body_of(&other.markdown).starts_with("## Beta\n\nb00"),
+            "{}",
+            other.markdown
+        );
+        assert!(!other.markdown.contains("a5"), "{}", other.markdown);
+        // its cursor continues Beta
+        let next = read(
+            &[],
+            &blocks,
+            &ReadOpts {
+                cursor: other.cursor.clone(),
+                ..opts(20)
+            },
+        );
+        assert!(!body_of(&next.markdown).contains('a'), "{}", next.markdown);
+
+        // the same region (any case or spacing) or none continues the cursor's read
+        for region in [Some("Alpha"), Some(" alpha "), None] {
+            let cont = read(
+                &[],
+                &blocks,
+                &ReadOpts {
+                    region: region.map(str::to_string),
+                    cursor: Some(c.clone()),
+                    ..opts(20)
+                },
+            );
+            assert_eq!(cont.chunk, 2, "{region:?}: {}", cont.markdown);
+            assert!(!cont.markdown.contains("restarted"), "{}", cont.markdown);
+            let body = body_of(&cont.markdown);
+            assert!(body.starts_with('a') && !body.contains("a00"), "{body}");
+        }
+    }
+
+    fn body_words(md: &str) -> usize {
+        body_of(md)
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(word_count)
+            .sum()
+    }
+
+    #[test]
+    fn remaining_outline_counts_only_words_not_yet_returned() {
+        // B-32 item 4, D-211
+        let blocks = vec![
+            para(1, &words("t", 7)),
+            heading(2, "One"),
+            para(3, &words("o", 50)),
+            para(4, &words("p", 30)),
+            heading(5, "Two"),
+            para(6, &words("w", 12)),
+        ];
+        let total = 7 + 50 + 30 + 12;
+        let outs = read_all(&[], &blocks, opts(25));
+        assert!(outs.len() > 3, "{}", outs.len());
+        // chunk 1 holds (top) only: the heading travels with its section
+        assert_eq!(body_of(&outs[0].markdown), words("t", 7));
+        let entries = |o: &ReadOutput| -> Vec<(String, usize)> {
+            o.remaining
+                .iter()
+                .map(|e| (e.heading.clone(), e.words))
+                .collect()
+        };
+        assert_eq!(
+            entries(&outs[0]),
+            [("## One".to_string(), 80), ("## Two".to_string(), 12)]
+        );
+        assert!(
+            outs[0]
+                .markdown
+                .contains("remaining:\n- ## One (80 words)\n- ## Two (12 words)"),
+            "{}",
+            outs[0].markdown
+        );
+        // chunk 2 splits the 50-word paragraph: One counts only the words not returned
+        let got = body_words(&outs[1].markdown);
+        assert!(got > 0 && got < 50, "{}", outs[1].markdown);
+        assert_eq!(
+            entries(&outs[1]),
+            [("## One".to_string(), 80 - got), ("## Two".to_string(), 12)]
+        );
+        // every chunk: returned so far + remaining = all words
+        let mut returned = 0;
+        for o in &outs {
+            returned += body_words(&o.markdown);
+            let left: usize = o.remaining.iter().map(|e| e.words).sum();
+            assert_eq!(returned + left, total, "{}", o.markdown);
+        }
+        assert!(outs.last().is_some_and(|o| o.remaining.is_empty()));
+        // (top) is listed while text before the first heading is unread
+        let out = read(&[], &blocks[..3], &opts(5));
+        assert_eq!(
+            out.remaining.first().map(|e| e.heading.as_str()),
+            Some("(top)")
+        );
+    }
+
+    #[test]
+    fn headings_only_fill_stays_within_max_tokens() {
+        // B-32 item 6, D-222: four headings use 34 chars; 10 tokens leave 4 chars, less than
+        // the quarter-chunk floor (10 chars)
+        let blocks = vec![
+            heading(1, "Aaaa"),
+            heading(2, "Bbbb"),
+            heading(3, "Cccc"),
+            heading(4, "Dddd"),
+            para(5, &words("w", 100)),
+        ];
+        let out = read(
+            &[],
+            &blocks,
+            &ReadOpts {
+                max_tokens: Some(10),
+                ..opts(0)
+            },
+        );
+        let body = body_of(&out.markdown);
+        assert!(estimate(body) <= 10, "{} tokens: {body:?}", estimate(body));
+        assert!(body.contains("w00"), "{body:?}");
+        assert!(out.cursor.is_none());
+        assert!(
+            out.markdown.ends_with("truncated: max_tokens 10 reached"),
+            "{}",
+            out.markdown
+        );
+        // without max_tokens the floor still applies (a chunk is never headings only)
+        let out = read(&[], &blocks, &opts(10));
+        assert!(body_of(&out.markdown).contains("w00"), "{}", out.markdown);
+    }
+
+    #[test]
+    fn page_change_keeps_the_max_tokens_budget() {
+        // B-32 item 7, D-220
+        let page =
+            |p: &str| -> Vec<TextBlock> { (0..5u32).map(|i| para(i, &words(p, 50))).collect() };
+        let o = |cursor: Option<Cursor>| ReadOpts {
+            max_tokens: Some(60),
+            cursor,
+            ..opts(90)
+        };
+        let first = read(&[], &page("a"), &o(None));
+        let used = estimate(body_of(&first.markdown));
+        assert!(used > 40 && used < 60, "{used}");
+        let c = first.cursor.clone().expect("more to read");
+
+        let out = read(&[], &page("b"), &o(Some(c)));
+        assert!(
+            out.markdown.contains("page changed since the cursor"),
+            "{}",
+            out.markdown
+        );
+        let body = body_of(&out.markdown);
+        assert!(body.starts_with("b00"), "{body:?}");
+        assert!(
+            estimate(body) <= 60 - used,
+            "{} > {}: {body:?}",
+            estimate(body),
+            60 - used
+        );
+        assert!(out.cursor.is_none());
+        assert!(
+            out.markdown.ends_with("truncated: max_tokens 60 reached"),
+            "{}",
+            out.markdown
+        );
     }
 }

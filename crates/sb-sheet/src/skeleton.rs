@@ -20,6 +20,7 @@
 //! Counts, forms and warnings cover visible rows outside CHALLENGE/OPAQUE frames only.
 
 use crate::data::alias_for;
+use crate::reader::Ctx;
 use crate::sheet::{clean, sealed_frames};
 use crate::{BlockKind, FrameId, IndexRow, SkeletonOpts, TextBlock};
 
@@ -61,12 +62,28 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-fn block_text(b: &TextBlock) -> String {
-    b.spans
-        .iter()
-        .map(|s| s.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
+/// A heading rendered by the reader's span rules, capped at `cap` chars with `...`. The cut
+/// never lands inside a link form: plain text carries no `[` after escaping (D-219), so the
+/// last `[` before the cut starts a form, and an unfinished form is dropped whole.
+fn heading_text(rules: &Ctx<'_>, b: &TextBlock, cap: usize) -> String {
+    let line = rules.block_line(b);
+    if line.chars().count() <= cap {
+        return line;
+    }
+    let mut head: String = line.chars().take(cap.saturating_sub(3)).collect();
+    if let Some(i) = head.rfind('[') {
+        let tail = head.get(i..).unwrap_or("");
+        let closed = tail
+            .find("](")
+            .and_then(|j| tail.get(j + 2..))
+            .is_some_and(|t| t.contains(')'));
+        if !closed {
+            head.truncate(i);
+        }
+    }
+    head.truncate(head.trim_end().len());
+    head.push_str("...");
+    head
 }
 
 fn word_count(b: &TextBlock) -> usize {
@@ -225,11 +242,14 @@ pub(crate) fn skeleton(
         out.push(format!("+{} more forms", forms.len() - FORMS_CAP));
     }
 
-    // h1/h2 from text blocks; without blocks, the rows' section headings.
+    // h1/h2 from text blocks through the reader's span rules (D-219): a password-linked span
+    // prints its link form only, a block linking a CHALLENGE row prints the iframe link form,
+    // plain text is escaped. Without blocks, the rows' section headings.
+    let rules = Ctx::new(index);
     let mut heads: Vec<String> = blocks
         .iter()
         .filter(|b| b.kind == BlockKind::Heading && matches!(b.level, Some(1) | Some(2)))
-        .map(|b| format!("h{} {}", b.level.unwrap_or(2), clean(&block_text(b), 60)))
+        .map(|b| format!("h{} {}", b.level.unwrap_or(2), heading_text(&rules, b, 60)))
         .filter(|s| s.len() > 3)
         .collect();
     if heads.is_empty() && blocks.is_empty() {
@@ -239,7 +259,11 @@ pub(crate) fn skeleton(
                 push_unique(&mut hs, h);
             }
         }
-        heads = hs.iter().map(|h| format!("h {}", clean(h, 60))).collect();
+        // Page text too: no `[..](#id)` look-alikes (D-219).
+        heads = hs
+            .iter()
+            .map(|h| format!("h {}", clean(&h.replace('[', "(").replace(']', ")"), 60)))
+            .collect();
     }
     if !heads.is_empty() {
         let mut line = heads
@@ -444,6 +468,107 @@ mod tests {
             s,
             "1 element: 1 link, 0 buttons, 0 fields
 ! CHALLENGE #3 iframe \"reCAPTCHA\""
+        );
+    }
+
+    fn heading(order: u32, level: u8, spans: Vec<Span>) -> TextBlock {
+        TextBlock {
+            order,
+            frame: 0,
+            kind: BlockKind::Heading,
+            level: Some(level),
+            landmark: Some("main".into()),
+            heading: None,
+            table: None,
+            header: false,
+            spans,
+        }
+    }
+
+    fn span(t: &str, elem: Option<crate::ElemRef>) -> Span {
+        Span {
+            text: t.into(),
+            elem,
+        }
+    }
+
+    #[test]
+    fn heading_line_follows_the_reader_span_rules() {
+        // B-32 item 2, D-219
+        let mut pw = row(5, "textbox", "Password");
+        pw.state.input_type = Some("password".into());
+        pw.state.value = Some(crate::FieldValue::Text("hunter2pass".into()));
+        let mut cap = row(3, "iframe", "reCAPTCHA");
+        cap.flags.challenge = true;
+        let blocks = vec![
+            heading(
+                1,
+                1,
+                vec![span("Sign in ", None), span("hunter2pass", Some(pw.elem()))],
+            ),
+            heading(
+                2,
+                2,
+                vec![
+                    span("Verify ", None),
+                    span("I'm not a robot", Some(cap.elem())),
+                ],
+            ),
+            heading(
+                3,
+                2,
+                vec![span("Press [button \"Continue\"](#31) now", None)],
+            ),
+            heading(4, 2, vec![span("Run ```js now", None)]),
+        ];
+        let s = skeleton(&[pw, cap], &blocks, &SkeletonOpts::default());
+        let line = s
+            .lines()
+            .find(|l| l.starts_with("h1 "))
+            .unwrap_or_else(|| panic!("no heading line: {s}"));
+        assert_eq!(
+            line,
+            "h1 Sign in [input \"Password\"](#5) · h2 [iframe \"reCAPTCHA\"](#3) · h2 Press (button \"Continue\")(#31) now · h2 Run ``js now"
+        );
+        assert!(!s.contains("hunter2pass") && !s.contains("robot"), "{s}");
+    }
+
+    #[test]
+    fn row_heading_fallback_cannot_forge_a_link_form() {
+        // no text blocks: the rows' section headings are page text too (D-219)
+        let mut r = row(2, "button", "Go");
+        r.heading = Some("Pay [button \"Confirm\"](#31)".into());
+        let s = skeleton(&[r], &[], &SkeletonOpts::default());
+        assert!(s.contains("h Pay (button 'Confirm')(#31)"), "{s}");
+        assert!(!s.contains("[button"), "{s}");
+    }
+
+    #[test]
+    fn long_heading_is_never_cut_inside_a_link_form() {
+        let b = row(7, "button", "Buy the extended warranty plan");
+        let blocks = vec![heading(
+            1,
+            1,
+            vec![
+                span("A heading with quite a few words before ", None),
+                span("", Some(b.elem())),
+            ],
+        )];
+        let s = skeleton(std::slice::from_ref(&b), &blocks, &SkeletonOpts::default());
+        let line = s
+            .lines()
+            .find(|l| l.starts_with("h1 "))
+            .unwrap_or_else(|| panic!("no heading line: {s}"));
+        assert_eq!(line, "h1 A heading with quite a few words before...");
+        let short = vec![heading(
+            1,
+            1,
+            vec![span("Buy ", None), span("", Some(b.elem()))],
+        )];
+        let s = skeleton(std::slice::from_ref(&b), &short, &SkeletonOpts::default());
+        assert!(
+            s.contains("h1 Buy [button \"Buy the extended warranty plan\"](#7)"),
+            "{s}"
         );
     }
 }
