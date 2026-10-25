@@ -37,12 +37,14 @@ impl ToolStore {
     /// `tools/<domain>/<name>.js`. For a `domain` or `name` that fails the D-310 check this is
     /// the empty path, which no file operation accepts, so it can never point outside the
     /// root. Mutators use [`ToolStore::try_tool_path`] and return `StoreError::BadPath`.
+    #[deprecated(note = "use try_tool_path / try_archive_path (D-72)")]
     pub fn tool_path(&self, domain: &str, name: &str) -> PathBuf {
         self.try_tool_path(domain, name).unwrap_or_default()
     }
 
     /// `tools/_archive/<domain>/<name>.<version>.js`; the empty path on bad input, as
     /// [`ToolStore::tool_path`].
+    #[deprecated(note = "use try_tool_path / try_archive_path (D-72)")]
     pub fn archive_path(&self, domain: &str, name: &str, version: i32) -> PathBuf {
         self.try_archive_path(domain, name, version)
             .unwrap_or_default()
@@ -51,11 +53,32 @@ impl ToolStore {
     /// Moves `tools/<domain>/<name>.js` to the archive as `version`. If that archive name is
     /// taken (the same version archived twice), `<name>.<version>.<n>.js` is used. Returns
     /// the archive path; `Ok(None)` when the tool file does not exist.
+    ///
+    /// Fails closed (D-314): if the archived file's mtime cannot be set to now, the file is
+    /// renamed back and the error returned, so an archived file always carries its archive
+    /// time and the 90-day sweep never measures from the tool's old mtime.
     pub fn archive(
         &self,
         domain: &str,
         name: &str,
         version: i32,
+    ) -> Result<Option<PathBuf>, StoreError> {
+        self.archive_with(domain, name, version, |to| {
+            fs::File::options()
+                .write(true)
+                .open(to)?
+                .set_modified(SystemTime::now())
+        })
+    }
+
+    /// [`ToolStore::archive`] with the set-mtime step as a seam, so the D-314 rollback can be
+    /// tested without forcing a real filesystem failure.
+    fn archive_with(
+        &self,
+        domain: &str,
+        name: &str,
+        version: i32,
+        set_mtime: impl FnOnce(&Path) -> std::io::Result<()>,
     ) -> Result<Option<PathBuf>, StoreError> {
         let from = self.try_tool_path(domain, name)?;
         if !from.is_file() {
@@ -75,10 +98,19 @@ impl ToolStore {
             fs::create_dir_all(dir)?;
         }
         fs::rename(&from, &to)?;
-        fs::File::options()
-            .write(true)
-            .open(&to)?
-            .set_modified(SystemTime::now())?;
+        if let Err(e) = set_mtime(&to) {
+            return Err(match fs::rename(&to, &from) {
+                Ok(()) => e.into(),
+                Err(back) => StoreError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "archive {domain}/{name}: setting the mtime of {} failed ({e}) and \
+                         moving it back failed too ({back}); the tool is at that path",
+                        to.display()
+                    ),
+                )),
+            });
+        }
         Ok(Some(to))
     }
 
@@ -191,14 +223,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ts = ToolStore::new(dir.path());
         fs::create_dir_all(dir.path().join("luma.com")).unwrap();
-        fs::write(ts.tool_path("luma.com", "register"), "a").unwrap();
+        let tool = ts.try_tool_path("luma.com", "register").unwrap();
+        fs::write(&tool, "a").unwrap();
         let to = ts.archive("luma.com", "register", 1).unwrap().unwrap();
         assert_eq!(to, dir.path().join("_archive/luma.com/register.1.js"));
-        assert!(!ts.tool_path("luma.com", "register").exists());
-        fs::write(ts.tool_path("luma.com", "register"), "b").unwrap();
+        assert!(!tool.exists());
+        fs::write(&tool, "b").unwrap();
         let to2 = ts.archive("luma.com", "register", 1).unwrap().unwrap();
         assert_eq!(to2, dir.path().join("_archive/luma.com/register.1.2.js"));
         assert_eq!(ts.archive("luma.com", "register", 3).unwrap(), None);
+    }
+
+    /// D-314: a failed set-mtime after the rename puts the tool back and returns the error.
+    #[test]
+    fn archive_fails_closed_when_mtime_cannot_be_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = ToolStore::new(dir.path());
+        fs::create_dir_all(dir.path().join("luma.com")).unwrap();
+        let tool = ts.try_tool_path("luma.com", "register").unwrap();
+        fs::write(&tool, "a").unwrap();
+        let archived = ts.try_archive_path("luma.com", "register", 1).unwrap();
+        let mut seen = None;
+        let r = ts.archive_with("luma.com", "register", 1, |to| {
+            seen = Some(to.to_path_buf());
+            assert!(to.is_file(), "set_mtime runs after the rename");
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "no mtime",
+            ))
+        });
+        assert!(
+            matches!(&r, Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "{r:?}"
+        );
+        assert_eq!(seen.as_deref(), Some(archived.as_path()));
+        assert_eq!(fs::read_to_string(&tool).unwrap(), "a");
+        assert!(!archived.exists());
+        // The real step succeeds and the archived copy carries the archive time, not the
+        // tool's old mtime.
+        let old = SystemTime::now() - std::time::Duration::from_secs(200 * 86_400);
+        fs::File::options()
+            .write(true)
+            .open(&tool)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let before = SystemTime::now() - std::time::Duration::from_secs(5);
+        let to = ts.archive("luma.com", "register", 1).unwrap().unwrap();
+        assert!(fs::metadata(&to).unwrap().modified().unwrap() >= before);
     }
 
     #[test]

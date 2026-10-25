@@ -114,8 +114,10 @@ impl ToolStore {
     /// A first row for a tool on disk with no row yet: `ephemeral` when its header says
     /// `@forged`, else `saved` (hand-written, G-5); `ephemeral` when the file is missing.
     fn new_row(&self, domain: &str, name: &str) -> ToolHealth {
-        let status = match fs::read_to_string(self.tool_path(domain, name))
+        let status = match self
+            .try_tool_path(domain, name)
             .ok()
+            .and_then(|p| fs::read_to_string(p).ok())
             .and_then(|s| parse_header(&s).ok())
         {
             Some(h) if h.forged.is_none() => ToolStatus::Saved,
@@ -354,7 +356,8 @@ impl ToolStore {
         Ok(h)
     }
 
-    /// T-5 re-forge under the same name: invariants (D-307), old file to
+    /// T-5 re-forge under the same name: the new `@name` must be `name` (D-312), invariants
+    /// (D-307, D-313), old file to
     /// `_archive/<domain>/<name>.<version>.js`, new file written, version += 1, status
     /// `repaired`, or `ask` when the new `@gate` floor is higher or the row was already `ask`
     /// (until [`ToolStore::confirm`], D-310).
@@ -377,6 +380,18 @@ impl ToolStore {
         if let Err(e) = check_repair(&old, new_src, RepairKind::Reforge) {
             self.log_invariant(store, domain, name, &e).await?;
             return Err(e);
+        }
+        // D-312: the new file is `<name>.js`, so its @name must be `name`. check_repair only
+        // compares with the old file's @name, which a hand edit may have left different from
+        // the file name. Refused before anything is written (no file, row or ledger).
+        match parse_header(new_src) {
+            Ok(h) if h.name != name => {
+                return Err(StoreError::Invariant(format!(
+                    "re-forge of {domain}/{name} names the tool {} (D-312)",
+                    h.name
+                )))
+            }
+            _ => {}
         }
         let gate = |src: &str| {
             parse_header(src)

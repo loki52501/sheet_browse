@@ -305,10 +305,14 @@ fn validators_accept_real_names_and_refuse_traversal() {
     ] {
         assert!(!valid_domain(d), "{d:?}");
     }
-    for n in ["list_jobs", "read_table", "register", "listJobs", "a-b"] {
+    for n in ["list_jobs", "read_table", "register", "a-b", "x2"] {
         assert!(valid_name(n), "{n}");
     }
     for n in [
+        // D-312: lower case only.
+        "listJobs",
+        "Register",
+        "REGISTER",
         "",
         "../../evil",
         "..",
@@ -323,20 +327,45 @@ fn validators_accept_real_names_and_refuse_traversal() {
     }
 }
 
+/// D-72: the deprecated builders keep their wave-0 behaviour, the empty path on bad input
+/// (including an upper-case name, D-312). The one test that still calls them.
+#[test]
+#[allow(deprecated)]
+fn deprecated_path_builders_return_the_empty_path_on_bad_input() {
+    let (dir, ts) = luma();
+    assert_eq!(ts.tool_path("luma.com", "../../evil"), PathBuf::new());
+    assert_eq!(ts.tool_path("..\\..", "evil"), PathBuf::new());
+    assert_eq!(ts.tool_path("\\windows", "x"), PathBuf::new());
+    assert_eq!(ts.tool_path("luma.com", "Register"), PathBuf::new());
+    assert_eq!(ts.archive_path("..", "x", 1), PathBuf::new());
+    assert_eq!(ts.archive_path("luma.com", "Register", 1), PathBuf::new());
+    assert_eq!(
+        ts.tool_path("luma.com", "register"),
+        dir.path().join("luma.com").join("register.js")
+    );
+    assert_eq!(
+        ts.archive_path("luma.com", "register", 3),
+        dir.path()
+            .join("_archive")
+            .join("luma.com")
+            .join("register.3.js")
+    );
+}
+
 #[test]
 fn path_builders_never_leave_the_root() {
     let (dir, ts) = luma();
     // Reviewer probes.
-    assert_eq!(ts.tool_path("luma.com", "../../evil"), PathBuf::new());
-    assert_eq!(ts.tool_path("..\\..", "evil"), PathBuf::new());
-    assert_eq!(ts.tool_path("\\windows", "x"), PathBuf::new());
-    assert_eq!(ts.archive_path("..", "x", 1), PathBuf::new());
     assert!(bad_path(ts.try_tool_path("luma.com", "../../evil")));
+    assert!(bad_path(ts.try_tool_path("..\\..", "evil")));
+    assert!(bad_path(ts.try_tool_path("\\windows", "x")));
+    assert!(bad_path(ts.try_tool_path("luma.com", "Register")));
+    assert!(bad_path(ts.try_archive_path("..", "x", 1)));
     assert!(bad_path(ts.try_tool_path("C:\\windows", "x")));
     assert!(bad_path(ts.try_archive_path("_archive", "x", 1)));
     assert!(bad_path(ts.archive("..", "evil", 1)));
     assert_eq!(
-        ts.tool_path("luma.com", "register"),
+        ts.try_tool_path("luma.com", "register").unwrap(),
         dir.path().join("luma.com").join("register.js")
     );
 }
@@ -534,7 +563,7 @@ async fn ask_survives_relocate() {
         .await
         .unwrap();
     assert_eq!((h.status, h.version), (ToolStatus::Ask, 3));
-    let src = fs::read_to_string(ts.tool_path("luma.com", "register")).unwrap();
+    let src = fs::read_to_string(ts.try_tool_path("luma.com", "register").unwrap()).unwrap();
     assert!(src.contains("button\"Sign up\""), "{src}");
 }
 
@@ -558,7 +587,7 @@ async fn ask_survives_miss_then_clean_runs() {
         store.row("luma.com", "register").unwrap().status,
         ToolStatus::Ask
     );
-    assert!(ts.tool_path("luma.com", "register").is_file());
+    assert!(ts.try_tool_path("luma.com", "register").unwrap().is_file());
 }
 
 #[tokio::test]
@@ -641,7 +670,7 @@ async fn sweep_idle_clock_is_the_later_of_last_ok_and_last_fail() {
         if let Some(t) = mtime {
             fs::File::options()
                 .write(true)
-                .open(ts.tool_path("luma.com", name))
+                .open(ts.try_tool_path("luma.com", name).unwrap())
                 .unwrap()
                 .set_modified(t.into())
                 .unwrap();
@@ -822,7 +851,7 @@ async fn retire_persists_the_row_before_moving_the_file() {
     assert!(r.is_err(), "{r:?}");
     let h = store.row("luma.com", "register").unwrap();
     assert_eq!(h.status, ToolStatus::Retired);
-    assert!(ts.tool_path("luma.com", "register").is_file());
+    assert!(ts.try_tool_path("luma.com", "register").unwrap().is_file());
     // Recoverable: the next sweep archives the retired file in place.
     fs::remove_file(dir.path().join("_archive")).unwrap();
     let done = ts.sweep(&store, Utc::now(), &|_| 0).await.unwrap();
@@ -830,7 +859,7 @@ async fn retire_persists_the_row_before_moving_the_file() {
         matches!(&done[..], [SweepAction::Archived { name, .. }] if name == "register"),
         "{done:?}"
     );
-    assert!(!ts.tool_path("luma.com", "register").exists());
+    assert!(!ts.try_tool_path("luma.com", "register").unwrap().exists());
 }
 
 #[tokio::test]
@@ -845,10 +874,13 @@ async fn reforge_rolls_back_when_the_row_cannot_be_written() {
         .await;
     assert!(matches!(r, Err(StoreError::Memory(_))), "{r:?}");
     assert_eq!(
-        fs::read_to_string(ts.tool_path("luma.com", "register")).unwrap(),
+        fs::read_to_string(ts.try_tool_path("luma.com", "register").unwrap()).unwrap(),
         REGISTER
     );
-    assert!(!ts.archive_path("luma.com", "register", 1).exists());
+    assert!(!ts
+        .try_archive_path("luma.com", "register", 1)
+        .unwrap()
+        .exists());
     assert!(dir
         .path()
         .join("_archive/luma.com")
@@ -869,7 +901,7 @@ async fn reforge_keeps_the_archive_when_the_rollback_fails() {
     let store = Store::default();
     store.put(row(ToolStatus::NeedsRepair, 1));
     store.fail_set.store(true, Ordering::SeqCst);
-    let path = ts.tool_path("luma.com", "register");
+    let path = ts.try_tool_path("luma.com", "register").unwrap();
     *store.block_path.lock().unwrap() = Some(path.clone());
     let new = REGISTER.replace(
         "const btn",
@@ -890,9 +922,37 @@ async fn reforge_keeps_the_archive_when_the_rollback_fails() {
     );
     assert!(msg.contains("_archive/luma.com/register.1.js"), "{msg}");
     assert!(path.is_dir(), "the injected fault is still in place");
-    let archived = ts.archive_path("luma.com", "register", 1);
+    let archived = ts.try_archive_path("luma.com", "register", 1).unwrap();
     assert_eq!(fs::read_to_string(&archived).unwrap(), REGISTER);
     assert_eq!(store.ledger_len(), 0);
     assert_eq!(store.row("luma.com", "register").unwrap().version, 1);
     drop(dir);
+}
+
+/// D-312: a re-forge whose new @name is not the name it was called with is refused and
+/// writes nothing, even when the old file (hand-edited) already carries that other @name,
+/// so check_repair's old-vs-new rename check cannot catch it.
+#[tokio::test]
+async fn reforge_refuses_a_new_name_that_is_not_the_called_name() {
+    let (dir, ts) = luma();
+    let other = REGISTER.replace("@name register", "@name signup");
+    let path = ts.try_tool_path("luma.com", "register").unwrap();
+    fs::write(&path, &other).unwrap();
+    let store = Store::default();
+    store.put(row(ToolStatus::NeedsRepair, 1));
+    let new = other.replace("const btn", "const x = 1;\n  const btn");
+    let r = ts
+        .reforge(&store, "luma.com", "register", &new, Utc::now())
+        .await;
+    assert!(
+        matches!(&r, Err(StoreError::Invariant(m)) if m.contains("signup") && m.contains("D-312")),
+        "{r:?}"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), other);
+    assert!(!dir.path().join("_archive").exists());
+    assert_eq!(
+        store.row("luma.com", "register").unwrap(),
+        row(ToolStatus::NeedsRepair, 1)
+    );
+    assert_eq!(store.ledger_len(), 0);
 }

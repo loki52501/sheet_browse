@@ -443,7 +443,7 @@ async fn accept_2_planted_mismatch_needs_repair_then_relocate_version_2() {
     let (_dir, ts) = sandbox();
     let store = FakeStore::default();
     store.seed(ToolStatus::Saved, "register", 1, 4).await;
-    let path = ts.tool_path("luma.com", "register");
+    let path = ts.try_tool_path("luma.com", "register").unwrap();
     let original = read(&path);
     let reg = tool(&ts, "lu.ma", "register");
     assert_eq!(
@@ -551,8 +551,8 @@ async fn accept_3_stale_ephemeral_retired_archived_then_deleted_after_90_days() 
     fresh.last_ok = Some(now - Duration::days(2));
     store.tool_health_set(fresh).await.unwrap();
 
-    let file = ts.tool_path("luma.com", "list_events");
-    let archived = ts.archive_path("luma.com", "list_events", 1);
+    let file = ts.try_tool_path("luma.com", "list_events").unwrap();
+    let archived = ts.try_archive_path("luma.com", "list_events", 1).unwrap();
     let done = ts.sweep(&store, now, &|_| 0).await.unwrap();
     assert_eq!(done.len(), 1, "{done:?}");
     assert!(
@@ -788,7 +788,7 @@ async fn t9_repair_changing_gate_or_removing_stop_rejected_and_logged() {
     let (dir, ts) = sandbox();
     let store = FakeStore::default();
     store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
-    let path = ts.tool_path("luma.com", "register");
+    let path = ts.try_tool_path("luma.com", "register").unwrap();
     let old = read(&path);
 
     let cases = [
@@ -917,9 +917,9 @@ async fn g4_no_new_vault_key() {
     let (dir, ts) = sandbox();
     let store = FakeStore::default();
     let login = "// @name login\n// @kind planner\n// @match /login\n// @args email:string\n// @gate Account\n// @phase 2\nexport default function (page, args) {\n  const p = page.find('input \"Password\"');\n  const b = page.find('button \"Log in\" SUBMIT');\n  return `t#${p}=@vault(luma_password); c#${b}; ?s`;\n}\n";
-    fs::write(ts.tool_path("luma.com", "login"), login).unwrap();
+    fs::write(ts.try_tool_path("luma.com", "login").unwrap(), login).unwrap();
     store.seed(ToolStatus::NeedsRepair, "login", 1, 0).await;
-    let reg_path = ts.tool_path("luma.com", "register");
+    let reg_path = ts.try_tool_path("luma.com", "register").unwrap();
     let reg_old = read(&reg_path);
     store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
 
@@ -948,22 +948,47 @@ async fn g4_no_new_vault_key() {
         .await
         .unwrap();
     assert_eq!((h.status, h.version), (ToolStatus::Repaired, 2));
+    // B-31 (3): the canary is fed in. The re-forge adds a new key, @vault(luma_otp_seed), and
+    // carries that key's value (the canary) as a trace line in the new source. Only the
+    // refusal keeps the value out of the tools tree: without the G-4 check the file is
+    // written and the sweep below finds the canary.
     let more = kept.replace(
-        "t#${p}=@vault(luma_password);",
-        "t#${p}=@vault(luma_password); t#9=@vault(luma_otp_seed);",
+        "  return `t#${p}=@vault(luma_password);",
+        &format!(
+            "  // trace: luma_otp_seed = {canary}\n  return `t#${{p}}=@vault(luma_password); t#9=@vault(luma_otp_seed);"
+        ),
     );
-    let e = ts
+    assert!(more.contains(&canary) && more.contains("@vault(luma_otp_seed)"));
+    let r = ts
         .reforge(&store, "luma.com", "login", &more, Utc::now())
-        .await
-        .unwrap_err();
-    assert!(e.to_string().contains("@vault(luma_otp_seed)"), "{e}");
+        .await;
 
-    // Canary sweep: health rows, ledger, every file under the tools root, the errors.
-    let mut haystack = format!("{:?}{:?}{e}", store.health.lock().unwrap(), store.events());
+    // Canary sweep: health rows, ledger, every file under the tools root, the result.
+    let mut haystack = format!(
+        "{:?}{:?}{r:?}",
+        store.health.lock().unwrap(),
+        store.events()
+    );
+    if let Err(e) = &r {
+        haystack.push_str(&e.to_string());
+    }
     for (_, c) in tree(dir.path()) {
         haystack.push_str(&c);
     }
     assert!(!haystack.contains(&canary), "vault canary leaked");
+
+    // ...and the re-forge was refused, naming the key only.
+    let e = r.unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Invariant(m) if m.contains("@vault(luma_otp_seed)")),
+        "{e}"
+    );
+    assert_eq!(read(&ts.try_tool_path("luma.com", "login").unwrap()), kept);
+    assert_eq!(
+        store.row("luma.com", "login").unwrap().version,
+        2,
+        "no new version"
+    );
 }
 
 /// G-4: @match may not be widened to another domain (scheme, host, //, ..), on re-forge or
@@ -973,7 +998,7 @@ async fn g4_match_not_widened_to_another_domain() {
     let (_dir, ts) = sandbox();
     let store = FakeStore::default();
     store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
-    let path = ts.tool_path("luma.com", "register");
+    let path = ts.try_tool_path("luma.com", "register").unwrap();
     let old = read(&path);
     for wide in [
         "https://evil.example/*",
@@ -998,7 +1023,7 @@ async fn g4_match_not_widened_to_another_domain() {
     }
     // A file already carrying a cross-domain @match is not loaded.
     fs::write(
-        ts.tool_path("luma.com", "wide"),
+        ts.try_tool_path("luma.com", "wide").unwrap(),
         "// @name wide\n// @kind reader\n// @match https://evil.example/*\n// @gate Read\nexport default function () { return {}; }\n",
     )
     .unwrap();
@@ -1139,7 +1164,7 @@ async fn t7_needs_repair_to_repaired_by_relocate_and_by_reforge() {
     let (dir, ts) = sandbox();
     let store = FakeStore::default();
     store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
-    let old = read(&ts.tool_path("luma.com", "register"));
+    let old = read(&ts.try_tool_path("luma.com", "register").unwrap());
     // The trace found the name field under a new label; body changes, header and ?s do not.
     let new = with_line(&old, "input \"Full name\"", "input \"Name\"");
     let h = ts
@@ -1151,7 +1176,10 @@ async fn t7_needs_repair_to_repaired_by_relocate_and_by_reforge() {
         read(&dir.path().join("tools/_archive/luma.com/register.1.js")),
         old
     );
-    assert_eq!(read(&ts.tool_path("luma.com", "register")), new);
+    assert_eq!(
+        read(&ts.try_tool_path("luma.com", "register").unwrap()),
+        new
+    );
     assert_eq!(store.tools_logged(), ["tools.reforge"]);
 }
 
@@ -1191,7 +1219,7 @@ async fn t7_needs_repair_to_retired_at_five_misses() {
     let (dir, ts) = sandbox();
     let store = FakeStore::default();
     store.seed(ToolStatus::Saved, "register", 1, 3).await;
-    let file = ts.tool_path("luma.com", "register");
+    let file = ts.try_tool_path("luma.com", "register").unwrap();
     for i in 1..=4 {
         let h = ts
             .record(&store, res("register", fp_miss(), Utc::now()))
@@ -1227,7 +1255,7 @@ async fn t7_retired_to_archive_to_delete() {
         matches!(&done[..], [SweepAction::Archived { version: 3, to, .. }] if *to == archived),
         "{done:?}"
     );
-    assert!(!ts.tool_path("luma.com", "register").exists());
+    assert!(!ts.try_tool_path("luma.com", "register").unwrap().exists());
     assert!(archived.exists());
     // Not deleted before 90 days.
     let d = ts
@@ -1270,11 +1298,11 @@ async fn t7_pinned_never_auto_retired_or_deleted() {
         (h.status, h.fails, h.pinned),
         (ToolStatus::NeedsRepair, 8, true)
     );
-    assert!(ts.tool_path("luma.com", "register").exists());
+    assert!(ts.try_tool_path("luma.com", "register").unwrap().exists());
 
     // Pinned tool's re-forge archives its old version; that archive is never deleted, and a
     // re-forge that raises the gate class asks first.
-    let old = read(&ts.tool_path("luma.com", "register"));
+    let old = read(&ts.try_tool_path("luma.com", "register").unwrap());
     let new = with_line(&old, "// @gate Submit", "// @gate Pay");
     let h = ts
         .reforge(&store, "luma.com", "register", &new, Utc::now())
@@ -1312,7 +1340,10 @@ async fn t7_pinned_never_auto_retired_or_deleted() {
     .unwrap();
     let d = ts2.sweep(&store2, now, &|_| 100).await.unwrap();
     assert!(d.is_empty(), "{d:?}");
-    assert!(ts2.tool_path("luma.com", "list_events").exists());
+    assert!(ts2
+        .try_tool_path("luma.com", "list_events")
+        .unwrap()
+        .exists());
     assert!(store2.events().is_empty());
 }
 
@@ -1321,7 +1352,7 @@ async fn t7_reforge_with_raised_floor_asks_then_confirm() {
     let (dir, ts) = sandbox();
     let store = FakeStore::default();
     store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
-    let old = read(&ts.tool_path("luma.com", "register"));
+    let old = read(&ts.try_tool_path("luma.com", "register").unwrap());
     // A payment step appeared: floor raised Submit -> Pay, ?s kept.
     let new = with_line(&old, "// @gate Submit", "// @gate Pay");
     let h = ts
@@ -1331,7 +1362,10 @@ async fn t7_reforge_with_raised_floor_asks_then_confirm() {
     assert_eq!((h.status, h.version), (ToolStatus::Ask, 2));
     let why = h.why.unwrap();
     assert!(why.contains("Submit") && why.contains("Pay"), "{why}");
-    assert_eq!(read(&ts.tool_path("luma.com", "register")), new);
+    assert_eq!(
+        read(&ts.try_tool_path("luma.com", "register").unwrap()),
+        new
+    );
     assert_eq!(
         read(&dir.path().join("tools/_archive/luma.com/register.1.js")),
         old
@@ -1359,7 +1393,7 @@ async fn g4_vault_key_built_by_concatenation_is_rejected() {
     let (_dir, ts) = sandbox();
     let store = FakeStore::default();
     store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
-    let old = read(&ts.tool_path("luma.com", "register"));
+    let old = read(&ts.try_tool_path("luma.com", "register").unwrap());
     let sneaky = with_line(
         &old,
         "t#${email}=${q(args.email)}; c#${btn}; ?s`",
@@ -1403,7 +1437,7 @@ async fn g4_match_backslash_and_percent_encoded_host_rejected() {
     let (_dir, ts) = sandbox();
     let store = FakeStore::default();
     store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
-    let old = read(&ts.tool_path("luma.com", "register"));
+    let old = read(&ts.try_tool_path("luma.com", "register").unwrap());
     let mut accepted = Vec::new();
     for wide in [
         r"/\evil.example/*",
@@ -1426,7 +1460,7 @@ async fn t7_ask_held_until_confirm() {
         let (dir, ts) = sandbox();
         let store = FakeStore::default();
         store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
-        let old = read(&ts.tool_path("luma.com", "register"));
+        let old = read(&ts.try_tool_path("luma.com", "register").unwrap());
         let new = with_line(&old, "// @gate Submit", "// @gate Pay");
         let h = ts
             .reforge(&store, "luma.com", "register", &new, Utc::now())
@@ -1574,7 +1608,7 @@ async fn d310_hostile_domain_or_name_refused_by_record_and_reforge() {
     let store = FakeStore::default();
     plant_bait(dir.path());
     let before = sorted_tree(dir.path());
-    let good_src = read(&ts.tool_path("luma.com", "register"));
+    let good_src = read(&ts.try_tool_path("luma.com", "register").unwrap());
     let mut pairs: Vec<(&str, &str)> = HOSTILE_DOMAINS.iter().map(|d| (*d, "register")).collect();
     pairs.extend(HOSTILE_NAMES.iter().map(|n| ("luma.com", *n)));
     let bad =
@@ -1628,16 +1662,6 @@ async fn d310_hostile_domain_or_name_refused_by_record_and_reforge() {
             matches!(ts.try_archive_path(d, n, 1), Err(StoreError::BadPath(_))),
             "try_archive_path({d:?}, {n:?})"
         );
-        assert_eq!(
-            ts.tool_path(d, n),
-            PathBuf::new(),
-            "tool_path({d:?}, {n:?})"
-        );
-        assert_eq!(
-            ts.archive_path(d, n, 1),
-            PathBuf::new(),
-            "archive_path({d:?}, {n:?})"
-        );
     }
     assert_eq!(sorted_tree(dir.path()), before, "files changed");
     assert!(store.health.lock().unwrap().is_empty(), "rows written");
@@ -1653,7 +1677,7 @@ async fn d310_sweep_never_acts_on_a_hostile_row() {
     let store = FakeStore::default();
     let now = Utc::now();
     plant_bait(dir.path());
-    let register_src = read(&ts.tool_path("luma.com", "register"));
+    let register_src = read(&ts.try_tool_path("luma.com", "register").unwrap());
     // The good row: a stale ephemeral, which sweep retires.
     ts.register_forged(&store, "luma.com", "list_events")
         .await
@@ -1700,14 +1724,17 @@ async fn d310_sweep_never_acts_on_a_hostile_row() {
     // Bait and the real register.js are untouched; the archive holds only list_events.
     assert_eq!(read(&dir.path().join("escape.js")), "bait");
     assert_eq!(read(&dir.path().join("outside/register.js")), "bait");
-    assert_eq!(read(&ts.tool_path("luma.com", "register")), register_src);
+    assert_eq!(
+        read(&ts.try_tool_path("luma.com", "register").unwrap()),
+        register_src
+    );
     let archived: Vec<PathBuf> = tree(&ts.root.join(ARCHIVE))
         .into_iter()
         .map(|(p, _)| p)
         .collect();
     assert_eq!(
         archived,
-        vec![ts.archive_path("luma.com", "list_events", 1)],
+        vec![ts.try_archive_path("luma.com", "list_events", 1).unwrap()],
         "archive"
     );
     for (p, _) in tree(dir.path()) {
@@ -1808,16 +1835,12 @@ fn d310_folder_for_hostile_host_never_leaves_root() {
                 "{h:?} -> {f:?}"
             );
         }
-        let tp = ts.tool_path(&f, "x");
-        assert!(
-            tp.as_os_str().is_empty() || strictly_under(&tp, &root),
-            "{h:?} -> {f:?} -> {tp:?}"
-        );
-        let ap = ts.archive_path(&f, "x", 1);
-        assert!(
-            ap.as_os_str().is_empty() || strictly_under(&ap, &root),
-            "{h:?} -> {f:?} -> {ap:?}"
-        );
+        if let Ok(tp) = ts.try_tool_path(&f, "x") {
+            assert!(strictly_under(&tp, &root), "{h:?} -> {f:?} -> {tp:?}");
+        }
+        if let Ok(ap) = ts.try_archive_path(&f, "x", 1) {
+            assert!(strictly_under(&ap, &root), "{h:?} -> {f:?} -> {ap:?}");
+        }
         for t in ts.load(h, "/").unwrap() {
             assert!(strictly_under(&t.path, &root), "{h:?} loaded {:?}", t.path);
         }
