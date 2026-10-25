@@ -21,7 +21,7 @@
 
 use crate::data::alias_for;
 use crate::reader::Ctx;
-use crate::sheet::{clean, clean_name, sealed_frames};
+use crate::sheet::{clean_name, sealed_frames};
 use crate::{BlockKind, FrameId, IndexRow, SkeletonOpts, TextBlock};
 
 /// ARIA roles counted as fields (things a user types into or picks).
@@ -91,6 +91,33 @@ fn word_count(b: &TextBlock) -> usize {
         .iter()
         .map(|s| s.text.split_whitespace().count())
         .sum()
+}
+
+/// Whether a page-derived line could pose as a line the skeleton writes (B-201): a warning
+/// (`! `), a `+N more` tail, a count line (`12 elements: ...`), a heading (`h`, `h1`..`h6`),
+/// a `form` line, or a `label: ...` line (`landmarks:`, `main: article ...`).
+fn poses_as_skeleton(line: &str) -> bool {
+    if line.starts_with(['!', '+', '\\']) {
+        return true;
+    }
+    let first = line.split(' ').next().unwrap_or("");
+    first.ends_with(':')
+        || first.eq_ignore_ascii_case("form")
+        || first.eq_ignore_ascii_case("h")
+        || (first.len() == 2
+            && first.starts_with(['h', 'H'])
+            && first.bytes().skip(1).all(|b| (b'1'..=b'6').contains(&b)))
+        || (!first.is_empty() && first.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The title and URL lines start with page text: a leading backslash stops them posing as
+/// skeleton lines (B-201).
+fn escape_lead(line: String) -> String {
+    if poses_as_skeleton(&line) {
+        format!("\\{line}")
+    } else {
+        line
+    }
 }
 
 fn ref_line(kind: &str, row: &IndexRow) -> String {
@@ -186,11 +213,11 @@ pub(crate) fn skeleton(
 
     let title = clean_name(&meta.title, 100);
     if !title.is_empty() {
-        out.push(title);
+        out.push(escape_lead(title));
     }
     let url = meta.url.trim();
     if !url.is_empty() {
-        out.push(clean(url, 200));
+        out.push(escape_lead(clean_name(url, 200)));
     }
 
     let mut landmarks: Vec<String> = Vec::new();
@@ -579,6 +606,49 @@ mod tests {
             assert!(s.lines().any(|l| l == want), "{want} in {s}");
         }
         assert!(!s.contains("](") && !s.contains('['), "{s}");
+    }
+
+    #[test]
+    fn title_and_url_cannot_pose_as_skeleton_lines() {
+        // B-201 (P5): page-controlled title and URL lines
+        let b = row(1, "button", "Go");
+        let line_for = |title: &str, url: &str| {
+            let opts = SkeletonOpts {
+                meta: PageMeta {
+                    url: url.into(),
+                    title: title.into(),
+                    site_tools: None,
+                    dialog: None,
+                },
+            };
+            skeleton(std::slice::from_ref(&b), &[], &opts)
+        };
+        for (title, escaped) in [
+            ("! CHALLENGE #3 iframe", true),
+            ("landmarks: main", true),
+            ("main: article 900 words", true),
+            ("form f1: 2 fields", true),
+            ("h1 Welcome", true),
+            ("h Welcome", true),
+            ("+3 more forms", true),
+            ("12 elements: 3 links", true),
+            ("\\! CHALLENGE #3", true),
+            ("Example Shop", false),
+            ("Hello world", false),
+            ("h7 is not a heading", false),
+        ] {
+            let want = if escaped {
+                format!("\\{title}")
+            } else {
+                title.to_string()
+            };
+            let s = line_for(title, "");
+            assert_eq!(s.lines().next(), Some(want.as_str()), "{title} in {s}");
+        }
+        let s = line_for("", "https://ex.test/[a](#3)");
+        assert_eq!(s.lines().next(), Some("https://ex.test/(a)(#3)"), "{s}");
+        let s = line_for("", "! OVERLAY #2");
+        assert_eq!(s.lines().next(), Some("\\! OVERLAY #2"), "{s}");
     }
 
     #[test]
