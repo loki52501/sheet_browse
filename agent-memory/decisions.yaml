@@ -312,3 +312,12 @@ decisions:
   - id: D-222
     text: "B-32 (6): a headings-only chunk that must split the next unit's body respects the max_tokens budget passed in (the cap/4 floor applies only when no max_tokens limit is lower)."
     why: "max_tokens is a hard cap on what the read returns; the floor existed to avoid a chunk of headings only, not to exceed the caller's cap."
+  - id: D-223
+    text: "Refines D-219 for code blocks (coder proposal P1): inside a code block `[` and `]` are kept and only the link shape is broken (`](` becomes `)(`); the longer-fence rule stays. Plain spans outside code keep the full link_text swap."
+    why: "Code with attributes and indexing (`#[tokio::main]`, `a[i]`) must stay readable for the model; a link form needs `](`, so breaking only that pair still makes forging impossible."
+  - id: D-224
+    text: "Refines D-220 (coder proposal P2): switching region restarts the position but keeps the cursor's used, like a page change."
+    why: "max_tokens caps one read sequence; any reset of position must not refill the budget (fails closed)."
+  - id: D-225
+    text: "Coder proposal P3: a rendered body line (outside code) that starts with a harness trailer or note word (`remaining:`, `truncated:`, `chunk N of M`, `note:`) gets a leading backslash; the skeleton title, form headings, warning names and sheet lines apply link_text to page-derived names in addition to the quote swap."
+    why: "Same defect class as B-32 (1): page text must not pose as harness syntax; the quote swap alone leaves a `[button 'x'](#3)` look-alike."
