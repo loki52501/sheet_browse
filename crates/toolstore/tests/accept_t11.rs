@@ -2102,3 +2102,382 @@ fn d308_reader_output_over_max_output_is_output_too_large() {
         "{r:?}"
     );
 }
+
+// ================================================================ D-78 batch additions (tester-3)
+//
+// B-31 items 1 to 4 as fixed in 93a2e4d: lower-case names and the reforge @name check (D-312),
+// the @kind and @phase repair check (D-313), the fed vault canary (B-31 item 3) and the
+// archive that fails closed (D-314).
+
+fn canary_value() -> String {
+    std::env::var("SB_VAULT_CANARY").unwrap_or_else(|_| {
+        format!(
+            "sbcanary-t3-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    })
+}
+
+/// D-312: an upper-case tool name is refused everywhere: the header parser, the loader, the
+/// name validator and every mutator. NTFS would make `SignUp.js` and `signup.js` one file.
+#[tokio::test]
+async fn d312_upper_case_name_refused() {
+    let (dir, ts) = sandbox();
+    let store = FakeStore::default();
+    for n in ["Register", "SignUp", "LIST_EVENTS", "listJobs"] {
+        let src = format!("// @name {n}\n// @kind reader\n// @gate Read\n");
+        let e = parse_header(&src).unwrap_err();
+        assert!(e.contains("@name") && e.contains("[a-z0-9_]+"), "{n}: {e}");
+        assert!(!valid_name(n), "{n}");
+        assert!(
+            matches!(check_tool_id("luma.com", n), Err(StoreError::BadPath(_))),
+            "{n}"
+        );
+        assert!(
+            matches!(ts.try_tool_path("luma.com", n), Err(StoreError::BadPath(_))),
+            "{n}"
+        );
+        assert!(
+            matches!(
+                ts.try_archive_path("luma.com", n, 1),
+                Err(StoreError::BadPath(_))
+            ),
+            "{n}"
+        );
+    }
+    // Lower case with digits and _ still passes.
+    assert!(parse_header("// @name list_events2\n// @kind reader\n// @gate Read\n").is_ok());
+    assert!(valid_name("list_events2"));
+
+    // The loader skips an upper-case tool file (its @name matches its file name) and reports it.
+    let site = ts.root.join("luma.com");
+    fs::write(
+        site.join("SignUp.js"),
+        "// @name SignUp\n// @kind reader\n// @match /*\n// @gate Read\nexport default function () { return {}; }\n",
+    )
+    .unwrap();
+    let report = ts.scan("lu.ma", "/e/abc");
+    let mut names: Vec<&str> = report
+        .tools
+        .iter()
+        .map(|t| t.header.name.as_str())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["list_events", "register"]);
+    let why = report
+        .skipped
+        .iter()
+        .find(|(p, _)| p.ends_with("SignUp.js"))
+        .map(|(_, w)| w.clone())
+        .unwrap_or_else(|| panic!("SignUp.js not reported: {:?}", report.skipped));
+    assert!(why.contains("@name"), "{why}");
+
+    // Every mutator refuses the upper-case spelling of a real tool and writes nothing.
+    store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
+    let before = sorted_tree(dir.path());
+    let rows = format!("{:?}", store.health.lock().unwrap());
+    let old = read(&ts.try_tool_path("luma.com", "register").unwrap());
+    let upper_src = with_line(&old, "// @name register", "// @name Register");
+    for outcome in [RunOutcome::Ok, fp_miss()] {
+        let r = ts
+            .record(&store, res("Register", outcome, Utc::now()))
+            .await;
+        assert!(matches!(r, Err(StoreError::BadPath(_))), "record: {r:?}");
+    }
+    let r = ts
+        .reforge(&store, "luma.com", "Register", &upper_src, Utc::now())
+        .await;
+    assert!(matches!(r, Err(StoreError::BadPath(_))), "reforge: {r:?}");
+    let r = ts.register_forged(&store, "luma.com", "Register").await;
+    assert!(
+        matches!(r, Err(StoreError::BadPath(_))),
+        "register_forged: {r:?}"
+    );
+    let r = ts.confirm(&store, "luma.com", "Register").await;
+    assert!(matches!(r, Err(StoreError::BadPath(_))), "confirm: {r:?}");
+    let r = ts.set_pinned(&store, "luma.com", "Register", true).await;
+    assert!(
+        matches!(r, Err(StoreError::BadPath(_))),
+        "set_pinned: {r:?}"
+    );
+    let r = ts.archive("luma.com", "Register", 1);
+    assert!(matches!(r, Err(StoreError::BadPath(_))), "archive: {r:?}");
+    assert_eq!(sorted_tree(dir.path()), before, "files changed");
+    assert_eq!(format!("{:?}", store.health.lock().unwrap()), rows);
+    assert!(store.events().is_empty(), "ledger written");
+}
+
+/// D-312: a re-forge whose new @name is not the name it was called with is refused and writes
+/// no file, no archive and no ledger event: (a) a plain rename, caught by check_repair and
+/// logged; (b) a hand-edited old file that already carries the other @name, so the old/new
+/// rename check cannot see it; (c) the upper-case spelling of the same name.
+#[tokio::test]
+async fn d312_reforge_with_a_different_name_refused() {
+    let (dir, ts) = sandbox();
+    let store = FakeStore::default();
+    store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
+    let path = ts.try_tool_path("luma.com", "register").unwrap();
+    let old = read(&path);
+
+    // (a) rename register -> signup.
+    let renamed = with_line(&old, "// @name register", "// @name signup");
+    let e = ts
+        .reforge(&store, "luma.com", "register", &renamed, Utc::now())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Invariant(m) if m.contains("renamed") && m.contains("signup")),
+        "{e}"
+    );
+    let h = store.row("luma.com", "register").unwrap();
+    assert_eq!((h.status, h.version), (ToolStatus::NeedsRepair, 1));
+    assert!(
+        h.why.as_deref().is_some_and(|w| w.starts_with("rejected:")),
+        "{h:?}"
+    );
+    assert_eq!(read(&path), old);
+    assert!(!ts.try_tool_path("luma.com", "signup").unwrap().exists());
+
+    // (c) Register (upper case): the new header is not valid.
+    let upper = with_line(&old, "// @name register", "// @name Register");
+    let e = ts
+        .reforge(&store, "luma.com", "register", &upper, Utc::now())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Invariant(m) if m.contains("@name")),
+        "{e}"
+    );
+    assert_eq!(read(&path), old);
+
+    // (b) the old file was hand-edited to @name signup; the new one keeps @name signup.
+    let hand = renamed.clone();
+    fs::write(&path, &hand).unwrap();
+    let seeded = store.row("luma.com", "register").unwrap();
+    let new = with_line(&hand, "const btn", "const x = 1;\n  const btn");
+    let e = ts
+        .reforge(&store, "luma.com", "register", &new, Utc::now())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Invariant(m) if m.contains("signup") && m.contains("D-312")),
+        "{e}"
+    );
+    assert_eq!(read(&path), hand);
+    assert_eq!(store.row("luma.com", "register").unwrap(), seeded);
+
+    assert!(!dir.path().join("tools/_archive").exists(), "archived");
+    assert!(store.events().is_empty(), "ledger written");
+}
+
+/// D-313: a repair may not change @kind (planner -> reader or reader -> planner). The re-forge
+/// is refused and logged; nothing is written. A relocate that changes @kind is refused too.
+#[tokio::test]
+async fn d313_kind_change_refused() {
+    let (dir, ts) = sandbox();
+    let store = FakeStore::default();
+    store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
+    store
+        .seed(ToolStatus::NeedsRepair, "list_events", 1, 0)
+        .await;
+    let reg = ts.try_tool_path("luma.com", "register").unwrap();
+    let le = ts.try_tool_path("luma.com", "list_events").unwrap();
+    let (reg_old, le_old) = (read(&reg), read(&le));
+
+    // Header-only change: gate, ?s count, vault keys and @match stay as they were, so @kind is
+    // the only thing a re-forge check can object to.
+    let cases = [
+        (
+            "register",
+            &reg,
+            &reg_old,
+            with_line(&reg_old, "// @kind planner", "// @kind reader"),
+            "@kind planner -> reader",
+        ),
+        (
+            "list_events",
+            &le,
+            &le_old,
+            with_line(&le_old, "// @kind reader", "// @kind planner"),
+            "@kind reader -> planner",
+        ),
+    ];
+    for (name, path, old, new, want) in &cases {
+        let e = ts
+            .reforge(&store, "luma.com", name, new, Utc::now())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, StoreError::Invariant(m) if m.contains(want)),
+            "{name}: {e}"
+        );
+        let h = store.row("luma.com", name).unwrap();
+        assert_eq!(
+            (h.status, h.version),
+            (ToolStatus::NeedsRepair, 1),
+            "{name}"
+        );
+        let why = h.why.unwrap_or_default();
+        assert!(why.starts_with("rejected:") && why.contains(want), "{why}");
+        assert_eq!(&read(path), *old, "{name} file changed");
+        let e = check_repair(old, new, RepairKind::Relocate).unwrap_err();
+        assert!(matches!(&e, StoreError::Invariant(_)), "{name}: {e}");
+    }
+    assert!(!dir.path().join("tools/_archive").exists(), "archived");
+    assert!(store.events().is_empty(), "ledger written");
+}
+
+/// D-313: @phase may go 1 -> 2 (narrows: no page.api) but not 2 -> 1 (gains page.api and runs
+/// on fetched HTML), including from a tool with no @phase line, which means 2.
+#[tokio::test]
+async fn d313_phase_lowered_refused_raised_allowed() {
+    let (dir, ts) = sandbox();
+    let store = FakeStore::default();
+    store.seed(ToolStatus::NeedsRepair, "register", 1, 0).await;
+    let reg = ts.try_tool_path("luma.com", "register").unwrap();
+    let reg_old = read(&reg);
+
+    // 2 -> 1, explicit @phase 2.
+    let lowered = with_line(&reg_old, "// @phase 2", "// @phase 1");
+    let e = ts
+        .reforge(&store, "luma.com", "register", &lowered, Utc::now())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Invariant(m) if m.contains("@phase lowered 2 -> 1")),
+        "{e}"
+    );
+    let h = store.row("luma.com", "register").unwrap();
+    assert_eq!((h.status, h.version), (ToolStatus::NeedsRepair, 1));
+    assert!(h.why.unwrap_or_default().contains("@phase lowered"));
+    assert_eq!(read(&reg), reg_old);
+
+    // 2 -> 1 from a tool with no @phase line (default 2).
+    let nophase_src = "// @name nophase\n// @kind reader\n// @match /*\n// @gate Read\nexport default function (page) {\n  return { url: page.url };\n}\n";
+    let np = ts.try_tool_path("luma.com", "nophase").unwrap();
+    fs::write(&np, nophase_src).unwrap();
+    store.seed(ToolStatus::NeedsRepair, "nophase", 1, 0).await;
+    let np_lowered = with_line(nophase_src, "// @gate Read", "// @gate Read\n// @phase 1");
+    let e = ts
+        .reforge(&store, "luma.com", "nophase", &np_lowered, Utc::now())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Invariant(m) if m.contains("@phase lowered 2 -> 1")),
+        "{e}"
+    );
+    assert_eq!(read(&np), nophase_src);
+    assert!(!dir.path().join("tools/_archive").exists(), "archived");
+    assert!(store.events().is_empty(), "ledger written");
+
+    // 1 -> 2 is allowed: list_events is @phase 1.
+    store
+        .seed(ToolStatus::NeedsRepair, "list_events", 1, 0)
+        .await;
+    let le = ts.try_tool_path("luma.com", "list_events").unwrap();
+    let le_old = read(&le);
+    let raised = with_line(&le_old, "// @phase 1", "// @phase 2");
+    let h = ts
+        .reforge(&store, "luma.com", "list_events", &raised, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!((h.status, h.version), (ToolStatus::Repaired, 2));
+    assert_eq!(read(&le), raised);
+    assert_eq!(
+        read(&dir.path().join("tools/_archive/luma.com/list_events.1.js")),
+        le_old
+    );
+    assert_eq!(store.tools_logged(), ["tools.reforge"]);
+    assert_eq!(tool(&ts, "lu.ma", "list_events").header.phase, 2);
+}
+
+/// G-4 vault canary, focused (B-31 item 3): a re-forge that adds a new @vault key and carries
+/// that key's value (SB_VAULT_CANARY) in its source is refused, and the canary is in no health
+/// row, no ledger event, no file under the tempdir and not in the result. The canary sweep is
+/// the first assertion, so with the G-4 vault-key check disabled this test fails on the leak.
+#[tokio::test]
+async fn g4_canary_fed_new_vault_key_refused_and_absent() {
+    let canary = canary_value();
+    let (dir, ts) = sandbox();
+    let store = FakeStore::default();
+    let login = "// @name login\n// @kind planner\n// @match /login\n// @gate Account\n// @phase 2\nexport default function (page) {\n  const p = page.find('input \"Password\"');\n  const b = page.find('button \"Log in\" SUBMIT');\n  return `t#${p}=@vault(luma_password); c#${b}; ?s`;\n}\n";
+    let path = ts.try_tool_path("luma.com", "login").unwrap();
+    fs::write(&path, login).unwrap();
+    store.seed(ToolStatus::NeedsRepair, "login", 1, 0).await;
+    let fed = login.replace(
+        "  return `t#${p}=@vault(luma_password);",
+        &format!(
+            "  // seed: {canary}\n  return `t#${{p}}=@vault(luma_password); t#8=@vault(luma_totp);"
+        ),
+    );
+    assert!(fed.contains(&canary) && fed.contains("@vault(luma_totp)"));
+    let r = ts
+        .reforge(&store, "luma.com", "login", &fed, Utc::now())
+        .await;
+    let mut haystack = format!(
+        "{:?}{:?}{r:?}",
+        store.health.lock().unwrap(),
+        store.events()
+    );
+    if let Err(e) = &r {
+        haystack.push_str(&e.to_string());
+    }
+    for (_, c) in tree(dir.path()) {
+        haystack.push_str(&c);
+    }
+    assert!(!haystack.contains(&canary), "vault canary leaked");
+    let e = r.unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Invariant(m) if m.contains("@vault(luma_totp)")),
+        "{e}"
+    );
+    assert_eq!(read(&path), login);
+}
+
+/// D-314: when the archived file's mtime cannot be set, archive() moves the tool back and
+/// returns the error, so no archived file carries the tool's old mtime. The failure is real:
+/// the tool file is read-only, which a rename allows and an open-for-write refuses.
+#[test]
+fn d314_archive_fails_closed_when_mtime_cannot_be_set() {
+    let (dir, ts) = sandbox();
+    let tool_file = ts.try_tool_path("luma.com", "register").unwrap();
+    let archived = ts.try_archive_path("luma.com", "register", 1).unwrap();
+    let content = read(&tool_file);
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(200 * 86_400);
+    fs::File::options()
+        .write(true)
+        .open(&tool_file)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let writable = fs::metadata(&tool_file).unwrap().permissions();
+    let mut ro = writable.clone();
+    ro.set_readonly(true);
+    fs::set_permissions(&tool_file, ro).unwrap();
+
+    let r = ts.archive("luma.com", "register", 1);
+    let back = tool_file.is_file();
+    let leaked = archived.exists();
+    // Undo the read-only bit wherever the file is, so the tempdir can be removed.
+    for p in [&tool_file, &archived] {
+        if p.exists() {
+            fs::set_permissions(p, writable.clone()).unwrap();
+        }
+    }
+    assert!(matches!(&r, Err(StoreError::Io(_))), "{r:?}");
+    assert!(back, "the tool was not moved back");
+    assert!(!leaked, "an archived copy was left with the old mtime");
+    assert_eq!(read(&tool_file), content);
+
+    // Writable again: archive succeeds and the archived file carries the archive time, not
+    // the tool's 200-day-old mtime.
+    let before = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+    let to = ts.archive("luma.com", "register", 1).unwrap().unwrap();
+    assert_eq!(to, archived);
+    assert!(!tool_file.exists());
+    assert!(fs::metadata(&to).unwrap().modified().unwrap() >= before);
+    drop(dir);
+}

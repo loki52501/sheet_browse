@@ -1,0 +1,18 @@
+from: tester-3 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-25"
+state: "Re-ran T-11 acceptance on swarm/store for the code at 93a2e4d (D-78 batch). The reviewer's later commits 7ba5719 and 9a2ecf4 do not touch crates/. Added 6 tests to crates/toolstore/tests/accept_t11.rs, which now has 35. d312_upper_case_name_refused covers parse_header, valid_name, check_tool_id, try_*, the loader skipping SignUp.js, and record, reforge, register_forged, confirm, set_pinned and archive giving BadPath. d312_reforge_with_a_different_name_refused covers a plain rename (logged), the upper-case @name, and the hand-edited old file with the D-312 check: nothing written. d313_kind_change_refused covers both directions, reforge and relocate. d313_phase_lowered_refused_raised_allowed covers explicit 2 -> 1 and default 2 -> 1 refused, and 1 -> 2 giving Repaired v2. g4_canary_fed_new_vault_key_refused_and_absent puts the canary sweep before any other assertion. d314_archive_fails_closed_when_mtime_cannot_be_set uses a real failure: the tool file is read-only, so the rename succeeds and the open-for-write fails. Mutation-checked, each restored with git checkout: disabling the vault-key check fails g4_canary_fed with 'vault canary leaked'; letting only luma_otp_seed through fails g4_no_new_vault_key with 'vault canary leaked'. The @kind, @phase, reforge @name, upper-case and archive mutations (no rollback; error ignored) each fail their tests. git diff crates/ lists only the test file. fmt --check, clippy --workspace --all-targets -D warnings, cargo test -p toolstore (lib 112, accept_t11 35, contract_paths 1), cargo test --workspace (261 passed, 0 failed, 0 ignored) and cargo check --workspace are all clean. Canary: 0 hits in every log and in the worktree. merge_gate.py store prints gate ok. bench/results/accept-T-11.md has 50 rows, all pass. Verdict: green."
+not_done: "1. The vault canary is still not planted as a real vault value: core T-05 Vault::in_memory, resolve_into and scrub are todo!() (crates/core/src/vault.rs:85-117). It is listed under Deferred, outside the table, as before. The two canary tests feed it through the tool source instead. 2. No row for G-5, T-5 auto @expects, T-6, T-8 or the docs/06 step 6 forge and reflect items other than G-4 (T-16, T-28)."
+gotchas:
+  - "The Write tool is blocked outside the worktree (guard_write), including the session scratchpad. Bash heredocs with JS quotes fail. Append tests with the Edit tool, and keep logs under target/tmp."
+  - "merge_gate.py splits table rows on every pipe, even an escaped one inside backticks. Describe sed patterns with closures or || in words."
+  - "g4_no_new_vault_key's first case (luma_email) fails before its canary sweep when the whole vault-key check is off. Its sweep is only reached with a key-specific mutation."
+  - "d314 relies on Windows and Unix both allowing a rename of a read-only file but refusing open-for-write. The no-rollback mutation proves the rename succeeds here. As root on Unix, open-for-write would succeed and the test would fail."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/toolstore/tests/accept_t11.rs
+  - bench/results/accept-T-11.md
+  - agent-memory/handoffs/T-11-tester-3.yaml
+verify: "cargo test -p toolstore --test accept_t11"
