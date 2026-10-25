@@ -1,0 +1,18 @@
+from: sheet sub-orchestrator (restart session)
+to: supreme
+task: T-10
+date: "2026-10-23"
+state: "T-10 done, wave-1 PR state for area sheet (D-46 local-only, no remote, so this commit is the PR). Review round 3 (bench/results/review-T-10.md, committed f348f10) verdict approve, no Blocking items. Acceptance round 3 (bench/results/accept-T-10.md, at c8e892a) verdict green. main merged at 5e69e97 (store f493fd3, D-72..D-74), no conflicts. After the merge: cargo build --workspace --all-targets clean. cargo test -p sb-sheet -p toolstore green (sb-sheet lib 57, acceptance_t10 20, find_register 8, read_article 11, skeleton_sheet 8; toolstore lib 95, accept_t11 29). clippy -p sb-sheet -p toolstore --all-targets -D warnings clean, cargo fmt --all --check clean. The skeleton example exits 0 on examples/register.index.json and prints CHALLENGE #11 and OVERLAY #17. tasks.yaml T-10 status done; swarm.yaml areas.sheet.status pr_open."
+not_done: "1. Supreme: second-opinion review of swarm/sheet, then scripts/swarm/merge.ps1 -Area sheet. 2. Live-index halves of docs/05 acc. 6/7 and the docs/04 live fetch belong to the sb-driver and srv-web waves. 3. Review 'carried minor' items are left as is, see review-T-10.md Notes (k=0 find returns only appended rows, cursor region overrides opts.region, decisions D-210..D-212 listed before D-205..D-208, sheet.rs:153 cites D-206 where D-218 applies)."
+gotchas:
+  - "toolstore depends on sb-sheet (IndexRow, FindOpts, ReadOpts, TextBlock). crates/toolstore/src/fingerprint.rs still uses a built-in role alias table 'until sb-sheet's data/roles.txt exists' (D-49). roles.txt now exists and data::alias_for is exported (D-59), so store can switch in a follow-up. Not done here because it is another area's crate."
+  - "Review round 3 and tester round 3 ran at the same time, so the review's 'report pinned to dd00fd6' should-fix was already resolved by 61775fd (report restamped at c8e892a, 20/20)."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/tasks.yaml
+  - agent-memory/swarm.yaml
+  - agent-memory/handoffs/T-10-suborch-2.yaml
+  - bench/results/review-T-10.md
+  - crates/sb-sheet/ (whole crate, see git diff --name-only main...swarm/sheet)
+verify: "cargo test -p sb-sheet -p toolstore --no-fail-fast"

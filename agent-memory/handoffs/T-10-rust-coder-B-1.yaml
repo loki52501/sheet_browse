@@ -1,0 +1,17 @@
+from: rust-coder-B
+to: tester
+task: T-10
+date: "2026-10-23"
+state: "W-5 read renderer (B-6.4) implemented in crates/sb-sheet/src/reader.rs: CHALLENGE-frame drop, main landmark or boilerplate scoring, region (landmark or heading section), light markdown (headings, nested lists, tables with |---|, fenced code, quotes, [text](#id) links, [alias \"name\"](#id) for other elements via data::alias_for), chunking between blocks with sentence/word splits for oversized blocks, chunk i of N, remaining outline, v1 cursors with hash restart, max_tokens over the whole read, garbage cursor safe. 2 unit tests in reader.rs and 11 integration tests in tests/read_article.rs pass; clippy --all-targets -D warnings clean. Not committed (orchestrator commits)."
+not_done: "No bench/pages/article.html written (optional). Infinite-scroll handling of B-6.4 is driver-side (sb-driver), not here."
+gotchas:
+  - "data::alias_for maps textbox -> input; reader element links depend on roles.txt order (input before textarea)."
+  - "Chunk numbering is recomputed from the region start on every call, so changing chunk_tokens mid-read renumbers but never repeats text."
+decisions_made: [D-210, D-211, D-212]
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/src/reader.rs
+  - crates/sb-sheet/tests/read_article.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/handoffs/T-10-rust-coder-B-1.yaml
+verify: "cargo test -p sb-sheet --test read_article"

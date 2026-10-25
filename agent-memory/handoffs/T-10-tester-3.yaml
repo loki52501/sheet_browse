@@ -1,0 +1,16 @@
+from: tester (T-10 round 3)
+to: sheet sub-orchestrator
+task: T-10
+date: "2026-10-23"
+state: "Round-3 acceptance for docs/05 B-6 (acc. 6, pure half of 7, B-6.1, B-6.3) and docs/04 W-5 (pure half), run on c8e892a (fixes 4220e1b plus the main merge). All 16 tests from rounds 1 and 2 pass. Four r3_* tests were added for D-217/D-218. First, a respelled e-mail query at k=1 keeps the four hits plus CHALLENGE and OVERLAY, in document order. Second, password values with pipe, bracket and quote characters are never emitted in any escaped spelling (table, paragraph, span text, list, quote, code). Third, spans that link into the challenge frame never leak its text or #f1. refs, and sheet never names regions that exist only in sealed frames. Fourth, the skeleton's content hint ignores a main inside an iframe. Results: acceptance_t10 20/20, unit 57/57, and every other test binary green. clippy --all-targets -D warnings and fmt are clean. The skeleton CLI exits 0. SB_VAULT_CANARY had 0 hits in the logs, runs/, the worktree and the tracked tree. merge_gate.check_accept returns None. Report: bench/results/accept-T-10.md, Verdict: green."
+not_done: "The live-index halves of docs/05 acc. 6/7 and the docs/04 live fetch belong to the sb-driver and srv-web waves."
+gotchas:
+  - "merge_gate splits table rows on every pipe, escaped or not. Never put a pipe character in a report cell."
+  - "Bash heredocs with many quotes failed to parse here. Append Rust test code with the Edit tool instead."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/tests/acceptance_t10.rs
+  - bench/results/accept-T-10.md
+  - agent-memory/handoffs/T-10-tester-3.yaml
+verify: "cargo test -p sb-sheet --no-fail-fast"

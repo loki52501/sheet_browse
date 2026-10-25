@@ -35,6 +35,11 @@ blockers:
     default_taken: "Area core closes them in step 3 together with page's readers: (a) digit-normalised matching for personal entries (match the value's digits with any non-digit separators between them, for values with at least 7 digits); (b) readers scrub their joined text, never per node, and core adds a prefix-of-value rule for an ellipsis-truncated tail of at least 8 characters; (c) add a capitalised base (first letter of each word upper-cased) for non-ASCII values. Accepted for Phase 1 without a fix: HTML entities (readers return decoded text, rule 5), quoted-printable (mail is read through the browser UI), punycode (IDN hosts only), unzeroed library internals (memory hygiene, documented in vault.rs)."
     needs_user: false
 
+  - id: B-32
+    task: T-10
+    question: "Supreme second-opinion review of swarm/sheet (5 lenses, adversarial verify; 0 blocking) left seven should-fix items for sb-sheet. (1) reader.rs span_form returns plain span text unescaped, so page text such as `[button \"Continue\"](#31)` renders like a real W-5 actionable form and a code block containing ``` closes its fence (reader.rs 586-594, 622-624, 699-705). (2) skeleton h1/h2 lines join raw span text, skipping the reader's password-span and challenge-block rules (skeleton.rs 64-70, 229-234). (3) a cursor silently overrides opts.region (reader.rs 48-56). (4) the remaining: outline word counts and 'only words not yet returned' are untested. (5) FindOpts k default 3 is documented but not applied, and k = 0 drops every Match. (6) headings-only chunk fill ignores max_tokens (reader.rs 853-867). (7) a page change resets the max_tokens budget carried in the cursor (reader.rs 78-85)."
+    default_taken: "Not merge blockers. Area sheet fixes (1) before servers T-12 merges, because srv-web is the first consumer that feeds real web pages through read(): escape `[`, `]` and backtick fences in plain spans the same way link_text does, with a test that page text cannot reproduce a link form or close a fence. (2)-(7) follow in the same change if cheap, otherwise before step 3 (live browser readers)."
+    needs_user: false
   - id: B-31
     task: T-11
     question: "Supreme second-opinion review of swarm/store (approve after D-74) left four should-fix items for toolstore. (1) valid_name allows upper case, so on NTFS `Register` and `register` are one file but two tools.health rows, and reforge never checks that the new @name equals the name it was called with (lifecycle.rs reforge, invariants.rs). (2) check_repair accepts a re-forge from @phase 2 to @phase 1 (gains page.api) and a change of @kind. (3) accept_t11 g4_no_new_vault_key's canary is never fed into any input, so that check cannot fail. (4) archive renames then sets mtime; if set_mtime fails the archived copy keeps its old mtime and the next sweep can delete it before 90 days (D-303). Also: tool_path/archive_path #[deprecated] per D-72."
@@ -162,6 +167,11 @@ interface_changes:
     interface: I-4
     change: "Additive pub items in harness_core::vault: fn default_path() -> Result<PathBuf, VaultError> (SB_VAULT_PATH, else <config_dir>/sheetbrowse/vault.toml.age; D-101), fn default_key() -> KeySource (keychain service `sheetbrowse`, account `vault`; D-101), const MIN_VALUE_CHARS: usize = 4 (D-118). VaultError gains ValueTooShort { name, min } (set or open of a non-empty value under MIN_VALUE_CHARS characters) and ScrubUnavailable (the scrub automaton could not be built; set writes nothing). Adding variants breaks an exhaustive match on VaultError; the only one is harness-core's own test vault_accept_t05 row 5, updated."
     why: "The CLI (`harness vault set`) and bootstrap need one definition of the D-101 defaults; D-118 needs typed errors so a refused short value and a failed scrubber are reported instead of silently over-scrubbing or withholding every output. Default until supreme answers: as implemented in T-05 round 3."
+  - id: B-200
+    from: sheet
+    interface: I-6
+    change: "Draft additions, no existing signature changed: sb_sheet::sheet_line(&IndexRow) -> String, sb_sheet::find_lines(&[IndexRow], &[FindHit]) -> String, sb_sheet::data::{aria_roles(alias) -> &[String], alias_for(aria_role) -> &str, role_prior(word) -> &[String], synonyms(word) -> &[String]}, sb_sheet::tokens::estimate(&str) -> usize, and an example binary `cargo run -p sb-sheet --example skeleton -- <index.json>`."
+    why: "srv-web and sb-mcp must render find and sheet lines identically (D-203), toolstore::fingerprint must read the same alias table (D-49, D-201), and servers need a smoke test that needs no browser."
   - id: IC-300
     from: store
     interface: I-7

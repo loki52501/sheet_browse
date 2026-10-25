@@ -1,0 +1,19 @@
+from: rust-coder-fixer
+to: next
+task: T-10
+date: "2026-10-23"
+state: "Review/audit round 1 fixed in crates/sb-sheet: reader uses sheet::is_password and sheet::sealed_frames, scrubs password values per unit before chunking, judges main only in frame 0, splits the unit after a headings-only chunk (D-211 acceptance a7 green), saturating cursor used; find matches synonym phrases as phrases, admits prior-only rows (weak), role nouns override task priors; CHALLENGE rows reported hidden or not in find and skeleton. fmt, clippy --all-targets -D warnings, cargo test -p sb-sheet (lib 48, acceptance_t10 13/13, find_register 8, read_article 11, skeleton_sheet 8) and cargo build --workspace all clean."
+not_done: "Tester to rerun the acceptance ladder; reviewer to re-check items 7-9 scoring choices (D-213, D-214) against register.html precision."
+gotchas:
+  - "skeleton content_hint still treats a main landmark in any frame as the page's main (same class as item 12, not in the round-1 list)."
+  - "D-214 changed behaviour: a query naming a role with no text match now returns that role's rows marked `?` instead of nothing."
+decisions_made: [D-213, D-214, D-215, D-216]
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/src/reader.rs
+  - crates/sb-sheet/src/find.rs
+  - crates/sb-sheet/src/skeleton.rs
+  - crates/sb-sheet/src/data.rs
+  - crates/sb-sheet/data/roles.txt
+  - agent-memory/decisions.yaml
+verify: "cargo test -p sb-sheet --no-fail-fast"

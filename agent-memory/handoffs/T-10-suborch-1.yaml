@@ -1,0 +1,19 @@
+from: sheet/suborch
+to: next
+task: T-10
+date: "2026-10-23"
+state: "T-10 claimed (e4c8a8a). Module scaffold committed (2a9c358): lib.rs delegates to find.rs, skeleton.rs, sheet.rs, reader.rs; data.rs, tokens.rs, data/roles.txt, data/synonyms.txt are stubs. Decisions D-200..D-204 and interface change B-200 recorded. Workflow wf_e019642d-16a is running: coders A+B in parallel, integrator commit, then reviewer + tester + 3 auditors (refuted findings dropped) and a fixer, looping until review approves and accept is green."
+not_done: "1) wait for the workflow to finish; 2) check bench/results/review-T-10.md (Verdict: approve) and accept-T-10.md (Verdict: green); 3) mark T-10 done in tasks.yaml; 4) set swarm.yaml areas.sheet.status: pr_open (local-only repo, D-46) and write the final handoff."
+gotchas:
+  - "Acceptance 6 runs with k=1 (D-54); the expected rows are #6 #7 #10 #11 #12 #17 of the hand-built register fixture (hidden promo rows #4/#5 have visible:false)."
+  - "Stop and SubagentStop hooks need a handoff newer than the session start."
+decisions_made: [D-200, D-201, D-202, D-203, D-204]
+blockers_opened: [B-200]
+files_touched:
+  - agent-memory/tasks.yaml
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - crates/sb-sheet/src/
+  - crates/sb-sheet/data/
+verify: "cargo test -p sb-sheet && cargo clippy -p sb-sheet --all-targets -- -D warnings"
+# supreme 2026-10-23 01:40: B-200 accepted as D-59; interfaces.yaml I-6 updated on main (sheet_line, find_lines, data::{aria_roles, alias_for, role_prior, synonyms}, tokens::estimate, skeleton example; toolstore added as consumer). Pull main (git merge main) before your PR.
