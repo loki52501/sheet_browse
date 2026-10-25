@@ -300,3 +300,15 @@ decisions:
   - id: D-82
     text: "B-413 accepted (I-11 draft): __sbMedia frame() returns {t: null, why} and frames(id, times) returns a single {t: null, why} entry when the call is refused as a whole (no base, unknown id, challenge); per-time failures keep one entry per requested time."
     why: "I-11 named a bare {why} only for list() and cues(), so sb-media (wave 2) had no written shape for whole-call refusals of frame()/frames(); writing it down before sb-media exists costs nothing, and a single t:null entry is distinguishable from per-time failures."
+  - id: D-219
+    text: "B-32 (1)/(2): every plain span the reader or the skeleton prints from page text goes through link_text (`[` to `(`, `]` to `)`), so page text cannot forge a `[role \"name\"](#id)` form; outside code blocks a run of three or more backticks is cut to two; a code block's fence is one backtick longer than the longest backtick run in its body (minimum three), so its content cannot close it. Skeleton h1/h2 lines render their spans through the reader's span rules (a password-linked span prints its link form only, a block linking a CHALLENGE row prints the iframe link form)."
+    why: "srv-web (T-12) feeds real pages through read(); a forged link form gives the model an id that does not exist or names a different element, and a closed fence lets page text pose as harness output. One escaping rule for both renderers keeps them from drifting."
+  - id: D-220
+    text: "B-32 (3)/(7): when ReadOpts.region is set and differs from the cursor's region, the explicit region wins and the read restarts at chunk 1 with a note; the max_tokens budget carried in a cursor (used) survives a page change (only the position resets)."
+    why: "The caller asked for a different region, so continuing the old one wastes a turn; and max_tokens caps what one read sequence spends, which a page change must not refill (fails closed)."
+  - id: D-221
+    text: "B-32 (5): FindOpts implements Default with k = 3, and find() treats k = 0 as the default 3 instead of dropping every Match row."
+    why: "The documented default must be applied in code; 0 meaning 'drop everything' silently returns only the appended rows, which reads like an empty page."
+  - id: D-222
+    text: "B-32 (6): a headings-only chunk that must split the next unit's body respects the max_tokens budget passed in (the cap/4 floor applies only when no max_tokens limit is lower)."
+    why: "max_tokens is a hard cap on what the read returns; the floor existed to avoid a chunk of headings only, not to exceed the caller's cap."
