@@ -43,6 +43,10 @@ blockers:
     task: T-19
     question: "A SUBMIT/submitish row with no form id (SPA forms built without <form>) gets no form context, so card, password and heading evidence elsewhere on the page is not used. Should injected.js assign a pseudo form id to such groups, or should sb-act use the same frame's formless rows as context?"
     default_taken: "Button-only context (D-433). Preferred fix is in injected.js: give formless field groups a synthetic form id so sheets, fingerprints and sb-act agree."
+  - id: B-32
+    task: T-10
+    question: "Supreme second-opinion review of swarm/sheet (5 lenses, adversarial verify; 0 blocking) left seven should-fix items for sb-sheet. (1) reader.rs span_form returns plain span text unescaped, so page text such as `[button \"Continue\"](#31)` renders like a real W-5 actionable form and a code block containing ``` closes its fence (reader.rs 586-594, 622-624, 699-705). (2) skeleton h1/h2 lines join raw span text, skipping the reader's password-span and challenge-block rules (skeleton.rs 64-70, 229-234). (3) a cursor silently overrides opts.region (reader.rs 48-56). (4) the remaining: outline word counts and 'only words not yet returned' are untested. (5) FindOpts k default 3 is documented but not applied, and k = 0 drops every Match. (6) headings-only chunk fill ignores max_tokens (reader.rs 853-867). (7) a page change resets the max_tokens budget carried in the cursor (reader.rs 78-85)."
+    default_taken: "Not merge blockers. Area sheet fixes (1) before servers T-12 merges, because srv-web is the first consumer that feeds real web pages through read(): escape `[`, `]` and backtick fences in plain spans the same way link_text does, with a test that page text cannot reproduce a link form or close a fence. (2)-(7) follow in the same change if cheap, otherwise before step 3 (live browser readers)."
     needs_user: false
   - id: B-31
     task: T-11
@@ -161,6 +165,11 @@ interface_changes:
     interface: I-11
     change: "Return-shape changes (D-405, D-423..D-425): before the first walk({base}) in a document, id(), index(), text(), fingerprint(), state(), name() and frames() return {why: \"no base\"} (array-returning calls return that object instead), walk() without a base returns it too, and resolve() answers stale; sb-driver must walk with a base after every navigation before any read. A challenge page returns index() = [one CHALLENGE row, role document], text() = [one other block linking it], frames() = [self with challenge: true]. __sbMedia (B-410): list() and cues() may return {why}, frames() entries may carry truncated: true and opts gains budgetMs (default 8000)."
     why: "The un-based first call reused ids across document generations (review Blocking 2) and an empty index for a challenge page was an unreported stop; consumers (sb-driver, sb-media) must handle the new shapes."
+  - id: B-200
+    from: sheet
+    interface: I-6
+    change: "Draft additions, no existing signature changed: sb_sheet::sheet_line(&IndexRow) -> String, sb_sheet::find_lines(&[IndexRow], &[FindHit]) -> String, sb_sheet::data::{aria_roles(alias) -> &[String], alias_for(aria_role) -> &str, role_prior(word) -> &[String], synonyms(word) -> &[String]}, sb_sheet::tokens::estimate(&str) -> usize, and an example binary `cargo run -p sb-sheet --example skeleton -- <index.json>`."
+    why: "srv-web and sb-mcp must render find and sheet lines identically (D-203), toolstore::fingerprint must read the same alias table (D-49, D-201), and servers need a smoke test that needs no browser."
   - id: IC-300
     from: store
     interface: I-7

@@ -1,0 +1,33 @@
+{
+  "url": "http://127.0.0.1:8000/register.html",
+  "title": "Create your account · Fixture Co",
+  "rows": [
+    {"id": 1, "frame": 0, "role": "link", "name": "Home", "landmark": "nav"},
+    {"id": 2, "frame": 0, "role": "link", "name": "Pricing", "landmark": "nav"},
+    {"id": 3, "frame": 0, "role": "link", "name": "Sign in", "landmark": "nav"},
+    {"id": 4, "frame": 0, "role": "textbox", "name": "Email for the offer", "heading": "Limited offer", "state": {"input_type": "email", "value": {"kind": "empty"}, "visible": false}, "landmark": "main"},
+    {"id": 5, "frame": 0, "role": "button", "name": "Register for the offer", "heading": "Limited offer", "state": {"visible": false}, "landmark": "main"},
+    {"id": 6, "frame": 0, "role": "textbox", "name": "Email", "heading": "Create your account", "state": {"autocomplete": "email", "input_type": "email", "value": {"kind": "empty"}}, "form": "f1", "landmark": "main"},
+    {"id": 7, "frame": 0, "role": "textbox", "name": "Password", "heading": "Create your account", "state": {"autocomplete": "new-password", "input_type": "password", "value": {"kind": "empty"}}, "form": "f1", "landmark": "main"},
+    {"id": 8, "frame": 0, "role": "textbox", "name": "Full name", "heading": "Create your account", "state": {"input_type": "text", "value": {"kind": "empty"}}, "form": "f1", "landmark": "main"},
+    {"id": 9, "frame": 0, "role": "combobox", "name": "Plan", "heading": "Create your account", "state": {"options": ["Basic", "Plus", "Pro"], "value": {"kind": "text", "text": "Basic"}}, "form": "f1", "landmark": "main"},
+    {"id": 10, "frame": 0, "role": "checkbox", "name": "I agree to the Terms of Service", "heading": "Create your account", "state": {"checked": false, "input_type": "checkbox"}, "form": "f1", "landmark": "main"},
+    {"id": 11, "frame": 0, "role": "iframe", "name": "reCAPTCHA", "heading": "Create your account", "flags": {"challenge": true, "opaque": true}, "form": "f1", "landmark": "main"},
+    {"id": 12, "frame": 0, "role": "button", "name": "Register", "heading": "Create your account", "state": {"submitish": true}, "flags": {"submit": true}, "form": "f1", "landmark": "main"},
+    {"id": 13, "frame": 0, "role": "textbox", "name": "Email", "heading": "Stay in the loop", "state": {"input_type": "email", "value": {"kind": "empty"}}, "form": "f2", "landmark": "footer"},
+    {"id": 14, "frame": 0, "role": "button", "name": "Subscribe", "heading": "Stay in the loop", "state": {"submitish": true}, "flags": {"submit": true}, "form": "f2", "landmark": "footer"},
+    {"id": 15, "frame": 0, "role": "link", "name": "Privacy", "heading": "Stay in the loop", "landmark": "footer"},
+    {"id": 16, "frame": 0, "role": "link", "name": "Terms", "heading": "Stay in the loop", "landmark": "footer"},
+    {"id": 17, "frame": 0, "role": "region", "name": "Cookie consent", "flags": {"overlay": true}},
+    {"id": 18, "frame": 0, "role": "button", "name": "Accept all", "landmark": "region"},
+    {"id": 19, "frame": 0, "role": "button", "name": "Reject", "landmark": "region"}
+  ],
+  "text": [
+    {"frame": 0, "kind": "paragraph", "landmark": "nav", "order": 0, "spans": [{"elem": "#1", "text": "Home"}, {"elem": "#2", "text": "Pricing"}, {"elem": "#3", "text": "Sign in"}]},
+    {"frame": 0, "kind": "heading", "landmark": "main", "level": 1, "order": 1, "spans": [{"text": "Create your account"}]},
+    {"frame": 0, "heading": "Create your account", "kind": "paragraph", "landmark": "main", "order": 2, "spans": [{"text": "Start your free trial. No card required."}]},
+    {"frame": 0, "kind": "heading", "landmark": "footer", "level": 2, "order": 3, "spans": [{"text": "Stay in the loop"}]},
+    {"frame": 0, "heading": "Stay in the loop", "kind": "paragraph", "landmark": "footer", "order": 4, "spans": [{"elem": "#15", "text": "Privacy"}, {"text": " · "}, {"elem": "#16", "text": "Terms"}]},
+    {"frame": 0, "kind": "paragraph", "landmark": "region", "order": 5, "spans": [{"text": "We use cookies to run this site."}]}
+  ]
+}

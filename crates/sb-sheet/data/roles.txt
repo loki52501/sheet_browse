@@ -1,0 +1,94 @@
+# sb-sheet data/roles.txt (D-49, D-201, B-6.2). Embedded with include_str!, parsed once.
+#
+# Two kinds of line. Blank lines and lines starting with `#` are ignored.
+#
+#   alias <alias>: <aria-role> [<aria-role> ...]
+#       The short alias that sheet lines, @fingerprint items and `name:role` queries use,
+#       and the lowercase ARIA roles it stands for (IndexRow.role vocabulary).
+#       alias_for(aria_role) is the FIRST alias line listing that role; a role on no line
+#       prints as itself. Every role named on an alias line is a known role for `name:role`.
+#
+#   prior <aria-role> [<aria-role> ...]: <word>, <word>, <multi word>, ...
+#       Role prior (B-6.2): a query word or phrase on the right gives +2 to elements whose
+#       role is on the left. Words are matched in normal form (lowercase, split on
+#       non-alphanumerics, joined by one space), so `sign up` and `sign-up` are the same key.
+#       A word may appear on several prior lines; its roles accumulate.
+#
+#   noun <aria-role> [<aria-role> ...]: <word>, ...      (see the role nouns section)
+
+# ---- aliases (first listing of a role wins for alias_for) ----
+alias input: textbox searchbox
+alias textarea: textbox
+alias select: combobox listbox
+alias button: button
+alias link: link
+alias checkbox: checkbox
+alias radio: radio
+alias switch: switch
+alias tab: tab
+alias menuitem: menuitem menuitemcheckbox menuitemradio
+alias option: option
+alias slider: slider
+alias spinbutton: spinbutton
+alias number: spinbutton
+alias iframe: iframe
+alias frame: iframe
+alias image: img
+alias img: img
+alias heading: heading
+alias dialog: dialog alertdialog
+alias region: region
+alias form: form
+alias search: search
+alias nav: navigation
+alias main: main
+alias banner: banner
+alias footer: contentinfo
+alias aside: complementary
+alias list: list
+alias item: listitem
+alias table: table grid
+alias row: row
+alias cell: cell gridcell columnheader rowheader
+alias tree: tree treeitem
+alias menu: menu menubar
+alias tablist: tablist
+alias tabpanel: tabpanel
+alias toolbar: toolbar
+alias progress: progressbar
+alias meter: meter
+alias tooltip: tooltip
+alias status: status alert
+alias video: video
+alias audio: audio
+alias canvas: canvas
+alias generic: generic group
+
+# ---- role priors ----
+prior textbox searchbox: email, e mail, mail, password, passcode, name, first name, last name, full name, username, user name, login name, phone, telephone, mobile, search, query, address, street, city, town, zip, postcode, postal code, message, comment, comments, note, notes, title, subject, company, organization, website, url, code, coupon, promo code, otp, card number, cvv, cvc, expiry, amount, quantity, age, birthday, date of birth, bio, description, reply, answer, text, keyword, keywords, to, cc, bcc, recipient, body
+prior searchbox: search, find, query, lookup
+prior checkbox switch: agree, accept, consent, subscribe, remember, remember me, opt in, newsletter, terms, i agree, keep me signed in, stay signed in, enable, disable, toggle, notify, notifications
+prior radio: choose, option, gender, pick one
+prior button: submit, register, sign up, signup, sign in, signin, login, log in, log out, logout, sign out, continue, next, back, previous, send, save, buy, purchase, checkout, pay, order, add to cart, add, create, join, apply, confirm, ok, cancel, close, dismiss, delete, remove, edit, update, upload, download, search, go, start, finish, done, reply, forward, compose, post, publish, share, follow, like, reject, allow, deny, accept all, reject all, verify, retry, refresh, menu, open, play, pause
+prior link: more, read more, read, details, home, learn more, see all, view, view all, profile, privacy, terms, about, contact, help, faq, blog, docs, documentation, pricing, careers, page, article, forgot password, forgot
+prior combobox listbox: country, state, region, province, plan, size, color, colour, language, currency, month, year, day, time zone, timezone, category, sort, sort by, quantity, type, gender, title
+prior tab: tab, section, settings, overview
+prior menuitem: menu item, action
+prior slider: volume, range, brightness
+prior iframe: captcha, recaptcha, frame, embed, video
+prior option: option, choice
+
+# ---- role nouns (D-214) ----
+#
+#   noun <aria-role> [<aria-role> ...]: <word>, <multi word>, ...
+#       A query that names a role (`help button`, `country dropdown`) gives +2 to that role
+#       only: when a part holds a role noun, its task-word priors above do not fire. The
+#       longest noun wins (`radio button` is a radio, not a button).
+noun button: button, btn
+noun link: link, hyperlink
+noun textbox searchbox: field, input, input field, text field, text box, textbox, textarea
+noun searchbox: search box, search field, searchbox, search bar
+noun combobox listbox: dropdown, drop down, select, select box, combobox, listbox, picker
+noun checkbox: checkbox, check box, tickbox, tick box
+noun radio: radio, radio button
+noun switch: switch

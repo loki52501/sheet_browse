@@ -60,7 +60,12 @@ tasks:
     step: 2
     title: "sb-sheet (pure): index row types, skeleton, find scorer (BM25 + synonyms + roles + group), sheet lines, read renderer with chunking"
     docs: [docs/05-BROWSER.md, docs/04-TOOL-SERVERS-PHASE1.md]
-    status: todo
+    status: done
+    owner: sheet/suborch
+    claimed_at: "2026-10-23"
+    done_at: "2026-10-23"
+    evidence: [bench/results/review-T-10.md, bench/results/accept-T-10.md]
+    deferred: "B-6.4's infinite-scroll half is driver-side (sb-driver). The live-index halves of docs/05 acc. 6/7 go to T-23 and the docs/04 live fetch to srv-web T-12 (accept-T-10.md, Out of scope). B-32 should-fix items: (1) plain-span escaping before T-12 merges, (2)-(7) in the same change or before step 3."
   - id: T-11
     step: 2
     title: "toolstore: layout, header parser, loader, fingerprint check, lifecycle updates, git commit helper"

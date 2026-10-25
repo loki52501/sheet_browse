@@ -19,8 +19,8 @@ areas:
     crates: [sb-sheet]
     tasks: [T-10]
     docs: [docs/05-BROWSER.md#B-6, docs/04-TOOL-SERVERS-PHASE1.md#W-5]
-    status: not_started
-    merged: false
+    status: pr_open
+    merged: true   # 607eda5, 2026-10-23 18:52: gate ok T-10, cargo test --workspace 237 passed 0 failed
   store:
     wave: 1
     crates: [toolstore]
