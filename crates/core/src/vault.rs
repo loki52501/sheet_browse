@@ -19,13 +19,19 @@
 //! [`spellings`]). All overlapping matches are found and the union of their spans is
 //! replaced, so two entries that overlap in the text leave no fragment behind. A match
 //! lying wholly inside an `@vault(name)` literal of an existing entry (or inside the
-//! `@vault(` of any opener) is ignored, so scrub output stays parseable and
-//! `scrub(scrub(s)) == scrub(s)` (D-118).
+//! `@vault(` of any opener) is ignored; a match that only overlaps one swallows the whole
+//! literal. Scrub repeats until nothing changes, so a literal it wrote cannot complete
+//! another value, the output stays parseable and `scrub(scrub(s)) == scrub(s)` (D-118).
 //!
-//! Value floor (D-118): `set` refuses, and `open` refuses a file holding, a non-empty
-//! value shorter than [`MIN_VALUE_CHARS`] characters. Matched case-insensitively, such a
-//! value (a middle initial, a state code) hits ordinary words everywhere and protects
-//! almost nothing. Empty values are allowed and scrub nothing.
+//! Value rules (D-118): `set` refuses, and `open` refuses a file holding, a non-empty
+//! value shorter than [`MIN_VALUE_CHARS`] characters (`ValueTooShort`), or one that
+//! occurs, in any ASCII case, inside `@vault(` or inside `@vault(n)` for any entry name
+//! `n` (`ValueInLiteral`). Matched case-insensitively, a very short value (a middle
+//! initial, a state code) hits ordinary words everywhere and protects almost nothing,
+//! and a value inside a literal could not be told from it. Empty values are allowed and
+//! scrub nothing. Both errors name the entry, never the value, and tell the user to run
+//! `harness vault set <name>`; [`Vault::open_for_set`] opens such a file so that command
+//! can repair it.
 //!
 //! Plaintext hygiene: values, decrypted plaintext, the serialized TOML and every
 //! scrub spelling live in `Zeroizing` buffers sized up front so they never reallocate
@@ -63,9 +69,16 @@ pub enum VaultError {
     Decrypt,
     /// A non-empty value shorter than `min` characters (D-118). The name only.
     #[error(
-        "vault entry {name:?} is shorter than {min} characters; a value that short cannot be scrubbed without destroying ordinary text"
+        "vault entry {name:?} is shorter than {min} characters; a value that short cannot be scrubbed without destroying ordinary text; give it a longer value with `harness vault set {name}`"
     )]
     ValueTooShort { name: String, min: usize },
+    /// The value of entry `name` occurs, in some ASCII case, inside `@vault(` or inside
+    /// the `@vault(n)` of an entry `n`, where scrub could not tell it from the literal
+    /// (D-118). The name only; `n` is not named either.
+    #[error(
+        "the value of vault entry {name:?} occurs inside `@vault(` or inside an entry's @vault(name) reference, where scrub cannot find it; give it another value with `harness vault set {name}`, or give the new entry another name"
+    )]
+    ValueInLiteral { name: String },
     /// The scrub automaton could not be built; `set` wrote nothing (D-118).
     #[error("vault scrubber could not be built; the vault was not changed")]
     ScrubUnavailable,
@@ -81,6 +94,71 @@ fn check_value(name: &str, value: &str) -> Result<(), VaultError> {
             name: name.to_owned(),
             min: MIN_VALUE_CHARS,
         });
+    }
+    Ok(())
+}
+
+/// Which entries [`check_entries`] checks.
+#[derive(Clone, Copy)]
+enum Check<'a> {
+    /// Every entry: `open`, and `set` on a vault from `open`.
+    All,
+    /// Only what involves this entry: its own value, and every value against its
+    /// `@vault(name)`. `set` on a vault from `in_memory` or `open_for_set`: problems the
+    /// set did not make are left for `open` to report, so they can be fixed one at a time.
+    Only(&'a str),
+}
+
+/// True when `needle` occurs in `hay` ignoring ASCII case (the scrub automaton's rule).
+fn contains_ascii_ci(hay: &str, needle: &str) -> bool {
+    let n = needle.as_bytes();
+    !n.is_empty()
+        && hay
+            .as_bytes()
+            .windows(n.len())
+            .any(|w| w.eq_ignore_ascii_case(n))
+}
+
+/// The D-118 value rules: `ValueTooShort` for a value under the floor, then
+/// `ValueInLiteral` for a value any of whose scrub spellings lies, in some ASCII case,
+/// inside `@vault(` or inside `@vault(n)` for an entry name `n` (every name, with a value
+/// or not). Scrub drops such a match as part of the literal, so the value could hide
+/// there. The first offending entry is named.
+fn check_entries(entries: &BTreeMap<String, Entry>, check: Check<'_>) -> Result<(), VaultError> {
+    let involves = |n: &str| match check {
+        Check::All => true,
+        Check::Only(only) => only == n,
+    };
+    for (name, e) in entries {
+        if involves(name) {
+            check_value(name, &e.value)?;
+        }
+    }
+    let mut every = vec![REF_OPEN.to_owned()];
+    every.extend(entries.keys().map(|n| vault_literal(n)));
+    let own: Vec<String> = match check {
+        Check::All => Vec::new(),
+        Check::Only(only) => vec![vault_literal(only)],
+    };
+    for (name, e) in entries {
+        if e.value.is_empty() {
+            continue;
+        }
+        let involved = involves(name);
+        let literals = if involved { &every } else { &own };
+        if literals.is_empty() {
+            continue;
+        }
+        let sps = spellings(&e.value);
+        let hides_in = |l: &str| sps.iter().any(|sp| contains_ascii_ci(l, sp));
+        // Another entry already hidden in `@vault(` is hidden in every literal: a problem
+        // this set did not make, which `open` reports and its own set fixes.
+        if !involved && hides_in(REF_OPEN) {
+            continue;
+        }
+        if literals.iter().any(|l| hides_in(l)) {
+            return Err(VaultError::ValueInLiteral { name: name.clone() });
+        }
     }
     Ok(())
 }
@@ -185,6 +263,9 @@ pub struct Vault {
     entries: BTreeMap<String, Entry>,
     backing: Option<Backing>,
     scrubber: Arc<Scrubber>,
+    /// `set` checks every entry ([`Check::All`]): a vault from `open`. A vault from
+    /// `in_memory` or `open_for_set` checks only the entry being set.
+    strict: bool,
 }
 
 impl fmt::Debug for Vault {
@@ -196,18 +277,34 @@ impl fmt::Debug for Vault {
 impl Vault {
     /// Opens and decrypts `path` (`vault.toml.age`).
     /// A missing file opens as an empty vault without touching the key (D-101).
-    /// A file holding a value under [`MIN_VALUE_CHARS`] characters is `ValueTooShort`; a
-    /// scrubber that cannot be built is `ScrubUnavailable` (D-118).
+    /// A file holding a value under [`MIN_VALUE_CHARS`] characters is `ValueTooShort`, one
+    /// holding a value that occurs inside a vault literal is `ValueInLiteral` (both name
+    /// the entry and tell the user to run `harness vault set <name>`), and a scrubber that
+    /// cannot be built is `ScrubUnavailable` (D-118).
     pub fn open(path: &Path, key: &KeySource) -> Result<Vault, VaultError> {
-        let entries = match std::fs::read(path) {
-            Ok(ciphertext) => {
-                let identity = load_identity(key)?
-                    .ok_or_else(|| VaultError::Key("no age identity for this vault".into()))?;
-                decrypt_entries(&identity, &ciphertext)?
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(e) => return Err(VaultError::Io(e)),
-        };
+        let entries = read_entries(path, key)?;
+        check_entries(&entries, Check::All)?;
+        Vault::with_backing(entries, path, key, true)
+    }
+
+    /// For `harness vault set` only: [`Vault::open`] without the D-118 value rules, so a
+    /// file `open` refuses (an entry under the floor or inside a literal, written by an
+    /// older build or by hand) can be repaired. `set` on this handle checks only the entry
+    /// it sets; the other entries are kept as they are, and `open` keeps refusing the file,
+    /// naming the next entry to fix, until every one is fixed. Its scrub over-scrubs a
+    /// short value and cannot see a value inside a literal, so never install it as the
+    /// process-wide scrubber.
+    pub fn open_for_set(path: &Path, key: &KeySource) -> Result<Vault, VaultError> {
+        let entries = read_entries(path, key)?;
+        Vault::with_backing(entries, path, key, false)
+    }
+
+    fn with_backing(
+        entries: BTreeMap<String, Entry>,
+        path: &Path,
+        key: &KeySource,
+        strict: bool,
+    ) -> Result<Vault, VaultError> {
         let scrubber = Arc::new(Scrubber::try_build(&entries)?);
         Ok(Vault {
             entries,
@@ -216,6 +313,7 @@ impl Vault {
                 key: key.clone(),
             }),
             scrubber,
+            strict,
         })
     }
 
@@ -242,6 +340,7 @@ impl Vault {
             entries,
             backing: None,
             scrubber,
+            strict: false,
         }
     }
 
@@ -249,7 +348,14 @@ impl Vault {
     ///
     /// `name` must be `[A-Za-z0-9_.-]+` so that `@vault(name)` can reference it; otherwise
     /// `BadReference(byte offset of the first bad char in name)`. A non-empty `value`
-    /// under [`MIN_VALUE_CHARS`] characters is `ValueTooShort` (D-118). For a file-backed vault
+    /// under [`MIN_VALUE_CHARS`] characters is `ValueTooShort`, and a value that occurs
+    /// inside a vault literal (or a name whose literal holds another entry's value) is
+    /// `ValueInLiteral`; both are refused before the file or key is touched when this
+    /// handle's entries already show it (D-118). On a vault from `open` every entry of the
+    /// re-read file is checked, except that the entry being set replaces a same-name entry
+    /// that broke a rule; on a vault from `open_for_set` or `in_memory` only the entry
+    /// being set is checked, so a file `open` refuses can be repaired one entry at a
+    /// time. For a file-backed vault
     /// the whole read-modify-write runs under an exclusive lock on `<vault file>.lock`:
     /// the current file is re-read and decrypted (so entries set by other processes since
     /// `open` are kept and picked up), the change applied, and the file rewritten
@@ -263,21 +369,30 @@ impl Vault {
             return Err(VaultError::BadReference(bad));
         }
         check_value(name, value)?;
-        let entry = Entry {
+        let entry = || Entry {
             value: Zeroizing::new(value.to_owned()),
             kind,
         };
+        // Against this handle's entries first, before any lock, file or key is touched.
+        let mut next = clone_entries(&self.entries);
+        next.insert(name.to_owned(), entry());
+        check_entries(&next, Check::Only(name))?;
+        let check = if self.strict {
+            Check::All
+        } else {
+            Check::Only(name)
+        };
         let (next, scrubber) = match &self.backing {
             None => {
-                let mut next = clone_entries(&self.entries);
-                next.insert(name.to_owned(), entry);
                 let scrubber = Scrubber::try_build(&next)?;
                 (next, scrubber)
             }
             Some(backing) => {
+                drop(next);
                 let lock = lock_exclusive(&backing.path)?;
                 let (identity, mut next) = current_locked(backing, &self.entries)?;
-                next.insert(name.to_owned(), entry);
+                next.insert(name.to_owned(), entry());
+                check_entries(&next, check)?;
                 let scrubber = Scrubber::try_build(&next)?;
                 let ciphertext = encrypt_entries(&identity, &next)?;
                 write_atomic(&backing.path, &ciphertext)?;
@@ -610,23 +725,49 @@ impl Scrubber {
         }
     }
 
-    /// Redacts the union of all (overlapping) match spans, see [`merge_spans`]. A match
-    /// wholly inside an existing entry's `@vault(name)` literal, or inside the `@vault(`
-    /// of any opener, is not a value: the literal is what scrub itself writes, and it
-    /// stays intact (D-118, [`literal_ranges`]). A match that only overlaps such a range
-    /// is kept, so a value can never hide behind one.
+    /// Repeats [`Scrubber::scrub_pass`] until it changes nothing, so the output is a fixed
+    /// point (D-118): a literal scrub wrote cannot complete another value that touches it
+    /// (`<v>@` before `t`'s value gives `<v>@vault(t)`, which the next pass catches). Text
+    /// with no value takes one pass. Each later pass swallows at least one literal or one
+    /// character of text into a literal, so the loop ends; the cap only bounds the work an
+    /// adversarial string can cause, and hitting it withholds the output (fail closed).
     fn scrub(&self, s: &str) -> String {
         let ac = match &self.matcher {
             Matcher::Empty => return s.to_owned(),
             Matcher::Failed => return SCRUB_WITHHELD.to_owned(),
             Matcher::Ready(ac) => ac,
         };
+        let Some(mut cur) = self.scrub_pass(ac, s) else {
+            return s.to_owned();
+        };
+        for _ in 1..MAX_SCRUB_PASSES {
+            match self.scrub_pass(ac, &cur) {
+                Some(next) if next != cur => cur = next,
+                _ => return cur,
+            }
+        }
+        SCRUB_WITHHELD.to_owned()
+    }
+
+    /// One pass: redacts the union of all (overlapping) match spans, see
+    /// [`merge_spans`]; `None` when nothing matched. A match wholly inside an existing
+    /// entry's `@vault(name)` literal, or inside the `@vault(` of any opener, is not a
+    /// value: the literal is what scrub itself writes, and it stays intact (D-118,
+    /// [`literal_ranges`]). A match that only overlaps such a range is kept and widened
+    /// to cover the whole range, so a value can never hide behind a literal and no
+    /// fragment of a literal is left to break `vault_refs`.
+    fn scrub_pass(&self, ac: &AhoCorasick, s: &str) -> Option<String> {
         let protected = literal_ranges(s, &self.names);
-        let spans = merge_spans(
-            ac.find_overlapping_iter(s)
-                .filter(|m| !inside_literal(&protected, m.start(), m.end()))
-                .map(|m| Span::new(m.start(), m.end(), m.pattern().as_usize())),
-        );
+        let spans = merge_spans(ac.find_overlapping_iter(s).filter_map(|m| {
+            if inside_literal(&protected, m.start(), m.end()) {
+                return None;
+            }
+            let (start, end) = widen_over_literals(&protected, m.start(), m.end());
+            Some(Span::new(start, end, m.pattern().as_usize()))
+        }));
+        if spans.is_empty() {
+            return None;
+        }
         let mut out = String::with_capacity(s.len());
         let mut at = 0;
         for sp in &spans {
@@ -637,8 +778,28 @@ impl Scrubber {
             at = sp.end;
         }
         out.push_str(s.get(at..).unwrap_or_default());
-        out
+        Some(out)
     }
+}
+
+/// Bound on [`Scrubber::scrub`]'s passes. Ordinary text takes 1, a value completed by a
+/// literal scrub wrote takes 2 or 3; each pass changes at least one span.
+const MAX_SCRUB_PASSES: usize = 8;
+
+/// `[start, end)` grown to cover every range of `ranges` (sorted, disjoint) it overlaps.
+/// Ranges start at `@` and end after `(` or `)`, so the result stays on char boundaries.
+fn widen_over_literals(ranges: &[(usize, usize)], start: usize, end: usize) -> (usize, usize) {
+    let (mut lo, mut hi) = (start, end);
+    let mut i = ranges.partition_point(|&(_, e)| e <= start);
+    while let Some(&(rs, re)) = ranges.get(i) {
+        if rs >= end {
+            break;
+        }
+        lo = lo.min(rs);
+        hi = hi.max(re);
+        i += 1;
+    }
+    (lo, hi)
 }
 
 /// A percent-encode set over ASCII bytes; non-ASCII bytes are always encoded.
@@ -1006,11 +1167,8 @@ fn decrypt_entries(
             )
         })
         .collect();
-    // A file written by hand or by an older build may hold a value under the floor
-    // (D-118); `open` and `set` refuse it rather than over-scrub every output.
-    for (name, e) in &entries {
-        check_value(name, &e.value)?;
-    }
+    // A file written by hand or by an older build may break a D-118 value rule; the
+    // callers decide (`open` refuses it, `set` checks per its mode, `open_for_set` repairs).
     Ok(entries)
 }
 
@@ -1062,6 +1220,20 @@ fn encrypt_entries(
     let text = encode_toml(entries);
     age::encrypt(&identity.to_public(), text.as_bytes())
         .map_err(|_| VaultError::Key("age encryption failed".into()))
+}
+
+/// The decrypted entries of `path`, unchecked; a missing file is an empty map and does
+/// not touch the key (D-101).
+fn read_entries(path: &Path, key: &KeySource) -> Result<BTreeMap<String, Entry>, VaultError> {
+    match std::fs::read(path) {
+        Ok(ciphertext) => {
+            let identity = load_identity(key)?
+                .ok_or_else(|| VaultError::Key("no age identity for this vault".into()))?;
+            decrypt_entries(&identity, &ciphertext)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(VaultError::Io(e)),
+    }
 }
 
 /// Opens (creating if needed) `<path>.lock` and takes an exclusive OS lock on it,
@@ -1543,12 +1715,151 @@ mod tests {
         assert!(!once.contains(&canary()));
         assert_eq!(v.scrub(&once), once);
         assert!(vault_refs(&once).is_ok());
-        // A value that only overlaps a literal is still scrubbed (it cannot hide).
+        // A value that only overlaps a literal is still scrubbed (it cannot hide), and the
+        // literal it overlaps goes with it, so no fragment `(name)` is left behind.
         let w = Vault::in_memory([
             ("k".to_owned(), "zz@vault".to_owned(), EntryKind::Secret),
             ("name".to_owned(), canary(), EntryKind::Secret),
         ]);
-        assert_eq!(w.scrub("zz@vault(name)"), "@vault(k)(name)");
+        assert_eq!(w.scrub("zz@vault(name)"), "@vault(k)");
+    }
+
+    #[test]
+    fn widen_over_literals_covers_every_overlapped_range() {
+        let r = [(2, 12), (13, 20), (20, 27)];
+        assert_eq!(widen_over_literals(&r, 0, 2), (0, 2), "touching only");
+        assert_eq!(widen_over_literals(&r, 0, 3), (0, 12));
+        assert_eq!(widen_over_literals(&r, 11, 14), (2, 20));
+        assert_eq!(widen_over_literals(&r, 19, 21), (13, 27));
+        assert_eq!(widen_over_literals(&r, 27, 30), (27, 30));
+        assert_eq!(widen_over_literals(&[], 1, 4), (1, 4));
+    }
+
+    #[test]
+    fn scrub_is_a_fixed_point_when_a_literal_completes_a_value() {
+        let c = canary();
+        // Review round 3: `)xyz1` follows the literal scrub writes for `name`.
+        let v = vault_with(&[("name", c.clone()), ("k", ")xyz1".to_owned())]);
+        let once = v.scrub(&format!("{c}xyz1"));
+        assert_eq!(once, "@vault(k)");
+        assert_eq!(v.scrub(&once), once);
+        assert_eq!(vault_refs(&once).unwrap(), ["k"]);
+        // The same text arriving already half scrubbed.
+        assert_eq!(v.scrub("@vault(name)xyz1"), "@vault(k)");
+        // A value ending in `@` before another value, and one starting with `)` after it.
+        let tail = "Zq7-tail-value";
+        for (p, s) in [
+            (format!("{c}@"), format!("{c}{tail}")),
+            (format!("){c}"), format!("{tail}{c}")),
+        ] {
+            let v = vault_with(&[("p", p.clone()), ("t", tail.to_owned())]);
+            let once = v.scrub(&s);
+            assert!(!contains_ascii_ci(&once, &p), "a whole value survived");
+            assert_eq!(once, "@vault(p)");
+            assert_eq!(v.scrub(&once), once);
+        }
+        // Clean text takes one pass and comes back as is.
+        assert_eq!(v.scrub("no value (here) @ all"), "no value (here) @ all");
+    }
+
+    #[test]
+    fn set_refuses_values_inside_literals() {
+        let c = canary();
+        let mut v = vault_with(&[("test", c.clone())]);
+        let in_literal = |r: Result<(), VaultError>, want: &str| match r {
+            Err(VaultError::ValueInLiteral { name }) => assert_eq!(name, want),
+            other => panic!("expected ValueInLiteral for {want}, got {other:?}"),
+        };
+        // Inside `@vault(`, in any ASCII case, and inside an entry's own or another's literal.
+        in_literal(v.set("pw", "vault", EntryKind::Secret), "pw");
+        in_literal(v.set("pw", "AULT(", EntryKind::Secret), "pw");
+        in_literal(v.set("pw", "(test)", EntryKind::Secret), "pw");
+        in_literal(
+            v.set("zip_94110", "94110", EntryKind::Personal),
+            "zip_94110",
+        );
+        // A non-ASCII value whose Unicode lower case is ASCII (KELVIN SIGN) hides too.
+        in_literal(v.set("key1", "\u{212a}ey1", EntryKind::Secret), "key1");
+        // A new name whose literal would hold an existing value names the value's entry.
+        let mut z = vault_with(&[("zip", "94110".to_owned())]);
+        in_literal(z.set("zip_94110", &c, EntryKind::Personal), "zip");
+        assert_eq!(z.names().len(), 1, "a refused set changed the vault");
+        assert_eq!(v.names().len(), 1, "a refused set changed the vault");
+        // Values that only touch or overlap a literal are fine; they cannot hide.
+        v.set("k", ")xyz1", EntryKind::Secret).unwrap();
+        v.set("m", "vault(x", EntryKind::Secret).unwrap();
+        let msg = VaultError::ValueInLiteral { name: "pw".into() }.to_string();
+        assert!(
+            msg.contains("\"pw\"") && msg.contains("harness vault set pw"),
+            "{msg}"
+        );
+    }
+
+    /// Writes `entries` to `path` as an older build or a hand edit could have.
+    fn write_raw(path: &Path, key: &KeySource, entries: &[(&str, &str)]) {
+        let id = load_identity(key).unwrap().unwrap();
+        let map: BTreeMap<String, Entry> = entries
+            .iter()
+            .map(|(n, v)| {
+                (
+                    (*n).to_owned(),
+                    Entry {
+                        value: Zeroizing::new((*v).to_owned()),
+                        kind: EntryKind::Personal,
+                    },
+                )
+            })
+            .collect();
+        write_atomic(path, &encrypt_entries(&id, &map).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn open_for_set_repairs_a_file_open_refuses() {
+        let c = canary();
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+        let mut strict = Vault::open(&path, &key).unwrap();
+        strict.set("test", &c, EntryKind::Secret).unwrap();
+        write_raw(&path, &key, &[("test", &c), ("st", "a1z"), ("v", "vault")]);
+        // open names the first entry to fix and the command that fixes it.
+        match Vault::open(&path, &key) {
+            Err(e @ VaultError::ValueTooShort { .. }) => {
+                assert!(e.to_string().contains("harness vault set st"), "{e}");
+            }
+            other => panic!("expected ValueTooShort, got {other:?}"),
+        }
+        // A handle from open still checks every entry of the re-read file.
+        assert!(matches!(
+            strict.set("other", &format!("{c}-o"), EntryKind::Secret),
+            Err(VaultError::ValueTooShort { name, .. }) if name == "st"
+        ));
+        // open_for_set opens it; set fixes one entry while another is still broken.
+        let mut fix = Vault::open_for_set(&path, &key).unwrap();
+        fix.set("st", "a1z9", EntryKind::Personal).unwrap();
+        match Vault::open(&path, &key) {
+            Err(e @ VaultError::ValueInLiteral { .. }) => {
+                assert!(e.to_string().contains("harness vault set v"), "{e}");
+            }
+            other => panic!("expected ValueInLiteral, got {other:?}"),
+        }
+        // The new value is still checked on a repair handle.
+        assert!(matches!(
+            fix.set("v", "a1", EntryKind::Personal),
+            Err(VaultError::ValueTooShort { .. })
+        ));
+        assert!(matches!(
+            fix.set("v", "Vault", EntryKind::Personal),
+            Err(VaultError::ValueInLiteral { .. })
+        ));
+        // A handle from open may replace a same-name entry that breaks a rule.
+        strict.set("v", "Zq7-v-fixed", EntryKind::Personal).unwrap();
+        let ok = Vault::open(&path, &key).unwrap();
+        assert_eq!(ok.names().len(), 3);
+        assert_eq!(ok.scrub("x a1z9 y"), "x @vault(st) y");
+        assert!(ok
+            .resolve_into("@vault(test)", |r| r.expose() == c)
+            .unwrap());
     }
 
     #[test]

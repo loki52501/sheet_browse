@@ -514,3 +514,221 @@ fn short_in_memory_values_leave_literals_and_text_parseable() {
         "scrub output has a malformed ref"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// 10. Round 4 (D-118): values inside literals are refused, scrub is a real fixed point,
+// and a file `open` refuses can be repaired with `open_for_set` + `set`.
+
+/// True when `needle` occurs in `hay` in any ASCII case.
+fn has_ci(hay: &str, needle: &str) -> bool {
+    hay.to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
+/// A file-backed vault holding `test` = the canary, in a fresh temp dir.
+fn canary_file_vault(tag: &str) -> (TempDir, PathBuf, KeySource, Vault) {
+    let dir = TempDir::new(tag);
+    let path = dir.0.join("vault.toml.age");
+    let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+    let mut v = Vault::open(&path, &key).unwrap();
+    v.set("test", &canary(), EntryKind::Secret).unwrap();
+    (dir, path, key, v)
+}
+
+#[test]
+fn canary_wrapped_in_literals_is_scrubbed_to_a_fixed_point() {
+    let c = canary();
+    let (_dir, _path, _key, v) = canary_file_vault("wrap");
+    for (label, s) in [
+        ("inside an unknown literal", format!("@vault({c})")),
+        ("appended to a known name", format!("@vault(test{c})")),
+        ("right after a known literal", format!("@vault(test){c}")),
+        ("right before a known literal", format!("{c}@vault(test)")),
+        ("upper-case opener", format!("@VAULT({c})")),
+        ("unclosed opener", format!("@vault({c}")),
+        (
+            "between two literals",
+            format!("x@vault(test)@vault({c})@vault(test)y"),
+        ),
+        ("closed after a literal", format!("@vault(test){c})")),
+        (
+            "upper-cased value",
+            format!("@vault({})", c.to_ascii_uppercase()),
+        ),
+    ] {
+        let once = v.scrub(&s);
+        assert!(!has_ci(&once, &c), "{label}: canary survived");
+        assert!(v.scrub(&once) == once, "{label}: not a fixed point");
+    }
+}
+
+#[test]
+fn literal_completing_a_value_is_scrubbed_review_round_3() {
+    use harness_core::vault::vault_refs;
+    let c = canary();
+    let (_dir, path, key, mut v) = canary_file_vault("xyz1");
+    v.set("k", ")xyz1", EntryKind::Secret).unwrap();
+    let once = v.scrub(&format!("{c}xyz1"));
+    check(&v, &once, "@vault(k)", "first pass");
+    check(&v, "@vault(test)xyz1", "@vault(k)", "half scrubbed input");
+    assert_eq!(vault_refs(&once).unwrap(), ["k"]);
+    // The same through a reopened file.
+    let re = Vault::open(&path, &key).unwrap();
+    check(&re, &format!("a {c}xyz1 b"), "a @vault(k) b", "reopened");
+}
+
+#[test]
+fn scrub_fixed_point_property_over_tricky_values() {
+    use harness_core::vault::vault_refs;
+    let c = canary();
+    // Built through set, so every value meets the D-118 rules.
+    let mut v = Vault::in_memory(std::iter::empty());
+    let values: Vec<(&str, String)> = vec![
+        ("test", c.clone()),
+        ("k", ")xyz1".to_owned()),
+        ("p", format!("{c}@")),
+        ("q", format!("){c}")),
+        ("o", "@@x(".to_owned()),
+        ("m", "vault(x".to_owned()),
+        ("t", "Zq7-tail".to_owned()),
+    ];
+    for (n, val) in &values {
+        v.set(n, val, EntryKind::Secret).unwrap();
+    }
+    let known = ["k", "m", "o", "p", "q", "t", "test"];
+    let pieces: Vec<String> = vec![
+        c.clone(),
+        c.to_ascii_uppercase(),
+        ")".into(),
+        "(".into(),
+        "@".into(),
+        "@vault(".into(),
+        "@vault(test)".into(),
+        "@vault(k)".into(),
+        "@vault(t)".into(),
+        "xyz1".into(),
+        "x".into(),
+        "Zq7-tail".into(),
+        "vault".into(),
+        " ".into(),
+        "\"".into(),
+    ];
+    let mut seed: u64 = 0x7005_f1c5;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let (mut leaks, mut not_fixed, mut unparsed) = (0usize, 0usize, 0usize);
+    for _ in 0..3000 {
+        let n = 1 + (next() % 8) as usize;
+        let s: String = (0..n)
+            .map(|_| pieces[(next() % pieces.len() as u64) as usize].as_str())
+            .collect();
+        let once = v.scrub(&s);
+        if values.iter().any(|(_, val)| has_ci(&once, val)) {
+            leaks += 1;
+        }
+        if v.scrub(&once) != once {
+            not_fixed += 1;
+        }
+        let input_known = vault_refs(&s).is_ok_and(|r| r.iter().all(|n| known.contains(n)));
+        if input_known && vault_refs(&once).is_err() {
+            unparsed += 1;
+        }
+    }
+    assert_eq!(leaks, 0, "a whole value survived scrub");
+    assert_eq!(not_fixed, 0, "scrub(scrub(s)) != scrub(s)");
+    assert_eq!(unparsed, 0, "known literals no longer parse");
+}
+
+#[test]
+fn set_refuses_values_inside_literals_and_leaves_the_file_alone() {
+    use harness_core::vault::VaultError;
+    let c = canary();
+    let (_dir, path, _key, mut v) = canary_file_vault("in-literal");
+    let before = std::fs::read(&path).unwrap();
+    let cf: String = c.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect();
+    let cf = if cf.len() >= 4 {
+        cf
+    } else {
+        format!("{cf}Zq7k")
+    };
+    for (label, name, value, want) in [
+        ("inside @vault(", "pw", "Vault", "pw"),
+        ("inside its own literal", "zip_94110", "94110", "zip_94110"),
+        ("inside the literal of test", "pw", "(TEST)", "pw"),
+    ] {
+        match v.set(name, value, EntryKind::Personal) {
+            Err(VaultError::ValueInLiteral { name: got }) => assert_eq!(got, want, "{label}"),
+            Err(other) => panic!("{label}: expected ValueInLiteral, got {other}"),
+            Ok(()) => panic!("{label}: set accepted it"),
+        }
+    }
+    assert!(
+        std::fs::read(&path).unwrap() == before,
+        "a refused set rewrote the file"
+    );
+    // A new name whose literal would hold the canary-derived value of an existing entry.
+    v.set("zip", &cf, EntryKind::Personal).unwrap();
+    let after_zip = std::fs::read(&path).unwrap();
+    match v.set(&format!("k_{cf}"), "unrelated-value", EntryKind::Secret) {
+        Err(e @ VaultError::ValueInLiteral { .. }) => {
+            let shown = format!("{e} {e:?}");
+            assert!(shown.contains("\"zip\""), "the value's entry is named");
+            assert!(
+                !has_ci(&shown, &cf) && !shown.contains(&c),
+                "a value leaked"
+            );
+        }
+        Err(other) => panic!("expected ValueInLiteral, got {other}"),
+        Ok(()) => panic!("set accepted a name holding a value"),
+    }
+    assert!(std::fs::read(&path).unwrap() == after_zip, "file rewritten");
+    assert_eq!(v.names().len(), 2);
+}
+
+#[test]
+fn open_for_set_repairs_a_pre_floor_file() {
+    use harness_core::vault::VaultError;
+    let c = canary();
+    let (dir, path, key, _v) = canary_file_vault("repair");
+    // An older build wrote a short value and one inside `@vault(`.
+    let id_text = std::fs::read_to_string(dir.0.join("vault.key")).unwrap();
+    let id: age::x25519::Identity = id_text
+        .lines()
+        .find(|l| l.starts_with("AGE-SECRET-KEY-"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let body = format!(
+        "test = {{ value = {}, kind = \"secret\" }}\nst = {{ value = \"CA\", kind = \"personal\" }}\nv = {{ value = \"ault\", kind = \"personal\" }}\n",
+        serde_json::to_string(&c).unwrap()
+    );
+    let ct = age::encrypt(&id.to_public(), body.as_bytes()).unwrap();
+    std::fs::write(&path, ct).unwrap();
+
+    let err = Vault::open(&path, &key).unwrap_err();
+    assert!(matches!(err, VaultError::ValueTooShort { ref name, .. } if name == "st"));
+    assert!(
+        err.to_string().contains("harness vault set st"),
+        "no repair hint"
+    );
+    // The repair handle sets one entry while the other is still broken.
+    let mut fix = Vault::open_for_set(&path, &key).unwrap();
+    fix.set("st", "California", EntryKind::Personal).unwrap();
+    let err = Vault::open(&path, &key).unwrap_err();
+    assert!(matches!(err, VaultError::ValueInLiteral { ref name } if name == "v"));
+    assert!(
+        err.to_string().contains("harness vault set v"),
+        "no repair hint"
+    );
+    fix.set("v", "Zq7-v-value", EntryKind::Personal).unwrap();
+    let ok = Vault::open(&path, &key).unwrap();
+    assert_eq!(ok.names().len(), 3);
+    let kept = ok
+        .resolve_into("@vault(test)", |r| r.expose() == c.as_str())
+        .unwrap();
+    assert!(kept, "the repair lost an entry");
+}

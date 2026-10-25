@@ -394,6 +394,20 @@ fn row5_debug_and_errors_contain_no_value() {
         "ValueTooShort",
         fv.set("st", &short, EntryKind::Personal).unwrap_err(),
     ));
+    // ValueInLiteral (D-118): a new name whose literal would hold an entry's value, which
+    // is the canary's alphanumerics. The error names the value's entry, not the new name.
+    let cf: String = c.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect();
+    let cf = if cf.len() >= 4 {
+        cf
+    } else {
+        format!("{cf}Zq7k")
+    };
+    let mut lit = Vault::in_memory([("zip".to_owned(), cf.clone(), EntryKind::Personal)]);
+    errs.push((
+        "ValueInLiteral",
+        lit.set(&format!("k_{cf}"), "unrelated-value", EntryKind::Secret)
+            .unwrap_err(),
+    ));
 
     let seen: Vec<&str> = errs
         .iter()
@@ -404,6 +418,7 @@ fn row5_debug_and_errors_contain_no_value() {
             VaultError::Io(_) => "Io",
             VaultError::Decrypt => "Decrypt",
             VaultError::ValueTooShort { .. } => "ValueTooShort",
+            VaultError::ValueInLiteral { .. } => "ValueInLiteral",
             // Not reachable from outside (aho-corasick size limits); the vault.rs unit
             // test failed_build_withholds_output covers it.
             VaultError::ScrubUnavailable => "ScrubUnavailable",
@@ -416,6 +431,7 @@ fn row5_debug_and_errors_contain_no_value() {
         "Io",
         "Decrypt",
         "ValueTooShort",
+        "ValueInLiteral",
     ] {
         assert!(seen.contains(&want), "variant {want} not exercised");
     }
