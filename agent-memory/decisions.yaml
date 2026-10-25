@@ -300,3 +300,12 @@ decisions:
   - id: D-82
     text: "B-413 accepted (I-11 draft): __sbMedia frame() returns {t: null, why} and frames(id, times) returns a single {t: null, why} entry when the call is refused as a whole (no base, unknown id, challenge); per-time failures keep one entry per requested time."
     why: "I-11 named a bare {why} only for list() and cues(), so sb-media (wave 2) had no written shape for whole-call refusals of frame()/frames(); writing it down before sb-media exists costs nothing, and a single t:null entry is distinguishable from per-time failures."
+  - id: D-312
+    text: "B-31 (1), per D-78: tool names are lower case only. domain::valid_name accepts [a-z0-9_-]+ (still no device names, at most 100 bytes), the header parser refuses an @name with an upper-case letter, and ToolStore::reforge refuses a new spec whose @name differs from the name it was called with (StoreError::Invariant-style refusal, no file written)."
+    why: "NTFS and the default macOS volume are case-insensitive, so Register.js and register.js are one file but would be two tools.health rows. Lower-casing at the boundary is simpler than case-folding every health key, docs/03 sets no case rule, and both seeds are already lower case."
+  - id: D-313
+    text: "B-31 (2), per D-78: check_repair refuses a re-forge that changes @kind (either way) or lowers @phase (2 to 1, which gains page.api and runs on fetched HTML). Raising @phase 1 to 2 is allowed."
+    why: "G-4 says a repair may never widen what a tool can do; a reader becoming a planner or a browser tool becoming a fetch tool with api access both widen it, and neither is a repair."
+  - id: D-314
+    text: "B-31 (4), per D-78: ToolStore::archive fails closed. If setting the archived file's mtime fails after the rename, it renames the file back and returns the error, so an archived file always carries its archive time and sweep's 90-day clock (D-303) is never measured from the tool's old mtime."
+    why: "Recording the time in a row would need a tools.health column (contract change, like G-5's content hash); failing the archive keeps the current contract and the caller retries at the next sweep."
