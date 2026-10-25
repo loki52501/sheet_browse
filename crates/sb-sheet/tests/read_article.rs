@@ -333,8 +333,8 @@ fn chunks_cover_main_once_without_boilerplate() {
     assert!(
         all.contains("| Name | Value |\n|---|---|\n| workers | 4 |\n| blocking \\| max | 512 |")
     );
-    // Code keeps its lines; `[` `]` become `(` `)` like every plain span (D-219).
-    assert!(all.contains("```\n#(tokio::main)\nasync fn main() {\n    run().await;\n}\n```"));
+    // Code is verbatim: it keeps its lines and its `[` `]` (D-223).
+    assert!(all.contains("```\n#[tokio::main]\nasync fn main() {\n    run().await;\n}\n```"));
     assert!(all.contains("> QUOTEX Fearless concurrency."));
     assert!(all.contains("See the [API docs](#20) or press [button \"Add to cart\"](#21)."));
     assert!(all.contains("## FAQ") && all.contains("### Is Tokio fast?"));
