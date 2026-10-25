@@ -1,82 +1,73 @@
-# Review T-05 round 3: core::vault (bed9d02)
+# Review T-05 round 4: core::vault (fc23dd2)
 
 Scope:
-- Code: `crates/core/src/vault.rs` and `crates/core/tests/{vault_accept_t05,vault_accept_t05_r2,vault_scrub_t05_fix}.rs` at bed9d02.
-- Records: D-118 (f2dea11, f00c0b3) and B-150..B-152 (75b89c9).
-- Spec: docs/01 H-2, I-4, D-1, D-101, D-102, D-112, D-118, CLAUDE.md rule 2.
-- Handoff: `agent-memory/handoffs/T-05-rust-coder-3.yaml`.
+- Code: `git diff a4f3224 fc23dd2 -- crates/core` (vault.rs, tests vault_accept_t05.rs, vault_accept_t05_r3.rs, vault_scrub_t05_fix.rs). crates/core is unchanged from fc23dd2 to HEAD 15e09d3.
+- Callers: `crates/harness/src/cli.rs`, `crates/harness/src/lib.rs`, `crates/core-pg/src/lib.rs`.
+- Records: D-76, D-118, interfaces.yaml I-4. fc23dd2 carried no handoff.
+- Line numbers are `crates/core/src/vault.rs` at 15e09d3 unless another file is named.
 
-Line numbers below are `vault.rs` at bed9d02 unless another file is named.
-
-Checks run (detached checkout of bed9d02, TMP and target under F:/sb-swarm/tmp-core, random `SB_VAULT_CANARY`):
-- `cargo test -p harness-core --lib vault::`: 21 passed, 0 ignored.
-- `cargo test -p harness-core --test vault_accept_t05 --test vault_accept_t05_r2 --test vault_scrub_t05_fix`: 9, 14 and 11 passed, 0 ignored. r2_4b, r2_4c and r2_4d are now un-ignored and green.
-- The canary had 0 hits in the combined output.
-- `cargo clippy -p harness-core --lib --test vault_accept_t05 --test vault_accept_t05_r2 --test vault_scrub_t05_fix -- -D warnings` is clean.
-- `rustfmt --check` is clean on all 4 files.
-- I could not run any scratch probe. The write guard hook blocks writes outside the worktree. The two counterexamples below come from reading the code, step by step.
+Checks run (detached worktree of 15e09d3, own target dir, random `SB_VAULT_CANARY`):
+- `cargo test -p harness-core --lib vault::`: 25 passed.
+- `--test vault_accept_t05 / _r2 / _r3 / vault_scrub_t05_fix`: 9 / 14 / 9 (+2 ignored) / 16 passed.
+- `--test vault_accept_t05_r3 -- --ignored`: r3_2 and r3_5 fail as announced (premise changed).
+- `cargo clippy -p harness-core --all-targets -- -D warnings`: clean. `rustfmt --check` on all 5 vault files: clean.
+- Canary: 0 hits in the combined output.
 
 ## Blocking
 
-- none
+- **VaultError is not `#[non_exhaustive]`** (`:57-58`). D-76 and the I-4 notes in interfaces.yaml both say it is. This round adds a variant (`ValueInLiteral`, `:79-82`), which is exactly the breakage D-76 guards against. Fix: add the attribute. Integration tests are separate crates, so the exhaustive match in `tests/vault_accept_t05.rs:412-425` then needs a `_` arm. That is a tester change.
 
 ## Should fix
 
-- **Some values hide inside literals, and `set` accepts them.**
-  - Where: the filter at `:627` with `literal_ranges` (`:451-474`), and `check_value` (`:78-86`).
-  - How it works: a match is dropped only when its whole range lies inside fixed text. That text is `@vault(`, or `@vault(<existing name>)`, found case-sensitively. So a page cannot use the filter to hide an arbitrary reflected secret. Every wrapping form is still scrubbed: `@vault(<C>)`, `@vault(test<C>)`, `@vault(test)<C>`, `<C>@vault(test)` and `@VAULT(<C>)`. In each one the value lies in the unprotected name part, outside the range, or only overlapping it.
-  - What hides: a value that is itself an ASCII-case-insensitive substring of that fixed text.
-    - `set("pw", "vault")` passes the floor, and `scrub("@vault(")` then keeps `vault`.
-    - `set("zip_94110", "94110")`: every `@vault(zip_94110)`, including the ones scrub writes, keeps `94110`.
-  - Why it matters: H-2 says "every vault value found". Names are public through `names()`, so this exposure partly predates D-118. But D-118 (2) now skips such values on purpose.
-  - Fix: one check in `set` and `open`. Refuse a value that occurs ASCII-case-insensitively in `@vault(` or in `@vault(n)` for any entry name `n`, which also covers a name that contains a value.
-- **D-118 (2) promises more than the code does.** It claims that output "stays parseable by vault_refs and scrub(scrub(s)) == scrub(s)", which also appears in the doc at `:20-23` and `:613-617`. That is false when a value contains `)`, `(` or `@`.
-  - Counterexample: entries `name = C` and `k = ")xyz1"`. Five characters, so `set` accepts it.
-  - `scrub(C + "xyz1")` gives `@vault(name)xyz1`.
-  - Scrubbing that again: `)xyz1` at [11,16) only overlaps the protected range [0,12), so it is kept. The output is `@vault(name@vault(k)`, and `vault_refs` on it gives `BadReference(0)`.
-  - This is safe for rule 2, because it over-scrubs. But D-117's ledger re-scrubs scrubbed fields and fails closed when they change. Such a line becomes `Unscrubbable` and the H-3 event is lost.
-  - Fix, either way:
-    - When a kept match overlaps a protected literal, widen the span to cover the whole literal. The output stays parseable and nothing can hide.
-    - Or narrow the claim in D-118 and the docs, and add this case as a test.
-- **A short value in an existing file cannot be repaired.** `decrypt_entries` (`:1008-1013`) refuses it, which means:
-  - `open` fails.
-  - `set` fails too, because `current_locked` re-reads the file under the lock.
-  - There is no remove API, so the user has to rebuild the whole vault and re-enter every secret.
-  - No real vault predates the floor, so this is cheap to fix now. Let `set(name, …)` replace a short entry with the same name by skipping `check_value` for `name` in the re-read, or log the file-level check as a blocker.
+- **Round-3 item 3 is fixed in the library only. The user still cannot repair a vault.** `harness vault set` opens the vault with `Vault::open` (`crates/harness/src/cli.rs:612`), and `open` refuses a file with a broken entry. Both error texts tell the user to run `harness vault set <name>` (`:71-72`, `:79-80`), and that command fails with the same error, so the user goes round in a loop. The module doc (`:33-34`) says `open_for_set` "opens such a file so that command can repair it", but no caller uses it.
+  - Fix: use `Vault::open_for_set` in `vault_set`. The process never installs that handle globally, so this is safe.
+  - Add a CLI test: a file with a short entry, `vault set` on that entry, then `open` succeeds.
+- **D-118 no longer matches the code. Amend it as follows:**
+  - In (2), replace "and a match that only overlaps a literal is kept, so a value cannot hide behind one" with: "a match that only overlaps a literal is kept and widened to cover the whole literal; scrub repeats until a pass changes nothing (at most 8 passes, after which the whole output is withheld as the SCRUB_WITHHELD marker), so a literal scrub wrote cannot complete another value".
+  - In (2), narrow "scrub output stays parseable by vault_refs" to "the @vault(name) literals of existing entries in the input stay parseable". Counterexample to the broad claim: the input `@vault(xxhunter22yy)`, with `pw = hunter22`, is a well-formed reference to an unknown name. It scrubs to `@vault(xx@vault(pw)yy)`, which gives `BadReference(0)`. That result is idempotent and leaks nothing, but it does not parse. The module doc `:22-24` needs the same narrowing.
+  - Add a (3b): "set and open also refuse a non-empty value any of whose spellings occurs, ignoring ASCII case, inside `@vault(` or inside `@vault(n)` for any entry name n (VaultError::ValueInLiteral { name }, naming the entry whose value hides). Both errors name only the entry and point to `harness vault set <name>`. Vault::open_for_set skips these rules so that command can repair a file; set on that handle (and on in_memory) checks only the entry being set, and set on a handle from open checks every entry of the re-read file."
+  - Fix (4) to match: the withheld marker is no longer only in_memory's backstop.
+- **I-4 additions without a blocker.** `Vault::open_for_set` (`:297`) and `VaultError::ValueInLiteral` are new public API. They are not in interfaces.yaml, and no `interface_changes` B- entry asks supreme for them (B-150 was the earlier precedent). File one.
+- **The pass cap is untested, and its marker text is misleading** (`:742-749`, `:787`). Nothing exercises hitting `MAX_SCRUB_PASSES`. Text built from a value C followed by the tail of `k = ")xyz1"` repeated 8 or more times (`C xyz1 xyz1 ...` written without spaces) costs one pass per repeat, so it hits the cap. The output is then withheld as "vault scrubber unavailable", which is wrong in this case. It fails closed, so nothing leaks.
+  - Add a test for the cap.
+  - Consider giving this case its own marker text, e.g. `@vault(?) [output withheld: scrub did not settle]`.
 
 ## Notes
 
-- **Round-2 items, all resolved:**
-  1. The stale `incompatible_msrv` allows and the 1.85 comment are gone. A grep finds none in `crates/`.
-  2. A failed build is now reported. `open` (`:211`) and both `set` paths (`:274`, `:281`) use `try_build`, and `set` builds before `encrypt_entries` and `write_atomic`. The marker is documented as a malformed reference (`:424-429`) and pinned in `failed_build_withholds_output`.
-  3. Short values are handled: there is a floor (`:75-86`, counted in characters) and literal protection.
-  4. D-102 now points to D-118, and D-118 matches the code.
-  5. B-150 lists `default_path`, `default_key`, `MIN_VALUE_CHARS`, `ValueTooShort` and `ScrubUnavailable`.
-  6. B-151 (step 2) and B-152 (step 3) have owners and deadlines, and HTML-safe JSON is fixed here.
-- **ScrubUnavailable** cannot be reached through the public API. It is covered only by the `Scrubber::checked` unit test, and `vault_accept_t05.rs:409` accepts the variant without requiring it. That is acceptable: aho-corasick's limits are far beyond any vault.
-- **The floor covers production.** `Vault::in_memory` (`:227`) is `pub` and exempt from the floor. Today it is used only in tests and in `#[cfg(test)]` (`mcp.rs:1163+`). The production paths use `open`: `harness/src/cli.rs:612` and `harness/src/lib.rs:65`. If a non-test caller ever appears, consider `#[doc(hidden)]` or a cfg/feature gate.
-- **New spellings** (`:739-773`, `:812-875`):
-  - They match Go `encoding/json` (`<>&`, U+2028/9, lower-case hex), Rails, and the System.Text.Json default encoder (`<>&'"+` and backtick, non-ASCII as UTF-16 `\uXXXX`; upper-case hex is folded by the case-insensitive automaton).
-  - The nested forms (JSON in `{:?}`, `{:?}` in JSON, `{:?}` in `{:?}`) are correct, and the hand-written expectations in `html_safe_and_nested_json_debug_spellings` are independent of the code under test.
-  - Two negligible gaps, which can go into B-151 or be ignored:
-    - System.Text.Json also writes DEL as `\u007F`, but the dotnet style leaves it raw.
-    - Go before 1.22 writes `\b` and `\f` as `\u0008` and `\u000c`.
-- **Test gap:** the literal-protection tests (`short_values_never_touch_vault_literals`, and `vault_scrub_t05_fix.rs` section 9) use short in-memory values (`@vault(cab)`). Add one assertion with the real canary in the wrapping forms listed under Should fix, so the "cannot hide" property is pinned for a real-length value.
-- **Error text:** `ValueTooShort` carries the name only. `mcp.rs:915-918` passes `ToolError::Vault(_)` through unscrubbed, which is fine for name-only variants.
-- **I-4:** all wave-0 signatures are unchanged. The additions are only those in B-150. Supreme still has to fold B-150 into `interfaces.yaml`.
-- **Spec ids:** H-2, I-4, D-102, D-112 and D-118 are implemented as claimed. D-101 is named, but no D-101 behaviour changed (doc comments only). D-118 first landed inside another coder's commit f2dea11. Say so in the PR description.
-- **Hard rules 1 and 3-7:** this change does not touch them. There are no keys, sleeps, challenge code, gate paths or HTML.
+- **Round-3 Should-fix status:**
+  1. Values inside literals: **resolved.**
+     - `check_entries` (`:127-164`) checks every spelling of every value, ignoring ASCII case, against `@vault(` and against every name's literal. Names with empty values are included, which is stricter than the scrubber's `names`.
+     - It runs before the lock on the handle's entries and again on the re-read file (`:375-395`).
+     - Tests cover `vault`, `AULT(`, `(test)`, `zip_94110`, the KELVIN SIGN, and a new name that would swallow an existing value.
+  2. D-118 (2) idempotence when a value contains `( ) @`: **resolved.**
+     - Widening (`:791-804`) leaves no literal fragment, and the fixed-point loop catches a literal that completes another value.
+     - r3_6 is green.
+     - The 3000-case property test in `vault_scrub_t05_fix.rs` checks no leak, the fixed point, and that known refs still parse.
+     - Termination: each changing pass either removes non-literal text or merges two or more literals into one.
+     - Parseability holds only in the narrowed sense above.
+  3. Repairing a short value: library only. See Should fix.
+- **New ValueTooShort text:** `vault entry "x" is shorter than 4 characters; ...; give it a longer value with \`harness vault set x\``. It names only the key (twice) and the floor, never the value. The r3_2 fixed string just needs updating.
+- **ValueInLiteral** carries the name only. When it names a different entry than the one being set, the caller learns that entry's value is a substring of the chosen literal. The only caller is the user's own CLI, and scrub already gives the same membership oracle, so this adds no exposure.
+- **Leak paths:**
+  - `strict` is not in `Debug`.
+  - No new log, panic or return path carries a value.
+  - All new `unwrap`s are in `#[cfg(test)]`.
+  - `open_for_set`'s scrubber is documented as never to be installed globally, and no caller does.
+  - `mcp.rs` still passes `ToolError::Vault` through unscrubbed. That is fine for name-only variants.
+- **Round-3 test gap** (wrapping forms with the real canary): closed by `canary_wrapped_in_literals_is_scrubbed_to_a_fixed_point`.
+- **Cost:** any scrub with a match now takes one extra confirming pass. Text with no match still takes one pass.
+- **Spec ids:** H-2 and D-118 behaviour is implemented, but D-118's text is stale (see above). I-4 is claimed, but `non_exhaustive` is missing and the additions are unfiled. Behaviour beyond the spec: `open_for_set` and the strict/only check modes.
+- **Process:** fc23dd2 has no handoff, so this review's handoff records the state.
+- **Hard rules 1 and 3-7:** this change does not touch them. There are no keys, sleeps, challenge code, gate paths or HTML. The error strings are not user drafts.
 
 ## Verdict
 
-Approve:
-- No rule break. The literal filter cannot hide a reflected secret, only a value that is a substring of `@vault(` or of an entry's own literal.
-- Every round-2 item is resolved.
-- The acceptance tests are present, assert the behaviour, and are green with 0 canary hits.
+Request changes:
+- One blocking item: `#[non_exhaustive]` on VaultError (D-76, I-4). It is a one-line fix plus a `_` arm in the row-5 test.
+- The scrub and leak logic is sound, and round-3 items 1 and 2 are resolved and tested.
+- Before merge, also:
+  - wire `open_for_set` into `harness vault set`, so the repair hint works;
+  - amend D-118 as written above;
+  - file the I-4 additions.
 
-Before step 2:
-- Refuse values that sit inside `@vault(` or a name literal.
-- Fix or narrow the idempotence claim, since the D-117 ledger depends on it.
-- Let `set` repair a short entry.
-
-Verdict: approve
+Verdict: request changes
