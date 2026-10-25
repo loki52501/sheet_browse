@@ -297,3 +297,6 @@ decisions:
   - id: D-81
     text: "B-191 accepted (I-3 contract, behaviour only): rule_domain stores Punycode A-labels and refuses non-mappable Unicode; rule_hint accepts only ASCII a-z 0-9 _ - .; a Send AskCard's values[0] is always the gate-written ('new recipients (N)', list) row and any other value under that key is dropped; blank Call.recipients are ignored and duplicates count once. No re-set is needed: the six seeded gate.rules (migrations/0001_init.sql) use '*' and ASCII hints, and no user rule exists yet."
     why: "Unicode domains and hints admit look-alike keys (the D-62 problem for gate rules), and a classifier-supplied 'new recipients' row could tell the user a Send goes to known contacts when it does not. Checked the seeds before accepting, so the stated incompatibility strands nothing."
+  - id: D-82
+    text: "B-413 accepted (I-11 draft): __sbMedia frame() returns {t: null, why} and frames(id, times) returns a single {t: null, why} entry when the call is refused as a whole (no base, unknown id, challenge); per-time failures keep one entry per requested time."
+    why: "I-11 named a bare {why} only for list() and cues(), so sb-media (wave 2) had no written shape for whole-call refusals of frame()/frames(); writing it down before sb-media exists costs nothing, and a single t:null entry is distinguishable from per-time failures."
