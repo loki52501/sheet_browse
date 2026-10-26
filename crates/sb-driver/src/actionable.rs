@@ -677,6 +677,10 @@ impl Driver {
             per_call: None,
             grace: Some(W_GRACE),
             at_least_once: false,
+            // D-625: a request of the tab still in flight when the wait ends, started
+            // before it or aged out of D-620 (3), makes the step unsettled.
+            pending_since: 0,
+            count_gaps: false,
         };
         match self.net_settle(tab, 0, mark, deadline, pass).await {
             Ok(s) => match &s.last {

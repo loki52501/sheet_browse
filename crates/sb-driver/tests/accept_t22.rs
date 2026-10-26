@@ -127,6 +127,21 @@ fn route(path: &str, query: &str) -> Option<Reply> {
             ))
         }
         "/api/save" => Reply::Slow(SAVE_API_MS, "ok".into()),
+        // Rule 2: the test writes the canary into these at run time (never in a fixture).
+        "/scrub" => html(format!(
+            "<title>Scrub</title>{STYLE}<h2 id=h>Heading</h2><p id=near>near</p>             <div id=cap class=captcha style=\"width:120px;height:40px\"></div>             <button id=t>text</button><button id=al>x</button>             <label>Titled <input id=ti></label><input id=v aria-label=Value>"
+        )),
+        // D-5: a challenge widget whose frame holds a frame that holds a frame.
+        "/chal" => html(format!(
+            "<title>Chal</title>{STYLE}<div class=h-captcha style=\"width:320px;height:140px\">             <iframe id=cw title=widget src=/cw1></iframe></div><button>Outside</button>"
+        )),
+        "/cw1" => html(format!(
+            "{STYLE}<button>Inside one</button><iframe title=two src=/cw2></iframe>"
+        )),
+        "/cw2" => html(format!(
+            "{STYLE}<button>Inside two</button><iframe title=three src=/cw3></iframe>"
+        )),
+        "/cw3" => html("<button>Inside three</button>".into()),
         _ => return None,
     })
 }
@@ -665,10 +680,41 @@ async fn a_slow_xhr_submit_is_not_no_visible_change() {
         .expect("open save-hang");
     let ix = d.index(tab).await.expect("index");
     let save = by_name(&ix, "Save").elem();
+    // When the click's XHR started (right after the input), from the event stream.
+    let mut events = d.cdp().events();
+    let xhr = tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(ev)
+                    if ev.method == "Network.requestWillBeSent"
+                        && ev
+                            .params
+                            .pointer("/request/url")
+                            .and_then(Value::as_str)
+                            .is_some_and(|u| u.ends_with("/hang")) =>
+                {
+                    return Some(Instant::now())
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => return None,
+            }
+        }
+    });
     let t0 = Instant::now();
     let r = d.act(tab, &format!("c{save}"), &ctx).await.expect("act");
     let took = t0.elapsed();
-    eprintln!("B-614: /save-hang act {took:?}: {:?}", r.steps);
+    let end = Instant::now();
+    let started = tokio::time::timeout(Duration::from_secs(1), xhr)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .expect("the click's XHR was seen");
+    let window = end.saturating_duration_since(started);
+    eprintln!(
+        "B-614: /save-hang act {took:?}, from the XHR {window:?}: {:?}",
+        r.steps
+    );
     assert!(
         !r.steps[0]
             .consequences
@@ -677,5 +723,161 @@ async fn a_slow_xhr_submit_is_not_no_visible_change() {
         r.steps
     );
     assert_eq!(r.steps[0].settled, Some(false));
-    assert!(took < Duration::from_millis(4500), "{took:?}");
+    // The whole window, its last call and that call's answer included, ends by input + 3 s
+    // (B-4 #8): measured from the XHR the click started, at most the cap + 40 ms.
+    assert!(window <= Duration::from_millis(3040), "{window:?}");
+}
+
+/// Rule 2, review-T-22 blocking 3: a page that puts the vault canary into an ARIA role, a
+/// text name, an aria-label, a title, a field value, a heading and nearby text gives an
+/// index with the literal in its place and the value nowhere (serde and Debug forms).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn index_rows_never_carry_a_vault_value() {
+    let rig = rig().await;
+    rig.harness.vault.install_global();
+    let d = &rig.d;
+    let c = canary();
+    let tab = d.open(&rig.url("/scrub")).await.expect("open scrub");
+    // The canary goes into the page at run time only.
+    let js = format!(
+        "(() => {{ const c = {c}; const $ = (i) => document.getElementById(i);\
+         $('cap').setAttribute('role', c);\
+         $('t').textContent = 'text ' + c;\
+         $('al').setAttribute('aria-label', 'label ' + c);\
+         $('ti').setAttribute('title', 'title ' + c);\
+         $('v').value = c;\
+         $('h').textContent = 'Heading ' + c;\
+         $('near').textContent = 'near ' + c;\
+         return 1; }})()",
+        c = serde_json::to_string(&c).unwrap()
+    );
+    assert_eq!(page_js(d, tab, &js).await, json!(1));
+    let ix = d.index(tab).await.expect("index");
+    let wire = serde_json::to_string(&ix).unwrap();
+    let dbg = format!("{ix:?}");
+    let hits = wire.matches(c.as_str()).count() + dbg.matches(c.as_str()).count();
+    let literals = ix
+        .iter()
+        .filter(|r| serde_json::to_string(r).unwrap().contains("@vault(pw)"))
+        .count();
+    eprintln!(
+        "index scrub: {} rows, {literals} with the literal, {hits} canary hits",
+        ix.len()
+    );
+    assert_eq!(hits, 0, "a vault value is in index()");
+    let role = ix
+        .iter()
+        .find(|r| r.flags.challenge)
+        .expect("the widget row");
+    assert!(
+        role.role.contains("@vault(pw)"),
+        "the role went through the scrub"
+    );
+    assert!(
+        literals >= 5,
+        "the canary reached role, name (text, aria-label, title) and value: {literals}"
+    );
+}
+
+/// D-5, review-T-22 should-fix 3: a CHALLENGE widget's frame, the frame inside it and the
+/// one inside that are never walked or read: decided from the parent's row and the
+/// registry's ancestry before any call. The frames' own `sb` worlds still say `no base`
+/// (no based walk ever ran there), and an act into one stops as a challenge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nothing_inside_a_challenge_frame_is_ever_read() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/chal")).await.expect("open chal");
+    let p = rig.port;
+    let urls = [1, 2, 3].map(|n| format!("http://127.0.0.1:{p}/cw{n}"));
+    let frames: Vec<u32> = d
+        .wait_registry(CAP, |r| {
+            let all = r.frames(tab)?;
+            let mut out = Vec::new();
+            for u in &urls {
+                let f = all.iter().find(|f| &f.url == u)?;
+                r.sb_context(tab, f.frame)?;
+                out.push(f.frame);
+            }
+            Some(out)
+        })
+        .await
+        .expect("three nested frames with sb worlds");
+    let ix = d.index(tab).await.expect("index");
+    let widget = ix
+        .iter()
+        .find(|r| r.flags.challenge)
+        .unwrap_or_else(|| panic!("a CHALLENGE row: {ix:#?}"));
+    assert_eq!(widget.child_frame, Some(frames[0]), "{widget:?}");
+    by_name(&ix, "Outside");
+    for f in &frames {
+        assert!(
+            !ix.iter().any(|r| r.frame == *f),
+            "frame {f} was read: {ix:#?}"
+        );
+    }
+    let probe = "function () { const sb = globalThis.__sb; if (!sb) return 'no runtime';\
+                 const r = sb.index(); return r && r.why ? r.why : 'walked'; }";
+    let walked = |f: u32| async move {
+        let ctx = d
+            .with_registry(|r| r.sb_context(tab, f).cloned())
+            .expect("sb world");
+        let v = d
+            .cdp()
+            .call(
+                Some(&ctx.session),
+                "Runtime.callFunctionOn",
+                json!({"functionDeclaration": probe, "executionContextId": ctx.id,
+                       "returnByValue": true}),
+            )
+            .await
+            .expect("probe");
+        v.pointer("/result/value").cloned().unwrap_or(Value::Null)
+    };
+    for f in &frames {
+        assert_eq!(walked(*f).await, json!("no base"), "frame {f} was walked");
+    }
+    // An act into the nested frame is a challenge stop, before any call.
+    let r = d
+        .act(tab, &format!("c#f{}.1", frames[2]), &rig.ctx(Class::Submit))
+        .await
+        .expect("act");
+    assert_eq!(
+        r.stopped.as_ref().map(|s| s.class),
+        Some(Class::Challenge),
+        "{r:?}"
+    );
+    for f in &frames {
+        assert_eq!(walked(*f).await, json!("no base"), "frame {f} was walked");
+    }
+}
+
+/// accept-T-22 note 2: `Settled.changed` also counts the DOM changes made while settle waits
+/// for a request between its in-page calls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settle_counts_dom_changes_made_during_its_network_wait() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/titled")).await.expect("open");
+    page_js(
+        d,
+        tab,
+        "setTimeout(() => fetch('/api/slow').then((r) => r.text()).then((t) => {\
+           const p = document.createElement('p'); p.textContent = t; document.body.append(p);\
+         }), 50); 1",
+    )
+    .await;
+    let t0 = Instant::now();
+    let s = d.settle(tab, SettleOpts::default()).await.expect("settle");
+    let took = t0.elapsed();
+    eprintln!("gap count: settle {took:?} {s:?}");
+    assert!(s.settled, "{s:?}");
+    assert!(
+        took >= Duration::from_millis(SLOW_API_MS),
+        "waited: {took:?}"
+    );
+    assert!(
+        s.changed >= 1,
+        "the response's DOM change is counted: {s:?}"
+    );
 }

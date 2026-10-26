@@ -324,9 +324,22 @@ impl Driver {
         }))
     }
 
+    /// Refuse a frame the registry calls opaque (cross-origin, out of process, or inside one)
+    /// or CHALLENGE (or inside one), judged now, at the call (B-4 #2, B-5, D-5): nothing is
+    /// installed, walked, read or acted in there. A frame that turns cross-origin after a
+    /// call is refused on the next one.
+    pub(crate) fn refuse_closed(&self, tab: TabId, frame: u32) -> Result<(), CallError> {
+        match lock(&self.registry).closed_frame(tab, frame) {
+            Some(c) => Err(CallError::Driver(DriverError::Cdp(c.why(frame)))),
+            None => Ok(()),
+        }
+    }
+
     /// The frame's `sb` context with its document walked with a base (D-73: no read before
     /// a based walk). `settle`: settle in the page first, in the same round trip (open).
     /// `force`: walk even if the driver thinks this document is based (a `no base` answer).
+    /// Every in-page call goes through here, so a closed frame ([`Driver::refuse_closed`]) is
+    /// refused before anything is sent to it.
     pub(crate) async fn based_ctx(
         &self,
         tab: TabId,
@@ -335,9 +348,11 @@ impl Driver {
         settle: Option<SettleOpts>,
         force: bool,
     ) -> Result<ExecContext, CallError> {
+        self.refuse_closed(tab, frame)?;
         let mut ctx = self.sb_ctx(tab, frame, deadline).await?;
         let mut installed = false;
         loop {
+            self.refuse_closed(tab, frame)?;
             let key = doc_key(&ctx);
             if !force && settle.is_none() && bases(&self.bases).is_walked(tab, frame, &key) {
                 return Ok(ctx);

@@ -204,6 +204,20 @@ const CLOSE_CAP: Duration = Duration::from_secs(5);
 /// `tabs`: cap of the one `Target.getTargets` that refreshes titles (B-601).
 const TITLES_CAP: Duration = Duration::from_millis(1000);
 
+/// A page URL as `tabs()` and `frames()` give it: scrubbed whole (rule 2), then escaped and
+/// capped (`clean_url`), then scrubbed again (what leaves is the shown form).
+fn shown_url(url: &str) -> String {
+    harness_core::scrub(&diff::clean_url(&harness_core::scrub(url)))
+}
+
+/// A page title as `tabs()` gives it (as `OpenedTab`): scrubbed, escaped, capped.
+fn shown_title(title: &str) -> String {
+    harness_core::scrub(&diff::page_text(
+        &harness_core::scrub(title),
+        diff::TEXT_CAP,
+    ))
+}
+
 fn lock(m: &Mutex<Registry>) -> MutexGuard<'_, Registry> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -529,11 +543,11 @@ impl Driver {
     }
 
     /// I-9 `open`: a new tab at `url`. Returns once its document has committed, settled
-    /// (B-4 #8: the DOM in the page, and the requests the navigation started, D-620; capped
-    /// at 3 s from the commit), had its first paint (D-607, capped at 3 s) and been walked
-    /// with a fresh base (D-73), in one round trip after the commit when the network is
-    /// quiet by then. A failed or dropped `open` closes the tab it created. Scheduling (max 6
-    /// live tabs, B-4 #10) is not done yet.
+    /// (B-4 #8: the DOM in the page, and the requests the navigation started, D-620), had its
+    /// first paint (D-607) and been walked with a fresh base (D-73): all of that after the
+    /// commit ends within 3 s of it (D-626), in one round trip after the commit when the
+    /// network is quiet by then. A failed or dropped `open` closes the tab it created.
+    /// Scheduling (max 6 live tabs, B-4 #10) is not done yet.
     pub async fn open(&self, url: &str) -> Result<TabId, DriverError> {
         // Its own window, so the tab stays visible: a background tab is hidden, and rAF
         // (which act(id) awaits) never fires there (D-605).
@@ -599,6 +613,10 @@ impl Driver {
         let blank = url.trim().is_empty() || url.trim().eq_ignore_ascii_case("about:blank");
         // D-620: the requests of this navigation and of the document it brings count.
         let since = self.events_mark();
+        // D-626: everything after the main frame's commit (the D-607 paint wait, the settle,
+        // the based walk and its reply, and the network pass) shares one deadline, the commit
+        // + the 3 s settle cap (B-4 #8). The navigation itself keeps OPEN_CAP.
+        let mut commit = Instant::now();
         if !blank {
             let nav = self
                 .cdp
@@ -612,31 +630,47 @@ impl Driver {
                     "open: the URL is a download, not a page".into(),
                 ));
             }
-            // The condition: the main frame committed a new document with an sb context.
-            self.wait_registry(OPEN_CAP, |r| {
+            // The conditions: the main frame committed a new document (the instant the
+            // driver sees it starts D-626's deadline), and that document has an sb context.
+            let committed = |r: &Registry| {
                 let moved = r.generation(tab, 0)? != g0;
                 let u = r.frame_url(tab, 0)?;
-                (moved && u != "about:blank" && r.sb_context(tab, 0).is_some()).then_some(())
-            })
-            .await
-            .ok_or_else(|| {
+                (moved && u != "about:blank").then_some(())
+            };
+            let no_commit = || {
                 DriverError::Timeout(format!(
                     "open: no document committed within {} s",
                     OPEN_CAP.as_secs()
                 ))
-            })?;
+            };
+            self.wait_registry(OPEN_CAP, committed)
+                .await
+                .ok_or_else(no_commit)?;
+            commit = Instant::now();
+            self.wait_registry(OPEN_CAP, |r| {
+                committed(r)?;
+                r.sb_context(tab, 0).map(|_| ())
+            })
+            .await
+            .ok_or_else(no_commit)?;
         }
         let deadline = Instant::now() + OPEN_CAP;
-        let settle_cap = Duration::from_millis(u64::from(SettleOpts::default().cap_ms));
-        let settle_end = Instant::now() + settle_cap;
+        let defaults = SettleOpts::default();
+        let settle_end = commit + Duration::from_millis(u64::from(defaults.cap_ms));
         let mut retried = false;
         loop {
             let old = self.sb_key(tab, 0);
             let iter = self.events_mark();
-            match self
-                .based_ctx(tab, 0, deadline, Some(SettleOpts::default()), false)
-                .await
-            {
+            // The in-page settle (and the paint wait under it) gets what is left of the
+            // deadline minus the reply margin, as settle_tab gives its call.
+            let left = settle_end
+                .saturating_duration_since(Instant::now())
+                .saturating_sub(settle::REPLY_MARGIN);
+            let opts = SettleOpts {
+                quiet_ms: defaults.quiet_ms,
+                cap_ms: u32::try_from(left.as_millis()).unwrap_or(u32::MAX),
+            };
+            match self.based_ctx(tab, 0, deadline, Some(opts), false).await {
                 Ok(_) => {
                     self.open_net_settle(tab, since, iter, settle_end).await;
                     return Ok(tab);
@@ -669,6 +703,8 @@ impl Driver {
             per_call: None,
             grace: None,
             at_least_once: false,
+            pending_since: since,
+            count_gaps: false,
         };
         let mark = self.events_mark();
         let run = self.or_dialog(tab, mark, self.net_settle(tab, 0, since, end, pass));
@@ -692,7 +728,9 @@ impl Driver {
     /// The tab's current index (I-5), all frames merged, ElemRefs and `child_frame` rewritten:
     /// each readable frame's rows follow its iframe row with the frame's registry number
     /// (`#f2.15`); an opaque (cross-origin) frame is its one OPAQUE row, never read inside;
-    /// a CHALLENGE frame is never read inside (D-5). Page strings are scrubbed (H-2).
+    /// a CHALLENGE frame, and every frame below it, is never walked or read (D-5): a child is
+    /// read only after its parent's row and the registry's ancestry allow it. Every row
+    /// string is scrubbed (H-2) and capped.
     pub async fn index(&self, tab: TabId) -> Result<Vec<IndexRow>, DriverError> {
         self.merged_index(tab).await
     }
@@ -713,7 +751,9 @@ impl Driver {
     /// answer within 1 s the registry's last titles are used. The URL and title are page
     /// strings: a page can echo a typed value into them (a GET form), so they go through the
     /// process-wide vault scrub (H-2, rule 2) before they leave, as defence in depth under
-    /// the MCP wrapper's own scrub.
+    /// the MCP wrapper's own scrub; then they are escaped and capped as consequence strings
+    /// are (`page_text` for the title, `clean_url` for the URL, as `OpenedTab`), so a page
+    /// cannot write the harness's own syntax (`#12`, `[x](#3)`) into them.
     pub async fn tabs(&self) -> Result<Vec<(TabId, String, String)>, DriverError> {
         let fresh = tokio::time::timeout(
             TITLES_CAP,
@@ -738,7 +778,7 @@ impl Driver {
         let tabs = lock(&self.registry).tabs();
         Ok(tabs
             .into_iter()
-            .map(|(t, url, title)| (t, harness_core::scrub(&url), harness_core::scrub(&title)))
+            .map(|(t, url, title)| (t, shown_url(&url), shown_title(&title)))
             .collect())
     }
 
@@ -836,9 +876,9 @@ impl Driver {
         let mut frames = lock(&self.registry)
             .frames(tab)
             .ok_or(DriverError::TabGone(tab))?;
-        // Page strings: scrubbed as in `tabs()` (H-2).
+        // Page strings: scrubbed and escaped as in `tabs()` (H-2, pr-ready 5).
         for f in &mut frames {
-            f.url = harness_core::scrub(&f.url);
+            f.url = shown_url(&f.url);
         }
         Ok(frames)
     }
@@ -1698,8 +1738,10 @@ mod tests {
     }
 
     /// B-614, T-21b (4): a Submit click whose XHR is still in flight after the 500 ms
-    /// window waits for it (at most 3 s from the input) before the settle-and-index call,
-    /// and since it never finished, the step never reports NoVisibleChange.
+    /// window waits for it before the settle-and-index call, and since it never finished,
+    /// the step never reports NoVisibleChange. The whole window ends by input + 3 s: the
+    /// wait stops early enough for one index-only call (settle cap 0), which answers before
+    /// the deadline (B-4 #8, review-T-22 blocking 2).
     #[tokio::test]
     async fn a_step_whose_request_outlasts_the_window_never_claims_no_change() {
         let (d, mut s) = mock_driver(Profile::Bench);
@@ -1707,7 +1749,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let ctx = vault_ctx(home.path(), harness_core::Class::Submit, &canary());
         let rows = json!([{"id": 5, "frame": 0, "role": "button", "name": "Save"}]);
-        let (r, waited) = tokio::join!(d.act(tab, "c#5", &ctx), async {
+        let (r, (waited, t_input)) = tokio::join!(d.act(tab, "c#5", &ctx), async {
             s.walked().await;
             let ix = s.call(INDEX, 2).await;
             s.value(&ix, rows.clone()).await;
@@ -1727,15 +1769,21 @@ mod tests {
             let waited = t_input.elapsed();
             assert_eq!(
                 post["params"]["arguments"][0]["value"],
-                json!({"quiet": 150, "cap": 500})
+                json!({"quiet": 150, "cap": 0}),
+                "index-only: the network never went idle"
             );
-            s.value(&post, json!({"settled": true, "index": rows.clone()}))
+            s.value(&post, json!({"settled": false, "index": rows.clone()}))
                 .await;
-            waited
+            (waited, t_input)
         });
+        let total = t_input.elapsed();
         assert!(
             waited >= Duration::from_millis(2500),
             "the window waited for the request first: {waited:?}"
+        );
+        assert!(
+            total <= Duration::from_millis(3040),
+            "the window ends by input + 3 s: {total:?}"
         );
         let r = r.expect("act");
         assert_eq!(r.steps.len(), 1);
@@ -1801,6 +1849,8 @@ mod tests {
             assert!((900..=950).contains(&cap), "cap minus the margin: {cap}");
             s.request("R1").await;
             s.value(&call, json!({"settled": true, "changed": 2})).await;
+            // The mutation counter for the network wait, sent and not awaited.
+            s.gap_mark().await;
         });
         let took = t0.elapsed();
         let r = r.expect("settle");
@@ -1846,10 +1896,14 @@ mod tests {
             let call = s.call(SETTLE, 2).await;
             s.request("R2").await;
             s.value(&call, json!({"settled": true, "changed": 1})).await;
+            // The DOM changes of the network wait are counted from here (accept-T-22 note
+            // 2): the next call carries the mark's token.
+            let tok = s.gap_mark().await;
             s.send(json!({"sessionId": "S1", "method": "Network.loadingFailed",
                 "params": {"requestId": "R2", "errorText": "net::ERR_FAILED"}}))
                 .await;
             let again = s.call(SETTLE, 2).await;
+            assert_eq!(again["params"]["arguments"][0]["value"]["gap"], tok);
             s.value(&again, json!({"settled": true, "changed": 4}))
                 .await;
         });
@@ -1913,5 +1967,387 @@ mod tests {
             d.settle(tab, SettleOpts::default()).await,
             Err(DriverError::TabGone(_))
         ));
+    }
+    // ---- review-T-22 round 1 fixes over the mock transport ----
+
+    impl Script {
+        /// The settle loop's mutation counter for a network wait ([`settle`]'s GAP_FN), sent
+        /// and not awaited: its token.
+        async fn gap_mark(&mut self) -> Value {
+            let m = self.expect("Runtime.callFunctionOn").await;
+            let decl = m["params"]["functionDeclaration"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(decl.contains("function (tok, ttl)"), "a gap mark: {decl}");
+            assert_eq!(m["params"]["executionContextId"], 2, "{m}");
+            m["params"]["arguments"][0]["value"].clone()
+        }
+
+        /// Child frame `id` of the main frame T1 at `url`.
+        async fn child_frame(&self, id: &str, url: &str) {
+            self.send(json!({"sessionId": "S1", "method": "Page.frameAttached",
+                "params": {"frameId": id, "parentFrameId": "T1"}}))
+                .await;
+            self.send(
+                json!({"sessionId": "S1", "method": "Page.frameNavigated", "params": {
+                "frame": {"id": id, "parentId": "T1", "url": url, "loaderId": format!("L-{id}")},
+                "type": "Navigation"}}),
+            )
+            .await;
+        }
+
+        async fn frame_sb_context(&self, frame: &str, id: i64) {
+            self.send(json!({"sessionId": "S1", "method": "Runtime.executionContextCreated", "params": {
+                "context": {"id": id, "origin": "https://a.test", "name": SB_WORLD, "uniqueId": format!("u{id}"),
+                    "auxData": {"isDefault": false, "type": "isolated", "frameId": frame}}}}))
+                .await;
+        }
+    }
+
+    /// Blocking 1: `w(d)` longer than the 3 s age limit on a request that outlives it. The
+    /// request stops holding the wait at 3 s (D-620 (3)), but it is still in flight, so the
+    /// step is not settled, though the page's own settle said it was.
+    #[tokio::test]
+    async fn a_w_step_over_3_s_is_unsettled_while_its_request_is_in_flight() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        let home = tempfile::tempdir().unwrap();
+        let ctx = chromium_t20::tool_ctx(home.path());
+        let t0 = Instant::now();
+        let (r, ()) = tokio::join!(d.act(tab, "w(10s)", &ctx), async {
+            s.walked().await;
+            let call = s.call(SETTLE, 2).await;
+            // A 5 s save starts during the first in-page settle.
+            s.request("R5").await;
+            s.value(&call, json!({"settled": true, "changed": 0})).await;
+            // At 3 s it no longer holds the wait: the page is asked again.
+            let again = s.call(SETTLE, 2).await;
+            s.value(&again, json!({"settled": true, "changed": 0}))
+                .await;
+        });
+        let took = t0.elapsed();
+        let r = r.expect("act");
+        assert_eq!(r.steps[0].outcome, StepOutcome::Ok);
+        assert_eq!(
+            r.steps[0].settled,
+            Some(false),
+            "the 5 s request is still in flight"
+        );
+        assert!(
+            took >= Duration::from_millis(2900) && took < Duration::from_millis(3500),
+            "{took:?}"
+        );
+        assert!(s.quiet());
+        // It ends at 5 s; the next w() is settled again.
+        s.send(
+            json!({"sessionId": "S1", "method": "Network.loadingFinished",
+            "params": {"requestId": "R5"}}),
+        )
+        .await;
+        let (r, ()) = tokio::join!(d.act(tab, "w(1s)", &ctx), async {
+            let call = s.call(SETTLE, 2).await;
+            s.value(&call, json!({"settled": true, "changed": 0})).await;
+        });
+        assert_eq!(r.expect("act").steps[0].settled, Some(true));
+    }
+
+    /// Blocking 1 through `Driver::settle`: a cap of 6 s on a 4 s request. At 3 s the
+    /// request stops holding the wait; at the end it is still in flight: not settled.
+    #[tokio::test]
+    async fn settle_over_3_s_is_unsettled_while_an_aged_request_is_in_flight() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        let opts = SettleOpts {
+            quiet_ms: 150,
+            cap_ms: 6000,
+        };
+        let t0 = Instant::now();
+        let (r, ()) = tokio::join!(d.settle(tab, opts), async {
+            s.walked().await;
+            let call = s.call(SETTLE, 2).await;
+            s.request("R4").await;
+            s.value(&call, json!({"settled": true, "changed": 1})).await;
+            let tok = s.gap_mark().await;
+            let again = s.call(SETTLE, 2).await;
+            assert_eq!(again["params"]["arguments"][0]["value"]["gap"], tok);
+            s.value(&again, json!({"settled": true, "changed": 2}))
+                .await;
+        });
+        let took = t0.elapsed();
+        assert_eq!(
+            r.expect("settle"),
+            Settled {
+                settled: false,
+                changed: 3
+            }
+        );
+        assert!(
+            took >= Duration::from_millis(2900) && took < Duration::from_millis(3500),
+            "{took:?}"
+        );
+        assert!(s.quiet());
+    }
+
+    /// D-625: a request the tab started before `settle` began is not waited for, but if it
+    /// is still in flight when the settle ends, the answer is not settled (fail-safe).
+    #[tokio::test]
+    async fn a_request_from_before_the_settle_is_not_waited_for_but_unsettles_it() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        s.request("R0").await;
+        d.wait_state(Duration::from_secs(5), |_, ev| {
+            ev.net().inflight().next().map(|_| ())
+        })
+        .await
+        .expect("R0 in flight");
+        let t0 = Instant::now();
+        let (r, ()) = tokio::join!(d.settle(tab, SettleOpts::default()), async {
+            s.walked().await;
+            let call = s.call(SETTLE, 2).await;
+            s.value(&call, json!({"settled": true, "changed": 0})).await;
+        });
+        let took = t0.elapsed();
+        assert_eq!(
+            r.expect("settle"),
+            Settled {
+                settled: false,
+                changed: 0
+            }
+        );
+        assert!(
+            took < Duration::from_millis(1000),
+            "not waited for: {took:?}"
+        );
+        assert!(s.quiet(), "one call");
+        // Once it ends, the same settle is settled.
+        s.send(
+            json!({"sessionId": "S1", "method": "Network.loadingFinished",
+            "params": {"requestId": "R0"}}),
+        )
+        .await;
+        let (r, ()) = tokio::join!(d.settle(tab, SettleOpts::default()), async {
+            let call = s.call(SETTLE, 2).await;
+            s.value(&call, json!({"settled": true, "changed": 0})).await;
+        });
+        assert!(r.expect("settle").settled);
+    }
+
+    /// Should-fix 2, rule 3, B-5: `act` on `#fN.x` for a frame the registry calls opaque
+    /// fails before anything is sent: no index read, no walk, no input inside it.
+    #[tokio::test]
+    async fn act_in_an_opaque_frame_fails_without_reading_or_clicking() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        s.child_frame("F1", "https://b.test/widget").await;
+        s.frame_sb_context("F1", 9).await;
+        let f = d
+            .wait_registry(Duration::from_secs(5), |r| {
+                let f = r.frame_by_cdp_id(tab, "F1")?;
+                r.sb_context(tab, f).map(|_| f)
+            })
+            .await
+            .expect("frame F1");
+        assert!(d
+            .frames(tab)
+            .await
+            .unwrap()
+            .iter()
+            .any(|i| i.frame == f && i.opaque));
+        let home = tempfile::tempdir().unwrap();
+        let ctx = vault_ctx(home.path(), harness_core::Class::Submit, &canary());
+        let r = d.act(tab, &format!("c#f{f}.5"), &ctx).await.expect("act");
+        assert_eq!(r.steps.len(), 1);
+        match &r.steps[0].outcome {
+            StepOutcome::Failed { why } => assert!(why.contains("OPAQUE"), "{why}"),
+            o => panic!("the step must fail: {o:?}"),
+        }
+        assert!(r.stopped.is_none(), "{:?}", r.stopped);
+        assert!(s.quiet(), "nothing was sent into or about the frame");
+        let direct = d
+            .call_sb(
+                tab,
+                f,
+                "function () { return 1; }",
+                &[],
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await;
+        assert!(direct.is_err(), "{direct:?}");
+        assert!(s.quiet(), "a direct call is refused too");
+    }
+
+    /// Should-fix 2: a frame that becomes cross-origin while a call into it runs is refused
+    /// on the next call, judged at that call, not from an earlier snapshot.
+    #[tokio::test]
+    async fn a_frame_that_turns_cross_origin_mid_call_is_refused_on_the_next_call() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        s.child_frame("F2", "about:blank").await;
+        s.frame_sb_context("F2", 7).await;
+        let f = d
+            .wait_registry(Duration::from_secs(5), |r| {
+                let f = r.frame_by_cdp_id(tab, "F2")?;
+                r.sb_context(tab, f).map(|_| f)
+            })
+            .await
+            .expect("frame F2");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (first, ()) = tokio::join!(
+            d.call_sb(tab, f, "function () { return 1; }", &[], deadline),
+            async {
+                let walk = s.call(WALK, 7).await;
+                s.value(&walk, json!({"count": 1, "settled": null})).await;
+                let call = s.call("return 1;", 7).await;
+                // The frame navigates cross-origin (same process) before the answer.
+                s.send(json!({"sessionId": "S1", "method": "Page.frameNavigated", "params": {
+                    "frame": {"id": "F2", "parentId": "T1", "url": "https://evil.test/", "loaderId": "L-x"},
+                    "type": "Navigation"}}))
+                    .await;
+                d.wait_registry(Duration::from_secs(5), |r| {
+                    r.closed_frame(tab, f).map(|_| ())
+                })
+                .await
+                .expect("the registry sees it");
+                s.value(&call, json!(1)).await;
+            }
+        );
+        assert_eq!(first.expect("the first call ran"), json!(1));
+        let next = d
+            .call_sb(tab, f, "function () { return 2; }", &[], deadline)
+            .await;
+        match next {
+            Err(runtime::CallError::Driver(DriverError::Cdp(why))) => {
+                assert!(why.contains("OPAQUE"), "{why}")
+            }
+            other => panic!("refused: {other:?}"),
+        }
+        assert!(s.quiet(), "nothing sent to the frame");
+    }
+
+    /// Should-fix 6: when `Target.getTargets` does not answer within 1 s, `tabs()` gives the
+    /// registry's last titles, escaped and capped like the fresh ones.
+    #[tokio::test]
+    async fn tabs_falls_back_to_the_registry_titles_after_1_s() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        s.send(
+            json!({"method": "Target.targetInfoChanged", "params": {"targetInfo": {
+            "targetId": "T1", "type": "page", "title": "Old \"title\" #12 [x](#3)",
+            "url": "https://a.test/"}}}),
+        )
+        .await;
+        d.wait_registry(Duration::from_secs(5), |r| {
+            r.tabs()
+                .first()
+                .is_some_and(|t| t.2.starts_with("Old"))
+                .then_some(())
+        })
+        .await
+        .expect("title");
+        let t0 = Instant::now();
+        let (r, ()) = tokio::join!(d.tabs(), async {
+            // Never answered.
+            s.expect("Target.getTargets").await;
+        });
+        let took = t0.elapsed();
+        let tabs = r.expect("tabs");
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].0, tab);
+        assert_eq!(tabs[0].2, "Old 'title' ＃12 (x)(＃3)");
+        assert!(
+            took >= Duration::from_millis(950) && took < Duration::from_millis(1300),
+            "{took:?}"
+        );
+    }
+
+    /// Row 6c: fresh titles and URLs from `Target.getTargets` are escaped and capped as
+    /// `OpenedTab` titles are.
+    #[tokio::test]
+    async fn tabs_escapes_and_caps_titles_and_urls() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let _tab = mock_tab(&d, &mut s).await;
+        let long = "y".repeat(500);
+        let (r, ()) = tokio::join!(d.tabs(), async {
+            let m = s.expect("Target.getTargets").await;
+            s.reply(
+                &m,
+                json!({"targetInfos": [{"targetId": "T1", "type": "page",
+                "title": format!("A\nB `c` #f2.3 [x](#3) {long}"), "url": "https://a.test/"}]}),
+            )
+            .await;
+        });
+        let tabs = r.expect("tabs");
+        let title = &tabs[0].2;
+        assert!(title.starts_with("A B 'c' ＃f2.3 (x)(＃3) yyy"), "{title}");
+        assert!(title.ends_with("..."), "capped: {title}");
+        assert!(title.chars().count() <= diff::TEXT_CAP + 3);
+        assert!(!tabs[0].1.contains(' '));
+    }
+
+    /// Should-fix 4: a failed owner lookup is not cached. The first `index()` leaves the
+    /// frame out (its owner is unknown), the next asks again and reads it, and the one after
+    /// that uses the cached, definite answer.
+    #[tokio::test]
+    async fn a_failed_owner_lookup_is_asked_again_and_a_definite_one_is_cached() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        s.child_frame("F3", "about:blank").await;
+        s.frame_sb_context("F3", 7).await;
+        let f = d
+            .wait_registry(Duration::from_secs(5), |r| {
+                let f = r.frame_by_cdp_id(tab, "F3")?;
+                r.sb_context(tab, f).map(|_| f)
+            })
+            .await
+            .expect("frame F3");
+        let mut owner_asks = 0usize;
+        let mut runs = Vec::new();
+        for run in 0..3 {
+            let ix = d.index(tab);
+            tokio::pin!(ix);
+            let rows = loop {
+                tokio::select! {
+                    r = &mut ix => break r.expect("index"),
+                    raw = s.sent.recv() => {
+                        let m: Value = serde_json::from_slice(&raw.expect("open")).unwrap();
+                        let decl = m["params"]["functionDeclaration"].as_str().unwrap_or_default();
+                        let ctx = m["params"]["executionContextId"].as_i64();
+                        match m["method"].as_str().unwrap_or_default() {
+                            "Runtime.callFunctionOn" if decl.contains(WALK) => {
+                                s.value(&m, json!({"count": 1, "settled": null})).await
+                            }
+                            "Runtime.callFunctionOn" if decl.contains(INDEX) && ctx == Some(2) => {
+                                s.value(&m, json!([{"id": 4, "frame": 0, "role": "iframe", "name": "inner"}])).await
+                            }
+                            "Runtime.callFunctionOn" if decl.contains(INDEX) && ctx == Some(7) => {
+                                s.value(&m, json!([{"id": 1, "frame": 0, "role": "button", "name": "Inner"}])).await
+                            }
+                            "Runtime.callFunctionOn" if decl.contains("sb.id(this)") => {
+                                s.reply(&m, json!({"result": {"type": "number", "value": 4}})).await
+                            }
+                            "DOM.getFrameOwner" => {
+                                owner_asks += 1;
+                                if run == 0 {
+                                    s.fail(&m, "Frame with the given id was not found.").await
+                                } else {
+                                    s.reply(&m, json!({"backendNodeId": 11})).await
+                                }
+                            }
+                            "DOM.resolveNode" => {
+                                s.reply(&m, json!({"object": {"type": "object", "objectId": "o-1"}})).await
+                            }
+                            "Runtime.releaseObjectGroup" => s.reply(&m, json!({})).await,
+                            other => panic!("unexpected {other}: {m}"),
+                        }
+                    }
+                }
+            };
+            runs.push((owner_asks, rows.iter().any(|r| r.frame == f)));
+        }
+        assert_eq!(
+            runs,
+            [(1, false), (2, true), (2, true)],
+            "(owner lookups so far, frame read)"
+        );
     }
 }

@@ -270,6 +270,11 @@ blockers:
     question: "Requests made by workers (dedicated, shared, service workers) come on worker sessions, which the driver attaches and resumes but does not track or Network-enable. Should settle count them?"
     default_taken: "Not counted (D-620): a fetch a page awaits is made by the page itself in nearly every SPA, and a service worker that answers a page fetch shows as the page's request. Counting worker requests would need Network.enable on every worker session and an owner map from worker to tab. Revisit if a bench task settles too early behind a worker fetch."
     needs_user: false
+  - id: B-617
+    task: T-22
+    question: "For area page (injected.js): Settled.changed should count DOM mutations made while sb-driver waits for the network between two in-page settles (accept-T-22 note 2), but __sb exposes no mutation counter (S.mutCount is internal), so the driver cannot read the count at the start of a wait. Should __sb expose mutations() -> number (S.mutCount, after flushMut) or let settle(opts) take a since-count?"
+    default_taken: "D-625 work in sb-driver: before a network wait between two settle calls, the driver sends (not awaited) a small function into the sb world that starts a MutationObserver and records a mark; the next SETTLE_FN call adds the count since the mark to changed and drops the observer with its last mark (or after the settle's remaining time + 1 s by a page timer). It lives in the isolated world only (globalThis.__sbGap there, never the page's window). Proposed for page: __sb.mutations() so the driver reads S.mutCount in the call it already makes and the extra observer goes."
+    needs_user: false
 
 interface_changes:
   - id: B-401

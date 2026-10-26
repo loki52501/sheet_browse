@@ -23,6 +23,7 @@ use crate::diff::{changes, clean_url, page_text, render, TEXT_CAP};
 use crate::input::{
     click_events, key_events, ready, upload_path, InputFut, SCROLL_FN, SCROLL_TO_FN, UPLOAD_FN,
 };
+use crate::registry::Closed;
 use crate::runtime::{CallError, OBJECT_GROUP};
 use crate::scrub::{scrub_with, spellings};
 use crate::settle::Pass;
@@ -63,12 +64,17 @@ const INDEX_FN: &str = "function () {
 }";
 
 /// The consequence window's page side: settle (capped), then the index in the same call.
+/// A hidden page (a `target=_blank` click put a new tab in front of it) is never settled:
+/// its timers are throttled, so whether its settle answered within the window was a race
+/// (accept-T-22 note 4). It gives its index at once, unsettled, and a page hidden by the
+/// end of its settle is unsettled too (D-627).
 const POST_FN: &str = "async function (opts) {
   const sb = globalThis.__sb;
   if (!sb) return { why: 'no runtime' };
-  const s = await sb.settle(opts);
+  const hidden = () => document.visibilityState === 'hidden';
+  const s = hidden() ? null : await sb.settle(opts);
   const ix = sb.index();
-  return { settled: !!(s && s.settled), index: Array.isArray(ix) ? ix : null };
+  return { settled: !!(s && s.settled) && !hidden(), index: Array.isArray(ix) ? ix : null };
 }";
 
 const TITLE_FN: &str = "function () { return String(document.title || ''); }";
@@ -321,6 +327,21 @@ impl Driver {
                 Step::StopHere => (StepOutcome::Ok, Vec::new(), None, false),
                 _ => {
                     let frame = step_frame(step);
+                    // A frame the registry calls opaque or CHALLENGE (or inside one) is never
+                    // read or acted in, judged now (B-5, D-5): the step fails before any call;
+                    // a CHALLENGE also stops the program (H-1.4).
+                    if let Some(closed) = self.with_registry(|r| r.closed_frame(tab, frame)) {
+                        let why = closed.why(frame);
+                        if closed == Closed::Challenge {
+                            stopped = Some(StopReason {
+                                class: Class::Challenge,
+                                why: why.clone(),
+                                element: step_target(step).map(|e| e.to_string()),
+                            });
+                        }
+                        out.push(failed_step(n, step, why));
+                        break;
+                    }
                     // Every read before the input races a dialog: one that opens now is
                     // reported at once (no stall to the read's cap, no Submit stop for a
                     // missing index).
@@ -687,8 +708,8 @@ impl Driver {
     }
 
     /// The settle-and-index call in the step's frame, capped at the window; while a request
-    /// the step started (after `mark`) is in flight, the call waits for it first, at most
-    /// until `t0` + [`NAV_CAP`] (D-620).
+    /// the step started (after `mark`) is in flight, the call waits for it first. Every call
+    /// ends by `t0` + [`NAV_CAP`], its grace included (D-620, B-4 #8).
     async fn post_step(
         &self,
         tab: TabId,
@@ -702,19 +723,17 @@ impl Driver {
             per_call: Some(WINDOW),
             grace: Some(WINDOW_GRACE),
             at_least_once: true,
+            pending_since: mark,
+            count_gaps: false,
         };
         match self.net_settle(tab, frame, mark, t0 + NAV_CAP, pass).await {
             Ok(s) => {
-                let (settled, index, doc) = match s.last {
-                    Some((v, doc)) => (
-                        Some(s.settled),
-                        v.get("index").and_then(|ix| rows(ix, frame)),
-                        Some(doc),
-                    ),
-                    None => (None, None, None),
+                let (index, doc) = match s.last {
+                    Some((v, doc)) => (v.get("index").and_then(|ix| rows(ix, frame)), Some(doc)),
+                    None => (None, None),
                 };
                 Ok(Post {
-                    settled,
+                    settled: Some(s.settled),
                     index,
                     doc,
                     net_busy: s.net_busy,
@@ -722,11 +741,14 @@ impl Driver {
             }
             Err(e) => {
                 call_failure(e, "settle", frame)?;
+                // The window ended without a settled answer (the call missed its cap, or
+                // its document went away): not settled, deterministically (accept-T-22
+                // note 4).
                 Ok(Post {
-                    settled: None,
+                    settled: Some(false),
                     index: None,
                     doc: None,
-                    net_busy: self.net_state(tab, mark).0,
+                    net_busy: self.with_events(|r, ev| crate::settle::pending(r, ev, tab, mark)),
                 })
             }
         }
@@ -858,7 +880,12 @@ impl Driver {
             .into_iter()
             .filter(|t| self.with_registry(|r| r.has_tab(*t)))
         {
-            let title: String = self.tab_title(t).await.chars().take(RAW_CAP).collect();
+            let title: String = self
+                .tab_title(t, nav_cap)
+                .await
+                .chars()
+                .take(RAW_CAP)
+                .collect();
             c.consequences
                 .push(Consequence::OpenedTab { tab: t, title });
         }
@@ -885,11 +912,11 @@ impl Driver {
     }
 
     /// A new tab's title: `document.title` from its sb world when it has one (TargetInfo
-    /// titles go stale, B-601), else the registry's.
-    async fn tab_title(&self, t: TabId) -> String {
+    /// titles go stale, B-601), else the registry's. The read ends by `end` (the window's).
+    async fn tab_title(&self, t: TabId, end: Instant) -> String {
         let ctx = self.with_registry(|r| r.sb_context(t, 0).cloned());
         if let Some(ctx) = ctx {
-            let deadline = Instant::now() + TITLE_CAP;
+            let deadline = (Instant::now() + TITLE_CAP).min(end);
             if let Ok(v) = self.raw_call(&ctx, TITLE_FN, &[], deadline).await {
                 if let Some(s) = v.as_str().filter(|s| !s.trim().is_empty()) {
                     return s.to_string();

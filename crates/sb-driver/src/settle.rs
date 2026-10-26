@@ -18,18 +18,27 @@
 //! 4. neither `loadingFinished` nor `loadingFailed` came for it, its session did not detach,
 //!    and, for a navigation request, its frame did not commit or start a download.
 //!
+//! D-625 (refines D-620 (1) and (3)): a request that does not hold the wait still makes the
+//! answer honest. When a settle ends with a request of the tab still in flight, whether it
+//! started before the settle began (D-620 (1): not waited for) or is older than
+//! [`LONG_REQUEST`] (D-620 (3): no longer waited for), the result is `settled: false`. A
+//! stream type (D-620 (2)) is never tracked, so it never does.
+//!
 //! Fail-safe: any doubt ends a settle earlier, never later. The cap is a hard deadline in
 //! Rust (the in-page call gets the cap minus [`REPLY_MARGIN`] so its answer can arrive in
-//! time); nothing waits past it.
+//! time); nothing waits past it. The act window's deadline (input + 3 s) is hard too: every
+//! call in it, with its grace, ends by then (B-4 #8).
 //!
 //! The loop: wait (a condition on the event store, capped) until no counted request is in
 //! flight, then one in-page settle; if a counted request started during it, or one is in
 //! flight now, go again while time remains. A page with no network activity costs one round
-//! trip, as before T-22.
+//! trip, as before T-22. `Driver::settle` also counts the DOM mutations of the network waits
+//! between its in-page calls ([`GAP_FN`]), so `changed` covers the whole settle.
 
 use crate::runtime::CallError;
 use crate::{Driver, DriverError, Registry, SettleOpts, Settled, TabId};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -38,14 +47,61 @@ pub(crate) const LONG_REQUEST: Duration = Duration::from_millis(3000);
 /// The in-page settle of [`Driver::settle`] gets the time left minus this, so its answer
 /// (with `changed`) arrives before the hard deadline.
 pub(crate) const REPLY_MARGIN: Duration = Duration::from_millis(50);
+/// The act window's network wait ends this long before the window's deadline when no call
+/// was made yet, so its one index-only call (settle cap 0) can still answer in time.
+pub(crate) const INDEX_ROOM: Duration = Duration::from_millis(100);
 
 /// The in-page settle (`settle`, `w(..)`, open's network pass and the wait between act(id)
-/// attempts): `{settled, changed}`.
+/// attempts): `{settled, changed}`. With `opts.gap` (a [`GAP_FN`] token), the mutations
+/// counted since that mark are added to `changed`, and the mark is dropped.
 pub(crate) const SETTLE_FN: &str = "function (opts) {
   const sb = globalThis.__sb;
   if (!sb) return { why: 'no runtime' };
-  return sb.settle(opts);
+  let gap = 0;
+  const g = globalThis.__sbGap;
+  if (g && opts && opts.gap != null && g.marks.has(opts.gap)) {
+    const m = g.marks.get(opts.gap);
+    g.n += g.mo.takeRecords().length;
+    gap = g.n - m.n;
+    clearTimeout(m.timer);
+    g.marks.delete(opts.gap);
+    if (!g.marks.size) {
+      g.mo.disconnect();
+      delete globalThis.__sbGap;
+    }
+  }
+  return Promise.resolve(sb.settle(opts)).then((s) => {
+    if (s && typeof s.changed === 'number') s.changed += gap;
+    return s;
+  });
 }";
+
+/// Start counting DOM mutations in the `sb` world (the page's own world never sees it)
+/// until the next settle call that carries `tok`. Sent, not awaited, before a network wait
+/// between two in-page settles, so `Settled.changed` covers those waits too (accept-T-22
+/// note 2). The observer goes with its last mark, or `ttl` ms after the mark if no call
+/// comes (a timer in the page, not a wait in the driver).
+const GAP_FN: &str = "function (tok, ttl) {
+  let g = globalThis.__sbGap;
+  if (!g) {
+    g = { n: 0, marks: new Map(), mo: null };
+    g.mo = new MutationObserver((rs) => { g.n += rs.length; });
+    g.mo.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    globalThis.__sbGap = g;
+  }
+  const timer = setTimeout(() => {
+    g.marks.delete(tok);
+    if (!g.marks.size && globalThis.__sbGap === g) {
+      g.mo.disconnect();
+      delete globalThis.__sbGap;
+    }
+  }, ttl);
+  g.marks.set(tok, { n: g.n, timer: timer });
+  return true;
+}";
+
+/// Tokens of [`GAP_FN`] marks: unique in the process.
+static GAP_TOKENS: AtomicU64 = AtomicU64::new(1);
 
 /// Whether a counted request (D-620) of `tab` is in flight now, and when the first of them
 /// stops counting by age.
@@ -72,6 +128,19 @@ pub(crate) fn net_busy(
     (busy, expiry)
 }
 
+/// D-625: whether any tracked request of `tab` announced after `since` is still in flight,
+/// whatever its age (`since` 0: those started before the settle began too).
+pub(crate) fn pending(
+    r: &Registry,
+    ev: &crate::consequence::Events,
+    tab: TabId,
+    since: u64,
+) -> bool {
+    ev.net()
+        .inflight()
+        .any(|q| q.seq > since && r.tab_of_session(&q.session) == Some(tab))
+}
+
 /// Whether a counted request of `tab` started after `mark` (finished or not).
 pub(crate) fn started_since(
     r: &Registry,
@@ -93,8 +162,18 @@ pub(crate) struct Pass<'a> {
     pub per_call: Option<Duration>,
     /// How long past its cap one call may take to answer; `None`: the deadline is hard.
     pub grace: Option<Duration>,
-    /// Make one call even when the network never went idle (the act window needs an index).
+    /// The act window: make one call even when the network never went idle (the step needs
+    /// an index; that call is index-only, settle cap 0, and its network wait ends
+    /// [`INDEX_ROOM`] early so it answers in time), and end every call, grace included, by
+    /// the deadline: each is capped at min(`per_call`, time left - [`REPLY_MARGIN`]).
     pub at_least_once: bool,
+    /// D-625: a request announced after this mark still in flight at the end makes the
+    /// answer unsettled, whatever its age. 0 for `settle` and `w(d)` (every request of the
+    /// tab), the step's mark for the act window.
+    pub pending_since: u64,
+    /// Count the DOM mutations of the network waits between calls into `changed`
+    /// ([`GAP_FN`]; the decl must be [`SETTLE_FN`]).
+    pub count_gaps: bool,
 }
 
 /// What the loop found.
@@ -104,16 +183,12 @@ pub(crate) struct NetSettled {
     pub last: Option<(Value, String)>,
     pub settled: bool,
     pub changed: u32,
-    /// A counted request was still in flight at the end.
+    /// A request announced after the settle's mark was still in flight at the end, counted
+    /// or aged out (D-620, D-625).
     pub net_busy: bool,
 }
 
 impl Driver {
-    /// (busy, first age-out) for `tab` now.
-    pub(crate) fn net_state(&self, tab: TabId, since: u64) -> (bool, Option<Instant>) {
-        self.with_events(|r, ev| net_busy(r, ev, tab, since, Instant::now()))
-    }
-
     /// Wait until no counted request of `tab` is in flight, at most until `deadline`: a
     /// condition re-checked on every event, and at the first age-out (D-620 (3)). True when
     /// idle.
@@ -137,6 +212,35 @@ impl Driver {
         }
     }
 
+    /// Every way out of the loop ends here: D-625's honesty about requests still in flight.
+    fn honest(&self, mut out: NetSettled, tab: TabId, since: u64, pass: &Pass<'_>) -> NetSettled {
+        let (any, mine) = self.with_events(|r, ev| {
+            (
+                pending(r, ev, tab, pass.pending_since),
+                pending(r, ev, tab, since),
+            )
+        });
+        if any {
+            out.settled = false;
+        }
+        out.net_busy |= mine;
+        out
+    }
+
+    /// Send [`GAP_FN`] to the frame's `sb` context (not awaited); its token, if sent.
+    fn start_gap(&self, tab: TabId, frame: u32, ttl: Duration) -> Option<u64> {
+        let ctx = self.with_registry(|r| r.sb_context(tab, frame).cloned())?;
+        let tok = GAP_TOKENS.fetch_add(1, Ordering::Relaxed);
+        let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+        drop(self.cdp.start(
+            Some(&ctx.session),
+            "Runtime.callFunctionOn",
+            json!({"functionDeclaration": GAP_FN, "executionContextId": ctx.id,
+                   "arguments": [{"value": tok}, {"value": ttl_ms}], "returnByValue": true}),
+        ));
+        Some(tok)
+    }
+
     /// The settle loop (module docs): network idle, then the in-page call, again while a
     /// counted request started meanwhile and time remains.
     pub(crate) async fn net_settle(
@@ -148,40 +252,50 @@ impl Driver {
         pass: Pass<'_>,
     ) -> Result<NetSettled, CallError> {
         let mut out = NetSettled::default();
+        let mut gap: Option<u64> = None;
         loop {
-            let idle = self.wait_net_idle(tab, since, deadline).await;
-            if !idle && !(pass.at_least_once && out.last.is_none()) {
+            let first_needed = pass.at_least_once && out.last.is_none();
+            // The act window's one call must still fit before its deadline.
+            let wait_end = if first_needed {
+                deadline.checked_sub(INDEX_ROOM).unwrap_or(deadline)
+            } else {
+                deadline
+            };
+            let idle = self.wait_net_idle(tab, since, wait_end).await;
+            if !idle && !first_needed {
                 out.settled = false;
                 out.net_busy = true;
-                return Ok(out);
+                return Ok(self.honest(out, tab, since, &pass));
             }
             let now = Instant::now();
-            let left = match pass.grace {
+            let to_end = deadline.saturating_duration_since(now);
+            let cap = if !idle {
+                // The network never went idle: nothing to settle for, only the index.
+                Duration::ZERO
+            } else if pass.grace.is_none() || pass.at_least_once {
                 // A hard deadline: the page answers before it.
-                None => deadline
-                    .saturating_duration_since(now)
-                    .saturating_sub(REPLY_MARGIN),
-                Some(_) => deadline.saturating_duration_since(now),
+                pass.per_call
+                    .unwrap_or(to_end)
+                    .min(to_end.saturating_sub(REPLY_MARGIN))
+            } else {
+                // w(d): the time left, and the grace past it for the answer.
+                to_end
             };
-            // The act window: its first call gets the whole window (as before T-22), later
-            // ones what is left of the network budget.
-            let cap = match pass.per_call {
-                Some(c) if out.last.is_some() => c.min(left),
-                Some(c) => c,
-                None => left,
-            };
-            if cap.is_zero() && out.last.is_some() {
+            if cap.is_zero() && idle && out.last.is_some() {
                 out.settled = false;
-                out.net_busy = !idle;
-                return Ok(out);
+                return Ok(self.honest(out, tab, since, &pass));
             }
             let call_deadline = match pass.grace {
+                Some(g) if pass.at_least_once => (now + cap + g).min(deadline),
                 Some(g) => now + cap + g,
                 None => deadline,
             };
             let iter = self.events_mark();
             let cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX);
-            let opts = json!({"quiet": pass.quiet_ms, "cap": cap_ms});
+            let mut opts = json!({"quiet": pass.quiet_ms, "cap": cap_ms});
+            if let Some(tok) = gap.take() {
+                opts["gap"] = json!(tok);
+            }
             let (v, doc) = self
                 .call_sb_doc(tab, frame, pass.decl, &[opts], call_deadline)
                 .await?;
@@ -198,7 +312,7 @@ impl Driver {
                 // effect may not be in the page yet).
                 out.settled = false;
                 out.net_busy = true;
-                return Ok(out);
+                return Ok(self.honest(out, tab, since, &pass));
             }
             let (again, busy) = self.with_events(|r, ev| {
                 let busy = net_busy(r, ev, tab, since, Instant::now()).0;
@@ -207,19 +321,25 @@ impl Driver {
             if !again {
                 out.settled = settled;
                 out.net_busy = false;
-                return Ok(out);
+                return Ok(self.honest(out, tab, since, &pass));
             }
             if Instant::now() >= deadline {
                 out.settled = false;
                 out.net_busy = busy;
-                return Ok(out);
+                return Ok(self.honest(out, tab, since, &pass));
+            }
+            if pass.count_gaps {
+                let ttl =
+                    deadline.saturating_duration_since(Instant::now()) + Duration::from_secs(1);
+                gap = self.start_gap(tab, frame, ttl);
             }
         }
     }
 
     /// I-9 `settle` (B-4 #8): frame 0's DOM and the tab's network, capped at `opts.cap_ms`
     /// as a hard deadline. A dialog open on the tab blocks the page: `{settled: false}` at
-    /// once.
+    /// once. A request of the tab still in flight at the end, waited for or not, makes it
+    /// `{settled: false}` (D-625).
     pub(crate) async fn settle_tab(
         &self,
         tab: TabId,
@@ -244,6 +364,8 @@ impl Driver {
             per_call: None,
             grace: None,
             at_least_once: false,
+            pending_since: 0,
+            count_gaps: true,
         };
         let run = tokio::time::timeout_at(
             deadline,
@@ -261,7 +383,6 @@ impl Driver {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -761,7 +761,10 @@ async fn cap_settle_and_w(kind: &str) {
 }
 
 /// open(), 5 runs, each in a new tab closed after: the total, and from the main-frame commit
-/// (as the event stream saw it, so a lower bound) to the return.
+/// (Page.frameNavigated as the event stream saw it) to the return. D-626: the 3 s cap of
+/// B-4 #8 applies to what follows the commit (paint wait, settle, based walk, reply), so the
+/// commit-to-return part is at most 3 s + 40 ms, and the total at most the time to the
+/// commit + 3 s + 40 ms. The navigation itself keeps its own cap.
 async fn cap_open(kind: &str) {
     let rig = rig().await;
     let d = &rig.d;
@@ -790,6 +793,17 @@ async fn cap_open(kind: &str) {
         }
         o_results.push((took, after));
         d.close(tab).await.expect("close");
+        let commit = commit.unwrap_or_else(|| panic!("{kind}: no main-frame commit seen"));
+        let to_commit = commit.saturating_duration_since(t0);
+        let after = back.saturating_duration_since(commit);
+        assert!(
+            after <= limit,
+            "{kind}: open() commit-to-return {after:?} > {limit:?}"
+        );
+        assert!(
+            took <= to_commit + limit,
+            "{kind}: open() total {took:?} > commit at {to_commit:?} + {limit:?}"
+        );
     }
     println!(
         "row03 {kind} open(): worst total {o_worst:?}, worst commit-to-return {o_after_worst:?}; runs (total, commit-to-return) {o_results:?}"
@@ -798,8 +812,8 @@ async fn cap_open(kind: &str) {
         "row03 {kind} SUMMARY open {o_worst:?} open-after-commit {o_after_worst:?} (limit {limit:?})"
     );
     assert!(
-        o_worst <= limit,
-        "{kind}: open() total {o_worst:?} > {limit:?}"
+        o_after_worst <= limit,
+        "{kind}: open() commit-to-return {o_after_worst:?} > {limit:?}"
     );
 }
 

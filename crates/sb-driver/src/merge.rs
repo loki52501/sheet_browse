@@ -6,15 +6,17 @@
 //! parent's `sb` world and `__sb.id(this)` there (cached per parent document). The child's
 //! rows follow its iframe row. An opaque frame (cross-origin, out of process, or inside one)
 //! is that one row with OPAQUE and is never read inside (B-4 #2, B-5); neither is a frame
-//! whose row is a CHALLENGE (D-5). A frame whose element is not a row (a hidden iframe) is
-//! left out with it. All reads and owner lookups of one call run concurrently.
+//! whose row is a CHALLENGE, nor any frame below it (D-5): frames are read level by level
+//! and a child is only read once its parent's fresh row and the registry's ancestry say it
+//! may be. A frame whose element is not a row (a hidden iframe) is left out with it. The
+//! reads of one level and the owner lookups of its children run concurrently.
 //!
 //! Rows are page strings: every string in them goes through the process-wide vault scrub
-//! (H-2, rule 2) before they leave, as `tabs()` does.
+//! (H-2, rule 2) and a cap before they leave, as `tabs()` does.
 
 use crate::runtime::CallError;
 use crate::{Driver, DriverError, FrameInfo, TabId};
-use sb_sheet::{FieldValue, IndexRow};
+use sb_sheet::{FieldValue, Flags, IndexRow, State};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -88,38 +90,84 @@ async fn join_all<T>(futs: Vec<BoxFut<'_, T>>) -> Vec<T> {
     out.into_iter().flatten().collect()
 }
 
-/// Every page string of the rows through the process-wide scrub (H-2).
-fn scrub_rows(rows: &mut [IndexRow]) {
-    let scrub = |s: &mut String| {
-        let c = harness_core::scrub(s);
-        if c != *s {
-            *s = c;
-        }
+/// Caps of the row strings, in characters, after the scrub (the page caps them too; these
+/// hold whatever a page or a changed runtime sends).
+const ROLE_CAP: usize = 40;
+const TEXT_CAP: usize = 300;
+const TOKEN_CAP: usize = 64;
+const OPTION_CAP: usize = 120;
+const OPTIONS_MAX: usize = 50;
+
+/// `s` scrubbed whole (rule 2), then cut at `cap` characters with `…` (on a char boundary).
+fn clean(s: &mut String, cap: usize, scrub: &dyn Fn(&str) -> String) {
+    let c = scrub(s);
+    *s = if c.chars().count() > cap {
+        let mut t: String = c.chars().take(cap.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    } else {
+        c
     };
+}
+
+/// Every page string of every row through `scrub` (the process-wide vault scrub in
+/// `index()`, H-2) and capped. The rows are taken apart field by field with exhaustive
+/// patterns, so a string field added to I-5 fails to compile here until it is handled.
+fn scrub_rows(rows: &mut [IndexRow], scrub: &dyn Fn(&str) -> String) {
     for r in rows {
-        scrub(&mut r.name);
-        for o in [
-            &mut r.nearby,
-            &mut r.heading,
-            &mut r.form,
-            &mut r.landmark,
-            &mut r.state.input_type,
-            &mut r.state.autocomplete,
-        ]
-        .into_iter()
-        .flatten()
+        let IndexRow {
+            id: _,
+            frame: _,
+            role,
+            name,
+            nearby,
+            heading,
+            state,
+            flags:
+                Flags {
+                    submit: _,
+                    challenge: _,
+                    overlay: _,
+                    opaque: _,
+                },
+            form,
+            landmark,
+            child_frame: _,
+            bbox: _,
+        } = r;
+        let State {
+            visible: _,
+            enabled: _,
+            checked: _,
+            value,
+            submitish: _,
+            opens_new_tab: _,
+            options,
+            covered: _,
+            input_type,
+            autocomplete,
+        } = state;
+        clean(role, ROLE_CAP, scrub);
+        clean(name, TEXT_CAP, scrub);
+        for s in [nearby, heading].into_iter().flatten() {
+            clean(s, TEXT_CAP, scrub);
+        }
+        for s in [form, landmark, input_type, autocomplete]
+            .into_iter()
+            .flatten()
         {
-            scrub(o);
+            clean(s, TOKEN_CAP, scrub);
         }
-        if let Some(FieldValue::Text(t)) = &mut r.state.value {
-            scrub(t);
+        match value {
+            Some(FieldValue::Text(t)) => clean(t, TEXT_CAP, scrub),
+            Some(FieldValue::Empty | FieldValue::Filled) | None => {}
         }
-        for o in &mut r.state.options {
-            scrub(o);
+        options.truncate(OPTIONS_MAX);
+        for o in options.iter_mut() {
+            clean(o, OPTION_CAP, scrub);
         }
     }
 }
-
 /// Merge per-frame rows: `rows[f]` in document order, each iframe row of `f` followed by its
 /// child frame's rows (depth first). `owners[c]` is the id of frame `c`'s element in its
 /// parent; `readable[c]` says whether `c` may be read inside.
@@ -192,7 +240,9 @@ impl Driver {
     }
 
     /// The id, in its parent's document, of the element hosting `frame` (cached per parent
-    /// document). `None` on any failure: the frame is then left out.
+    /// document). `None` when the element is not a row there, or on any failure: the frame
+    /// is then left out. Only a definite answer is cached; a timeout or a failed call is
+    /// asked again on the next `index()` (review-T-22 should-fix 4).
     async fn owner_id(
         &self,
         tab: TabId,
@@ -210,6 +260,21 @@ impl Driver {
                 return *id;
             }
         }
+        let definite = self.ask_owner(tab, frame, &ctx, deadline).await?;
+        self.owners().map.insert((tab, frame), (key, definite));
+        definite
+    }
+
+    /// `DOM.getFrameOwner` -> `DOM.resolveNode` into the parent's `sb` world ->
+    /// `__sb.id(this)`. `Some(answer)` when the page answered (`answer` is `None` for an
+    /// element that is not a row), `None` when any step failed or ran out of time.
+    async fn ask_owner(
+        &self,
+        tab: TabId,
+        frame: u32,
+        ctx: &crate::ExecContext,
+        deadline: Instant,
+    ) -> Option<Option<u32>> {
         let cdp_id = self.with_registry(|r| r.cdp_frame_id(tab, frame).map(str::to_string))?;
         let owner = self
             .cdp_call_until(
@@ -229,13 +294,13 @@ impl Driver {
                 deadline,
             )
             .await;
-        let id = match resolved
+        let answer = match resolved
             .as_ref()
             .and_then(|o| o.pointer("/object/objectId"))
             .and_then(Value::as_str)
         {
-            Some(object) => self
-                .cdp_call_until(
+            Some(object) => {
+                self.cdp_call_until(
                     &ctx.session,
                     "Runtime.callFunctionOn",
                     json!({"functionDeclaration": OWNER_FN, "objectId": object,
@@ -243,8 +308,7 @@ impl Driver {
                     deadline,
                 )
                 .await
-                .and_then(|v| v.pointer("/result/value").and_then(Value::as_u64))
-                .and_then(|n| u32::try_from(n).ok()),
+            }
             None => None,
         };
         drop(self.cdp.start(
@@ -252,9 +316,15 @@ impl Driver {
             "Runtime.releaseObjectGroup",
             json!({ "objectGroup": group }),
         ));
-        resolved?;
-        self.owners().map.insert((tab, frame), (key, id));
-        id
+        let v = answer?;
+        if v.get("exceptionDetails").is_some() {
+            return None;
+        }
+        Some(
+            v.pointer("/result/value")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok()),
+        )
     }
 
     /// One CDP command on `session`, `None` on any error or at `deadline`.
@@ -276,61 +346,93 @@ impl Driver {
         self.owners.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// I-9 `index` (module docs).
+    /// I-9 `index` (module docs). Frames are read level by level: frame 0, then each child
+    /// whose iframe row in its parent's fresh rows is neither OPAQUE nor CHALLENGE and that
+    /// the registry does not close (opaque, or a CHALLENGE frame or inside one), and so on.
+    /// A level's reads run concurrently with the owner lookups of its children, so a page
+    /// with one level of frames costs what it did, and nothing inside a CHALLENGE frame or
+    /// below one is ever walked or read (D-5, review-T-22 should-fix 3).
     pub(crate) async fn merged_index(&self, tab: TabId) -> Result<Vec<IndexRow>, DriverError> {
-        let frames = self
-            .with_registry(|r| r.frames(tab))
-            .ok_or(DriverError::TabGone(tab))?;
+        if !self.with_registry(|r| r.has_tab(tab)) {
+            return Err(DriverError::TabGone(tab));
+        }
         if self.open_dialog(tab).is_some() {
             return Err(DriverError::Cdp(
                 "index: a dialog is open on this tab: answer it with dialog() first".into(),
             ));
         }
         let deadline = Instant::now() + INDEX_CAP;
-        let readable: Vec<u32> = frames
-            .iter()
-            .filter(|f| !f.opaque)
-            .map(|f| f.frame)
-            .collect();
-        // Owners are looked up for every frame whose parent is read: an opaque child still
-        // gets its one row's child_frame.
-        let lookups: Vec<(u32, u32)> = frames
-            .iter()
-            .filter_map(|f| Some((f.frame, f.parent?)))
-            .filter(|(_, p)| readable.contains(p))
-            .collect();
-        let reads: Vec<BoxFut<'_, FrameRead>> = readable
-            .iter()
-            .map(|&f| -> BoxFut<'_, _> {
-                Box::pin(async move { (f, self.frame_rows(tab, f, deadline).await) })
-            })
-            .collect();
-        let owner_futs: Vec<BoxFut<'_, (u32, Option<u32>)>> = lookups
-            .iter()
-            .map(|&(f, p)| -> BoxFut<'_, _> {
-                Box::pin(async move { (f, self.owner_id(tab, f, p, deadline).await) })
-            })
-            .collect();
-        let (reads, owned) = tokio::join!(join_all(reads), join_all(owner_futs));
-        let mut rows = BTreeMap::new();
-        for (f, r) in reads {
-            match r {
-                Ok(Some(v)) => {
-                    rows.insert(f, v);
+        let mut rows: BTreeMap<u32, Vec<IndexRow>> = BTreeMap::new();
+        let mut owners: HashMap<u32, u32> = HashMap::new();
+        let mut level: Vec<u32> = vec![0];
+        let mut depth = 0usize;
+        while !level.is_empty() {
+            let frames = self
+                .with_registry(|r| r.frames(tab))
+                .ok_or(DriverError::TabGone(tab))?;
+            // Owners are looked up for every child of a frame read now (in the parent's
+            // world, never the child's): an opaque child still gets its one row's
+            // child_frame.
+            let lookups: Vec<(u32, u32)> = frames
+                .iter()
+                .filter_map(|f| Some((f.frame, f.parent?)))
+                .filter(|(_, p)| level.contains(p))
+                .collect();
+            let reads: Vec<BoxFut<'_, FrameRead>> = level
+                .iter()
+                .map(|&f| -> BoxFut<'_, _> {
+                    Box::pin(async move { (f, self.frame_rows(tab, f, deadline).await) })
+                })
+                .collect();
+            let owner_futs: Vec<BoxFut<'_, (u32, u32, Option<u32>)>> = lookups
+                .iter()
+                .map(|&(f, p)| -> BoxFut<'_, _> {
+                    Box::pin(async move { (f, p, self.owner_id(tab, f, p, deadline).await) })
+                })
+                .collect();
+            let (reads, owned) = tokio::join!(join_all(reads), join_all(owner_futs));
+            for (f, r) in reads {
+                match r {
+                    Ok(Some(v)) => {
+                        rows.insert(f, v);
+                    }
+                    Ok(None) if f == 0 => {
+                        return Err(DriverError::Cdp("index: the page gave no index".into()))
+                    }
+                    Err(e) if f == 0 => return Err(e.into_driver("index")),
+                    _ => {}
                 }
-                Ok(None) if f == 0 => {
-                    return Err(DriverError::Cdp("index: the page gave no index".into()))
-                }
-                Err(e) if f == 0 => return Err(e.into_driver("index")),
-                _ => {}
             }
+            depth += 1;
+            let mut next = Vec::new();
+            for (c, p, id) in owned {
+                let Some(id) = id else { continue };
+                owners.insert(c, id);
+                let Some(row) = rows.get(&p).and_then(|v| v.iter().find(|r| r.id == id)) else {
+                    continue;
+                };
+                // The parent's fresh row decides whether the frame is a CHALLENGE frame;
+                // the registry keeps it so every later call into it, or into a frame below
+                // it, is refused by ancestry before anything is sent (D-5).
+                let challenge = row.flags.challenge;
+                let shut = row.flags.opaque;
+                let closed = {
+                    let mut r = crate::lock(&self.registry);
+                    r.set_challenge(tab, c, challenge);
+                    r.closed_frame(tab, c).is_some()
+                };
+                if !challenge && !shut && !closed && depth < MAX_DEPTH {
+                    next.push(c);
+                }
+            }
+            level = next;
         }
-        let owners: HashMap<u32, u32> = owned
-            .into_iter()
-            .filter_map(|(f, id)| Some((f, id?)))
-            .collect();
+        // The registry now: a frame that turned opaque while it was read loses its rows.
+        let frames = self
+            .with_registry(|r| r.frames(tab))
+            .ok_or(DriverError::TabGone(tab))?;
         let mut merged = merge(&frames, &mut rows, &owners);
-        scrub_rows(&mut merged);
+        scrub_rows(&mut merged, &harness_core::scrub);
         Ok(merged)
     }
 }
@@ -421,6 +523,46 @@ mod tests {
         let m = merge(&frames, &mut rows, &HashMap::from([(1, 2)]));
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].child_frame, Some(1));
+    }
+
+    /// Rule 2, review-T-22 blocking 3: every string field of a row is scrubbed (role
+    /// included) and capped.
+    #[test]
+    fn every_row_string_is_scrubbed_and_capped() {
+        use harness_core::vault::EntryKind;
+        let canary = std::env::var("SB_VAULT_CANARY")
+            .ok()
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| "canary-t22-rows-not-a-secret".to_owned());
+        let vault =
+            harness_core::Vault::in_memory([("pw".to_string(), canary.clone(), EntryKind::Secret)]);
+        let scrub = |s: &str| vault.scrub(s);
+        let with = |s: &str| format!("{s} {canary} {s}");
+        let mut r = row(1, &canary, &with("name"));
+        r.nearby = Some(with("near"));
+        r.heading = Some(with("heading"));
+        r.form = Some(with("f1"));
+        r.landmark = Some(with("main"));
+        r.state.input_type = Some(canary.clone());
+        r.state.autocomplete = Some(with("email"));
+        r.state.value = Some(FieldValue::Text(with("value")));
+        r.state.options = vec![with("one"), canary.clone()];
+        let mut long = row(2, "button", &"n".repeat(1000));
+        long.state.options = (0..80).map(|i| format!("o{i}")).collect();
+        let mut rows = vec![r, long];
+        scrub_rows(&mut rows, &scrub);
+        let json = serde_json::to_string(&rows).unwrap();
+        let dbg = format!("{rows:?}");
+        assert!(!json.contains(&canary), "a row string holds the canary");
+        assert!(!dbg.contains(&canary), "a row string holds the canary");
+        assert!(rows[0].role.contains("@vault(pw)"), "the role is scrubbed");
+        assert!(rows[0].name.starts_with("name @vault(pw)"));
+        assert_eq!(rows[1].name.chars().count(), TEXT_CAP);
+        assert!(rows[1].name.ends_with('…'));
+        assert_eq!(rows[1].state.options.len(), OPTIONS_MAX);
+        let mut role = vec![row(3, &"r".repeat(100), "")];
+        scrub_rows(&mut role, &scrub);
+        assert_eq!(role[0].role.chars().count(), ROLE_CAP);
     }
 
     #[tokio::test]

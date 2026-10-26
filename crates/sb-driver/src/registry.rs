@@ -45,6 +45,9 @@ struct Frame {
     generation: u32,
     default_ctx: Option<ExecContext>,
     sb_ctx: Option<ExecContext>,
+    /// Its element in the parent is a CHALLENGE row (D-5), as the parent's last read said:
+    /// it and every frame below it are never read inside or acted in.
+    challenge: bool,
 }
 
 impl Frame {
@@ -56,6 +59,7 @@ impl Frame {
             generation: 0,
             default_ctx: None,
             sb_ctx: None,
+            challenge: false,
         }
     }
 }
@@ -145,6 +149,29 @@ struct Pending {
     target: String,
     /// The tab whose page session it was attached under.
     parent: Option<TabId>,
+}
+
+/// Why a frame is closed to the driver ([`Registry::closed_frame`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Closed {
+    /// Cross-origin, out of process, or inside such a frame (B-4 #2, B-5).
+    Opaque,
+    /// A CHALLENGE frame or inside one (D-5).
+    Challenge,
+}
+
+impl Closed {
+    /// The reason a refused call gives.
+    pub(crate) fn why(self, frame: u32) -> String {
+        match self {
+            Closed::Opaque => format!(
+                "frame {frame} is cross-origin (OPAQUE): it is never read inside or acted in (B-5)"
+            ),
+            Closed::Challenge => format!(
+                "frame {frame} is a CHALLENGE frame or inside one: stopped, hand back to the user (D-5)"
+            ),
+        }
+    }
 }
 
 /// Who a flattened session belongs to.
@@ -863,6 +890,44 @@ impl Registry {
                 .map(String::as_str)
                 .unwrap_or(t.session.as_str()),
         )
+    }
+
+    /// Why the driver must never read inside or act in the frame (B-4 #2, B-5, D-5): it is
+    /// opaque (out of process, cross-origin to its parent, or inside an opaque frame), or it
+    /// or one of its ancestors is a CHALLENGE frame. Decided from the registry alone, at the
+    /// time of the call; `None` for a frame that is gone (the call then fails on its own).
+    pub(crate) fn closed_frame(&self, tab: TabId, frame: u32) -> Option<Closed> {
+        let t = self.tabs.get(&tab)?;
+        t.frames.get(&frame)?;
+        let mut n = Some(frame);
+        let mut depth = 0;
+        while let Some(k) = n {
+            let Some(f) = t.frames.get(&k) else { break };
+            if f.challenge {
+                return Some(Closed::Challenge);
+            }
+            depth += 1;
+            if depth > 64 {
+                return Some(Closed::Opaque);
+            }
+            n = f.parent;
+        }
+        let mut memo = HashMap::new();
+        Self::origin_of(t, frame, &mut memo, 0)
+            .1
+            .then_some(Closed::Opaque)
+    }
+
+    /// Record whether the frame's element in its parent is a CHALLENGE row (from the
+    /// parent's read in `index()`).
+    pub(crate) fn set_challenge(&mut self, tab: TabId, frame: u32, on: bool) {
+        if let Some(f) = self
+            .tabs
+            .get_mut(&tab)
+            .and_then(|t| t.frames.get_mut(&frame))
+        {
+            f.challenge = on;
+        }
     }
 
     /// B-4 #2 view: every frame of the tab, frame 0 first, with parent and opacity. A frame
