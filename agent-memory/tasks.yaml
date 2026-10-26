@@ -145,7 +145,11 @@ tasks:
   - id: T-20
     step: 6
     title: "act(id) in page + Rust retry/backoff/5 s cap; acceptance 2"
-    status: todo
+    status: doing
+    owner: driver/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/driver-T20
+    note: "branch = main + swarm/driver-T18 + swarm/page (bb520c8) merged locally (D-88)"
     blocked_by: [T-18, T-19]
   - id: T-21
     step: 6
