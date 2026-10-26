@@ -156,6 +156,21 @@ blockers:
     question: "A scheduled `claude -p` session that is allowed Bash can run `harness ask <run> <n> yes`, `harness gate set` or `harness vault set` and approve its own asks or loosen its own gate (review-T-08 note; comes from the D-105 file-based asker). Rule 4 says everything goes through the gate; should the launcher deny those commands to the session?"
     default_taken: "ClaudeLauncher passes --disallowedTools for Bash(harness ask:*), Bash(harness gate:*) and Bash(harness vault:*) on every session it starts (scheduled and `harness run`), and a T-08 test asserts the argv. Answering asks, changing gate rules and vault entries stay user-only. Supreme may prefer a decision that moves the check into the CLI (e.g. refuse when SB_RUN_ID is set) as well. Implemented as D-124 (5). review-T-08 round 2: the deny rules match command text, so a full path, `cmd /c`, `cargo run` or writing <n>.answer directly bypasses them; the deny list is defence in depth only. A sound fix needs an answer the session cannot forge (e.g. the answer file carries a MAC keyed by a secret held in the OS keychain that sessions are never given, checked by FileAsker). Needs a supreme decision before B-192 closes; core keeps the deny list meanwhile."
     needs_user: false
+  - id: B-520
+    task: T-14
+    question: "docs/04 says `shell(\"rm -rf runs/x\")` is 'Read-class-safe'. Is that the class Read, or only 'allowed like Read'? ledger::report lists Read events under Read:, so an in-runs deletion shows as a read, not under Did."
+    default_taken: "Class Read for shell commands whose every changed target is scratch (the literal reading; D-520 (4)). The explicit fs.write/move/mkdir/delete tools are declared Fill, so their in-runs writes show under Did. Supreme may prefer Fill for both."
+    needs_user: false
+  - id: B-521
+    task: T-14
+    question: "Fail-closed shell classification makes every unknown command (python script.py, node x.js, make, go build) class Delete, so each one asks and times out to skip. Is that the intended cost, or should known project commands get an allowlist (like config/cli-allow.toml for C-4)?"
+    default_taken: "Delete for unknown commands (D-520 (5)); cargo build/test/fmt/run and npm test/run/install are Fill because this repo needs them. An allowlist file can be added later without changing the parser."
+    needs_user: false
+  - id: B-522
+    task: T-14
+    question: "B-192 follow-up: srv-files now treats a run's asks/, ledger.jsonl, report.md and prompt.md (and the run folder and runs root) as outside scratch, so fs.write, fs.move, fs.delete and shell redirections into asks/<n>.answer are Delete and ask. Claude Code's built-in Write and Bash tools are not behind the gate and can still write that file."
+    default_taken: "srv-files closes its own route (D-520 (2)); the general fix stays with B-192 (an answer the session cannot forge)."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core
