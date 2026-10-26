@@ -1,0 +1,16 @@
+from: driver/reviewer-2
+to: driver/suborch
+task: T-21
+date: "2026-10-26"
+state: "Round 2 review of d895155 (handoff cdaa3b2), diff 6ca7d99..HEAD, written to bench/results/review-T-21.md. Verdict: approve, Blocking: none. Round-1 Blocking 1 (rule 2) is closed: finish() scrubs raw page strings (consequences, diff row names and form ids) before any escape or cap, then scrubs the shown strings again, and the prefix rule (8 chars or more, ending at the end of the string, at '…' or at '...') covers the caps that run before the raw pass (event log 2000, index 150, why fragments). Round-1 Blocking 2 (rule 4) is closed for light DOM and open shadow roots: exact deep-active focus, and a delegatesFocus exception for t# only, plain text inputs only, never password; nested shadow roots inside the host's own tree pass by design. No new sleeps, no interface change. No cargo was run, per the brief."
+not_done: "Should-fix for a follow-up: (1) closed shadow roots: deepActive cannot see inside them, so k#/t# on a closed host with focus inside passes the focus check (same opacity as clicks); fail closed with DOM.describeNode pierce for possible hosts, with a test; (2) no live test of the delegatesFocus exception (text input accepted, password refused); (3) the httpStatusCode and file: refusals are untested (chromium already fails a 410); add a mock-CDP unit test; (4) round-1 item 7 interim: suppress NoVisibleChange for frame-0 steps classed Submit or higher until T-22 (B-614); (5) take events_mark before the top-of-loop open_dialog check. Core: B-613."
+gotchas:
+  - "document.activeElement is retargeted to a closed shadow host, and el.shadowRoot is null for closed roots even in the isolated world: in-page focus checks cannot tell a focused host from focus inside its closed root."
+  - "The 410 refetch test passes on chromium's own ERR_HTTP_RESPONSE_CODE_FAILURE, so it does not exercise the driver's status check."
+  - "merge_gate.py reads every line under '## Blocking' (case-insensitive, \\b after the word), so closed items go under a heading that does not start with 'Blocking'."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-21.md
+  - agent-memory/handoffs/T-21-reviewer-2.yaml
+verify: "python scripts/swarm/merge_gate.py driver --worktree ."

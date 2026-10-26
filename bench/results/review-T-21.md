@@ -1,64 +1,60 @@
-# Review T-21, round 1 (area driver)
+# Review T-21, round 2 (area driver)
 
-Scope: `git diff 02ce736..HEAD`, which is commit 8deaa56 plus handoff 4064360. That covers act.rs,
-input.rs, consequence.rs, diff.rs, and the T-18/T-20 edits (lib.rs D-610/D-612, runtime.rs,
-actionable.rs ACT_FN, the probes in accept_t20/chromium_t20, sb-cdp start_raw and the pipe
-writer). I did not run cargo, per the brief.
+Scope: `git diff 6ca7d99..HEAD`. That is commit d895155 (code) plus cdaa3b2 (handoff), with D-615 to D-619, B-613, B-614 and the new `crates/sb-driver/src/scrub.rs`. I did not run cargo, per the brief.
 
 ## Blocking
 
-- Rule 2 and pr-ready 5 ("split or truncated"): page strings are capped before they are scrubbed, so a typed vault value that crosses a cap leaks its prefix. `page_text` cuts mid-word at 120 characters (act.rs:740, 752, 758) and at 60 for diff names (diff.rs:18, 242). `clean_url` cuts at 200 (diff.rs:101). `scrub` (act.rs:895-929) runs after that, and `spellings` (act.rs:844) only matches whole values. Example: a heading `Signed in as <long @vault(email) value>` past 60 characters shows its first characters in `diff:`. The page index drops a partial last word when it truncates (injected.js:234), but the driver's cap does not. Fix: scrub the raw string before `page_text`/`clean_url` cap it, or replace a value prefix (8 or more characters) that ends at `...`. Add a test with an echo that crosses the cap.
-- Rule 4: a key or type step can act on an element the gate never classified. In ACT_FN `runOp` (actionable.rs:57-61), `focused` is `a === el || el.contains(a)`. `el.focus()` does nothing on a non-focusable row, so if focus already sits on a descendant, the check passes and the input goes to that descendant. Example: a dialog that autofocuses its "Pay now" or "Delete" button, then `k#<dialog>=Enter` or `=Space`. The gate classifies the dialog row (sb-act `enter` on a row outside a form is a click on that row, classify.rs:355-359, so Navigate), and Enter then presses the Pay or Delete button under a Navigate approval. The same gap lets `t#<container>=` type into a focused password field inside the container, which is above Fill. Fix: require the deep active element to be `el` itself (or inside `el`'s own shadow root), or re-gate against the focused element's row. Add a live test.
+- none
+
+## Round 1 Blocking, closed
+
+- Blocking 1 (rule 2, scrub before cap) is closed in sb-driver.
+  - `finish` (act.rs:1001) scrubs every raw page string before any escape or cap: Navigated URL, OpenedTab title, Dialog text, Download name and guid, and the diff rows' `name` and `form`. It then renders, then scrubs every shown string again, including whys and the stop why.
+  - The caps that run before the raw pass all leave a cut the prefix rule (scrub.rs:98-140) sees:
+    - the event log's 2000-character `raw()` (consequence.rs:81) and `tab_title` (act.rs:818) cut at the end of the string;
+    - the index's 150 cut ends at `…` (injected.js:234);
+    - the actionability whys' `neutral` and WHY_CAP cuts end at `...`, and the second pass matches them through the `neutral` and `why` spellings (scrub.rs:46-65, which mirror actionable.rs neutral and tidy_why).
+  - No `return Ok` in `act()` skips `finish` (the only early exits are `Err`). The diff's role alias (diff.rs:304) is not in the raw list, but it is capped at 20 with `...`, so the second pass covers it.
+  - `tabs()` and `frames()` (lib.rs:669, 725) and `download()` (consequence.rs:531) use core's whole-value scrubber only. Their strings are not capped by the driver first, so the round-1 leak cannot happen there. Prefix cuts made by the page itself on those paths are B-613 (core).
+- Blocking 2 (rule 4, exact focus) is closed for light DOM and open shadow roots.
+  - `focused` is now `a === el || delegated(el, a)` (actionable.rs:86). The `delegated` exception needs all of: `op.text === true` (t# only), `el` itself being an open delegatesFocus host, and the deep active element being an input of type text, search, email, url, tel or number, or a textarea.
+  - Password is excluded by the focused element's own `type`. The isolated world does not see page overrides of that property.
+  - Nested shadow roots: `ownShadow` (actionable.rs:67-77) walks up through hosts, so a text field in a component nested inside `el`'s own shadow tree passes, by design ("own shadow tree", D-615). It is still never a password field. A delegatesFocus host that is a descendant of `el`, and slotted light-DOM children, cannot pass, because `el.shadowRoot` must be the root that is reached.
+  - A failed focus returns `NO_FOCUS` before `type_text` or `dispatch` (act.rs, start_step). The live test (accept_t21.rs:936) covers the autofocused Pay button with `k#dlg=Enter`, and a focused password field in a container with `t#box=x`. It asserts zero keydown events and an empty password field.
 
 ## Should-fix
 
-1. Dialogs between steps. `open_dialog` is checked only before step 1 (act.rs:262). The per-step index read (act.rs:403, 411-421) and actionability (act.rs:435-490) are not raced with `or_dialog`. A dialog from a timer after the previous settle causes a stall of up to 3 s (index) or 5 s (actionability). Then the gate either stops with a misleading "step N is Submit ... above the approved" (no index means Submit), or a failed step. Fix: check `open_dialog(tab)` before each step (zero round trips) and race the reads with `or_dialog`.
-2. Download re-fetch. When `Network.loadNetworkResource` returns `success: true` with a non-2xx status, the error body is saved under the download's name (consequence.rs:566). Example: a 405 from a POST-only export (B-608). Refuse when `httpStatusCode` is not 2xx. Also drop `file` from the allowed schemes (consequence.rs:537): a page never needs it, and it would copy a local file into `runs/<id>/files`.
-3. Download names and page text keep Unicode format characters. `safe_name` (consequence.rs:265-274) and `page_text` (diff.rs:32) drop only `is_control()`. So U+202E (RLO), zero-width characters and other bidi controls survive: a saved `report<RLO>fdp.exe` shows in Explorer as `reportexe.pdf`. Strip general category Cf. Minor: `COM¹`-`COM³`, `CONIN$` and `CONOUT$` are also reserved on Windows.
-4. The T-20 probe change makes row 5 unable to fail on extra hit tests. `if (P.hits.length >= P.starts.length) return hit;` (accept_t20.rs:267, chromium_t20.rs:195) caps hits at the number of starts, so "one hit test per attempt" can no longer catch 2 per attempt. Count only hits between an attempt's start and its answer instead: ignore hits before the first start and after the last answer.
-5. A step whose target is not in a fresh live index (a stale id after a navigation) is reported as a gate stop with class Submit (`StopReason`, act.rs:294). It should be a failed step such as "not on the live page". Both fail closed, but the stop invites sb-mcp to ask the user to approve Submit for a step that cannot run, which costs a turn.
-6. Missing tests through `Driver::act`:
-   - `k#N=Enter` on a field in a form under Fill stops before any key event;
-   - `u#` is gated (for example under Read, or on a CHALLENGE row);
-   - the focus check rejects a focused descendant (Blocking 2);
-   - a long echo crosses the cap (Blocking 1).
-7. `NoVisibleChange` can be wrong until T-22. The window's settle tracks the DOM only, so a submit click whose XHR takes more than 500 ms reads as "no visible change", which invites a retried submit. Until network tracking lands, do not emit it for steps whose live class is Submit or higher, or report it as "unsettled".
+1. Rule 4 residual: closed shadow roots. `deepActive` (actionable.rs:61) cannot descend into a closed root, and `document.activeElement` is retargeted to the host. So for a host with a closed shadow root and an autofocused inner button, `el.focus()` is a no-op, `a === el` holds, and `k#<host>=Enter` presses the inner button. That is the round-1 Pay-button vector again, and with delegatesFocus the same applies to a closed inner password field for t#. I did not make this Blocking because clicks on such a host have the same opacity: the gate classifies the host row and the click lands inside it. Cheap fail-closed fix: for k# and t#, when `a === el`, ask CDP `DOM.describeNode({objectId, depth: 1, pierce: true})` and fail the step if `el` has a `closed` shadow root. Restrict the call to possible hosts (custom elements, plus the tags `attachShadow` allows) so most steps pay no round trip. Add a live test.
+2. No test covers the delegatesFocus exception. Add one live case for each side: `t#<open delegatesFocus host>` with an inner text input types into it, and the same host with an inner password input fails with `NO_FOCUS` and leaves the field empty. Today a mutation that drops the type check would stay green.
+3. The status check is untested. `a_refetch_with_an_error_status_is_not_saved` (accept_t21.rs:1080) passes on `ERR_HTTP_RESPONSE_CODE_FAILURE` alone, so removing the new `httpStatusCode` check (consequence.rs:628) stays green. Add a mock-CDP unit test that answers `success: true, httpStatusCode: 405`, and one for a `file:` URL refused (consequence.rs:585).
+4. Round-1 item 7 is carried over (B-614). The frame part is done (D-617, act.rs:405). For frame 0, the cheap interim is still open: do not emit `NoVisibleChange` when the step's live class is Submit or higher, or tag it unsettled. The class is already computed by `classify_step` before the step. A false "no visible change" after a slow submit invites a second submit, and that costs more than one condition.
+5. Dialog mark ordering. `open_dialog` is checked (act.rs:304) before `events_mark` is taken (act.rs:320). A dialog logged between the two is not seen by `or_dialog`'s `dialog_since(mark)`, so the step stalls to the read or actionability cap before it reports the dialog. The window is tiny. To close it, take the mark first, then check `open_dialog`, or have `or_dialog` also test `open_dialog(tab)`.
 
 ## Notes
 
-- Vault wire path, traced:
-  - The value is resolved once in `ctx.resolve_into` (input.rs:366). It is written into a `Zeroizing` buffer pre-sized at 6x+16, so it never reallocates.
-  - `start_raw` builds an exact-capacity `Wiped` message (client.rs:295-309), which is zeroed when the last `Bytes` handle drops.
-  - The pipe writer zeroes its framing `Vec`, whole capacity included, after each write (pipe.rs:106-120). There is no `BufWriter`.
-  - Errors name only the method (`Input.insertText`) or the vault entry.
-  - The mock test (lib.rs `a_vault_value_goes_only_into_the_insert_text_message`) asserts that exactly one wire message carries the canary.
-- Remaining memory-hygiene gaps (B-152, accepted): temporaries in `spellings()`, the page strings `scrub` replaces, and `IndexRow` `FieldValue::Text` of non-password typed fields are held unzeroed.
-- B-611 is acceptable: sb-driver never builds a WebSocket transport.
-- Gate (rule 4, H-1.4): every step except `w()` and `?s` reads or reuses its frame's live index and is classified before any focus, scroll or input (act.rs:291-304). That includes `u#` and `sc()`. With no index, every target is Submit, and a CHALLENGE row or page always stops; unit and live tests cover both. Enter in a form is Submit through sb-act (classify.rs:349-369).
-- B-612 (stop rather than ask) is acceptable. It fails closed, and sb-mcp can turn `stopped` into an ask. Supreme should align the `ToolCtx::ask` doc comment (core mcp.rs:355-356) with it.
-- Rule 3: the gate runs before actionability, so a challenge row or page is never focused, scrolled or clicked; the live test checks the title is unchanged. No solver or evasion code is added.
-- Upload containment does not fail open. Paths are refused on `..`, a root, a drive (including `C:x`), UNC or verbatim components. Both the root and the target are canonicalized, which covers symlinks, junctions, 8.3 names, case and `..::$INDEX_ALLOCATION`, and the target must be a file. Remaining gaps need local write access to `files/`: hard links, and a swap between the check and Chrome's read at submit time.
-- Downloads: deny is set at launch, so nothing lands before `download(allow=true)`. The live test checks `canceled`, the home folder and `~/Downloads`, and that a refused download is never fetched. `create_new` claims the name and a `.part` file is renamed onto it. B-608 (blob:, POST, one-time links; the re-fetch is a second credentialed request) is acceptable as a default. Under Profile::Me, deny also blocks the user's own manual downloads in that browser while the driver is attached.
-- Consequence window (B-4 #9): the 3 s wait for a pending main-frame navigation is a condition wait, capped at B-4 #8's 3 s settle cap. It avoids a false "no visible change" and a wasted turn, so it is acceptable. D-613 records it. The in-page settle is DOM-only until T-22.
-- Dialogs: the `or_dialog` race is correct. The observer logs the event before `bump`, it is biased toward the future, and no in-page call is made on the tab after a dialog in the window; the diff is skipped. The gap between steps is Should-fix 1.
-- Untrusted text: titles, dialog text, download names, guids, URLs, diff names and form ids are escaped (`"`, backticks, `[ ]`, ref-like `#`, newlines) and capped. The diff cannot close its quotes (unit test). Errors from page calls go through `tidy_why`.
-- Rule 5: the new in-page code (ACT_FN ops, SCROLL, UPLOAD, TITLE) reads no field values. The diff prints no values, and password rows count only as empty or filled.
-- Rule 6: no new sleeps. All waits are conditions with caps.
-- Rule 1 and rule 7: no keys, no `.env`, no em dashes. U+2212 in the diff is B-8's minus sign.
-- D-612 applies to every tracked session (OOPIFs, prerenders), not only popups. T-22 acceptance 4 should confirm that a cross-origin iframe's first document still gets the sb world.
-- D-610 under Profile::Me navigates the user's only blank tab. This is acceptable, but worth a line in B-606.
-- Input limits for a follow-up:
-  - cross-origin frames answer `cross-origin frame`, so steps cannot target controls inside cross-origin iframes (payment and login iframes);
-  - the frame offset ignores CSS transforms and zoom;
-  - `NoVisibleChange` compares only the step's frame;
-  - `o.selected = true` adds to a `<select multiple>` instead of replacing.
-- H-1.4 "marks the tab" is not in sb-driver. sb-mcp or T-25 should own it.
-- Interfaces: the I-9 signatures are unchanged (`dialog`, `download` filled in). `start_raw` on I-8 is additive and pending supreme (B-609); contract_paths compiles both paths.
-- Spec ids in 8deaa56 match the code (B-4 #7, #9, B-8, H-1.4, D-608..D-614). B-4 #8's network settle is T-22, and the handoff says so.
-- Tests: acceptance 3 rows a to e assert the behaviour, not just that it runs (opened tab 2 and its title, dialog paused with later steps not run, a download canceled then saved byte-exact, `NoVisibleChange`, navigated plus diff). The coder reports seeing the mutation tests go red. The workspace test run is still owed (handoff `not_done` 1).
+- Frame scroll (row 10b), actionable.rs:118-161.
+  - Each ancestor level re-checks `inside(p, vp(pw))` after the scroll, and the hit test must return `fe` through open shadow roots. The final point is checked against the top viewport for every frame, frame 0 included, so no out-of-viewport point is dispatched.
+  - Both new whys are `Retry` in `classify_why` (actionable.rs:225, 228), so retries stay inside the existing T-20 budget loop and its deadline. No new timer.
+  - A frame element inside a closed shadow root in its parent now fails as `covered by <host>` until the cap. That is a false failure, but it fails closed, and it is rare.
+- The stale check (D-618, act.rs:452-475) is a read-only resolve. It is skipped on a CHALLENGE and only turns `stale` or `gone` into a failed step. `live` and any doubt keep the Submit stop. It fails closed.
+- Cf stripping (diff.rs:27-52) matches Unicode 15.1 Cf exactly, and format characters do not count toward the cap. It also drops U+200C/U+200D (ZWNJ/ZWJ), which slightly alters Persian and Indic text and splits emoji ZWJ sequences in shown text and saved names. This is acceptable for display, and the comparisons run on raw rows.
+- `clean_url` now keeps any `@vault(name)` literal unencoded (diff.rs:105, 134), including one the page wrote itself. Page text could already contain such a literal, so this adds no new channel. It can at most mislead the model.
+- Scrub cost and termination: `cut_prefix` anchors on 8-character heads, and `MAX_REWRITES` withholds the whole string when it trips (fail closed). Matching is ASCII case-insensitive at char boundaries. The unit tests cover `...`, `…`, the end-of-string cut, non-ASCII text and the withheld case.
+- The T-20 probes now count `index()` hit tests by stack frame (accept_t20.rs, chromium_t20.rs). Act's own hit tests count again, and the coder reports the extra-hit mutation red.
+- Rule 6: no new sleeps. The only timer is still the documented `sleep_until` slot (actionable.rs:670). Rules 1, 3, 5 and 7: nothing new. No keys, no solver, no HTML or pixels, no user drafts.
+- Interfaces: no public signature changed (`tabs`, `frames` and `download` keep their I-9 shapes). Spec ids in d895155 (B-4 #7 #9, H-2, D-615..D-619) match the code.
+- Tests: these can fail:
+  - the long echo (index `…` cut, URL `ends_with("&v=@vault(long)")`, title, alert);
+  - the focused descendant;
+  - Enter in a form under Fill, u# under Read and on a CHALLENGE row, and the stale id;
+  - the dialog between steps (under 2.5 s against the 5 s cap);
+  - `tabs()` and `frames()` with a GET echo.
+
+  The round-1 Should-fix items 1, 2, 3, 5 and 6 are done, item 4 is done, and item 7 is partly done (Should-fix 4 above). `unwrap` appears only in tests. Clippy and the workspace run are owed to the tester.
+- B-613 (prefix rule and `ToolCtx::scrub` in core) is the right home for values typed in earlier programs, and for page-side cuts on `tabs()` and `download()`.
 
 ## Verdict
 
-There are two rule breaks: a typed vault prefix can survive the caps (rule 2), and a key or type step can reach an unclassified focused descendant (rule 4). Both are small, local fixes, each needing a test.
+Both round-1 Blocking items are closed within sb-driver's reach. The remaining items are a closed-shadow-root residual that has the same opacity clicks already have, two untested branches, and one deferred interim guard. Each is a small follow-up.
 
-Verdict: changes
+Verdict: approve
