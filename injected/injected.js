@@ -2001,13 +2001,15 @@
       const prior = [];
       for (const b of S.born) {
         const f = b.ref.deref();
-        if (f && f.isConnected && !S.sens.has(f)) prior.push({ f, p: b.parent.deref(), keys: undefined });
+        if (f && f.isConnected && !S.sens.has(f)) prior.push({ f, p: b.parent.deref(), keys: undefined, ld: b.ld });
       }
       for (const g of lost) {
-        // D-440: where this batch's one-for-one swap (D-437) already handed sensitivity to a new
-        // field of the parent, the single field added to it earlier (a parse-time neighbour) does
-        // not inherit. Key matches still do.
-        const inParent = g.e.swap ? [] : prior.filter((x) => x.p === g.parent);
+        // D-441 (amends D-440): where this batch's one-for-one swap (D-437) already handed
+        // sensitivity to a new field of the parent, a field added to it while the document was
+        // loading (a parser-inserted neighbour) does not inherit by the same-parent rule. A field
+        // added after load still does (a post-load add-first rebuild stays fail closed). Key
+        // matches always do.
+        const inParent = prior.filter((x) => x.p === g.parent && !(g.e.swap && x.ld));
         for (const x of prior) {
           if (S.sens.has(x.f)) continue;
           let hit = g.keys === null || (inParent.length === 1 && inParent[0] === x);
@@ -2084,7 +2086,8 @@
         hit = true; // a field whose sensitivity or keys cannot be read: sensitive (fail closed)
       }
       if (hit) S.sens.add(f);
-      else S.born.push({ t, ref: new WeakRef(f), parent: new WeakRef(p) });
+      // ld: added while the parser was still loading (D-441); a flag, never a value
+      else S.born.push({ t, ref: new WeakRef(f), parent: new WeakRef(p), ld: doc.readyState === "loading" });
     }
     if (S.born.length > BORN_MAX) S.born.splice(0, S.born.length - BORN_MAX);
   }

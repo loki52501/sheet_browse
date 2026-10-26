@@ -1250,7 +1250,7 @@ test("a getter that throws while a field is checked marks it sensitive and the b
 });
 
 // ------------------------------------------------------------------ D-440
-test("a swap within 2 s of a neighbour's add leaves the neighbour readable; key matches and batches with no swap still inherit (D-440)", async () => {
+test("a swap within 2 s of a neighbour added while loading leaves it readable; one added after load, key matches and batches with no swap still inherit (D-440, D-441)", async () => {
   const CANARY = "swap-canary-440";
   // a parse-time insert as the observer sees it: the form gains a label holding #nick
   const nick = (j) => {
@@ -1271,9 +1271,25 @@ test("a swap within 2 s of a neighbour's add leaves the neighbour readable; key 
       j.$("w2").replaceWith(w);
       return [n, f];
     },
-    // remove + append into the parent the neighbour was added to, one batch (D-437)
-    "remove + append next to the neighbour": async (j) => {
+    // remove + append into the parent the neighbour was added to, one batch (D-437); the
+    // neighbour was added while the document was loading (a parser insert): it reads (D-441)
+    "remove + append next to a neighbour added while loading": async (j) => {
+      assert.equal(j.doc.readyState, "loading");
       const n = j.mk('<input id="nick" name="nick" value="Ann">');
+      j.$("w2").appendChild(n);
+      await tick();
+      j.advance(1999);
+      const f = neutral(j);
+      j.$("k2").remove();
+      j.$("w2").appendChild(f);
+      return [n, f];
+    },
+    // the same, with the neighbour added after load: the single field added to the parent
+    // inherits as D-438 (1) says, so both read filled (D-441)
+    "remove + append next to a neighbour added after load": async (j) => {
+      await tick();
+      assert.notEqual(j.doc.readyState, "loading");
+      const n = j.spy(j.mk('<input id="nick" name="nick">'));
       j.$("w2").appendChild(n);
       await tick();
       j.advance(1999);
@@ -1309,7 +1325,8 @@ test("a swap within 2 s of a neighbour's add leaves the neighbour readable; key 
   };
   const want = {
     "wrapper swap at 1500 ms": [{ kind: "text", text: "Ann" }, { kind: "filled" }],
-    "remove + append next to the neighbour": [{ kind: "text", text: "Ann" }, { kind: "filled" }],
+    "remove + append next to a neighbour added while loading": [{ kind: "text", text: "Ann" }, { kind: "filled" }],
+    "remove + append next to a neighbour added after load": [{ kind: "filled" }, { kind: "filled" }],
     "key copy elsewhere": [{ kind: "text", text: "Ann" }, { kind: "filled" }, { kind: "filled" }],
     "add-first, then the removing batch adds two": [{ kind: "filled" }, { kind: "text", text: "Elm St" }, { kind: "text", text: "Leeds" }],
   };
@@ -1318,5 +1335,44 @@ test("a swap within 2 s of a neighbour's add leaves the neighbour readable; key 
     assert.equal(r.c.reads, 0, k + ": a value getter was called");
     assert.ok(!r.blob.includes(CANARY), k + ": " + r.blob);
     same(r.states, want[k], k);
+  }
+});
+
+// ------------------------------------------------------------------ D-441
+test("an add-first rebuild with no shared key, after load, inherits when the removing batch swaps in another field (D-441)", async () => {
+  const CANARY = "swap-canary-441";
+  const cases = {
+    // review-T-19 round 5 V7: a neutral copy after k2 holds its value; a later batch
+    // replaceWith's k2 by a different field (a D-437 swap in the removing batch)
+    "replaceWith": async (j) => {
+      await tick();
+      assert.notEqual(j.doc.readyState, "loading");
+      const n = j.spy(j.mk('<input id="q9" type="text">'));
+      j.$("k2").after(n);
+      await tick();
+      const other = j.mk('<input id="hint" type="text" placeholder="Hint">');
+      j.$("k2").replaceWith(other);
+      return [n, other];
+    },
+    // the same at the edge of the window, with the swap as remove + append
+    "remove + append at 1999 ms": async (j) => {
+      await tick();
+      assert.notEqual(j.doc.readyState, "loading");
+      const n = j.spy(j.mk('<input id="q9" type="text">'));
+      j.$("k2").after(n);
+      await tick();
+      j.advance(1999);
+      const other = j.mk('<input id="hint" type="text" placeholder="Hint">');
+      j.$("k2").remove();
+      j.$("w2").appendChild(other);
+      return [n, other];
+    },
+  };
+  for (const [k, step] of Object.entries(cases)) {
+    const r = await addFirst(CANARY, step);
+    assert.equal(r.c.reads, 0, k + ": a value getter was called");
+    assert.ok(!r.blob.includes(CANARY), k + ": " + r.blob);
+    for (const st of r.states) assert.ok(st.kind === "empty" || st.kind === "filled", k + ": " + JSON.stringify(st));
+    same(r.states, [{ kind: "filled" }, { kind: "empty" }], k);
   }
 });

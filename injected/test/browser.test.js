@@ -587,6 +587,28 @@ test("an add-first show toggle that removes the old field on transitionend never
   assert.deepEqual(byName(rows, "User").state.value, { kind: "text", text: "ada" });
 });
 
+test("an add-first show toggle whose leave swaps in a different field never reads the value (D-441)", async () => {
+  const o = await open("d441.html");
+  await o.page.fill("#acct", "d441-canary");
+  await o.page.fill("#user", "ada");
+  await o.ev(() => globalThis.__sb.index());
+  // the neighbour is added after load (not a parser insert), with no key shared with #acct
+  assert.equal(await o.page.evaluate(() => document.readyState), "complete");
+  await o.page.click("#toggle");
+  assert.equal(await o.page.evaluate(() => document.getElementById("q9").value), "d441-canary");
+  // the leave: on transitionend #acct is replaceWith'd by #hint (a D-437 swap in that batch)
+  await o.page.evaluate(() => globalThis.fade());
+  await o.page.waitForFunction(() => !document.getElementById("acct") && !!document.getElementById("hint"));
+  const r = await readCounting(o, ["q9", "hint"]);
+  assert.deepEqual(r.reads, {}, "a value getter was called after the removal");
+  assert.ok(!r.blob.includes("d441-canary"), r.blob);
+  // out: [index, text, state(q9), name(q9), state(hint), name(hint), index]
+  const out = JSON.parse(r.blob);
+  assert.deepEqual(out[2].value, { kind: "filled" }, "q9");
+  assert.deepEqual(out[4].value, { kind: "empty" }, "hint");
+  assert.deepEqual(byName(fill(r.index), "User").state.value, { kind: "text", text: "ada" });
+});
+
 test("a remove-first show toggle that appends an unrelated field in a later task never reads the value (D-439)", async () => {
   const o = await open("remove-first.html");
   await o.page.fill("#key", "rf-canary-439");
