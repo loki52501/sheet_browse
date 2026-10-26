@@ -1,30 +1,40 @@
-# Review T-04 (round 3): core::gate + harness_core::testing (bae6c45; at 15e09d3)
+# Review T-04 (round 4): core::gate rule_domain via idna + MemStore cut-off (b829add; at 4201aae)
 
-Scope: `git diff main...15e09d3 -- crates/core/src/gate.rs crates/core/src/testing.rs` (round-3 delta 7732264..15e09d3, which includes tests/gate_accept_t04.rs). Spec: H-1, H-1.1..H-1.4, I-3, I-1. Decisions checked: D-5, D-62, D-70, D-79, D-81, D-109, D-110, D-111, D-113, D-115, D-120. Blockers checked: B-190, B-191.
+Scope: `git show b829add` (crates/core/src/gate.rs, testing.rs, Cargo.toml, Cargo.lock, tests/gate_accept_t04_r3.rs, and the core-pg lines). Spec: H-1.2, I-3. Decisions checked: D-110, D-113, D-120, D-125 (binding), D-126 (binding), B-190, D-81.
 
-Runs, in a detached worktree at 15e09d3 with its own target dir:
-- `cargo clippy -p harness-core --tests -- -D warnings`: clean (exit 0, clippy 0.1.99).
-- `cargo clippy -p harness-core --all-targets --all-features -- -D warnings`: clean.
-- `cargo fmt -p harness-core --check`: clean.
-- `cargo test -p harness-core`: lib 123, gate_accept_t04 14, gate_accept_t04_r2 7, and every other binary pass.
+Runs, in a detached worktree at 4201aae with its own target dir, compose Postgres on 127.0.0.1:5433, `SB_VAULT_CANARY=sbcanary-<hex>-x`:
+- `cargo test -p harness-core -p core-pg --no-fail-fast`: exit 0. lib 127, gate_accept_t04 14, gate_accept_t04_r2 7, gate_accept_t04_r3 20 (0 ignored), and every other binary passes.
+- `cargo clippy -p harness-core -p core-pg --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Cargo.lock: b829add adds one line, `"idna"` under harness-core's dependencies. idna 1.1.0 was already locked through `url`. No other lock change in the three commits.
 
-The reported clippy failure ("items after a test module" in crates/core/src/testing.rs) does not reproduce at 15e09d3. `mod tests` is the last item (testing.rs:820-1479). It most likely came from uncommitted WIP in the shared checkout.
+## Round-3 items
 
-## Round-2 items
+- Should fix 1 (IDN mapping gaps): resolved by D-126.
+  - `rule_domain` (gate.rs:146) is `Uts46::to_ascii(.., AsciiDenyList::URL, Hyphens::Allow, DnsLength::Ignore)` (gate.rs:156). That is the same call `idna::domain_to_ascii` makes, which is the WHATWG URL host path, so the stored key is the browser's host.
+  - What idna refuses is refused (`map_err(|_| invalid())`).
+  - After mapping, every label must be non-empty, at most 63 bytes, and only `a-z 0-9 - _` (gate.rs:167-173). So `*.bank.com`, `a!b.com` and empty labels stay refused, and the 253 limit holds. `*` alone still returns `*`.
+  - No hand-written mapper is left. `map_host_char`, `host_char`, `compatibility_form` and `punycode` are deleted, and grep finds none of them or any `to_lowercase` in the domain path.
+  - Test `d126_stored_key_is_the_idna_a_label` (gate.rs:1667) covers ΒΑΣ.gr (σ, not ς), U+1E9E, U+F900, U+3131, example.ΑΣ, ſ, ĳ, U+1D2C and a decomposed ü. Each is checked against a hard-coded A-label and against `idna::domain_to_ascii`, for idempotence, and for a rule written that way stopping the A-label call. ZWJ, U+202E, `xn--zz` and a tag character are refused. Reverting to a lowercase-only mapper fails the hard-coded rows.
+  - The tester's `r3_b190_an_accepted_domain_is_its_uts46_a_label` is un-ignored and passes.
+- Should fix 2 (I-3 names): filed as an interface change (agent-memory/interfaces.yaml:230). It waits on supreme. Nothing is owed by the coder.
+- D-125 in MemStore: `WORD_SIMILARITY_THRESHOLD = 0.5` (testing.rs:263). `search_follows_d115` asserts 'Vasnth' hits at 0.5, and the tester's `r3_d115_vasnth_typo_inside_longer_subject_hits` is un-ignored and passes.
 
-- Should fix 1 (`from_hint` set by a losing lower-class hint): resolved per D-120 (4).
-  - gate.rs:523-536: when the class level is stricter, the hit takes the class-level mode and name with `from_hint = false`.
-  - gate.rs:553-555: a tie keeps `from_hint`.
-  - Test `a_hint_overruled_by_the_class_level_does_not_force_skip` covers four cases: Account/Send(new) under `('*','Read:newsletter','allow')` proceed, a tying hint skips, a raising hint skips.
-- Should fix 2 (no IDNA): resolved by the D-120 subset (B-190). Changes:
-  - The full stops U+3002/U+FF0E/U+FF61 and full-width ASCII are mapped.
-  - Each label is Punycoded (RFC 3492, overflow-checked).
-  - Invisible, compatibility and combining input is refused.
-  - Tests: `unicode_domains_and_hints_are_canonical_or_rejected` and `punycode_matches_rfc_3492` (5 RFC vectors). Over PgStore: accept_t03.rs:347-362.
-  - Gaps remain; see Should fix 1.
-- Should fix 3 (`add_contact("")`): resolved. testing.rs:130-134 asserts a non-blank `contact_key`.
-- Should fix 4 (stale header, missing `on_timeout` check): resolved. gate_accept_t04.rs:4-6 now names D-111, and :103-104 asserts `OnTimeout::Skip`.
-- Note (StopReason embeds an uncleaned tool name): resolved. gate.rs:424 uses `card_text(&call.tool, 128)`, tested in `escapes_cannot_span_card_components`.
+## Tester refusal-list edits (judged)
+
+gate_accept_t04_r3.rs:153 `r3_rule_domain_refuses_what_it_cannot_map_safely`. Each removed entry, as UTS-46 (nontransitional, what Chrome, Firefox and the `url` crate apply) treats it:
+- `bücher.de`: NFC gives bücher, so the host is xn--bcher-kva.de. Justified.
+- U+200B, U+00AD, U+2060: status `ignored`, so the host is bank.com. Justified.
+- U+2800: status `valid`, so the host is xn--bank-yj5b.com, a different host. Justified: a rule written with it now matches that exact host. A rule meant for bank.com, though, silently does not (see Notes).
+- U+FB01 to fi, U+00B2 to 2, U+1D41B to b, U+24D1 to b: `mapped`. Justified.
+- U+FF8A U+FF9F: maps to ハ plus U+309A, and NFC makes パ, which is valid. Justified.
+
+r3_gate_rule_set_stores_rule_key_and_gate_matches_idn_hosts (gate_accept_t04_r3.rs:297) and core-pg accept_t03_r3.rs:589: the decomposed, ZWSP, fi and math-bold entries were replaced by U+202E and U+200D. These are justified for the same reasons.
+
+What remains still tests refusal:
+- the ASCII structure: empty, dots, port, `*`, space, `@`, `/`, and lengths, including a Punycode label over 63;
+- two real UTS-46 refusals: U+200D (CheckJoiners) and U+202E (disallowed).
+
+The coder also added `xn--zz`, a tag character, U+E0041 and `%2e` in gate.rs. The removals are correct. What the tester file has lost is breadth of UTS-46 refusal classes and a positive assertion for the removed inputs (see Should fix 1).
 
 ## Blocking
 
@@ -32,49 +42,22 @@ The reported clippy failure ("items after a test module" in crates/core/src/test
 
 ## Should fix
 
-1. crates/core/src/gate.rs:150-155 and :207-229: `rule_domain` still stores some keys that no URL host carries, which contradicts D-120 (1) ("refused, never mapped"). I checked each case with rustc 1.99:
-   - `str::to_lowercase` applies Final_Sigma, so `ΒΑΣ.gr` becomes `βας`, but UTS-46 maps Σ to σ (`βασ`).
-   - U+1E9E becomes `ß`, but UTS-46 maps it to `ss`.
-   - `compatibility_form` misses most CJK compatibility ideographs (U+F900..U+FAFF, U+2F800..U+2FA1F, which NFC maps) and the Hangul compatibility jamo (U+3131..U+318E, which NFKC maps). All of them are alphanumeric, so they are accepted and Punycoded as written.
-
-   Each case is the silent dead user rule D-110 (1) exists to prevent. The inputs are rare, so this is not blocking. Fix: lowercase per char (`char::to_lowercase`), refuse U+1E9E (or map it to `ss`), and add the ranges above to `compatibility_form`. Or take the `idna` crate as B-190 allows. Add these strings to the refusal or mapping tests.
-2. agent-memory/interfaces.yaml:28 (I-3 `rust:`): the list does not name `ANY_DOMAIN`, `rule_domain`, `rule_hint`, `rule_class_key` or `rule_key`. D-113 makes them the one canonicaliser, and core-pg now calls them (crates/core-pg/src/lib.rs:778, :908), so their behaviour is contract in fact. D-81/B-191 records the behaviour but not the names. File an `interface_changes` entry so supreme adds them to I-3 and lists core-pg as a consumer.
+1. crates/core/tests/gate_accept_t04_r3.rs:165-181 (tester-owned): the tester's refused list now holds only two UTS-46 refusal classes. Ask the tester to:
+   - add a CheckBidi failure (an LTR label holding a Hebrew letter, for example `a\u{5d0}.com`), a label starting with a combining mark (`\u{301}bank.com`, CheckMarks), and a disallowed symbol (U+FFFD or U+2028);
+   - move the removed entries into a positive "maps to" assertion. Today only the coder's gate.rs unit test pins them.
+   The coder edited tester assertions. The edit was justified by binding D-126 and disclosed in the commit body and handoff, but a tester must still confirm it.
 
 ## Notes
 
-- D-120 (3) / D-81, the Send row (gate.rs:845-906, 908-942):
-  - `values[0]` is always the gate's `new recipients (N)` row.
-  - Blank recipients are dropped (gate.rs:431-436).
-  - New recipients are deduped by `contact_key`, first spelling kept (gate.rs:625-639).
-  - The caps are 32 recipients, 2000 characters, and a head + `…(+K chars)…` + `@domain` form for a recipient over 120 characters.
-  - `complete` requires every new recipient to be listed and `clean == r.trim()`. `may_proceed` requires `complete` (gate.rs:451-459).
-  - Tests: `send_card_lists_every_new_recipient` and `blank_recipients_are_not_recipients`. Both assert the row text and `on_timeout`.
-- Two spoof shapes the user can still see. Neither changes the decision, because the gate's own row stays first and keeps the true count:
-  - A classifier key with a homoglyph (Cyrillic `е` in `nеw recipients (0)`) passes the drop filter at gate.rs:951.
-  - One recipient string holding `a@x.com, b@y.com` is shown as written. It counts as one recipient and can proceed.
-- D-120 (2): `what_line` cleans every component before joining (gate.rs:826-843). This closes the OSC-across-recipients trick, and the test asserts both addresses survive and the card skips. `invisible` covers Default_Ignorable plus U+2800 (gate.rs:699-721).
-- D-110 (2)(3), D-113: unchanged apart from (4) above. A same-class hint `allow` combined with a lower-class hint that the class level raises still resolves to the class-level ask, which is the safe direction. Challenge stops before any lookup (gate.rs:419-428), and `rule_key` refuses a non-stop Challenge rule, hinted or not (gate.rs:351-357). D-5 holds.
-- D-109 / D-110 (4): `on_timeout` and `default_mode` keep their signatures. An ask proceeds only for a non-strict Account, or a non-strict Send(new) with a complete row, when no hint decided.
-- MemStore parity (testing.rs):
-  - `gate_rule` canonicalises its lookup like PgStore.
-  - `micros` truncates toward zero from 2000-01-01 as sqlx does, including the `since`/`now` bounds.
-  - `search` ports pg_trgm `word_similarity` with threshold 0.6 and matches PgStore's score (5/7) in both suites.
-  - SM-2 uses `ceil_days`.
-  - Each item has a regression test.
-- Hard rules:
-  - No keys and no sleeps.
-  - No vault value reaches a card. Args are scrubbed upstream, and only `@vault(...)` literals appear.
-  - No HTML or pixels.
-  - Non-test `unwrap`/`panic!` appear only in the ScriptedAsker test double (testing.rs:809).
-  - The `…` markers are U+2026, not em dashes, and cards are not user-sent drafts.
-- Commit ids: bae6c45 claims H-1, H-1.1..H-1.4, I-1, I-3, D-62, D-70, D-109, D-110, D-113, D-115 and D-120. All are implemented. `clean_card` is public as I-3 lists it (D-70). There is no unclaimed behaviour.
-- Lookup cost:
-  - Each distinct recipient takes one `contact` round trip.
-  - Each hint can take up to 2 x (class rank + 1) `gate_rule` calls.
-  - These are local round trips, not model turns.
+- Invisible-but-valid code points: U+2800 (and any other code point UTS-46 calls valid but that renders blank) now produce a key for a lookalike host instead of a refusal, as D-120 did before. This is what D-126 asks for, and it is right when a user copies a phishing host into a stop rule. A rule typed to mean bank.com would not apply to bank.com, and the stored key, shown as `xn--bank-yj5b.com`, reveals that. If supreme wants it, refusing D-120's invisible set after mapping is compatible with D-126, which only says that idna refusals are refused.
+- `resolve` (gate.rs:380-384) canonicalises `call.domain` through the same `rule_domain`, and a refused host falls back to `*` rules. That is unchanged, and consistent because a refused host can never have a stored rule.
+- IPv4-looking names (`0x7f.1`) are stored as written, while the WHATWG parser would turn them into `127.0.0.1`. This predates the round and no realistic rule hits it.
+- D-81 and interfaces.yaml:224 still say "refuses non-mappable Unicode". That is still true, since idna's refusals are refused. Supreme may want the I-3 note to cite D-126.
+- Hard rules: no keys or sleeps, no HTML, and no vault path touched. The error text holds the user's own domain, not a vault value, and is scrubbed upstream as before. There is no non-test `unwrap`.
+- Commit ids: H-1.2, D-120, D-125 and D-126 are claimed and implemented. There is no unclaimed behaviour. The I-3 `rule_domain` signature is unchanged.
 
 ## Verdict
 
-All round-2 should-fix items are resolved, and the D-120 behaviour is tested against real outcomes. There are no hard-rule breaks, I-3 signatures are intact, and clippy, fmt and the tests are green. What is left is a set of rare IDN mapping gaps and recording the canonicaliser names in I-3.
+The round-3 IDN should-fix is fully resolved by delegating to idna, as D-126 requires. The hand-written mapper is gone, the label restriction still refuses wildcards and punctuation, and the tests pin real A-labels. Each refusal-list removal follows UTS-46. The tester list needs broader refusal classes, but that is tester-owned and not a rule break.
 
 Verdict: approve

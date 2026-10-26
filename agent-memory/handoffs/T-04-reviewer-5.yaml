@@ -1,0 +1,18 @@
+from: reviewer-5 (area core)
+to: core sub-orchestrator
+task: T-04
+date: "2026-10-25"
+state: "Re-review of T-03 round 4 (3b66c28), T-04 round 4 (b829add) and T-05 round 6 (3f6fea5) at 4201aae; reports in bench/results/review-T-03.md, review-T-04.md, review-T-05.md. All three: Verdict approve, Blocking none. Every prior should-fix is resolved with a test that fails when the fix is removed (ignore_missing row 9999, 8-session trigram 0.5 check, sb_t_ name filter, idna A-label table cross-checked against idna::domain_to_ascii, marker-word refusals). The coder's removals from the tester refusal lists (decomposed, U+200B, U+00AD, U+2060, U+2800, ligatures, compatibility forms, half-width kana) all follow UTS-46. cargo test -p harness-core -p core-pg --no-fail-fast exit 0, clippy -D warnings and fmt clean, Cargo.lock gains only idna under harness-core."
+not_done: "Should fix, not blocking: 1. T-03: pg.rs:1052 checks the index with a hand-written %> query, not SEARCH_SQL; pin `subject %> $1` in SEARCH_SQL with a unit test. 2. T-03: the sweep's no-force drop and age filter have no test (the name filter does). 3. T-04 (tester-owned): gate_accept_t04_r3 refused list keeps only U+200D and U+202E as UTS-46 refusals; add CheckBidi, leading combining mark and a disallowed symbol, move the removed entries into positive 'maps to' assertions, and confirm the coder's edits."
+gotchas:
+  - "A parallel clippy run in a fresh target dir failed with 'paging file is too small' (os error 1455) while tests were linking; cargo clippy -j 2 succeeded. Not a code fault."
+  - "SB_VAULT_CANARY must contain 'sbcanary' and a non-alphanumeric character (sbcanary-<hex>-x works)."
+  - "U+2800 is UTS-46 valid, so a rule 'bank<U+2800>.com' is stored as xn--bank-yj5b.com, not refused; this is per D-126, noted in review-T-04 for supreme."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-03.md
+  - bench/results/review-T-04.md
+  - bench/results/review-T-05.md
+  - agent-memory/handoffs/T-04-reviewer-5.yaml
+verify: "SB_VAULT_CANARY=sbcanary-<hex>-x cargo test -p harness-core -p core-pg --no-fail-fast && cargo clippy -p harness-core -p core-pg --all-targets -- -D warnings"
