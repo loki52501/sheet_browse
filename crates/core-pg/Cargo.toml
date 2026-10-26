@@ -8,4 +8,21 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
+fastembed.workspace = true
 harness-core.workspace = true
+pgvector.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+
+[features]
+# PgStore::pool() for core-pg's own tests (review T-03: M-2, nothing else talks to the DB).
+testing = []
+
+# Same pattern as harness-core (D-111): the self dev-dependency turns `testing` on for every
+# test target, so plain `cargo test -p core-pg` builds and runs them all.
+[dev-dependencies]
+core-pg = { path = ".", features = ["testing"] }
+tokio.workspace = true

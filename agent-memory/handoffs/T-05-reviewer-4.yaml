@@ -1,0 +1,16 @@
+from: reviewer (area core)
+to: next
+task: T-05
+date: "2026-10-25"
+state: "Reviewed T-05 round 4 (fc23dd2, crates/core unchanged to 15e09d3); report bench/results/review-T-05.md committed as b1b40b4. Verdict: request changes. Blocking: VaultError lacks #[non_exhaustive] (vault.rs:57-58) although D-76 and interfaces.yaml I-4 say it has it, and round 4 added ValueInLiteral. Round-3 should-fix 1 (values inside literals) and 2 (D-118 idempotence with ( ) @, r3_6 green) are resolved and tested; 3 (repair a short entry) is library-only: harness vault set (crates/harness/src/cli.rs:612) still uses Vault::open, so the new repair hint loops. Tests: --lib vault:: 25, vault_accept_t05 9, _r2 14, _r3 9 + 2 ignored (r3_2, r3_5 red as announced), vault_scrub_t05_fix 16; clippy --all-targets -D warnings clean; rustfmt clean; canary 0 hits."
+not_done: "(1) coder: add #[non_exhaustive] to VaultError; tester adds a `_` arm to tests/vault_accept_t05.rs:412-425 and updates r3_2 (new ValueTooShort text, still names only the key) and r3_5 (vault/ault/test now ValueInLiteral). (2) Use Vault::open_for_set in cli.rs vault_set plus a CLI repair test. (3) Amend D-118 (2), (3), (4) per the report's exact wording, and narrow the parseability claim in the vault.rs module doc :22-24. (4) File an interface_changes blocker for Vault::open_for_set and VaultError::ValueInLiteral. (5) Test the MAX_SCRUB_PASSES cap and consider a distinct withheld marker."
+gotchas:
+  - "fc23dd2 had no coder handoff; this file is the only record of round 4's state."
+  - "Adding #[non_exhaustive] breaks compilation of the exhaustive match in tests/vault_accept_t05.rs (integration tests are another crate); land both together."
+  - "`cargo test --lib vault:: --test X` filters the integration binaries to 0 tests; run --lib and --test targets separately."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-05.md
+  - agent-memory/handoffs/T-05-reviewer-4.yaml
+verify: "SB_VAULT_CANARY=Zq7x-$RANDOM-kpw sh -c 'cargo test -p harness-core --lib vault:: && cargo test -p harness-core --test vault_accept_t05 --test vault_accept_t05_r2 --test vault_accept_t05_r3 --test vault_scrub_t05_fix && cargo clippy -p harness-core --all-targets -- -D warnings'"

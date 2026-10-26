@@ -1,0 +1,26 @@
+from: rust-coder-2
+to: next
+task: T-04
+date: "2026-10-23"
+state: "T-04 fix round after the adversarial review, commit c22ece0. D-110 (1)-(5) and D-111 implemented in crates/core/src/gate.rs, crates/core/src/testing.rs, crates/core/Cargo.toml. cargo test -p harness-core (no --features) builds and runs every test binary incl. gate_accept_t04, vault_accept_t05, ledger_t06; 34 gate::/testing:: unit tests green; clippy --all-targets -D warnings clean. gate_accept_t04.rs needed no change: none of its rows hits a case D-110 changed."
+not_done: "core-pg's gate_rule_set must call harness_core::gate::rule_key (today it has its own check_rule that stores keys verbatim); that is the core-pg coder's file. Nothing else in T-04."
+gotchas:
+  - "Canonicalisers are pub in harness_core::gate: rule_domain(&str), rule_class_key(&str), rule_hint(&str), each -> Result<String, MemoryError>, and rule_key(domain, class, &GateRule) -> Result<(String, String), MemoryError> which also enforces D-5 (Challenge rules, hinted or not, must be stop). Every MemoryStore::gate_rule_set backend must store rule_key's output. ANY_DOMAIN ('*') is now pub too."
+  - "rule_domain: trim, lowercase, strip one trailing dot; rejects empty, whitespace, control chars, '*' unless the whole value, / : @ ? # \\, leading dot, '..'. A call.domain that does not canonicalise (e.g. 'bank.com:443') skips the domain-scoped keys, so only '*' rules apply to it."
+  - "rule_hint rejects empty, ':', whitespace, control chars. A call hint that does not canonicalise is skipped (no stored rule can match it). Hints are deduplicated after canonicalising."
+  - "Guard beyond D-110 (2): a hint rule found at a class BELOW the call's class can raise the class-level result but never lower it, so ('*','Read:newsletter','allow') cannot allow a Pay or Account call hinted newsletter. Same-class hint hits beat the class level as D-110 (3) says. Supreme may want this recorded as a decision."
+  - "D-110 (4) as implemented: an ask proceeds on timeout only if run and rule are not strict, no hint rule hit, and class is Account or Send with >= 1 recipient not in contacts. A Send with EMPTY recipients therefore asks (Send(new), I-3) but times out to skip (literal 'at least one new recipient'). on_timeout/default_mode signatures unchanged; check passes strict=true for the skip cases."
+  - "Lookup cost: per hint up to 2 x (classes from call.class down to Read) gate_rule calls, plus 2 class-level calls; contacts are looked up once per Send call. The I-1 trait has no list-rules method, so this is one query per key on PgStore."
+  - "Ask cards: what, every values key and value, site and stop element pass card_text: ANSI CSI/OSC/DCS (7-bit and 8-bit), C0/C1 controls, CR/LF, bidi and zero-width marks become one space, whitespace collapses, capped (what 200, value 200, key 64, site 253 chars, '...' suffix). Max 32 values plus one '...' summary row. An unterminated OSC keeps its text so it cannot hide the rest of the line. A classifier what that cleans to empty falls back to the generated line."
+  - "MemStore now: canonical rule keys (rule_note canonicalises its lookup; force_rule stays verbatim), every stored Ts truncated to micros (ledger ts, runs started/ended, schedules last_run, facts seen_at, baselines updated, tools last_ok/last_fail, contacts last, review due), neighbors ordered by (depth, node id) then capped at 500, blank recall/search query -> empty, Invalid on empty node kind/name, edge rel, tool domain/name. gate_rule reads stay exact-match like PgStore."
+  - "ScriptedAsker panics when a queued TimeoutProceed/TimeoutSkip disagrees with card.on_timeout."
+  - "D-111: [dev-dependencies] harness-core = { path = \".\", features = [\"testing\"] }; the [[test]] required-features entry is gone. No duplicate-crate type mismatch in unit tests; testing stays behind #[cfg(any(test, feature = \"testing\"))]."
+  - "Shared worktree: crates/core/Cargo.toml and Cargo.lock also carry another coder's uncommitted notify dependency; commit c22ece0 staged only this task's hunks (index blobs built from HEAD), so their notify hunk is still unstaged for them to commit."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/src/gate.rs
+  - crates/core/src/testing.rs
+  - crates/core/Cargo.toml
+  - Cargo.lock
+verify: "cargo test -p harness-core"

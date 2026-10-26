@@ -55,14 +55,15 @@ def raw_interface_changes(text):
 def live_sessions():
     if sys.platform != "win32":
         return {}
-    ps = ("Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | "
-          "ForEach-Object { $_.ProcessId.ToString() + ' ' + $_.CommandLine }")
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | ForEach-Object { "
+          "$_.ProcessId.ToString() + ' ' + [int]((Get-Date) - $_.CreationDate).TotalMinutes + ' ' + $_.CommandLine }")
     r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True)
     alive = {}
     for line in r.stdout.splitlines():
         m = re.search(r"suborch/(\w+)\.md", line)
         if m:
-            alive[m.group(1)] = line.split(" ", 1)[0]
+            pid, up = line.split(" ", 2)[:2]
+            alive[m.group(1)] = (pid, int(up))
     return alive
 
 
@@ -103,7 +104,7 @@ def main(argv):
             dirty = len([l for l in r.stdout.splitlines() if l.strip()])
         row = {"area": area, "head": head, "ahead": ahead, "behind": behind, "last_commit_min": age,
                "status": status, "merged": merged, "ready": ready, "reports": reports,
-               "session": alive.get(area), "dirty": dirty, "dup_keys": dup_keys, "undecided": undecided}
+               "session": (alive.get(area) or (None,))[0], "session_min": (alive.get(area) or (None, None))[1], "dirty": dirty, "dup_keys": dup_keys, "undecided": undecided}
         rows.append(row)
         if undecided:
             actions.append(f"{area}: decide interface changes {', '.join(undecided)}")
@@ -113,14 +114,31 @@ def main(argv):
             actions.append(f"{area}: PR ready -> supreme-merge (status {status}, ready={ready})")
         if not merged and not alive.get(area) and ahead:
             actions.append(f"{area}: no live session (last commit {age} min ago)")
-        elif not merged and alive.get(area) and age > 90:
-            actions.append(f"{area}: session alive but no commit for {age} min (stuck on a prompt?)")
+        elif not merged and alive.get(area) and min(age, alive[area][1]) > 90:
+            actions.append(f"{area}: session up {alive[area][1]} min with no commit in that time (stuck on a prompt?)")
+        if merged and ahead:
+            actions.append(f"{area}: merged, {ahead} follow-up commit(s) on its branch (merge again when it reports the follow-up done)")
     waves = swarm.get("waves", {})
     merged_set = {r["area"] for r in rows if r["merged"]} | {k for k, v in swarm["areas"].items() if v.get("merged")}
     for area, a in swarm["areas"].items():
         need = a.get("needs_merged")
         if need and not a.get("merged") and all(n in merged_set for n in need) and area not in {r["area"] for r in rows}:
             actions.append(f"{area}: unblocked (needs {need} all merged) -> ask the user to launch")
+    # D-91 per-task branches (swarm/<area>-T<nn>) and D-86 GitHub PRs
+    tasks_rows = []
+    for ref in (git("for-each-ref", "--format=%(refname:short)", "refs/heads/swarm/") or "").split():
+        if "-T" not in ref:
+            continue
+        ahead = int(git("rev-list", "--count", f"main..{ref}"))
+        tasks_rows.append((ref, ahead, int((now - int(git("log", "-1", "--format=%ct", ref))) / 60)))
+    prs = []
+    r = subprocess.run(["gh", "pr", "list", "--state", "open", "--json", "number,headRefName,title,isDraft"],
+                       cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+    if r.returncode == 0 and r.stdout.strip():
+        prs = json.loads(r.stdout)
+        for pr in prs:
+            if not pr.get("isDraft"):
+                actions.append(f"PR #{pr['number']} {pr['headRefName']} open: {pr['title'][:60]} -> D-87 merge check (review Blocking none + cargo test --workspace on a local merge)")
     main_dirty = git("status", "--porcelain", "--untracked-files=no") or ""
     merge_head = (ROOT / ".git" / "MERGE_HEAD").exists()
     if merge_head:
@@ -129,7 +147,7 @@ def main(argv):
         actions.insert(0, "main: uncommitted tracked changes")
 
     if "--json" in argv:
-        print(json.dumps({"rows": rows, "actions": actions, "waves": waves}, indent=1))
+        print(json.dumps({"rows": rows, "task_branches": tasks_rows, "prs": prs, "actions": actions, "waves": waves}, indent=1))
         return 0
     print(f"main {git('rev-parse', '--short', 'main').strip()}  waves {waves}")
     print(f"{'area':7} {'head':8} {'+ahd':>5} {'-bhd':>5} {'age':>5} {'status':12} {'mrg':3} {'rdy':3} {'sess':6} {'dirty':>5}  reports")
@@ -139,6 +157,9 @@ def main(argv):
         print(f"{r['area']:7} {r['head']:8} {r['ahead']:5} {r['behind']:5} {r['last_commit_min']:4}m "
               f"{str(r['status']):12} {'y' if r['merged'] else 'n':3} {'y' if r['ready'] else 'n':3} "
               f"{(r['session'] or '-'):6} {str(r['dirty']):>5}  {rep}")
+    if tasks_rows:
+        print("task branches: " + "  ".join(f"{b} +{a} {m}m" for b, a, m in tasks_rows))
+    print(f"open PRs: {len(prs)}")
     print("actions:" if actions else "actions: none")
     for x in actions:
         print("  - " + x)

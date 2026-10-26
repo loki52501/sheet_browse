@@ -1,0 +1,15 @@
+from: reviewer (area core)
+to: next
+task: T-05
+date: "2026-10-25"
+state: "Reviewed T-05 round 5 (5cec6ef); report bench/results/review-T-05.md. Verdict: approve, Blocking none. Round-4 Blocking resolved: VaultError is #[non_exhaustive] (vault.rs:66), vault_accept_t05 row 5 has a `_` arm and still requires every current variant. D-118 amended and matches the code (widening, 8-pass cap incl. the confirming pass, narrowed parseability, (3b), two markers); B-194 files open_for_set and ValueInLiteral for I-4; cap test asserts the exact 6/7 boundary, marker text, no value, BadReference(0), sink not called. SCRUB_UNSETTLED cannot resolve (`?` is not a name byte, parse_refs fails at byte 0 before any lookup). Tests at 5cec6ef with a unique canary: --lib vault:: 26, vault_accept_t05 9, _r2 14, _r3 9 (+2 ignored), vault_scrub_t05_fix 16; clippy -p harness-core --all-targets -D warnings clean; cargo check --workspace --all-targets clean; rustfmt clean; canary 0 hits."
+not_done: "(1) Should fix (coder): the markers are returned verbatim, so a value that occurs in a marker's text (e.g. `settle`, `output`, `withheld`) appears in a cap output and breaks D-118's scrub(scrub(s)) == scrub(s); refuse such values in check_entries (3b) with a test, or narrow D-118 (2) and the module doc. (2) T-08 coder: harness vault set must call Vault::open_for_set plus a CLI repair test. (3) Tester: r3_2 and r3_5 ignores; tester commit 0790269 at HEAD not reviewed here. (4) Supreme: accept B-194 into interfaces.yaml I-4."
+gotchas:
+  - "The `boom @vault(test)` panic line in --lib vault:: output is the intentional scrubbed panic hook test, not a failure."
+  - "`git commit -- <paths>` refuses an untracked path; `git add` the new handoff first. Other sessions have uncommitted edits in this worktree, so commit only by path."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-05.md
+  - agent-memory/handoffs/T-05-reviewer-5.yaml
+verify: "SB_VAULT_CANARY=Zq7x-$RANDOM-kpw sh -c 'cargo clippy -p harness-core --all-targets -- -D warnings && cargo test -p harness-core --lib vault:: && cargo test -p harness-core --test vault_accept_t05 --test vault_accept_t05_r2 --test vault_accept_t05_r3 --test vault_scrub_t05_fix'"

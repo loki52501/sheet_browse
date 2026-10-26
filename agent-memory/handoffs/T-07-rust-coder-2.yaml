@@ -1,0 +1,26 @@
+from: rust-coder-2 (area core)
+to: next
+task: T-07
+date: "2026-10-23"
+state: "Round 2 of T-07 fixes every Blocking and Should-fix item in bench/results/review-T-07.md, except bootstrap in core-pg (B-175, a file outside this brief). D-119 records the design. (1) FileAsker fails closed: if it cannot create asks/ or write the card, the result is TimeoutSkip. (2) ToolCtx::ask runs the card's class and site through Gate::check with the call's hints and the run's strict. Stop means no card, a core stop event and TimeoutSkip. Otherwise the card proceeds on timeout only if the handler card, the gate card and Gate::on_timeout all proceed. (3) The mcp.rs card_line copy is deleted (D-70). Cards and diagnostic or stop lines are scrubbed, run through gate::clean_card, then scrubbed again. (4) Every Asker call is capped at card.timeout + 5 s, and a cap hit counts as TimeoutSkip. (5) dispatch catches handler and classifier panics: the model gets isError and the ledger gets an ok=false tool event. (6) Only payload strings are scrubbed on the way out. (7) A non-UTF-8 input line answers -32700 and the server keeps reading. (8) <n>.answer is claimed no-clobber, so answer() refuses with AlreadyExists after an answer or a timeout. (9) A missing runs row counts as strict. (10) FileAsker file I/O runs through spawn_blocking or tokio::fs. (11) The Allow-path ledger gap is documented in the mcp module doc. Tests: mcp_t07 has 33 passing plus 1 ignored child test, accept_t07 has 10, and the mcp::/ask:: unit tests have 11, all green with a random SB_VAULT_CANARY and 0 canary hits. Clippy -D warnings is clean on harness-core --lib --test mcp_t07 --test accept_t07."
+not_done: "B-175: core_pg::bootstrap should refuse an SB_RUN_ID that has no runs row (core-pg owner). The tester should also run bootstrap with and without SB_RUN_ID against Postgres. B-176: tokio test-util as a harness-core dev-dependency would allow an end-to-end test of the 65 s cap through dispatch. Left from the review notes and not addressed: a handler that returns `stopped` after a mid-call Challenge writes a second core stop; ToolRegistry::add can still lower a re-registered tool's class (toolstore floor)."
+gotchas:
+  - "gate::clean_card(card) does not scrub. It cleans and caps, keeps class, timeout and on_timeout, and drops a value under the gate's `new recipients` key (D-120). Always scrub before and after it. mcp::clean_line (pub(crate)) does this for a single line, and ask.rs uses it for stderr."
+  - "The mid-call gate Call has no recipients, so a mid-call Send card always skips on timeout (the gate treats empty recipients as all known). This is deliberate: the on_timeout can only get tighter."
+  - "FileAsker writes `timeout` into <n>.answer when its timer runs out. read_answer/parse_answer treat that as no answer. `harness ask` gets AlreadyExists with a message that says whether the ask was answered or timed out, and should print that message as is."
+  - "The answer claim is a temp file plus std::fs::hard_link, which is atomic and never overwrites. If the filesystem has no hard links, it falls back to create_new plus a write; there a reader can see an empty file for a moment, and that empty file parses as no answer yet."
+  - "Tests that need a failing store use the delegating `Flaky` store in tests/mcp_t07.rs (switches for append, run_get and gate_rule). The stderr canary test re-runs the test binary as a child process (`file_asker_stderr_child`, #[ignore], gated by SB_MCP_T07_STDERR_CHILD) and greps the child's stderr."
+  - "`cargo test -p harness-core --lib mcp:: ask::` is not valid cargo syntax. Use `--lib -- mcp:: ask::`, and run the integration targets without a filter, because a filter after `--` applies to every target."
+  - "Writes outside the worktree are blocked by a hook. In this worktree, agent-memory/*.yaml files had other coders' uncommitted hunks (a blockers.yaml duplicate-key fix, D-116). This commit staged a blob of HEAD plus only the T-07 entries (git hash-object + update-index), so those other hunks are still uncommitted in the working tree."
+decisions_made: [D-119]
+blockers_opened: [B-175, B-176, B-177]
+new_pub_items:
+  - "None. Behaviour changes are listed in B-177 (interface_changes, I-2)."
+files_touched:
+  - crates/core/src/mcp.rs
+  - crates/core/src/ask.rs
+  - crates/core/tests/mcp_t07.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/handoffs/T-07-rust-coder-2.yaml
+verify: "SB_VAULT_CANARY=cnry-$RANDOM$RANDOM cargo test -p harness-core --test mcp_t07 --test accept_t07 && cargo test -p harness-core --lib -- mcp:: ask::"

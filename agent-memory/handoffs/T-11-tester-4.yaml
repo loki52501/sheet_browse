@@ -1,0 +1,18 @@
+from: tester-4 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-25"
+state: "Re-ran T-11 acceptance on swarm/store for the code at 66f74a6 (rust-coder-7 review fixes). The reviewer's 65e719b does not touch crates/. Reviewed the coder's two edits to tester tests. The d314 rename to d314_read_only_tool_archives_with_its_mtime_set is faithful to the updated D-314. The d312 case (b) 'logged' check was vacuous: case (c) already leaves 'rejected: ... (D-312)' in why, and the mutant without log_invariant passed. I fixed it by clearing why before (b) and asserting 'names the tool signup' + D-312; the mutant now fails. Added 6 tests (accept_t11 now 41 on Windows) plus a cfg(unix) mode-000 fail-closed test that is not compiled here, and a fail_health_set hook on FakeStore. d314_sweep_archives_a_read_only_tool_with_its_mtime_set: sweep archives a read-only 200-day-old tool with a fresh mtime, keeps it at +60 days and deletes it at +91 days. d314_failed_archive_does_not_stop_sweep_and_next_sweep_retries (real failure: share_mode(0) lock): one ok:false tools.archive event; a later tool in the same domain, a 90-day delete and a later domain are still done; the next sweep archives it. d314_failed_retire_... (ok:false tools.retire, row Retired, next sweep archives). d314_memory_error_stops_sweep: Err(Memory), no event, nothing moved, later domain untouched. d314_archive_fails_closed_when_write_attributes_is_denied (real stamp failure via icacls /deny WA): Err(Io), old mtime kept, no _archive. d314_archive_of_a_tool_held_open_fails_and_moves_nothing. Mutation-checked and restored: sweep continue -> return Err (archive branch and retire branch), the ok:false ledger call dropped, the Memory early-return dropped, touch back to write(true), the stamp error ignored, the D-312 log dropped, plus the earlier G-4, D-313 and D-312 mutations re-run. fmt --check, clippy -D warnings, cargo test -p toolstore (116/41/1), cargo test --workspace (271 passed, 0 failed, 0 ignored) and cargo check are all clean. Canary: 0 hits. merge_gate store prints gate ok. accept-T-11.md has 63 rows, all pass. Verdict: green."
+not_done: "1. The vault canary is still not planted as a real vault value (core T-05 Vault is todo!()). It stays under Deferred. 2. The cfg(unix) test d314_archive_fails_closed_when_the_tool_cannot_be_opened has never run (Windows host); first run it on Linux or macOS as non-root. 3. Reviewer gap (2) proposed share_mode(0) to make the stamp fail. It does not: a FILE_WRITE_ATTRIBUTES-only open is exempt from share checks, so the stamp succeeds and the rename fails (os error 32), leaving the tool in place with a fresh mtime. The stamp-fail path is covered by the icacls deny test instead. 4. No row for G-5, T-5 auto @expects, T-6, T-8 (T-16, T-28)."
+gotchas:
+  - "Long Bash heredocs that include Rust code break (unexpected EOF). Append tests with the Edit tool."
+  - "merge_gate.py splits rows on every pipe, even an escaped one inside backticks. Describe closures and || in words."
+  - "The d314 Windows tests use share_mode(0) locks and icacls; both restore state before asserting, so tempdirs are cleaned up."
+  - "accept_3 and the sweep tests depend on FakeStore row order (insertion order); the failing tool is seeded first."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/toolstore/tests/accept_t11.rs
+  - bench/results/accept-T-11.md
+  - agent-memory/handoffs/T-11-tester-4.yaml
+verify: "cargo test -p toolstore --test accept_t11"

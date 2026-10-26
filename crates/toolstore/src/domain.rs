@@ -169,14 +169,16 @@ pub fn valid_domain(d: &str) -> bool {
         && !is_device_name(d)
 }
 
-/// D-310: a tool name that is safe as `<name>.js` and `<name>.<version>.js`: `[A-Za-z0-9_-]+`
-/// (every T-2 `@name`, which is `[A-Za-z0-9_]+`, passes), not a Windows device name, at most
-/// 100 bytes. No `.`, so the archive's `<name>.<version>` split stays unambiguous.
+/// D-310, D-312: a tool name that is safe as `<name>.js` and `<name>.<version>.js`:
+/// `[a-z0-9_-]+` (every T-2 `@name`, which is `[a-z0-9_]+`, passes), not a Windows device
+/// name, at most 100 bytes. Lower case only, because NTFS and the default macOS volume are
+/// case-insensitive: `Register.js` and `register.js` are one file and must not be two
+/// `tools.health` rows. No `.`, so the archive's `<name>.<version>` split stays unambiguous.
 pub fn valid_name(n: &str) -> bool {
     !n.is_empty()
         && n.len() <= 100
         && n.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
         && !is_device_name(n)
 }
 
@@ -190,7 +192,7 @@ pub fn check_tool_id(domain: &str, name: &str) -> Result<(), StoreError> {
     }
     if !valid_name(name) {
         return Err(StoreError::BadPath(format!(
-            "tool name {name:?} is not [A-Za-z0-9_-] (D-310)"
+            "tool name {name:?} is not [a-z0-9_-] (D-310, D-312)"
         )));
     }
     Ok(())

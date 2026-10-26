@@ -1,12 +1,14 @@
 //! T-4 fingerprint check and relocate over an I-5 index (live or fetched), per D-304.
 //!
-//! Role aliases (D-49) come from a built-in table until sb-sheet's data/roles.txt exists
-//! (B-300). Names compare case-, space- and punctuation-insensitively (`Email *` = `email`).
+//! Role aliases (D-49) come from sb-sheet's data/roles.txt through
+//! `sb_sheet::data::{aria_roles, alias_for}` (D-59), the one table find, sheets and
+//! fingerprints share. Names compare case-, space- and punctuation-insensitively (`Email *` = `email`).
 //! Relocate re-finds a missing item among unused rows of the same role by name synonyms or
 //! token overlap. Everything here is pure and linear in the index size.
 
 use crate::header::FpItem;
 use crate::Tool;
+use sb_sheet::data::{alias_for, aria_roles};
 use sb_sheet::IndexRow;
 
 /// T-4 outcome.
@@ -19,20 +21,6 @@ pub enum FingerprintResult {
     },
     Miss,
 }
-
-/// B-300 default: short alias -> ARIA roles. Replaced by sb-sheet's data/roles.txt (D-49).
-const ROLE_ALIASES: &[(&str, &[&str])] = &[
-    ("input", &["textbox", "searchbox", "spinbutton"]),
-    ("textarea", &["textbox"]),
-    ("button", &["button"]),
-    ("select", &["combobox", "listbox"]),
-    ("checkbox", &["checkbox", "switch"]),
-    ("radio", &["radio"]),
-    ("link", &["link"]),
-    ("form", &["form"]),
-    ("tab", &["tab"]),
-    ("table", &["table", "grid"]),
-];
 
 /// Phrase synonym groups for relocate, compared after [`norm`].
 const SYNONYMS: &[&[&str]] = &[
@@ -95,17 +83,14 @@ pub fn norm(s: &str) -> String {
     mapped.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Does `row_role` (ARIA) satisfy the item role (alias or ARIA, D-49)?
+/// Does `row_role` (ARIA) satisfy the item role (alias or ARIA, D-49)? Yes when they are
+/// the same role, when the item is the alias a sheet line prints for the row
+/// (`sb_sheet::data::alias_for`), or when the row's role is one the item alias stands for
+/// (`sb_sheet::data::aria_roles`, so `textarea` covers `textbox`). Case-insensitive.
 pub fn role_matches(item_role: &str, row_role: &str) -> bool {
-    let item = item_role.to_ascii_lowercase();
-    let row = row_role.to_ascii_lowercase();
-    if item == row {
-        return true;
-    }
-    ROLE_ALIASES
-        .iter()
-        .find(|(alias, _)| *alias == item)
-        .is_some_and(|(_, roles)| roles.contains(&row.as_str()))
+    let item = item_role.trim().to_ascii_lowercase();
+    let row = row_role.trim().to_ascii_lowercase();
+    item == row || alias_for(&row) == item || aria_roles(&item).contains(&row)
 }
 
 fn is_form_item(item: &FpItem) -> bool {
@@ -339,6 +324,87 @@ pub(crate) mod tests {
         assert!(role_matches("select", "combobox"));
         assert!(role_matches("textbox", "textbox"));
         assert!(!role_matches("input", "button"));
+    }
+
+    /// B-300 / D-59: every alias the old built-in map handled still matches, now through
+    /// sb-sheet's roles.txt. One test per alias.
+    #[test]
+    fn alias_input_matches_textbox_and_searchbox() {
+        assert!(role_matches("input", "textbox"));
+        assert!(role_matches("input", "searchbox"));
+        assert!(role_matches("INPUT", "TextBox"));
+        assert!(!role_matches("input", "combobox"));
+    }
+
+    #[test]
+    fn alias_textarea_matches_textbox() {
+        assert!(role_matches("textarea", "textbox"));
+        assert!(!role_matches("textarea", "searchbox"));
+    }
+
+    #[test]
+    fn alias_button_matches_button() {
+        assert!(role_matches("button", "button"));
+        assert!(!role_matches("button", "link"));
+    }
+
+    #[test]
+    fn alias_select_matches_combobox_and_listbox() {
+        assert!(role_matches("select", "combobox"));
+        assert!(role_matches("select", "listbox"));
+        assert!(!role_matches("select", "textbox"));
+    }
+
+    #[test]
+    fn alias_checkbox_matches_checkbox() {
+        assert!(role_matches("checkbox", "checkbox"));
+        assert!(!role_matches("checkbox", "radio"));
+    }
+
+    #[test]
+    fn alias_radio_matches_radio() {
+        assert!(role_matches("radio", "radio"));
+        assert!(!role_matches("radio", "checkbox"));
+    }
+
+    #[test]
+    fn alias_link_matches_link() {
+        assert!(role_matches("link", "link"));
+        assert!(!role_matches("link", "button"));
+    }
+
+    #[test]
+    fn alias_form_matches_form() {
+        assert!(role_matches("form", "form"));
+        assert!(!role_matches("form", "region"));
+    }
+
+    #[test]
+    fn alias_tab_and_table_match() {
+        assert!(role_matches("tab", "tab"));
+        assert!(role_matches("table", "table"));
+        assert!(role_matches("table", "grid"));
+    }
+
+    /// Aliases the old map lacked now come from roles.txt (one table for find and
+    /// fingerprints, D-49).
+    #[test]
+    fn roles_txt_aliases_beyond_the_old_map() {
+        assert!(role_matches("image", "img"));
+        assert!(role_matches("dialog", "alertdialog"));
+        assert!(role_matches("nav", "navigation"));
+    }
+
+    /// Where roles.txt differs from the old map, sb-sheet wins (D-59): `input` no longer
+    /// covers `spinbutton` (roles.txt: `number`/`spinbutton`), `checkbox` no longer covers
+    /// `switch` (roles.txt: `switch`).
+    #[test]
+    fn roles_txt_wins_over_the_old_map() {
+        assert!(!role_matches("input", "spinbutton"));
+        assert!(role_matches("number", "spinbutton"));
+        assert!(role_matches("spinbutton", "spinbutton"));
+        assert!(!role_matches("checkbox", "switch"));
+        assert!(role_matches("switch", "switch"));
     }
 
     #[test]

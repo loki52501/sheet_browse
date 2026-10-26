@@ -1,0 +1,16 @@
+from: rust-coder (core, T-09 round 2)
+to: core/suborch, then reviewer and tester
+task: T-09
+date: "2026-10-25"
+state: "Round 2 fixes bench/results/review-T-09.md (request changes). (1) Blocking: b2 never skips. step1_accept.rs canary() returns SB_VAULT_CANARY when set, else a runtime-unique ASCII value (prefix cnryT09q, process id hex, nanos hex, RandomState hash hex; asserted >= MIN_VALUE_CHARS), and b2 runs the full grep either way. (2) examples/echo.rs requires both --vault-key (clap required arg, an identity file path) and SB_VAULT_PATH (env, trimmed, non-empty); it refuses to start without either and no longer uses vault::default_path or default_key (no keychain, no default path). The sink's chars/bytes/fnv1a64 line stays, so it only ever hashes a test value. Checked: no --vault-key gives a clap error exit 2, no SB_VAULT_PATH gives `echo: SB_VAULT_PATH is required ...` exit 1, no sink file written. (3) b3 now asserts each failing statement's error text contains `ledger is append-only` (the trigger in migrations/0001_init.sql:42) and panics on Ok; TRUNCATE ledger.events added beside the two UPDATEs and the DELETE. Results: cargo test -p harness --test step1_accept green without SB_VAULT_CANARY (7 passed) and with a fresh SB_VAULT_CANARY (7 passed). Leak mutation (eprintln of the uppercased resolved value inside the sink closure, reverted, never committed): b2 without SB_VAULT_CANARY fails with `SB_VAULT_CANARY found in: [\"echo stderr\"]`. clippy -p harness --all-targets -D warnings clean, rustfmt clean on both files. No library or pub API change, no interface_changes entry."
+not_done: "1. Reviewer re-pass on round 2. 2. Tester runs the step-1 acceptance and writes bench/results/accept-T-09.md. 3. tasks.yaml T-09 status (core/suborch)."
+gotchas:
+  - "Sessions point --vault-key at a key file that does not exist until a test plants a value; Vault::open of a missing vault needs no key, so echo only checks that the flag and SB_VAULT_PATH are present, not that the file exists."
+  - "A run takes 4 to 6 minutes here because echo_bin() rebuilds the example whenever other agents' uncommitted crates/core edits change; the tests themselves are under 2 minutes."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/harness/examples/echo.rs
+  - crates/harness/tests/step1_accept.rs
+  - agent-memory/handoffs/T-09-rust-coder-2.yaml
+verify: "cargo test -p harness --test step1_accept"

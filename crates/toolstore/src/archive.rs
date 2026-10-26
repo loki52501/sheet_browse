@@ -11,6 +11,28 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
+/// The set-mtime step of [`ToolStore::archive`]; a seam for tests (`Sync` so `sweep`'s future
+/// stays `Send`).
+pub(crate) type SetMtime<'a> = &'a (dyn Fn(&Path) -> std::io::Result<()> + Sync);
+
+/// Sets `p`'s mtime to now. A read-only file must work (D-314, sweep would otherwise retry it
+/// forever). On Windows `write(true)` asks for FILE_WRITE_DATA, which the read-only attribute
+/// denies, so the handle asks only for FILE_WRITE_ATTRIBUTES, which it grants. Elsewhere a
+/// read-only open is enough: futimens checks the file's owner, not the open mode.
+pub(crate) fn touch(p: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let f = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+        fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .open(p)?
+    };
+    #[cfg(not(windows))]
+    let f = fs::File::open(p)?;
+    f.set_modified(SystemTime::now())
+}
+
 impl ToolStore {
     /// `tools/<domain>/<name>.js`, or `Err(BadPath)` when `domain` or `name` is not a single
     /// safe path component (D-310).
@@ -37,12 +59,14 @@ impl ToolStore {
     /// `tools/<domain>/<name>.js`. For a `domain` or `name` that fails the D-310 check this is
     /// the empty path, which no file operation accepts, so it can never point outside the
     /// root. Mutators use [`ToolStore::try_tool_path`] and return `StoreError::BadPath`.
+    #[deprecated(note = "use try_tool_path / try_archive_path (D-72)")]
     pub fn tool_path(&self, domain: &str, name: &str) -> PathBuf {
         self.try_tool_path(domain, name).unwrap_or_default()
     }
 
     /// `tools/_archive/<domain>/<name>.<version>.js`; the empty path on bad input, as
     /// [`ToolStore::tool_path`].
+    #[deprecated(note = "use try_tool_path / try_archive_path (D-72)")]
     pub fn archive_path(&self, domain: &str, name: &str, version: i32) -> PathBuf {
         self.try_archive_path(domain, name, version)
             .unwrap_or_default()
@@ -51,11 +75,28 @@ impl ToolStore {
     /// Moves `tools/<domain>/<name>.js` to the archive as `version`. If that archive name is
     /// taken (the same version archived twice), `<name>.<version>.<n>.js` is used. Returns
     /// the archive path; `Ok(None)` when the tool file does not exist.
+    ///
+    /// Fails closed (D-314): the tool's mtime is set to now before the move (a rename keeps
+    /// it), so an archived file always carries its archive time and the 90-day sweep never
+    /// measures from the tool's old mtime. If the mtime cannot be set, nothing has moved and
+    /// the error is returned. A read-only tool file archives normally.
     pub fn archive(
         &self,
         domain: &str,
         name: &str,
         version: i32,
+    ) -> Result<Option<PathBuf>, StoreError> {
+        self.archive_with(domain, name, version, &touch)
+    }
+
+    /// [`ToolStore::archive`] with the set-mtime step as a seam, so a failing step can be
+    /// tested (here and through `sweep_with`) without forcing a real filesystem failure.
+    pub(crate) fn archive_with(
+        &self,
+        domain: &str,
+        name: &str,
+        version: i32,
+        set_mtime: SetMtime,
     ) -> Result<Option<PathBuf>, StoreError> {
         let from = self.try_tool_path(domain, name)?;
         if !from.is_file() {
@@ -71,14 +112,13 @@ impl ToolStore {
                 .join(format!("{name}.{version}.{n}.js"));
             n += 1;
         }
+        // D-314: stamp the tool in place first. A failure here leaves it untouched where it
+        // was, so there is never an archived copy with the old mtime and nothing to undo.
+        set_mtime(&from)?;
         if let Some(dir) = to.parent() {
             fs::create_dir_all(dir)?;
         }
         fs::rename(&from, &to)?;
-        fs::File::options()
-            .write(true)
-            .open(&to)?
-            .set_modified(SystemTime::now())?;
         Ok(Some(to))
     }
 
@@ -191,14 +231,114 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ts = ToolStore::new(dir.path());
         fs::create_dir_all(dir.path().join("luma.com")).unwrap();
-        fs::write(ts.tool_path("luma.com", "register"), "a").unwrap();
+        let tool = ts.try_tool_path("luma.com", "register").unwrap();
+        fs::write(&tool, "a").unwrap();
         let to = ts.archive("luma.com", "register", 1).unwrap().unwrap();
         assert_eq!(to, dir.path().join("_archive/luma.com/register.1.js"));
-        assert!(!ts.tool_path("luma.com", "register").exists());
-        fs::write(ts.tool_path("luma.com", "register"), "b").unwrap();
+        assert!(!tool.exists());
+        fs::write(&tool, "b").unwrap();
         let to2 = ts.archive("luma.com", "register", 1).unwrap().unwrap();
         assert_eq!(to2, dir.path().join("_archive/luma.com/register.1.2.js"));
         assert_eq!(ts.archive("luma.com", "register", 3).unwrap(), None);
+    }
+
+    fn denied(_: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "no mtime",
+        ))
+    }
+
+    fn set_old_mtime(p: &Path) -> SystemTime {
+        let old = SystemTime::now() - std::time::Duration::from_secs(200 * 86_400);
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        old
+    }
+
+    /// D-314: the mtime is set on the tool in place, before the move, and a failed set leaves
+    /// the tool where it was with nothing in the archive (also when the archive name would
+    /// have taken a `.<n>` suffix).
+    #[test]
+    fn archive_fails_closed_when_mtime_cannot_be_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = ToolStore::new(dir.path());
+        fs::create_dir_all(dir.path().join("luma.com")).unwrap();
+        let tool = ts.try_tool_path("luma.com", "register").unwrap();
+        fs::write(&tool, "a").unwrap();
+        let old = set_old_mtime(&tool);
+        let archived = ts.try_archive_path("luma.com", "register", 1).unwrap();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let r = ts.archive_with("luma.com", "register", 1, &|p: &Path| {
+            seen.lock().unwrap().push(p.to_path_buf());
+            assert!(p.is_file(), "set_mtime runs before the move");
+            denied(p)
+        });
+        assert!(
+            matches!(&r, Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "{r:?}"
+        );
+        assert_eq!(*seen.lock().unwrap(), vec![tool.clone()]);
+        assert_eq!(fs::read_to_string(&tool).unwrap(), "a");
+        assert_eq!(fs::metadata(&tool).unwrap().modified().unwrap(), old);
+        assert!(
+            !dir.path().join(ARCHIVE).exists(),
+            "nothing created or moved"
+        );
+
+        // `.<n>` case: register.1.js is taken; a failed set leaves both files and no .2.
+        fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        fs::write(&archived, "v1").unwrap();
+        let r = ts.archive_with("luma.com", "register", 1, &denied);
+        assert!(matches!(&r, Err(StoreError::Io(_))), "{r:?}");
+        assert_eq!(fs::read_to_string(&tool).unwrap(), "a");
+        assert_eq!(fs::read_to_string(&archived).unwrap(), "v1");
+        assert!(!dir
+            .path()
+            .join("_archive/luma.com/register.1.2.js")
+            .exists());
+
+        // The real step succeeds and the archived copy carries the archive time, not the
+        // tool's old mtime.
+        let before = SystemTime::now() - std::time::Duration::from_secs(5);
+        let to = ts.archive("luma.com", "register", 1).unwrap().unwrap();
+        assert_eq!(to, dir.path().join("_archive/luma.com/register.1.2.js"));
+        assert!(!tool.exists());
+        assert!(fs::metadata(&to).unwrap().modified().unwrap() >= before);
+    }
+
+    /// D-314 / review should-fix 1: a read-only tool file archives (Windows denies an
+    /// open-for-write on it) and the archived copy carries the archive time.
+    #[test]
+    fn archive_sets_the_mtime_of_a_read_only_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = ToolStore::new(dir.path());
+        fs::create_dir_all(dir.path().join("luma.com")).unwrap();
+        let tool = ts.try_tool_path("luma.com", "register").unwrap();
+        fs::write(&tool, "a").unwrap();
+        set_old_mtime(&tool);
+        let mut ro = fs::metadata(&tool).unwrap().permissions();
+        ro.set_readonly(true);
+        fs::set_permissions(&tool, ro).unwrap();
+        let before = SystemTime::now() - std::time::Duration::from_secs(5);
+        let r = ts.archive("luma.com", "register", 1);
+        let to = ts.try_archive_path("luma.com", "register", 1).unwrap();
+        for p in [&tool, &to] {
+            if let Ok(m) = fs::metadata(p) {
+                let mut w = m.permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                w.set_readonly(false);
+                fs::set_permissions(p, w).unwrap();
+            }
+        }
+        assert_eq!(r.unwrap(), Some(to.clone()));
+        assert!(!tool.exists());
+        assert_eq!(fs::read_to_string(&to).unwrap(), "a");
+        assert!(fs::metadata(&to).unwrap().modified().unwrap() >= before);
     }
 
     #[test]
