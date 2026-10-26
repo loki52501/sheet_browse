@@ -485,9 +485,42 @@ fn writes_to_config_that_runs_programs_are_delete() {
             "echo x > runs/x/repo/.git/config",
             "echo x >> .curlrc",
             "mv runs/x/a.txt .wgetrc",
+            // review-T-14 round 2: XDG git config and attributes, startup and rc files.
+            "echo x >> ~/.config/git/config",
+            "echo '* diff=x' >> ~/.config/git/attributes",
+            "echo x >> ~/.bashrc",
+            "echo x >> ~/.bash_profile",
+            "echo x >> ~/.profile",
+            "echo x >> ~/.zshrc",
+            "echo x >> ~/.ssh/authorized_keys",
+            "echo x >> ~/.ssh/config",
+            "echo x >> ~/.npmrc",
+            "echo x >> ~/.netrc",
+            "echo x >> ~/_netrc",
+            "echo x >> ~/.cargo/config.toml",
+            "echo x >> .cargo/config.toml",
+            "echo x >> .envrc",
+            "echo x >> ~/Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1",
+            "echo x > ~/AppData/Roaming/Microsoft/Windows/Start\\ Menu/Programs/Startup/a.cmd",
         ],
         Class::Delete,
     );
+}
+
+#[test]
+fn writes_into_a_path_folder_are_delete() {
+    let dir = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .find(|d| d.is_absolute() && d.is_dir());
+    let Some(dir) = dir else { return };
+    let target = dir.join("planted-by-test-git");
+    assert!(
+        crate::paths::runs_code_on_use(&target),
+        "{}",
+        target.display()
+    );
+    assert!(!crate::paths::runs_code_on_use(
+        &std::env::temp_dir().join("no-path-dir-here").join("a.txt")
+    ));
 }
 
 #[test]

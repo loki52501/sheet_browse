@@ -97,7 +97,7 @@ pub fn write_verdict(roots: &Roots, p: &Path, replaces: bool, floor: Class) -> V
         v.raise(
             Class::Delete,
             format!(
-                "writes {}, which git, curl or wget read as configuration that can run programs",
+                "writes {}, configuration or a startup file that can make a program run code later",
                 roots.shown(p)
             ),
         );

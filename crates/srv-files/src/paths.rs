@@ -142,32 +142,82 @@ pub fn place(roots: &Roots, p: &Path) -> Place {
     Place::Scratch
 }
 
-/// True when writing `p` can make an allowed program run code later: anything inside a
-/// `.git` folder (hooks, config: core.fsmonitor, diff.external), `.gitattributes` and
-/// `.gitmodules` (textconv and filter drivers), and the rc files curl and wget read
-/// (D-523). Such writes are Delete wherever they are.
+/// Dot folders that hold configuration a later program runs code from, wherever they are
+/// (project-local ones included): git hooks and config, cargo runners and aliases, the
+/// XDG config tree (`~/.config/git/config`, `~/.config/git/attributes`), ssh, editors,
+/// git hook managers.
+const CODE_DIRS: &[&str] = &[
+    ".git",
+    ".cargo",
+    ".config",
+    ".ssh",
+    ".husky",
+    ".vscode",
+    ".devcontainer",
+    ".github",
+    ".local",
+];
+
+/// Folders below the home folder whose files run at login or app start on Windows
+/// (`AppData\...\Startup`, the PowerShell profiles in `Documents`).
+const CODE_HOME_DIRS: &[&str] = &["appdata", "windowspowershell", "powershell", "start menu"];
+
+/// True when writing `p` can make a program run code later, so the write is Delete
+/// wherever it is (D-523 (8), D-524):
+/// * any dotfile (`.gitattributes`, `.gitmodules`, `.gitconfig`, `.curlrc`, `.wgetrc`,
+///   `.bashrc`, `.profile`, `.zshrc`, `.npmrc`, `.netrc`, `.envrc`, ...) and the Windows
+///   `_netrc` / `_curlrc` spellings;
+/// * anything inside a [`CODE_DIRS`] folder;
+/// * below the home folder: anything inside any dot folder, and the [`CODE_HOME_DIRS`];
+/// * a file in a folder on `PATH` (a planted `git` would replace the real one).
+///
+/// Fails closed: this over-matches (a dotfile inside `runs/` is Delete too) rather than
+/// keep a list of the startup files each program reads.
 pub fn runs_code_on_use(p: &Path) -> bool {
-    let names: Vec<String> = p
-        .components()
+    let names = lower_names(p);
+    let Some((file, dirs)) = names.split_last() else {
+        return false;
+    };
+    if (file.starts_with('.') && file != ".." && file.len() > 1)
+        || matches!(file.as_str(), "_netrc" | "_curlrc")
+        || dirs.iter().any(|d| CODE_DIRS.contains(&d.as_str()))
+    {
+        return true;
+    }
+    if let Some(home) = dirs::home_dir() {
+        let home = lower_names(&home);
+        if names.len() > home.len() && names[..home.len()] == home[..] {
+            let below = &names[home.len()..names.len() - 1];
+            if below
+                .iter()
+                .any(|d| (d.starts_with('.') && d != "..") || CODE_HOME_DIRS.contains(&d.as_str()))
+            {
+                return true;
+            }
+        }
+    }
+    on_path(&names[..names.len() - 1])
+}
+
+/// The normal components of `p`, ASCII-lowercased (Windows paths are case-insensitive).
+fn lower_names(p: &Path) -> Vec<String> {
+    p.components()
         .filter_map(|c| match c {
             Component::Normal(n) => Some(n.to_string_lossy().to_ascii_lowercase()),
             _ => None,
         })
-        .collect();
-    let Some((file, dirs)) = names.split_last() else {
+        .collect()
+}
+
+/// True when the folder whose components are `dir` is listed in `PATH`.
+fn on_path(dir: &[String]) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
-    dirs.iter().any(|n| n == ".git")
-        || matches!(
-            file.as_str(),
-            ".git"
-                | ".gitattributes"
-                | ".gitmodules"
-                | ".gitconfig"
-                | ".curlrc"
-                | "_curlrc"
-                | ".wgetrc"
-        )
+    std::env::split_paths(&path).any(|entry| {
+        let entry = lower_names(&entry);
+        !entry.is_empty() && entry == dir
+    })
 }
 
 /// True when `p` is an existing file (links followed) with more than one hard link, or
