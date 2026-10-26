@@ -302,16 +302,24 @@ impl Vault {
         Vault::with_backing(entries, path, key, true)
     }
 
-    /// For `harness vault set` only: [`Vault::open`] without the D-118 value rules, so a
-    /// file `open` refuses (an entry under the floor or inside a literal, written by an
-    /// older build or by hand) can be repaired. `set` on this handle checks only the entry
-    /// it sets; the other entries are kept as they are, and `open` keeps refusing the file,
-    /// naming the next entry to fix, until every one is fixed. Its scrub over-scrubs a
-    /// short value and cannot see a value inside a literal, so never install it as the
-    /// process-wide scrubber.
-    pub fn open_for_set(path: &Path, key: &KeySource) -> Result<Vault, VaultError> {
+    /// For `harness vault set` only (D-84): opens `path` without the D-118 value rules, so
+    /// a file `open` refuses (an entry under the floor or inside a literal, written by an
+    /// older build or by hand) can be repaired. It returns a [`VaultEditor`], not a
+    /// `Vault`: the editor can set, remove and list entries but cannot resolve a value,
+    /// scrub or be installed as the process-wide scrubber, because a vault that skipped
+    /// the value rules may hold values scrub cannot see. `set` on the editor checks only
+    /// the entry it sets; the other entries are kept as they are, and `open` keeps
+    /// refusing the file, naming the next entry to fix, until every one is fixed. A
+    /// missing file opens as an empty editor without touching the key (D-101).
+    pub fn open_for_set(path: &Path, key: &KeySource) -> Result<VaultEditor, VaultError> {
         let entries = read_entries(path, key)?;
-        Vault::with_backing(entries, path, key, false)
+        Ok(VaultEditor {
+            entries,
+            backing: Backing {
+                path: path.to_path_buf(),
+                key: key.clone(),
+            },
+        })
     }
 
     fn with_backing(
@@ -381,42 +389,19 @@ impl Vault {
     /// cannot be built, `ScrubUnavailable` and nothing changes. If the vault is the
     /// installed global one, the global scrub follows.
     pub fn set(&mut self, name: &str, value: &str, kind: EntryKind) -> Result<(), VaultError> {
-        if let Some(bad) = invalid_name_at(name) {
-            return Err(VaultError::BadReference(bad));
-        }
-        check_value(name, value)?;
-        let entry = || Entry {
-            value: Zeroizing::new(value.to_owned()),
-            kind,
-        };
-        // Against this handle's entries first, before any lock, file or key is touched.
-        let mut next = clone_entries(&self.entries);
-        next.insert(name.to_owned(), entry());
-        check_entries(&next, Check::Only(name))?;
         let check = if self.strict {
             Check::All
         } else {
             Check::Only(name)
         };
-        let (next, scrubber) = match &self.backing {
-            None => {
-                let scrubber = Scrubber::try_build(&next)?;
-                (next, scrubber)
-            }
-            Some(backing) => {
-                drop(next);
-                let lock = lock_exclusive(&backing.path)?;
-                let (identity, mut next) = current_locked(backing, &self.entries)?;
-                next.insert(name.to_owned(), entry());
-                check_entries(&next, check)?;
-                let scrubber = Scrubber::try_build(&next)?;
-                let ciphertext = encrypt_entries(&identity, &next)?;
-                write_atomic(&backing.path, &ciphertext)?;
-                // Closing the handle releases the lock.
-                drop(lock);
-                (next, scrubber)
-            }
-        };
+        let (next, scrubber) = set_entry(
+            &self.entries,
+            self.backing.as_ref(),
+            check,
+            name,
+            value,
+            kind,
+        )?;
         let scrubber = Arc::new(scrubber);
         replace_global_if_installed(&self.scrubber, &scrubber);
         self.entries = next;
@@ -476,6 +461,199 @@ impl Vault {
     pub fn install_global(&self) {
         *GLOBAL.write().unwrap_or_else(|e| e.into_inner()) = Some(self.scrubber.clone());
         PANIC_HOOK.call_once(install_panic_hook);
+    }
+}
+
+/// The shared `set` of [`Vault`] and [`VaultEditor`]: validates `name` and `value`, then
+/// (for a file-backed handle, under the lock) re-reads the file, applies the change,
+/// checks per `check`, builds the scrubber and writes the file. Returns the new entries
+/// and their scrubber; the caller swaps them in.
+fn set_entry(
+    entries: &BTreeMap<String, Entry>,
+    backing: Option<&Backing>,
+    check: Check<'_>,
+    name: &str,
+    value: &str,
+    kind: EntryKind,
+) -> Result<(BTreeMap<String, Entry>, Scrubber), VaultError> {
+    if let Some(bad) = invalid_name_at(name) {
+        return Err(VaultError::BadReference(bad));
+    }
+    check_value(name, value)?;
+    let entry = || Entry {
+        value: Zeroizing::new(value.to_owned()),
+        kind,
+    };
+    // Against this handle's entries first, before any lock, file or key is touched.
+    let mut next = clone_entries(entries);
+    next.insert(name.to_owned(), entry());
+    check_entries(&next, Check::Only(name))?;
+    match backing {
+        None => {
+            let scrubber = Scrubber::try_build(&next)?;
+            Ok((next, scrubber))
+        }
+        Some(backing) => {
+            drop(next);
+            let lock = lock_exclusive(&backing.path)?;
+            let (identity, mut next) = current_locked(backing, entries)?;
+            next.insert(name.to_owned(), entry());
+            check_entries(&next, check)?;
+            let scrubber = Scrubber::try_build(&next)?;
+            let ciphertext = encrypt_entries(&identity, &next)?;
+            write_atomic(&backing.path, &ciphertext)?;
+            // Closing the handle releases the lock.
+            drop(lock);
+            Ok((next, scrubber))
+        }
+    }
+}
+
+/// The handle [`Vault::open_for_set`] returns (D-84, I-4): edits a vault file that
+/// [`Vault::open`] may refuse, for `harness vault set` only. It has `set`, `remove`,
+/// `names` and `save`, and nothing that reads a value back: no `resolve_into`, no
+/// `scrub`, no `install_global`, no `Deref` to or conversion into a [`Vault`]. A vault
+/// opened without the D-118 value rules may hold values scrub cannot see (short ones,
+/// ones inside a literal), so this type can neither resolve them nor become the
+/// process-wide scrubber. `Debug` prints nothing of the entries.
+///
+/// `set` and `remove` write through: each runs its whole read-modify-write under the
+/// exclusive `<vault file>.lock`, as [`Vault::set`] does, so concurrent writers never
+/// drop each other's entries. `save` closes the editor after checking the file decrypts.
+///
+/// ```no_run
+/// use harness_core::vault::{EntryKind, KeySource, Vault, VaultEditor, VaultError};
+/// # fn f(path: &std::path::Path, key: &KeySource) -> Result<(), VaultError> {
+/// let mut editor: VaultEditor = Vault::open_for_set(path, key)?;
+/// editor.set("site_pw", "a value of 4 or more chars", EntryKind::Secret)?;
+/// let _names: Vec<(String, EntryKind)> = editor.names();
+/// editor.remove("old_entry")?;
+/// editor.save()?;
+/// # Ok(()) }
+/// ```
+///
+/// It cannot resolve a value:
+///
+/// ```compile_fail,E0599
+/// # use harness_core::vault::{KeySource, Vault};
+/// # fn f(path: &std::path::Path, key: &KeySource) {
+/// let editor = Vault::open_for_set(path, key).unwrap();
+/// let _ = editor.resolve_into("@vault(k)", |r| r.expose().len());
+/// # }
+/// ```
+///
+/// It cannot be installed as the process-wide scrubber:
+///
+/// ```compile_fail,E0599
+/// # use harness_core::vault::{KeySource, Vault};
+/// # fn f(path: &std::path::Path, key: &KeySource) {
+/// let editor = Vault::open_for_set(path, key).unwrap();
+/// editor.install_global();
+/// # }
+/// ```
+///
+/// It cannot scrub:
+///
+/// ```compile_fail,E0599
+/// # use harness_core::vault::{KeySource, Vault};
+/// # fn f(path: &std::path::Path, key: &KeySource) {
+/// let editor = Vault::open_for_set(path, key).unwrap();
+/// let _ = editor.scrub("text");
+/// # }
+/// ```
+///
+/// It is not a `Vault` and does not deref to one:
+///
+/// ```compile_fail,E0308
+/// # use harness_core::vault::{KeySource, Vault};
+/// # fn f(path: &std::path::Path, key: &KeySource) {
+/// let editor = Vault::open_for_set(path, key).unwrap();
+/// let _: &Vault = &editor;
+/// # }
+/// ```
+pub struct VaultEditor {
+    // Values are kept only for the checks in `set` and are never handed out.
+    entries: BTreeMap<String, Entry>,
+    backing: Backing,
+}
+
+impl fmt::Debug for VaultEditor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("VaultEditor(..)")
+    }
+}
+
+impl VaultEditor {
+    /// Adds or replaces an entry and re-encrypts the file, as [`Vault::set`] does, except
+    /// that only the entry being set is checked against the D-118 value rules: its own
+    /// value (`ValueTooShort`, `ValueInLiteral`) and every value against its
+    /// `@vault(name)`. Problems in other entries are left for `open` to report, so a
+    /// refused file can be repaired one entry at a time. `ScrubUnavailable` writes nothing.
+    pub fn set(&mut self, name: &str, value: &str, kind: EntryKind) -> Result<(), VaultError> {
+        let (next, _scrubber) = set_entry(
+            &self.entries,
+            Some(&self.backing),
+            Check::Only(name),
+            name,
+            value,
+            kind,
+        )?;
+        self.entries = next;
+        Ok(())
+    }
+
+    /// Removes entry `name` from the file under the lock and re-encrypts it. A name the
+    /// file does not hold (or a missing file) is `Unknown(name)`, and nothing is written
+    /// and no key is generated. The name is not checked against `[A-Za-z0-9_.-]+`, so an
+    /// entry written by hand under a bad name can be removed. `ScrubUnavailable` writes
+    /// nothing.
+    pub fn remove(&mut self, name: &str) -> Result<(), VaultError> {
+        let unknown = || VaultError::Unknown(name.to_owned());
+        let path = &self.backing.path;
+        if !path.try_exists()? {
+            return Err(unknown());
+        }
+        let lock = lock_exclusive(path)?;
+        let ciphertext = match std::fs::read(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(unknown()),
+            Err(e) => return Err(VaultError::Io(e)),
+        };
+        let identity = load_identity(&self.backing.key)?.ok_or_else(|| {
+            VaultError::Key("vault file exists but its age identity is missing".into())
+        })?;
+        let mut next = decrypt_entries(&identity, &ciphertext)?;
+        if next.remove(name).is_none() {
+            return Err(unknown());
+        }
+        // Removing an entry cannot break a D-118 rule; the scrubber is built only so that,
+        // as with `set`, a file no scrubber could cover is never written.
+        Scrubber::try_build(&next)?;
+        let ciphertext = encrypt_entries(&identity, &next)?;
+        write_atomic(path, &ciphertext)?;
+        // Closing the handle releases the lock.
+        drop(lock);
+        self.entries = next;
+        Ok(())
+    }
+
+    /// Entry names and kinds as of the last `open_for_set`, `set` or `remove`; never values.
+    pub fn names(&self) -> Vec<(String, EntryKind)> {
+        self.entries
+            .iter()
+            .map(|(k, e)| (k.clone(), e.kind))
+            .collect()
+    }
+
+    /// Closes the editor. `set` and `remove` have already written the file; `save` takes
+    /// the lock and checks that the file on disk decrypts with the key (a missing file,
+    /// when nothing was set, is fine), so a caller that wants confirmation gets an error
+    /// instead of a silent bad write. The values held in memory are zeroed on drop.
+    pub fn save(self) -> Result<(), VaultError> {
+        let lock = lock_exclusive(&self.backing.path)?;
+        read_entries(&self.backing.path, &self.backing.key)?;
+        drop(lock);
+        Ok(())
     }
 }
 
