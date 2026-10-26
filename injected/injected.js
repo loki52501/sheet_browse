@@ -1948,16 +1948,16 @@
     if (S.gone.length && !live(S.gone[0])) S.gone = S.gone.filter(live);
     if (S.born.length && !live(S.born[0])) S.born = S.born.filter(live);
     // parent -> { out: removed fields, sens: sensitive among them, add: added fields, gone: the
-    // S.gone entry of its sensitive field }
+    // S.gone entry of its sensitive field, swap: its one-for-one swap applied (D-437, D-440) }
     let swap = null;
-    const lost = []; // [{ keys, parent }] sensitive fields this batch removed
+    const lost = []; // [{ keys, parent, e }] sensitive fields this batch removed (e: swap entry)
     const gone = []; // S.gone entries of this batch
     for (const m of recs) {
       if (m.type !== "childList" || !m.removedNodes.length) continue;
       const roots = Array.from(m.removedNodes);
       for (const r of roots) {
         for (const f of fieldsIn(r)) {
-          const e = (swap || (swap = new Map())).get(m.target) || { out: 0, sens: 0, add: null, gone: null };
+          const e = (swap || (swap = new Map())).get(m.target) || { out: 0, sens: 0, add: null, gone: null, swap: false };
           swap.set(m.target, e);
           e.out++;
           let s = true; // sensitivity unreadable (a throwing getter): sensitive, fail closed
@@ -1972,7 +1972,7 @@
           } catch (err) { /* keys stays null */ }
           e.gone = { t, keys, parent: null };
           gone.push(e.gone);
-          lost.push({ keys, parent: m.target });
+          lost.push({ keys, parent: m.target, e });
         }
       }
     }
@@ -1987,7 +1987,10 @@
         // one out, one in within this batch (D-437); one out and nothing in: a later batch that
         // adds exactly one value field to this parent within the window inherits (D-439)
         if (!e.add) e.gone.parent = new WeakRef(p);
-        else if (e.add.length === 1) S.sens.add(e.add[0]);
+        else if (e.add.length === 1) {
+          S.sens.add(e.add[0]);
+          e.swap = true;
+        }
       }
     }
     for (const g of gone) if (g.keys === null || g.keys.length || g.parent) S.gone.push(g);
@@ -2001,7 +2004,10 @@
         if (f && f.isConnected && !S.sens.has(f)) prior.push({ f, p: b.parent.deref(), keys: undefined });
       }
       for (const g of lost) {
-        const inParent = prior.filter((x) => x.p === g.parent);
+        // D-440: where this batch's one-for-one swap (D-437) already handed sensitivity to a new
+        // field of the parent, the single field added to it earlier (a parse-time neighbour) does
+        // not inherit. Key matches still do.
+        const inParent = g.e.swap ? [] : prior.filter((x) => x.p === g.parent);
         for (const x of prior) {
           if (S.sens.has(x.f)) continue;
           let hit = g.keys === null || (inParent.length === 1 && inParent[0] === x);

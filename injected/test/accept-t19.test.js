@@ -1169,3 +1169,392 @@ test("A11 challenge text (D-429 (2), D-422): press-and-hold UI and an Are-you-hu
   t.diagnostic(`ACCEPT A11 negatives: 0 CHALLENGE rows of ${rows0.length}; positives: ${ch1.size} CHALLENGE rows after widgets (${chNames}); ` +
     `interstitial ${ich.length} CHALLENGE (acts refused), widgets ${wch.length} CHALLENGE, badge frame challenge=${badge.challenge}, article 0`);
 });
+
+// ------------------------------------------------------------------ round 3 (tester-8)
+// A12 D-435 (3) on accept-challenge-text.html; A13 D-436 on accept-v3-quiz.html; A14 D-435 (1)(2)
+// and D-437 on accept-d435.html with the password canary; A15 D-82 on accept-media-refusal.html.
+
+const chRows = (rows) => rows.filter((r) => r.flags.challenge);
+const indexOf = async (o) => fill(await o.ev(() => globalThis.__sb.index()));
+const actOk = async (o, row, why) => {
+  assert.ok(row, why + ": no row");
+  assert.ok(!row.flags.challenge, why + " is CHALLENGE");
+  const a = await timedAct(o, row.id);
+  assert.equal(typeof a.r.x, "number", why + " act " + JSON.stringify(a.r));
+};
+
+test("A12 D-435 (3): with only a challenge widget on the page, press-and-hold lines are CHALLENGE; Files, Mic, Hold to talk and Start stay ordinary rows", async (t) => {
+  const o = await open("accept-challenge-text.html");
+  const HOLD = ["Press and hold Shift to select several files.", "Press and hold the mic button to talk", "Press & hold to record a voice message."];
+  const CONTROLS = [["Files"], ["Mic", "button"], ["Hold to talk", "button"], ["Start the quiz", "button"]];
+  const rows0 = await indexOf(o);
+  // without a widget a hold line is plain text: no CHALLENGE row, and text() reads it
+  assert.deepEqual(chRows(rows0).map(sig), []);
+  const text0 = flat(await o.ev(() => globalThis.__sb.text()));
+  for (const n of HOLD) assert.ok(text0.includes(n), n + " in text() without a widget");
+  // only a widget, no human or robot words anywhere new: the challenge context alone decides
+  await o.page.evaluate(() => {
+    document.getElementById("extra").innerHTML = "<div id=\"hc\" class=\"h-captcha\" data-sitekey=\"fixture\" style=\"width:300px;height:60px\"></div>";
+  });
+  await o.ev(() => globalThis.__sb.walk({ dirty: true }));
+  const rows1 = await indexOf(o);
+  const names1 = JSON.stringify(chRows(rows1).map(sig));
+  for (const n of HOLD) assert.ok(byName(rows1, n) && byName(rows1, n).flags.challenge, n + " with a widget: " + names1);
+  assert.ok(byName(rows1, "Are you human?", "heading").flags.challenge, names1);
+  for (const [n, role] of CONTROLS) await actOk(o, byName(rows1, n, role), n);
+  const hc = await o.ev(() => globalThis.__sb.id(document.getElementById("hc")));
+  assert.ok(chRows(rows1).some((r) => r.id === hc), "the widget box is CHALLENGE");
+  assert.equal(chRows(rows1).length, HOLD.length + 2, "hold lines + heading + widget, nothing else: " + names1);
+  await o.page.evaluate(() => { document.getElementById("extra").textContent = ""; });
+  await o.ev(() => globalThis.__sb.walk({ dirty: true }));
+  const rows2 = await indexOf(o);
+  assert.deepEqual(chRows(rows2).map(sig), []);
+  t.diagnostic(`ACCEPT A12 widget only: ${chRows(rows1).length} CHALLENGE rows ${names1}; controls ${CONTROLS.map((c) => c[0]).join(", ")} ordinary and actionable; removed: 0`);
+});
+
+test("A13 D-436: an Are-you-human quiz is not CHALLENGE next to passive v3 markers; it is next to a visible v2 widget, frame or response field", async (t) => {
+  const report = {};
+  const check = async (v) => {
+    const o = await open("accept-v3-quiz.html?v=" + v);
+    assert.equal(await o.page.evaluate(() => document.documentElement.getAttribute("data-variant")), v);
+    const rows = await indexOf(o);
+    const frames = await o.ev(() => globalThis.__sb.frames());
+    const text = flat(await o.ev(() => globalThis.__sb.text()));
+    report[v] = chRows(rows).map(sig);
+    return { o, rows, frames, text };
+  };
+  for (const v of ["none", "badge", "bound", "script", "scriptshown", "invisible", "hidden", "v3all"]) {
+    const { o, rows, frames, text } = await check(v);
+    assert.deepEqual(chRows(rows).map(sig), [], v + ": no CHALLENGE row");
+    assert.ok(byName(rows, "Are you human?", "heading"), v + " heading row");
+    assert.equal(frames[0].challenge, false, v);
+    assert.match(text, /Are you human\?/, v);
+    assert.match(text, /Press and hold the button to start/, v);
+    await actOk(o, byName(rows, "Start the quiz", "button"), v + " Start");
+    await actOk(o, byName(rows, "Send", "button"), v + " Send");
+    await o.close();
+  }
+  for (const v of ["v2", "v2frame", "resp", "v3v2"]) {
+    const { o, rows } = await check(v);
+    const names = JSON.stringify(report[v]);
+    assert.ok(byName(rows, "Are you human?", "heading").flags.challenge, v + ": heading is CHALLENGE " + names);
+    const hold = byName(rows, "Press and hold the button to start");
+    assert.ok(hold && hold.flags.challenge, v + ": hold line is CHALLENGE " + names);
+    await actOk(o, byName(rows, "Start the quiz", "button"), v + " Start");
+    await actOk(o, byName(rows, "Send", "button"), v + " Send");
+    await actOk(o, rows.find((r) => r.name === "Email" && r.role === "textbox"), v + " Email");
+    if (v === "v2" || v === "v3v2") {
+      const box = chRows(rows).filter((r) => r.name !== "Are you human?" && r.name !== "Press and hold the button to start");
+      assert.ok(box.length >= 1, v + " widget row " + names);
+      for (const r of box) assert.deepEqual((await timedAct(o, r.id)).r, { why: "challenge" }, v + " " + sig(r));
+    }
+    await o.close();
+  }
+  // live: the badge page gains a v2 checkbox, then loses it again
+  const { o } = await check("badge");
+  await o.page.evaluate(() => {
+    document.getElementById("extra").innerHTML = "<div id=\"v2\" class=\"g-recaptcha\" data-sitekey=\"fixture\" style=\"width:304px;height:78px\">" +
+      "<iframe title=\"reCAPTCHA\" width=\"304\" height=\"78\" srcdoc=\"&lt;p&gt;x&lt;/p&gt;\"></iframe></div>";
+  });
+  await o.ev(() => globalThis.__sb.walk({ dirty: true }));
+  assert.ok(byName(await indexOf(o), "Are you human?", "heading").flags.challenge, "badge page + v2 checkbox");
+  await o.page.evaluate(() => { document.getElementById("extra").textContent = ""; });
+  await o.ev(() => globalThis.__sb.walk({ dirty: true }));
+  assert.deepEqual(chRows(await indexOf(o)).map(sig), [], "v2 removed, only the badge left");
+  t.diagnostic("ACCEPT A13 CHALLENGE rows per variant " + JSON.stringify(report));
+});
+
+test("A14 D-435 (1)(2), D-437: SPA swap keeps unrelated pre-filled fields readable; show-password toggles never emit the value", async (t) => {
+  const secret = process.env.SB_VAULT_CANARY || "sbpw" + crypto.randomBytes(12).toString("hex");
+  const o = await open("accept-d435.html");
+  const SENS = ["t-type", "t-same", "t-neu", "t-wrap", "t-app", "t-mic", "t-to1", "t-to2", "a-pw", "l-word"];
+  const NEW = ["t-same", "shown-b", "shown-c", "shown-d", "shown-e", "shown-f", "shown-g", "l-word"];
+  await o.ev((ids) => {
+    const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    globalThis.__pwReads = {};
+    Object.defineProperty(HTMLInputElement.prototype, "value", {
+      configurable: true,
+      enumerable: d.enumerable,
+      get() {
+        if (ids.includes(this.id)) globalThis.__pwReads[this.id] = (globalThis.__pwReads[this.id] || 0) + 1;
+        return d.get.call(this);
+      },
+      set(v) {
+        d.set.call(this, v);
+      },
+    });
+  }, SENS.concat(NEW));
+  await o.page.fill("#nick", "ada");
+  await o.page.fill("#a-email", "ada@example.org");
+  await o.page.fill("#l-email", "ada@example.org");
+  await o.page.locator("#t-type").pressSequentially(secret);
+  for (const id of SENS.slice(1)) await o.page.fill("#" + id, secret);
+  const read = (lbl) => o.ev(async (l) => {
+    const sb = globalThis.__sb;
+    const r = { label: l };
+    r.walkDirty = sb.walk({ dirty: true });
+    r.index = sb.index();
+    r.text = sb.text();
+    r.frames = sb.frames();
+    r.fp = sb.fingerprint("textbox \"Type toggle\" textbox \"Memorable word\"");
+    r.per = {};
+    for (const el of document.querySelectorAll("input,textarea")) {
+      const id = sb.id(el);
+      r.per[el.id] = { id, name: sb.name(el), role: sb.role(el), state: sb.state(el), act: await sb.act(id) };
+    }
+    r.settle = await sb.settle({ cap: 400 });
+    r.walkFull = sb.walk({});
+    r.index2 = sb.index();
+    r.text2 = sb.text();
+    return r;
+  }, lbl);
+  const r1 = await read("before");
+  // each toggle in its own task, so each is its own observer batch (the microtask one splits itself)
+  for (const fn of ["toggleType", "toggleSame", "toggleNeutral", "toggleWrap", "toggleAppend", "toggleMicro", "toggleTo1", "toggleTo2"]) {
+    await o.page.evaluate((f) => globalThis[f](), fn);
+  }
+  await o.page.waitForFunction(() => !!document.getElementById("shown-f") && !!document.getElementById("shown-g"), null, { timeout: 5000 });
+  await o.page.click("#sign-in");
+  await o.page.click("#rerender");
+  await o.page.locator("#t-type").pressSequentially("zz");
+  const facts = await o.page.evaluate(() => ({
+    gone: ["t-neu", "t-wrap", "t-app", "t-mic", "t-to1", "t-to2", "a-pw"].filter((i) => document.getElementById(i)).length,
+    lens: ["t-same", "shown-b", "shown-c", "shown-d", "shown-e", "shown-f", "shown-g", "l-word"].map((i) => document.getElementById(i).value.length),
+    types: ["t-type", "t-same", "l-word"].map((i) => document.getElementById(i).type),
+  }));
+  assert.equal(facts.gone, 0);
+  assert.deepEqual(facts.lens, Array(8).fill(secret.length), "the toggled fields carry the value");
+  assert.deepEqual(facts.types, ["text", "text", "text"]);
+  const r2 = await read("after");
+  const reads = await o.ev(() => globalThis.__pwReads);
+  const blob = JSON.stringify([r1, r2]);
+  const df = dump("d435-canary", [r1, r2]);
+  assert.deepEqual(reads, {}, "world sb called the value getter of a sensitive field: " + JSON.stringify(reads));
+  assert.equal(blob.includes(secret), false, "secret found in __sb output");
+  for (let i = 0; i + 8 <= secret.length; i += 2) {
+    assert.equal(blob.includes(secret.slice(i, i + 8)), false, "a fragment of the secret found in __sb output");
+  }
+  const kind = (r, id) => r.per[id] && r.per[id].state && r.per[id].state.value;
+  // failure messages carry kinds only, never a state that could hold the value
+  const kindOf = (v) => (v ? v.kind : String(v));
+  for (const id of SENS) assert.equal(kindOf(kind(r1, id)), "filled", "before " + id);
+  for (const id of ["t-type"].concat(NEW)) {
+    assert.equal(kindOf(kind(r2, id)), "filled", "after " + id);
+    assert.equal(Object.keys(kind(r2, id)).join(","), "kind", "after " + id + " carries only a kind");
+    const row = r2.index2.find((x) => x.id === r2.per[id].id);
+    assert.ok(row && row.state && row.state.value && row.state.value.kind === "filled", id + " row kind " + (row && row.state && kindOf(row.state.value)));
+  }
+  // D-435 (1): the swapped-in profile view and fields outside the swap read their values
+  const READ = { dn: "Ada Lovelace", city: "London", bio: "Mathematician and writer", phone: "+44 20 7946 0000",
+    "l-email": "ada@example.org", q: "pre-filled query", nick: "ada" };
+  for (const [id, text] of Object.entries(READ)) assert.deepEqual(kind(r2, id), { kind: "text", text }, "after " + id);
+  t.diagnostic(`ACCEPT A14 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""} absent from ${blob.length} bytes ` +
+    `(dump ${path.basename(df)}); value-getter reads ${JSON.stringify(reads)}; filled after: t-type ${NEW.join(" ")}; read after: ${Object.keys(READ).join(" ")}`);
+});
+
+test("A15 D-82: __sbMedia whole-call refusals are frame() -> {t:null, why} and frames() -> one {t:null, why} entry; per-time failures keep one entry per time", async (t) => {
+  const o = await open("accept-media-refusal.html", { base: null, media: true });
+  const pre = await o.ev(async () => {
+    const m = globalThis.__sbMedia;
+    return {
+      frame: JSON.stringify(await m.frame(1, 0.1)),
+      frames2: JSON.stringify(await m.frames(1, [0.1, 0.2])),
+      frames4: JSON.stringify(await m.frames(5, [0.1, 0.2, 0.3, 0.4])),
+      frames0: JSON.stringify(await m.frames(1, [])),
+    };
+  });
+  assert.equal(pre.frame, "{\"t\":null,\"why\":\"no base\"}");
+  assert.equal(pre.frames2, "[{\"t\":null,\"why\":\"no base\"}]");
+  assert.equal(pre.frames4, "[{\"t\":null,\"why\":\"no base\"}]");
+  assert.equal(pre.frames0, "[{\"t\":null,\"why\":\"no base\"}]");
+  await o.ev(() => globalThis.__sb.walk({ base: 300 }));
+  const ids = await o.ev(() => ({
+    bad: globalThis.__sb.id(document.getElementById("bad")),
+    cap: globalThis.__sb.id(document.getElementById("cap")),
+    para: globalThis.__sb.id(document.getElementById("para")),
+  }));
+  const post = await o.ev(async (a) => {
+    const m = globalThis.__sbMedia;
+    const s = (x) => JSON.stringify(x);
+    return {
+      capFrame: s(await m.frame(a.cap, 0.5)),
+      capFrames: s(await m.frames(a.cap, [0.1, 0.2, 0.3])),
+      paraFrame: s(await m.frame(a.para, 0.1)),
+      paraFrames: s(await m.frames(a.para, [0.1, 0.2])),
+      goneFrames: s(await m.frames(99999, [0.1, 0.2])),
+      goneFrame: s(await m.frame(99999, 0.1)),
+      staleFrames: s(await m.frames(5, [0.1, 0.2])),
+      list: m.list().map((v) => v.id),
+      bad: await m.frames(a.bad, [0.1, 0.2, 0.3], { seekCapMs: 1500, budgetMs: 6000, hashOnly: true }),
+      badOne: await m.frame(a.bad, 0.25, { seekCapMs: 1500, budgetMs: 3000 }),
+    };
+  }, ids);
+  assert.equal(post.capFrame, "{\"t\":null,\"why\":\"challenge\"}");
+  assert.equal(post.capFrames, "[{\"t\":null,\"why\":\"challenge\"}]");
+  assert.equal(post.paraFrame, "{\"t\":null,\"why\":\"not a video\"}");
+  assert.equal(post.paraFrames, "[{\"t\":null,\"why\":\"not a video\"}]");
+  for (const k of ["goneFrames", "staleFrames"]) {
+    const v = JSON.parse(post[k]);
+    assert.equal(v.length, 1, k + " " + post[k]);
+    assert.deepEqual(Object.keys(v[0]), ["t", "why"], k);
+    assert.equal(v[0].t, null, k);
+    assert.ok(["gone", "stale"].includes(v[0].why), k + " " + post[k]);
+  }
+  assert.deepEqual(JSON.parse(post.goneFrame), JSON.parse(post.goneFrames)[0]);
+  assert.ok(post.list.includes(ids.bad) && !post.list.includes(ids.cap) && !post.list.includes(ids.para), JSON.stringify(post.list));
+  // per-time failures: one entry per requested time, each with its own t (never t:null)
+  assert.equal(post.bad.length, 3, JSON.stringify(post.bad));
+  assert.deepEqual(post.bad.map((e) => e.t), [0.1, 0.2, 0.3], JSON.stringify(post.bad));
+  for (const e of post.bad) assert.ok(typeof e.why === "string" && e.why && !("hash" in e), JSON.stringify(e));
+  assert.equal(post.badOne.t, 0.25, JSON.stringify(post.badOne));
+  assert.equal(typeof post.badOne.why, "string");
+  t.diagnostic(`ACCEPT A15 before base ${pre.frame} ${pre.frames2} (2 times) ${pre.frames4} (4 times); challenge ${post.capFrame} ${post.capFrames} (3 times); ` +
+    `not a video ${post.paraFrames}; unknown ${post.goneFrames}; below base ${post.staleFrames}; per-time ${JSON.stringify(post.bad)}; frame ${JSON.stringify(post.badOne)}`);
+});
+
+// A16: D-438 (1)(2) (review-T-19 round 4 Blocking and Should) and the D-437 "lost exactly one
+// field" rule. Values are checked in world sb; only kinds, counts and booleans come back, so a
+// leak fails the test without the value reaching the test output.
+test("A16 D-438: add-first rebuilds (later task, microtask, transitionend, overlap) and a wrapper with a show checkbox never emit the value; a two-field to one-field page still reads", async (t) => {
+  const secret = process.env.SB_VAULT_CANARY || "sbpw" + crypto.randomBytes(12).toString("hex");
+  const o = await open("accept-d438.html");
+  const OLD = ["af-task", "af-mic", "af-fade", "af-ov", "af-neu", "af-far", "wc-pw", "two-pw"];
+  const NEW = ["af-task-new", "af-mic-new", "af-fade-new", "af-ov-new", "af-neu-new", "af-far-new", "wc-new"];
+  await o.ev((ids) => {
+    const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    globalThis.__pwReads = {};
+    Object.defineProperty(HTMLInputElement.prototype, "value", {
+      configurable: true,
+      enumerable: d.enumerable,
+      get() {
+        if (ids.includes(this.id)) globalThis.__pwReads[this.id] = (globalThis.__pwReads[this.id] || 0) + 1;
+        return d.get.call(this);
+      },
+      set(v) {
+        d.set.call(this, v);
+      },
+    });
+  }, OLD.concat(NEW));
+  await o.page.fill("#two-email", "ada@example.org");
+  for (const id of OLD) await o.page.fill("#" + id, secret);
+  // world sb read: every reader, then per-field kinds and whether the value appears anywhere
+  const probe = (ids) => o.ev(async (a) => {
+    const sb = globalThis.__sb;
+    const out = [sb.walk({ dirty: true }), sb.index(), sb.text(), sb.frames()];
+    const per = {};
+    for (const id of a.ids) {
+      const el = document.getElementById(id);
+      if (!el) {
+        per[id] = { missing: true };
+        continue;
+      }
+      const s = sb.state(el);
+      const x = [s, sb.name(el), sb.id(el), await sb.act(sb.id(el))];
+      out.push(x);
+      per[id] = { kind: s && s.value ? s.value.kind : String(s && s.value), value: JSON.stringify(x).includes(a.secret) };
+    }
+    out.push(sb.walk({}), sb.index(), sb.text());
+    const blob = JSON.stringify(out);
+    let frag = false;
+    for (let i = 0; i + 8 <= a.secret.length; i += 2) if (blob.includes(a.secret.slice(i, i + 8))) frag = true;
+    return { per, value: blob.includes(a.secret), frag, bytes: blob.length };
+  }, { ids, secret });
+  await o.ev(() => globalThis.__sb.index());
+  // overlap: the copy is in, the old field still there (removed after 1500 ms)
+  await o.page.evaluate(() => globalThis.addFirstOverlap());
+  const ov = await probe(["af-ov-new"]);
+  for (const fn of ["addFirstTask", "addFirstMicro", "addFirstFade", "addFirstNeutral", "addFirstFar", "wrapCheckbox", "twoToOne"]) {
+    await o.page.evaluate((f) => globalThis[f](), fn);
+  }
+  await o.page.waitForFunction((ids) => ids.every((i) => !document.getElementById(i)), OLD, { timeout: 5000 });
+  const after = await probe(NEW.concat(["promo"]));
+  const reads = await o.ev(() => globalThis.__pwReads);
+  const promo = await o.ev(() => globalThis.__sb.state(document.getElementById("promo")).value);
+  const leaked = (p, id) => !!(p.per[id] && (p.per[id].value || p.per[id].kind !== "filled"));
+  const leaks = Array.from(new Set(Object.keys(reads).concat(NEW.filter((id) => leaked(after, id)))));
+  if (leaked(ov, "af-ov-new")) leaks.push("af-ov-new (overlap)");
+  t.diagnostic(`ACCEPT A16 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""}; overlap kind ${ov.per["af-ov-new"].kind}; ` +
+    `after kinds ${JSON.stringify(Object.fromEntries(NEW.map((i) => [i, after.per[i].kind])))}; value-getter reads ${JSON.stringify(reads)}; ` +
+    `value in output: overlap ${ov.value || ov.frag}, after ${after.value || after.frag} (${after.bytes} bytes); promo kind ${promo && promo.kind}; leaking fields: ${leaks.join(", ") || "none"}`);
+  // D-437 negative: two fields lost, one gained: not a swap, the promo code reads
+  assert.deepEqual(promo, { kind: "text", text: "SPRING" }, "two-field to one-field page");
+  assert.deepEqual(leaks, [], "fields whose value sb read or emitted: " + leaks.join(", "));
+  assert.equal(ov.value || ov.frag || after.value || after.frag, false, "the value or a fragment is in __sb output");
+});
+
+// A18: D-435 (1) against D-438 (1)'s same-parent rule: a wrapper swap shortly after load must
+// not mark an untouched ordinary field of the same form. A10 and A14 do much typing first, so
+// whether their swap lands inside the 2 s window varies; this test swaps at once.
+test("A18 D-435 (1): a show-password wrapper swap right after load leaves the untouched ordinary field of the same form readable", async (t) => {
+  const out = {};
+  for (const [page, fill, swap] of [["accept-pw.html", "#p1", "#btn-wrap"], ["accept-d435.html", "#t-wrap", null]]) {
+    const o = await open(page);
+    const t0 = await o.page.evaluate(() => performance.now());
+    await o.page.fill("#nick", "ada");
+    await o.page.fill(fill, "pw-dummy-a18");
+    if (swap) await o.page.click(swap);
+    else await o.page.evaluate(() => globalThis.toggleWrap());
+    const ms = Math.round((await o.page.evaluate(() => performance.now())) - t0);
+    const v = await o.ev(() => {
+      globalThis.__sb.walk({ dirty: true });
+      return globalThis.__sb.state(document.getElementById("nick")).value;
+    });
+    out[page] = { ms, kind: v && v.kind };
+    assert.deepEqual(v, { kind: "text", text: "ada" }, page + ": Nickname after the wrapper swap, " + ms + " ms after the first based walk");
+  }
+  t.diagnostic("ACCEPT A18 " + JSON.stringify(out));
+});
+
+// A17: D-439, remove-first rebuilds split across batches with a neutral identity (js-coder-4
+// not_done 3, js-coder-5 not_done 1). Values are checked in world sb, as in A16.
+test("A17 D-439: a remove-first neutral rebuild into the same parent (microtask, later task) never emits the value; a different parent or two fields still read", async (t) => {
+  const secret = process.env.SB_VAULT_CANARY || "sbpw" + crypto.randomBytes(12).toString("hex");
+  const o = await open("accept-d439.html");
+  const OLD = ["rm-mic", "rm-task", "rm-other", "rm-two"];
+  const NEW = ["plain-m", "plain-t"];
+  const READ = { coupon: "WELCOME10", "first-n": "Ada", "last-n": "Lovelace" };
+  await o.ev((ids) => {
+    const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    globalThis.__pwReads = {};
+    Object.defineProperty(HTMLInputElement.prototype, "value", {
+      configurable: true,
+      enumerable: d.enumerable,
+      get() {
+        if (ids.includes(this.id)) globalThis.__pwReads[this.id] = (globalThis.__pwReads[this.id] || 0) + 1;
+        return d.get.call(this);
+      },
+      set(v) {
+        d.set.call(this, v);
+      },
+    });
+  }, OLD.concat(NEW));
+  for (const id of OLD) await o.page.fill("#" + id, secret);
+  await o.ev(() => globalThis.__sb.index());
+  for (const fn of ["removeMicro", "removeTask", "removeOther", "removeTwo"]) await o.page.evaluate((f) => globalThis[f](), fn);
+  await o.page.waitForFunction(() => ["plain-m", "plain-t", "coupon", "first-n", "last-n"].every((i) => !!document.getElementById(i)), null, { timeout: 5000 });
+  const r = await o.ev(async (a) => {
+    const sb = globalThis.__sb;
+    const out = [sb.walk({ dirty: true }), sb.index(), sb.text(), sb.frames()];
+    const per = {};
+    for (const id of a.ids) {
+      const el = document.getElementById(id);
+      const s = sb.state(el);
+      const x = [s, sb.name(el), await sb.act(sb.id(el))];
+      out.push(x);
+      const v = s && s.value ? s.value : {};
+      per[id] = { kind: v.kind, text: a.read.includes(id) ? v.text : undefined, value: JSON.stringify(x).includes(a.secret) };
+    }
+    out.push(sb.walk({}), sb.index(), sb.text());
+    const blob = JSON.stringify(out);
+    let frag = false;
+    for (let i = 0; i + 8 <= a.secret.length; i += 2) if (blob.includes(a.secret.slice(i, i + 8))) frag = true;
+    return { per, value: blob.includes(a.secret), frag, bytes: blob.length };
+  }, { ids: NEW.concat(Object.keys(READ)), read: Object.keys(READ), secret });
+  const reads = await o.ev(() => globalThis.__pwReads);
+  const leaks = Array.from(new Set(Object.keys(reads).concat(NEW.filter((id) => r.per[id].value || r.per[id].kind !== "filled"))));
+  t.diagnostic(`ACCEPT A17 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""}; kinds ${JSON.stringify(Object.fromEntries(Object.entries(r.per).map(([k, v]) => [k, v.kind])))}; ` +
+    `value-getter reads ${JSON.stringify(reads)}; value in output ${r.value || r.frag} (${r.bytes} bytes); leaking fields: ${leaks.join(", ") || "none"}`);
+  for (const [id, text] of Object.entries(READ)) assert.deepEqual({ kind: r.per[id].kind, text: r.per[id].text }, { kind: "text", text }, "negative " + id);
+  assert.deepEqual(leaks, [], "fields whose value sb read or emitted: " + leaks.join(", "));
+  assert.equal(r.value || r.frag, false, "the value or a fragment is in __sb output");
+});

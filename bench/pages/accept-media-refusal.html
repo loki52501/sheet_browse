@@ -1,0 +1,26 @@
+<!doctype html>
+<!--
+  bench/pages/accept-media-refusal.html: D-82 / I-11 __sbMedia refusal shapes for the T-19
+  acceptance (tester-8). No playable media is needed:
+    #bad    a video whose file is missing (/no-such-clip.webm): every requested time fails on
+            its own, so frames() keeps one entry per time (per-time failure)
+    #cap    a video inside a visible reCAPTCHA v2 container: the whole call is refused (challenge)
+    #para   a paragraph: the whole call is refused (not a video)
+  Whole-call refusals are frame() -> {t: null, why} and frames(id, times) -> a single
+  {t: null, why} entry, whatever the number of times.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Media refusals · acceptance fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } video { background: #222; }</style>
+</head>
+<body>
+<main>
+  <h1>Clips</h1>
+  <video id="bad" src="/no-such-clip.webm" preload="none" width="320" height="180" muted></video>
+  <div class="g-recaptcha" data-sitekey="fixture" style="width:320px;height:200px">
+    <video id="cap" width="320" height="180" muted></video>
+  </div>
+  <p id="para">Not a video.</p>
+</main>
+</body>
+</html>

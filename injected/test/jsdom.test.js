@@ -1248,3 +1248,75 @@ test("a getter that throws while a field is checked marks it sensitive and the b
   // the throwing field holds no value: empty (sensitive), not { kind: "text", text: "" }
   same(r.states, [{ kind: "empty" }, { kind: "filled" }]);
 });
+
+// ------------------------------------------------------------------ D-440
+test("a swap within 2 s of a neighbour's add leaves the neighbour readable; key matches and batches with no swap still inherit (D-440)", async () => {
+  const CANARY = "swap-canary-440";
+  // a parse-time insert as the observer sees it: the form gains a label holding #nick
+  const nick = (j) => {
+    const l = j.mk('<label>Nickname <input id="nick" name="nick" value="Ann"></label>');
+    j.$("f").insertBefore(l, j.$("w1"));
+    return l.firstElementChild;
+  };
+  const neutral = (j) => j.spy(j.mk('<input id="k2-plain" type="text" aria-label="Visible key">'));
+  const cases = {
+    // replaceWith of the password's wrapper: the form lost k2 and gained the new field
+    "wrapper swap at 1500 ms": async (j) => {
+      const n = nick(j);
+      await tick();
+      j.advance(1500);
+      const w = j.mk('<div id="w2b"></div>');
+      const f = neutral(j);
+      w.appendChild(f);
+      j.$("w2").replaceWith(w);
+      return [n, f];
+    },
+    // remove + append into the parent the neighbour was added to, one batch (D-437)
+    "remove + append next to the neighbour": async (j) => {
+      const n = j.mk('<input id="nick" name="nick" value="Ann">');
+      j.$("w2").appendChild(n);
+      await tick();
+      j.advance(1999);
+      const f = neutral(j);
+      j.$("k2").remove();
+      j.$("w2").appendChild(f);
+      return [n, f];
+    },
+    // a remembered field that matches k2 by key still inherits when the swap applied
+    "key copy elsewhere": async (j) => {
+      const n = nick(j);
+      const copy = j.spy(j.mk('<input id="k2-copy" type="text" aria-label="Key two">'));
+      j.$("b1").appendChild(copy);
+      await tick();
+      const w = j.mk('<div id="w2b"></div>');
+      const f = neutral(j);
+      w.appendChild(f);
+      j.$("w2").replaceWith(w);
+      return [n, copy, f];
+    },
+    // no swap applied (the removing batch adds two fields): the earlier single field added to
+    // the parent is the rebuilt one and still inherits (D-438 (1)); the two new fields read
+    "add-first, then the removing batch adds two": async (j) => {
+      const n = neutral(j);
+      j.$("w2").appendChild(n);
+      await tick();
+      const a = j.mk('<input aria-label="Street" value="Elm St">');
+      const b = j.mk('<input aria-label="Town" value="Leeds">');
+      j.$("k2").remove();
+      j.$("w2").append(a, b);
+      return [n, a, b];
+    },
+  };
+  const want = {
+    "wrapper swap at 1500 ms": [{ kind: "text", text: "Ann" }, { kind: "filled" }],
+    "remove + append next to the neighbour": [{ kind: "text", text: "Ann" }, { kind: "filled" }],
+    "key copy elsewhere": [{ kind: "text", text: "Ann" }, { kind: "filled" }, { kind: "filled" }],
+    "add-first, then the removing batch adds two": [{ kind: "filled" }, { kind: "text", text: "Elm St" }, { kind: "text", text: "Leeds" }],
+  };
+  for (const [k, step] of Object.entries(cases)) {
+    const r = await addFirst(CANARY, step);
+    assert.equal(r.c.reads, 0, k + ": a value getter was called");
+    assert.ok(!r.blob.includes(CANARY), k + ": " + r.blob);
+    same(r.states, want[k], k);
+  }
+});
