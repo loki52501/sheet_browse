@@ -196,6 +196,16 @@ blockers:
     question: "For area core: harness-core test mcp_t07::file_asker_stderr_has_no_canary (crates/core/tests/mcp_t07.rs:1602) fails 3/3 when TEMP is a longer path (e.g. F:/sb-swarm/tmp-servers/t14acc-F) and passes with the default TEMP. The FileAsker stderr line 'ask: cannot create <temp path>\\asks: ...; skipped, nobody saw' is cut by the core line-length cap before 'nobody saw', so the assertion depends on the temp path length. Found by the T-14 acceptance re-run; no srv-files code involved."
     default_taken: "Not a servers fix. Core shortens the path in that line (or puts the fail-closed words first) so the cap never cuts them, or asserts on a prefix. Until then run the workspace suite with a short TEMP."
     needs_user: false
+  - id: B-559
+    task: T-15
+    question: "WAVE2.md (D-91) says to run parallel tasks in sibling worktrees F:/sb-swarm/wt/<area>-T<nn>, but scripts/hooks/guard_write.py refuses every Write/Edit outside ROOT (= the session's own worktree, wt/<area>), so subagents of an area session cannot write in a sibling worktree. Should the hook accept sibling wt/<area>-T* worktrees, or should launch.ps1 start one session per task worktree?"
+    default_taken: "No hook edit (hooks are supreme's). Area servers moved its task worktrees inside its own worktree (git worktree move to wt/servers/.wt/T<nn>, same branches swarm/servers-T<nn>), so the guard applies. Known gap of this layout: guard_write's path-specific checks compare the path relative to ROOT, so `tools/*.js` planner `?s` and the interfaces.yaml check do not match `.wt/T<nn>/...`; servers writes tool files (T-13) from wt/servers itself and never edits interfaces.yaml. SubagentStop and Stop read handoffs from wt/servers/agent-memory/handoffs, so coders also copy their handoff there."
+    needs_user: false
+  - id: B-540
+    task: T-15
+    question: "docs/04 C-3 says flags(provider, env) reads and that writes are Account, but names no provider, API shape or auth; C-4 names config/cli-allow.toml but no schema. Which providers and programs ship, and how are they configured?"
+    default_taken: "config/flags.toml ships with no providers and a commented example; a provider is {api, auth (header value template that must contain @vault(name)), header (default Authorization), read (GET path, {env} replaced), domain (optional gate domain)}. flags(provider, env) GETs the read path; method/path/body make writes (POST/PUT/PATCH Account, DELETE Delete). config/cli-allow.toml is [programs.<name>] {bin, read, write (Account), delete (Delete), default read|write|delete|refuse, deny_flags, timeout_secs}, shipped with read-only git, dig and nslookup entries; anything not listed is refused with nothing run. Both files are read per call and again inside the call, so an edit after the gate approved a call cannot raise its class. Provider and program names fold to ASCII lowercase."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core
