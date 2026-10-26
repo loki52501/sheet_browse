@@ -138,7 +138,7 @@ tasks:
     step: 6
     title: "injected.js: identity, walk, names, roles, states, flags, collapse, dirty re-walk; acceptance 1"
     docs: [docs/05-BROWSER.md]
-    status: doing
+    status: done
     owner: page/suborch
     claimed_at: "2026-10-23"
     note: "area page, wave 1; includes the sb-act half of B-7 (I-10). Not gated by T-17 (D-43)"
@@ -279,9 +279,10 @@ tasks:
     wave: 2
     owner: page
     branch: swarm/page-T19b
-    title: "page review items: Blocking in review-T-19.md, add-first password-field rebuild split across observer batches leaks the password into index()/state() (D-435 (2), hard rule); then its should-fix items."
+    title: "page T-19 follow-ups (review-T-19.md round 10 Should fix, D-444/D-445 open lists). The round-4 Blocking add-first leak is closed at 7dfc6f1 (D-442..D-445)."
     status: todo
     from: T-19
+<<<<<<< HEAD
   - id: T-18b
     step: follow-up
     wave: 2
@@ -314,3 +315,12 @@ tasks:
     title: "review-T-21 round 2 leftovers: (1) closed shadow roots: k#/t# on a closed host with focus inside passes the exact-focus check (rule 4 residual, review asks supreme whether to escalate); fail closed with a DOM.describeNode pierce check plus a test; (2) live test of the D-615 delegatesFocus exception (text accepted, password refused); (3) mock-CDP unit tests for the non-2xx re-fetch refusal and the file: scheme refusal; (4) until T-22 network settle, no NoVisibleChange for frame-0 steps classed Submit or higher; (5) take the event mark before the open-dialog check at the top of the act loop (act.rs:304/320); (6) tabs()/frames() rely on core install_global and have no cut-prefix rule (B-613)."
     status: todo
     from: T-21
+=======
+    items:
+      - "Remaining password-leak shapes (hard rule 5, ruled Should fix as not produced by mainstream toggles): V5 cross-parent three-batch build; X1, X1b, Y1, Y1g copies with no structural or key link; V9 and S.born cap eviction order (evict entries whose parent holds no sensitive field first, fakeClock tests for S.born 64, S.gone 32, NEAR_MAX 64); X2w, X2w0, X5 hidden trick input in the removal count; O4, O5, O6 exits longer than 2000 ms (r12 long.html, r13 y1g late); the 2 s born-window edge on slow clocks (r11 dbg k >= 50); Y2c jsdom only."
+      - "TWIN_DEPTH 6 (injected.js:922, :965): twins 7 or more levels below their common ancestor leak (review round 10 M10, Vuetify 2 v-col > v-card > v-card__text > v-text-field). Raise to 12 or 16 and add an M10-shaped test."
+      - "Masked fields with no evidence report empty, a false state (probe-r14-cost c1..c4: pre-filled email or textarea next to a hidden or off-screen password; identifier-first email reads filled so the agent cannot verify it). Report filled or a masked kind when unsure."
+      - "B-415 accepted over-mark (D-442 (3)): an unrelated field in the same parent reads empty or filled when a password is rebuilt within 2 s of load; accept-t19 A18 pins it and must be relaxed if this is fixed."
+      - "Acceptance gaps: no accept-t19 rows for D-443 (2) and (3); no fixture for D-444 (1)'s accepted cost."
+      - "D-443 (1) scope (accept-T-19 round 6 open item 2): nearOf counts every sensitive field anywhere under the add's parent, so with body as the parent any field the parser inserts after a password anywhere on the page reads empty or filled for 2 s after load. Decide whether to limit it to direct children and their single-field wrappers (efficiency, fails closed today)."
+>>>>>>> swarm/page

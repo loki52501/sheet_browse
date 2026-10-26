@@ -1,0 +1,16 @@
+from: page/tester-12
+to: page/suborch
+task: T-19
+date: "2026-10-26"
+state: "Round-7 combined acceptance of T-19 at cc2c98b is in bench/results/accept-T-19.md. Verdict green: 38 rows (S1..S10, J1..J28), 38 pass, 0 fail, 0 not-run. merge_gate.check_accept returns None. Since round 6 the only change is js-coder-13's 9590138 (test and fixture fix for the Z7 control flake). injected.js and media.js are byte-equal to fbce10e, and crates are unchanged from a9e246a, so S1..S10 are carried forward from round 6 and say so. All runs used a git archive of cc2c98b in runs/tester-14/snap. node --test injected/test/ ran 3 times in a row: 132/132 each (257, 254, 254 s). The D-445 tests alone (browser + jsdom, 17 tests) passed 3 of 3. A23 alone passed. Each of 4 fresh SB_VAULT_CANARY values had 0 hits in the TAP, runs/, injected/, bench/, agent-memory/, the dump dir and the TMP tree, and 0 8-char fragments. probe-chunk.js and probe-chunk-y7.js read User as text 12 of 12. js-coder-13's probe-split.js before form#fc gives controls text with the pastLoadWindow wait and 9 non-text reads without it. Review of 9590138 (row J28): no assertion weakened. The getter counter is now installed before the 2 s wait (stricter), and the old builds still fail the twin tests: Z7, Z7v and Z7i on 86cb048; Y6..Y7i on 8fb00b4."
+not_done: "1) Reviewer question still open (accept file open item 1): with p = body, nearOf(p) counts every sensitive descendant, so D-443 (1) masks any field the parser adds to body in a later batch than any password. Is that intended? 2) Round 5 and 6 open items for T-19b carried over unchanged. 3) A node --test injected/test/ from 04:58 (PID 17856, not mine) is still alive with 100 chrome-headless-shell processes (about 350 MB). Supreme or its owner should stop it."
+gotchas:
+  - "Do not use a pipe in acceptance table cells: merge_gate splits rows on it. Put regex alternations in a runs/ script (runs/tester-14/oldrun.sh) and cite the script."
+  - "probe-chunk.js cuts before #user, which now sits ahead of every password, so on the new fixtures it no longer splits after a password. Use runs/js-coder-13/probe-split.js with marker '<form id=\"fc\">' to exercise the D-443 (1) parser window on the controls."
+  - "In the worktree injected.js has CRLF line endings (core.autocrlf true) and the git archive has LF. Compare with tr -d '\\r' or against git show."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/accept-T-19.md
+  - agent-memory/handoffs/T-19-tester-12.yaml
+verify: "git archive cc2c98b injected bench/pages into a fresh dir; with TMP=TEMP=TMPDIR=F:/sb-swarm/tmp-page NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules run node --test injected/test/ (132/132) there; python -c \"import sys,pathlib; sys.path.insert(0,'scripts/swarm'); import merge_gate as g; print(g.check_accept(pathlib.Path('bench/results/accept-T-19.md').resolve()))\" prints None"

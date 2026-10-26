@@ -183,7 +183,7 @@
     born: [], // [{ t, ref, parent }] recently added non-sensitive value fields, WeakRefs only (D-438 (1))
     nearPw: new WeakMap(), // value field added next to a live sensitive field -> { t, parent: WeakRef } (D-443 (1))
     outSens: new WeakSet(), // sensitive value fields a mutation batch removed (moved or re-attached later: D-444 (2))
-    hid: null, // per-index() memo { d, g }: parent -> holds a hidden sensitive value field (D-444 (1))
+    hid: null, // per-index() twin memo { o, s, g }: onlyField, hidSens, hidden-sensitive children (D-445 (1))
     ids: new WeakMap(), // Element -> id
     refs: new Map(), // id -> WeakRef<Element>
     rec: new WeakMap(), // Element -> walk decision (cached between walks)
@@ -906,64 +906,227 @@
     return false;
   }
 
-  // Visibility-swap show toggles (D-444 (1)): a synced twin shown while the password gets
-  // display:none, or a clone added and the password hidden and kept, add and remove nothing
-  // that the batch rules see. A value field is not read while its parent directly holds a
-  // sensitive value field that is not displayed, or while it is the only value field of a
-  // wrapper whose parent has another child holding a single value field, a hidden sensitive
-  // one (twin and password each alone in sibling wrappers). Parent-local: one pass over a
-  // parent's children, memoized per index() call (S.hid).
+  // Visibility-swap show toggles (D-444 (1), D-445 (1)): a synced twin shown while the
+  // password is hidden, or a clone added and the password hidden and kept, add and remove
+  // nothing that the batch rules see. From a value field, climb its ancestors while the
+  // ancestor's only value field is that field (at most TWIN_DEPTH levels; a shadow root
+  // climbs on to its host): at each level, a sibling subtree whose only value field is a
+  // sensitive field that is not shown masks it (empty|filled, never read). Level one is
+  // D-444 (1): the parent directly holds a hidden password, or the field and the password sit
+  // each alone in sibling wrappers. Deeper levels are component-wrapped twins (Vue v-show on
+  // a `div.base > label + div.control > input` component, `[hidden]` on hosts). While an
+  // ancestor's only value field is el its other children hold none, so only the ancestor
+  // where the climb stops is scanned. onlyField and hidSens results and each scanned
+  // parent's hidden-sensitive children are memoized for one index() call (S.hid, reset at the
+  // top of index() and walk()).
+  const TWIN_DEPTH = 6;
   const hidSens = (s) => {
     try {
-      return sensitive(s) && !displayed(s);
+      return sensitive(s) && notShown(s);
     } catch (e) {
       return true; // unreadable: count it (fail closed)
     }
   };
-  // The single value field in n (n itself or its subtree), else null (none or two or more).
+  // The single value field in n (n itself, its subtree, or its open shadow root's top tree),
+  // else null (none, or two or more).
   function onlyField(n) {
     if (n.localName === "input" || n.localName === "textarea") return valueField(n) ? n : null;
-    if (typeof n.querySelectorAll !== "function") return null;
     let one = null;
-    for (const f of n.querySelectorAll("input,textarea")) {
-      if (!valueField(f)) continue;
-      if (one) return null;
-      one = f;
+    for (const r of [n, n.shadowRoot]) {
+      if (!r || typeof r.querySelectorAll !== "function") continue;
+      for (const f of r.querySelectorAll("input,textarea")) {
+        if (!valueField(f)) continue;
+        if (one) return null;
+        one = f;
+      }
     }
     return one;
   }
   const holder = (n) => (n && (n.nodeType === 1 || n.nodeType === 11) ? n : null); // element or shadow root
   function twinOfHiddenPw(el) {
-    const w = holder(el.parentNode);
-    if (!w) return false;
-    const m = S.hid || (S.hid = { d: new WeakMap(), g: new WeakMap() });
-    let d = m.d.get(w);
-    if (d === undefined) {
-      d = false;
-      for (const s of w.children) {
-        if ((s.localName === "input" || s.localName === "textarea") && valueField(s) && hidSens(s)) {
-          d = true;
-          break;
-        }
+    const m = S.hid || (S.hid = { o: new WeakMap(), s: new WeakMap(), g: new WeakMap() });
+    const only = (n) => {
+      let r = m.o.get(n);
+      if (r === undefined) {
+        r = onlyField(n);
+        m.o.set(n, r);
       }
-      m.d.set(w, d);
-    }
-    if (d) return true;
-    const g = holder(w.parentNode);
-    if (!g || onlyField(w) !== el) return false;
-    let h = m.g.get(g);
-    if (h === undefined) {
-      h = null;
-      for (const c of g.children) {
-        const f = onlyField(c);
-        if (f && hidSens(f)) {
-          h = c;
-          break;
-        }
+      return r;
+    };
+    const hid = (f) => {
+      let r = m.s.get(f);
+      if (r === undefined) {
+        r = hidSens(f);
+        m.s.set(f, r);
       }
-      m.g.set(g, h);
+      return r;
+    };
+    let c = el;
+    for (let depth = 0; depth < TWIN_DEPTH; depth++) {
+      const g = holder(c.parentNode);
+      if (!g) return false;
+      if (only(g) !== el) {
+        // g holds another value field: check its children once, then stop climbing. While
+        // el is g's only value field, no sibling of c holds one, so there is nothing to scan.
+        let h = m.g.get(g); // g's children whose only value field is a hidden sensitive one
+        if (h === undefined) {
+          h = [];
+          for (const x of g.children) {
+            const f = only(x);
+            if (f && hid(f)) h.push(x);
+          }
+          m.g.set(g, h);
+        }
+        for (const x of h) if (x !== c) return true; // c's own only field is el: not sensitive
+        return false;
+      }
+      if (g.nodeType === 11) {
+        c = g.host;
+        if (!c || only(c) !== el) return false;
+      } else {
+        c = g;
+      }
     }
-    return h !== null; // never w: its only field is el, which is not sensitive here
+    return false;
+  }
+
+  // D-445 (2): "not shown" for a sensitive field (the twin mask only; readers keep
+  // displayed()): not displayed (display none, visibility hidden or collapse, the hidden
+  // attribute), opacity 0 on it or an ancestor, a box under 2 px either way, a box wholly
+  // outside the scroll area of its nearest scroll container (or of the page), or a clip,
+  // clip-path or overflow hidden|clip ancestor that leaves under 2 px of it. Ancestors are
+  // walked at most NOT_SHOWN_DEPTH levels (composed tree); without layout (jsdom) only the
+  // style checks apply. A clip-path this cannot parse (url(), path()) hides the field when it
+  // is on the field, and cuts nothing on an ancestor.
+  const NOT_SHOWN_DEPTH = 16;
+  function notShown(el) {
+    if (!displayed(el)) return true;
+    if (typeof el.checkVisibility === "function") {
+      try {
+        if (!el.checkVisibility({ opacityProperty: true })) return true; // opacity 0 at any level
+      } catch (e) { /* the walk below checks opacity */ }
+    }
+    const r = S.layout ? el.getBoundingClientRect() : null;
+    let box = r ? { l: r.left, t: r.top, r: r.right, b: r.bottom } : null;
+    let scroller = null; // the nearest overflow auto|scroll ancestor: its own scroll area
+    let n = el;
+    for (let i = 0; i < NOT_SHOWN_DEPTH && n && n.nodeType === 1; i++, n = parentOf(n)) {
+      const cs = style(n);
+      if (parseFloat(cs.opacity) === 0) return true;
+      if (!box) continue;
+      const nr = n === el ? r : n.getBoundingClientRect();
+      if ((cs.position === "absolute" || cs.position === "fixed") && cs.clip && cs.clip !== "auto") {
+        box = cutBox(box, clipRect(cs.clip, nr));
+      }
+      if (cs.clipPath && cs.clipPath !== "none") {
+        const cb = clipPathBox(cs.clipPath, nr);
+        if (cb === false && n === el) return true; // an unparsed clip on the field: fail closed
+        if (cb) box = cutBox(box, cb);
+      }
+      if (n !== el) {
+        const hx = CLIPS_RE.test(cs.overflowX);
+        const hy = CLIPS_RE.test(cs.overflowY);
+        if (hx || hy) {
+          const I = Infinity;
+          box = cutBox(box, { l: hx ? nr.left : -I, t: hy ? nr.top : -I, r: hx ? nr.right : I, b: hy ? nr.bottom : I });
+        }
+        if (!scroller && (SCROLLS_RE.test(cs.overflowX) || SCROLLS_RE.test(cs.overflowY))) scroller = { n, nr };
+      }
+      if (tinyBox(box)) return true;
+    }
+    if (!box) return false;
+    // Off-screen: wholly outside the scroll area of the nearest scroll container, or of the
+    // page (negative offsets are never scrolled to; a box past the scroll size is not either).
+    let ox;
+    let oy;
+    let sw;
+    let sh;
+    if (scroller) {
+      const sc = scroller.n;
+      ox = scroller.nr.left + sc.clientLeft - sc.scrollLeft;
+      oy = scroller.nr.top + sc.clientTop - sc.scrollTop;
+      sw = sc.scrollWidth;
+      sh = sc.scrollHeight;
+    } else {
+      const de = doc.documentElement;
+      const vp = viewport();
+      ox = -(globalThis.scrollX || 0);
+      oy = -(globalThis.scrollY || 0);
+      sw = Math.max(de ? de.scrollWidth : 0, vp.w);
+      sh = Math.max(de ? de.scrollHeight : 0, vp.h);
+    }
+    return r.right <= ox || r.bottom <= oy || r.left >= ox + sw || r.top >= oy + sh;
+  }
+  const CLIPS_RE = /^(hidden|clip)$/;
+  const SCROLLS_RE = /^(auto|scroll)$/;
+  const tinyBox = (b) => b.r - b.l < 2 || b.b - b.t < 2;
+  const cutBox = (b, c) =>
+    (c ? { l: Math.max(b.l, c.l), t: Math.max(b.t, c.t), r: Math.min(b.r, c.r), b: Math.min(b.b, c.b) } : b);
+  // A CSS length against a reference size: px or %, else NaN.
+  function cssLen(s, ref) {
+    const m = /^(-?[\d.]+)(px|%)?$/.exec(String(s).trim());
+    if (!m) return NaN;
+    const v = parseFloat(m[1]);
+    return m[2] === "%" ? (v * ref) / 100 : v;
+  }
+  // clip: rect(top, right, bottom, left) on an absolutely positioned box; auto is the edge.
+  function clipRect(clip, nr) {
+    const m = /^rect\(([^)]*)\)$/.exec(clip.trim());
+    if (!m) return null;
+    const p = m[1].split(/[\s,]+/).filter(Boolean);
+    if (p.length !== 4) return null;
+    const w = nr.right - nr.left;
+    const h = nr.bottom - nr.top;
+    const at = (s, auto) => (s === "auto" ? auto : cssLen(s, 0));
+    const c = { t: at(p[0], 0), r: at(p[1], w), b: at(p[2], h), l: at(p[3], 0) };
+    if ([c.t, c.r, c.b, c.l].some(Number.isNaN)) return null;
+    return { l: nr.left + c.l, t: nr.top + c.t, r: nr.left + c.r, b: nr.top + c.b };
+  }
+  // clip-path basic shapes against the border box: inset(), circle(), ellipse(), polygon()
+  // (its bounding box). null: no cut (a box keyword alone, a circle or ellipse with a radius).
+  // false: a shape this does not parse (url(), path(), calc()); notShown counts that as hiding
+  // when it is on the field itself and as no cut on an ancestor (a decorative card clip).
+  function clipPathBox(cp, nr) {
+    const s = cp.trim();
+    const m = /^(inset|circle|ellipse|polygon)\(([^()]*)\)/.exec(s);
+    if (!m) return /^[a-z-]+$/.test(s) ? null : false;
+    const w = nr.right - nr.left;
+    const h = nr.bottom - nr.top;
+    const args = m[2].trim();
+    if (m[1] === "inset") {
+      const p = args.split(/\s+round\s+/)[0].split(/\s+/).filter(Boolean);
+      if (!p.length || p.length > 4) return false;
+      const [t, r = t, b = t, l = r] = p;
+      const v = { t: cssLen(t, h), r: cssLen(r, w), b: cssLen(b, h), l: cssLen(l, w) };
+      if ([v.t, v.r, v.b, v.l].some(Number.isNaN)) return false;
+      return { l: nr.left + v.l, t: nr.top + v.t, r: nr.right - v.r, b: nr.bottom - v.b };
+    }
+    if (m[1] === "circle" || m[1] === "ellipse") {
+      const radii = args.split(/(?:^|\s+)at\s/)[0].split(/\s+/).filter(Boolean);
+      const ref = [w, h];
+      for (let i = 0; i < radii.length; i++) {
+        const v = cssLen(radii[i], m[1] === "circle" ? Math.hypot(w, h) / Math.SQRT2 : ref[i] || w);
+        if (!Number.isNaN(v) && v < 1) return { l: nr.left, t: nr.top, r: nr.left, b: nr.top };
+      }
+      return null;
+    }
+    let l = Infinity;
+    let t = Infinity;
+    let r = -Infinity;
+    let b = -Infinity;
+    for (const pt of args.replace(/^(nonzero|evenodd)\s*,/, "").split(",")) {
+      const xy = pt.trim().split(/\s+/);
+      if (xy.length !== 2) return false;
+      const x = cssLen(xy[0], w);
+      const y = cssLen(xy[1], h);
+      if (Number.isNaN(x) || Number.isNaN(y)) return false;
+      l = Math.min(l, x);
+      r = Math.max(r, x);
+      t = Math.min(t, y);
+      b = Math.max(b, y);
+    }
+    if (l === Infinity) return false;
+    return { l: nr.left + l, t: nr.top + t, r: nr.left + r, b: nr.top + b };
   }
 
   // Every read of a field's value goes through here (index, state, text and fingerprint use
@@ -1311,6 +1474,7 @@
     // Records the observer has not delivered yet (same task as the change) count now, so a
     // rebuilt password field is marked before anything reads it (D-429 (1)).
     flushMut();
+    S.hid = null; // a walk may follow a display flip: the twin memo starts over (D-445 (1))
     if (S.full) incremental = false;
     // A challenge widget that appears or goes away changes what the weak prompts mean.
     const ctx = challengeContext();
@@ -1460,7 +1624,7 @@
     ensure();
     if (S.selfCh) return [selfRow()];
     S.layout = hasLayout();
-    S.hid = null; // fieldValue's twin memo is valid for this call only (D-444 (1))
+    S.hid = null; // fieldValue's twin memo is valid for this call only (D-444 (1), D-445 (1))
     const L = S.layout;
     const vp = viewport();
     const vpArea = Math.max(1, vp.w * vp.h);
@@ -2332,8 +2496,12 @@
       };
       // The cap is the deadline of the condition below.
       const capTimer = setTimeout(() => finish(false), Math.max(0, cap));
+      // One task of yield before resolving settled (D-445 (3)); any mutation or animation
+      // wait in between starts it over.
+      let yielded = false;
       const arm = () => {
         if (done || animWait) return;
+        yielded = false;
         clearTimeout(timer);
         const due = Math.max(S.lastMut, t0) + quiet - now();
         // Timer to the instant the quiet condition can first hold, re-armed on each mutation.
@@ -2349,6 +2517,7 @@
         const anims = runningAnims(t0 - 1000);
         if (anims.length) {
           animWait = true;
+          yielded = false;
           Promise.race(anims.map((a) => a.finished.catch(() => undefined))).then(() => {
             animWait = false;
             if (!done) check();
@@ -2359,6 +2528,16 @@
         if (left > 0 && wantsContent()) {
           // The next mutation wakes us; this timer is the content condition's own deadline.
           timer = setTimeout(check, left);
+          return;
+        }
+        if (!yielded) {
+          // Rule 6: a setTimeout 0, not a sleep. A transition's `finished` reaction runs before
+          // the transitionend / animationend handlers of the same rendering step, and a
+          // transitionend handler that sets display:none (Vue <Transition> + v-show) has no other
+          // observable condition; one task later it has run, so a read chained after settle()
+          // sees the hidden state (D-445 (3), Z6). A mutation it makes re-arms the quiet wait.
+          yielded = true;
+          timer = setTimeout(check, 0);
           return;
         }
         finish(true);
