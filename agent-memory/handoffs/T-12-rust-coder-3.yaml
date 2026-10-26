@@ -1,0 +1,28 @@
+from: rust-coder-3
+to: next
+task: T-12
+date: "2026-10-26"
+state: "Round-2 fixes for review-T-12 round 1 committed as b9ccca5 on swarm/servers-T12. Blocking rule 5: HTML is sniffed from the body start (BOM, whitespace, comments, <?xml?> skipped; <!doctype html or a common HTML start tag) whatever the content type: fetch walks it, api refuses it, feed says not-a-feed. Should-fix: @vault headers only over https or to loopback, vault redirects keep scheme/host/port, never https->http (api_vault client); fetch #id and site tools pin the classify-time target per ToolCtx (src/pin.rs, D-507); fetch/feed/search follow redirects by hand and refuse public->private/loopback/link-local hops (http::get_following); cf-mitigated and challenge pages stop feed and api (fetch::challenge_stop); registration skips retired/needs_repair tools and a fingerprint miss disables the tool for the process (D-505, D-506); prose blocks starting `# `/`- ` get a backslash; `](#` in api and site-tool JSON strings becomes `] (#`. Stalled bodies already map to 'did not answer in time' (accept_t12 requests_time_out_at_15_s passes). New tests: tests/round2_t12.rs (7, all shown failing against 51a4201 with the src changes set aside), 4 new unit tests (http sniff, api redirect predicate, private ranges/loopback, escape). cargo fmt --all --check clean; clippy -p srv-web --all-targets -D warnings clean; cargo test -p srv-web -j 2: 47 passed, 0 failed, 5 ignored (lib 15, accept_t12 5+1, accept_w 6+1, contract_paths 1, live 0+3, round2_t12 7, web_tools 13); live docs.rs/GitHub tests pass with --ignored; cargo test --workspace -j 2: 77 binaries, 751 passed, 0 failed, 10 ignored."
+not_done: "1) Reviewer round 2 and tester re-run (T-12 not marked done). 2) api_base64_echoed_vault_value_is_scrubbed stays ignored until T-05d (D-77). 3) B-500 and B-501 still open for supreme; the review's suggested non-interactive gate seam (ToolCtx::check(domain, class)) to re-check each redirect hop's domain is not built (core is another area)."
+gotchas:
+  - "Pinning keys on the ToolCtx address: core::mcp::dispatch builds one ctx per call and passes the same one to classify and call. If core ever moves or rebuilds the ctx between them, pinned calls fail closed with 'the page changed since the call was checked; call again'."
+  - "Config.resolve (test DNS overrides) counts as public for the private-redirect guard but as its address (loopback) for the vault-over-http check; tests that need a 'private' hop must redirect to an IP literal or localhost."
+  - "The page client no longer follows redirects itself (Policy::none); anything new on it must go through http::get_following or it will see raw 3xx responses."
+  - "Proving tests red: the guard hook refuses Write outside the worktree, so set src aside with a tagged stash of src paths only (git stash push -m <tag> -- crates/srv-web/src crates/srv-web/Cargo.toml), apply by sha, drop by tag."
+decisions_made: [D-505, D-506, D-507]
+blockers_opened: []
+files_touched:
+  - crates/srv-web/Cargo.toml
+  - crates/srv-web/src/api.rs
+  - crates/srv-web/src/escape.rs
+  - crates/srv-web/src/feed.rs
+  - crates/srv-web/src/fetch.rs
+  - crates/srv-web/src/html.rs
+  - crates/srv-web/src/http.rs
+  - crates/srv-web/src/lib.rs
+  - crates/srv-web/src/pin.rs
+  - crates/srv-web/src/search.rs
+  - crates/srv-web/src/site.rs
+  - crates/srv-web/tests/round2_t12.rs
+  - agent-memory/decisions.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -p srv-web -j 2"

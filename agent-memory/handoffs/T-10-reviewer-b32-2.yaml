@@ -1,0 +1,15 @@
+from: reviewer
+to: next
+task: T-10
+date: "2026-10-25"
+state: "Round 5 review of 182f11c (D-226) done: verdict changes, one blocking item. Round-4 should-fix 1-4 are fixed as D-226 says, each with a test that fails when broken (mutation spot-check: suffix dropped from fit_piece turns table_header_separator_counts_against_the_budget red). Gates green: fmt, clippy -D warnings, cargo test -p sb-sheet (lib 81, acceptance_t10 20, acceptance_t10_b32 16 with 0 ignored, find_register 8, read_article 11, skeleton_sheet 8). Probes: 2000-backtick run at max 50 has no overshoot; 40 KB with a 9000 run gives 3 chunks; 30-column header at max 10..120 has no overshoot; password split across heading spans never shows in remaining:; a 600-page fuzz (random max_tokens/chunk_tokens, cursor following to the end) had no overshoot, no repeated cursor and no 11+ backtick line. D-219..D-225 tests unchanged and green; I-5/I-6 untouched."
+not_done: "Blocking: reader.rs:1036 word_cap = chunk_cap and reader.rs:1194 need the whole first word unless it exceeds a chunk, so under max_tokens a word longer than the remainder but shorter than a chunk is never char-cut. A fresh read of a paragraph starting with a 6000-char token at max_tokens 100..1499 returns an empty body, truncated, and a spent cursor (D-204 regression). Fix: word_cap = chunk_cap.min(full max_tokens * 4), plus a test. Should-fix: (1) remaining: outline unbounded and outside max_tokens (2000 headings of 190 chars: 103,788 tokens at max_tokens 50); cap label length and entry count, supreme to amend D-210 before T-12. (2) wide header separator is unsplittable, so chunk_tokens is page-controlled without max_tokens (3000 empty columns: a 3002-token separator-only chunk). Tester should restamp accept-T-10.md (coder tightened acceptance_t10_b32.rs)."
+gotchas:
+  - "Probes ran in a throwaway copy under target/review5 with its own [workspace] and concrete deps; deleted afterwards. A random fuzz that follows cursors with chunk_tokens near 0 is slow (each read replans the page twice): keep it to a few hundred small pages or it passes the 10-minute tool cap."
+  - "A naive squeeze-and-search for a password value flags table rows whose cells hold the two halves; cells render separately, so that is not a scrub miss."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-10.md
+  - agent-memory/handoffs/T-10-reviewer-b32-2.yaml
+verify: "python scripts/swarm/merge_gate.py (reads bench/results/review-T-10.md); cargo test -p sb-sheet"

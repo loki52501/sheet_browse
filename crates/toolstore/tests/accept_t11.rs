@@ -2724,9 +2724,12 @@ async fn d314_failed_archive_does_not_stop_sweep_and_next_sweep_retries() {
     drop(dir);
 }
 
-/// D-314: an idle ephemeral tool whose archive fails during retire gets an ok:false
-/// `tools.retire` event; the row is persisted as retired with its file in place, a later
-/// domain is still swept, and the next sweep archives the file.
+/// D-314, D-316: an idle ephemeral tool whose archive fails during retire (its file held
+/// open with no sharing, so the rename is refused) is still retired: an ok:true
+/// `tools.retire` event with `archive_failed` set, then an ok:false `tools.archive` event
+/// naming the file and the error, `SweepAction::Retired { archived: None }`, the row
+/// persisted as retired with its file in place. A later domain is still swept, and the next
+/// sweep archives the file with an ok:true `tools.archive` event.
 #[cfg(windows)]
 #[tokio::test]
 async fn d314_failed_retire_does_not_stop_sweep_and_next_sweep_archives() {
@@ -2747,7 +2750,10 @@ async fn d314_failed_retire_does_not_stop_sweep_and_next_sweep_archives() {
     drop(held);
     let done = done.expect("sweep returned the per-tool retire failure");
     assert!(
-        matches!(&done[..], [SweepAction::Archived { domain, .. }] if domain == "zeta.org"),
+        matches!(&done[..], [
+            SweepAction::Retired { domain: d1, name, archived: None, .. },
+            SweepAction::Archived { domain: d2, .. },
+        ] if d1 == "luma.com" && name == "list_events" && d2 == "zeta.org"),
         "{done:?}"
     );
     assert!(!zeta.exists());
@@ -2758,12 +2764,48 @@ async fn d314_failed_retire_does_not_stop_sweep_and_next_sweep_archives() {
         ToolStatus::Retired
     );
     let ev = store.events();
-    assert_eq!(ev.len(), 2, "{ev:?}");
-    assert_eq!(ev[0].tool, "tools.retire");
-    assert!(!ev[0].ok, "{:?}", ev[0]);
-    assert_eq!(ev[0].consequences["failed"], "luma.com/list_events.js");
-    assert_eq!(ev[1].tool, "tools.archive");
-    assert!(ev[1].ok);
+    assert_eq!(ev.len(), 3, "{ev:?}");
+    let (r, a) = (&ev[0], &ev[1]);
+    assert_eq!(
+        (r.server.as_str(), r.tool.as_str()),
+        ("core", "tools.retire")
+    );
+    assert!(r.ok, "{r:?}");
+    assert_eq!(r.args["name"], "list_events");
+    assert_eq!(
+        r.consequences.get("archived"),
+        Some(&serde_json::Value::Null),
+        "{r:?}"
+    );
+    assert_eq!(
+        r.consequences["archive_failed"], "luma.com/list_events.js",
+        "{r:?}"
+    );
+    assert!(
+        r.why.as_deref().is_some_and(|w| w.contains("unused")),
+        "{r:?}"
+    );
+    assert_eq!(
+        (a.server.as_str(), a.tool.as_str()),
+        ("core", "tools.archive")
+    );
+    assert!(!a.ok, "{a:?}");
+    assert_eq!(a.args["name"], "list_events");
+    assert_eq!(a.consequences["failed"], "luma.com/list_events.js", "{a:?}");
+    assert!(
+        a.result_summary.contains("luma.com/list_events.js"),
+        "{a:?}"
+    );
+    // The rename is refused by the share-mode lock (os error 32), and the event says so.
+    let why = a.why.as_deref().unwrap_or_default();
+    assert!(!why.is_empty() && a.result_summary.contains(why), "{a:?}");
+    assert!(
+        !ev.iter().any(|e| e.tool == "tools.retire" && !e.ok),
+        "{ev:?}"
+    );
+    assert_eq!(ev[2].tool, "tools.archive");
+    assert_eq!(ev[2].args["name"], "probe");
+    assert!(ev[2].ok);
 
     let again = ts.sweep(&store, now, &|_| 0).await.unwrap();
     assert!(
@@ -2772,6 +2814,10 @@ async fn d314_failed_retire_does_not_stop_sweep_and_next_sweep_archives() {
         "{again:?}"
     );
     assert!(!file.exists());
+    let last = store.events().pop().unwrap();
+    assert_eq!(last.tool, "tools.archive");
+    assert_eq!(last.args["name"], "list_events");
+    assert!(last.ok, "{last:?}");
     drop(dir);
 }
 

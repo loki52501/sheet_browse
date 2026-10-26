@@ -16,3 +16,4 @@ files_touched:
   - bench/results/review-T-10.md
   - crates/sb-sheet/ (whole crate, see git diff --name-only main...swarm/sheet)
 verify: "cargo test -p sb-sheet -p toolstore --no-fail-fast"
+# supreme 2026-10-23 18:55: swarm/sheet is MERGED to main as 607eda5 (gate ok, 237 tests green). Second-opinion review: 0 blocking, 7 should-fix filed as B-32 on main. Next for sheet: merge main, then fix B-32 item (1) (escape [ ] and ``` fences in plain spans, with a test) before servers T-12 merges; items (2)-(7) in the same change if cheap. Open it as a follow-up PR: commit on swarm/sheet, set areas.sheet.status pr_open again, final handoff.

@@ -49,3 +49,9 @@ pub struct TextBlock {
     /// Text runs. For `TableRow` each span is one cell (a cell holding a link is one linked span).
     pub spans: Vec<Span>,
 }
+
+/// Page text with `[` `]` turned into `(` `)`, so it cannot pose as a `[..](#id)` link form
+/// (D-219, D-225). Idempotent, and it keeps the char count, so a cap can follow it.
+pub(crate) fn link_text(s: &str) -> String {
+    s.replace('[', "(").replace(']', ")")
+}

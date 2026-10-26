@@ -30,12 +30,34 @@ services:
       retries: 30
     restart: unless-stopped
 
-  # D-31: SearXNG for srv-web search() is added here by area servers in T-12, under
-  # `profiles: [search]` on 127.0.0.1:8888, on its own network (never `db`), with its secret
-  # generated locally into a git-ignored file.
+  # D-31: SearXNG for srv-web search() (W-1). Profile `search`, so `docker compose up postgres`
+  # never starts it:
+  #   python -c "import secrets; print('SEARXNG_SECRET=' + secrets.token_hex(32))" > config/searxng/secret.env
+  #   docker compose --profile search up -d searxng
+  # The secret is generated locally into config/searxng/secret.env, which is git-ignored; no
+  # secret is committed (D-1). settings.yml turns JSON output on and the limiter off.
+  # Own network `search`, never `db` (D-48). srv-web reads SB_SEARXNG_URL, default
+  # http://127.0.0.1:8888.
+  searxng:
+    # Pinned by digest: the `latest` of 2026-10-25 that passed
+    # `cargo test -p srv-web --test live -- --ignored` (JSON on, limiter off). Bump deliberately.
+    image: searxng/searxng@sha256:23482d8ecf7ddf66029479468ea04c1bb11d2b65785a17a7e629e2ffd13296ca
+    profiles: [search]
+    env_file:
+      - path: config/searxng/secret.env
+        required: false
+    environment:
+      SEARXNG_BASE_URL: http://127.0.0.1:8888/
+    ports:
+      - "127.0.0.1:8888:8080"
+    networks: [search]
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    restart: unless-stopped
 
 networks:
   db:
+  search:
 
 volumes:
   sb-pg:

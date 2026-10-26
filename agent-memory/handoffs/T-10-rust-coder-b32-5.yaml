@@ -1,0 +1,18 @@
+from: rust-coder-b32-5
+to: next
+task: T-10
+date: "2026-10-25"
+state: "D-229 done in crates/sb-sheet (one commit on swarm/sheet). The body is checked against every password spelling in ReaderCtx secrets as a markdown renderer shows it, with each link form read as its text, in two readings: the renderer's (`alias \"label\"`) and the outline label's (form_label). Each reading is checked as is and whitespace-collapsed. Rendering now builds tagged characters (TChar: span range, char index in a plain span, Shows Never/FormOnly/Always). Ctx::scrub_joined builds the line, runs the D-218 literal scrub on it (scrub_tagged, same result as Ctx::scrub), finds hits (joined_hits), hides contributing spans (Hide), and rebuilds until no hit is left or nothing new can be hidden. inline() (paragraphs, headings, list items, quotes, the skeleton's block_line), table rows (the whole row with its ` | ` separators, table_row_tagged) and code blocks (code_tagged; link forms render in code) all go through it. This runs before render_block's unit scrub, so cut points, budgets, the content hash and heading labels see the hidden text. D-218 literal and escaped scrubs are unchanged. With no password value the output is byte-identical to before (fast path). The tester's w5b_body_never_shows_a_value_joined_across_a_link_form passes, and its #[ignore] line is removed (that is the only change to the tester's file). New lib tests in reader.rs: value_joined_across_a_table_cell_link_is_hidden, value_joined_across_a_list_item_link_is_hidden, value_over_plain_link_plain_is_hidden (also covers the same three spans in a code block) and value_joined_to_a_quoted_label_is_hidden. Assert messages print the read with each value part replaced by <pN>. Mutations, each red and then restored: hit loop off (all 4 new lib tests and w5b red), outline-label reading off (quoted-label test red), table row check off (table test red), plain-char hiding off (all 4 new lib tests red). Gates: fmt check, clippy -p sb-sheet --all-targets -D warnings, cargo test -p sb-sheet (lib 87, acceptance_t10 20, b32 16, d226 9, d227 8, contract_paths 1, find_register 8, read_article 11, skeleton_sheet 8; 0 ignored), cargo test --workspace -j 2."
+not_done: "Supreme answers B-203: the plain-span judgment call below. Reviewer reviews D-229. Tester re-runs the T-10 ladder and restamps bench/results/accept-T-10.md (W-5b row)."
+gotchas:
+  - "Judgment call, B-203: D-229 says every contributing span renders as `***`. Done that way, the whole plain span is blanked and the tester's d227_label_is_scrubbed_before_the_cut goes red, because the `## Golf` label disappears. So link spans are blanked whole (form included), and plain spans hide only the characters they give to the hit, one `***` per run. To blank whole plain spans instead, map SpanKind::Plain hits to Hide.all in Ctx::scrub_joined and amend that D-227 test."
+  - "Text in a hit that came from several spans (a collapsed space across spans, an earlier `***`) is never a reason to hide more. Every secret has a non-space character, so hiding the single-span characters is enough, and the loop ends because each pass hides something new."
+  - "The guard_write hook blocks writes outside the worktree, including the scratchpad. Put edit scripts under target/tmp (gitignored). Do not put backticks in double-quoted `python -c` strings: bash substitutes them (it ate a comment once)."
+decisions_made: []
+blockers_opened: [B-203]
+files_touched:
+  - crates/sb-sheet/src/reader.rs
+  - crates/sb-sheet/tests/acceptance_t10_d227.rs
+  - agent-memory/blockers.yaml
+  - agent-memory/handoffs/T-10-rust-coder-b32-5.yaml
+verify: "cargo test -p sb-sheet"

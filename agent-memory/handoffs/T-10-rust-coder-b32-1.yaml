@@ -1,0 +1,26 @@
+from: rust-coder-b32
+to: next
+task: T-10
+date: "2026-10-25"
+state: "All seven B-32 should-fix items done in crates/sb-sheet per D-219..D-222, one commit on swarm/sheet. (1) reader: plain spans go through link_text, inline text cuts 3+ backtick runs to 2 (after joining spans), code fence = longest backtick run in the body + 1 (min 3), outline heading labels escaped the same way, escaped_spellings gains the backtick-cut spelling (16 combinations). (2) skeleton h1/h2 use reader::Ctx::block_line (pub(crate)): password span -> link form, challenge-linked block -> iframe link form, escaping applies; the 60-char cap never cuts inside a link form; the rows' heading fallback is link_text-escaped too. (3) an explicit ReadOpts.region that differs from the cursor's (compared whitespace-collapsed, lowercase) restarts at chunk 1 with note `region \"x\" is not the cursor's region, restarted at chunk 1`. (4) remaining: outline tests (exact counts, mid-unit continuation, returned + remaining = total on every chunk). (5) impl Default for FindOpts (k 3, query empty), find treats k 0 as 3; field names/types unchanged (I-6). (6) next_chunk takes the max_tokens remainder; the headings-only quarter-chunk floor is capped by it. (7) the cursor's used survives a page change (and a region switch); only the position resets. Gates: cargo fmt --all -- --check, cargo clippy -p sb-sheet --all-targets -D warnings, cargo test -p sb-sheet (lib 67, acceptance_t10 20, find_register 8, read_article 11, skeleton_sheet 8), cargo test --workspace (36 binaries ok, toolstore lib 95, accept_t11 29). Each of the 11 new tests was mutation-checked red (15 mutations) then restored."
+not_done: "Tester reruns the T-10 acceptance ladder and refreshes bench/results/accept-T-10.md; reviewer re-checks against B-32. Supreme to rule on the proposals below."
+gotchas:
+  - "D-219 taken literally: code-block spans also go through link_text, so `#[tokio::main]` reads as `#(tokio::main)` (read_article.rs expectation updated). See proposal 1."
+  - "Python text-mode writes on Windows turn LF into CRLF (Path.write_text); use read_bytes/write_bytes when editing sources from scripts. Bash heredocs can lose backslashes or fail on quotes; the Edit tool is safer for Rust string literals."
+  - "Write outside the worktree (the session scratchpad included) is blocked by guard_write; put throwaway scripts under target/ (gitignored)."
+  - "next_chunk(units, pos, budget, hard): plan_starts passes None so chunk numbering stays the canonical plan; only the actual read is capped by max_tokens."
+decisions_made: []
+proposed_decisions:
+  - "P1 (refines D-219): inside code blocks keep `[` `]` and break only the link-form shape (`](` -> `)(`), so code such as `a[0]` and `#[derive]` stays readable while `[x](#3)` still cannot be forged; the longer fence already marks the block as page content."
+  - "P2 (extends D-220): a region switch also keeps the cursor's used (implemented that way, fails closed); a caller that wants a fresh budget drops the cursor."
+  - "P3 (new, pr-ready section 5): a paragraph whose text starts with `remaining:`, `truncated:` or `chunk N of M` can pose as a trailer or note line; escape those prefixes at the start of a unit body. Also skeleton title, form headings, warning names and sheet lines print row names with only `\"` -> `'` (a `[button 'x'](#3)` look-alike survives); route them through link_text."
+  - "P4 (D-222 edge): with an empty chunk the reader always makes progress, so when max_tokens leaves fewer chars than a unit's fixed overhead (code fence lines) or a table header's separator suffix, the piece can exceed the remainder by that overhead. Fix would return an empty truncated body instead."
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/src/reader.rs
+  - crates/sb-sheet/src/skeleton.rs
+  - crates/sb-sheet/src/find.rs
+  - crates/sb-sheet/src/lib.rs
+  - crates/sb-sheet/tests/read_article.rs
+  - agent-memory/handoffs/T-10-rust-coder-b32-1.yaml
+verify: "cargo test -p sb-sheet"

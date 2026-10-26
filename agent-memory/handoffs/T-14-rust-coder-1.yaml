@@ -1,0 +1,39 @@
+from: rust-coder (T-14)
+to: next
+task: T-14
+date: "2026-10-25"
+state: "crates/srv-files implements F-1..F-6: fs.read/write/glob/move/mkdir/delete, shell (bash-subset classifier, Git Bash runner, Job Object tree kill, 20k cap + scrubbed full log in files/), pdf.read/pdf.write/md.to_pdf/xlsx.read/xlsx.write/docx.read/docx.write/pptx.write (skill recipes via an embedded python helper and pandoc, xlsx skill recalc.py), csv.clean, diff (text and table), history.search (copied Chrome History, rusqlite bundled). cargo fmt --check, clippy -p srv-files --all-targets -D warnings clean. cargo test -p srv-files: 28 unit, 17 acceptance (2 more ignored: pdf and docx round trips, both pass here with --ignored), 2 contract. Every docs/04 srv-files acceptance item and each risky path was broken once and seen red (pr-ready 6). cargo test --workspace (-j 2): 751 passed, 0 failed, 7 ignored (a -j default run failed only with os error 1455, paging file too small, while other areas built in parallel)."
+not_done: "1) Tester acceptance run and reviewer pass (not self-accepted). 2) merge main into swarm/servers-T14 (main moved by one prompts-only commit, ba6d37e). 3) Supreme answers B-520 (Read vs Fill for in-runs shell changes), B-521 (allowlist for unknown commands), B-522 (asks/ answer route outside srv-files). 4) Not tested on Linux/macOS (the Unix process-group kill and paths code compile under cfg(unix) but have only run on Windows here)."
+gotchas:
+  - "guard_write.py only allows Write/Edit under F:/sb-swarm/wt/servers; this task's worktree is F:/sb-swarm/wt/servers/.wt/T14. Do not write repo files with shell heredocs."
+  - "Git Bash starts pipeline stages and background commands as processes whose Windows parent is not bash: taskkill /T misses them (sleep 60 | cat kept running and its pipe held a tokio blocking thread 60 s). proc.rs puts each child, started suspended, in its own Job Object (D-521)."
+  - "canonicalize() returns \\\\?\\ paths, and Win32 normalisation is skipped for them: `asks.` stayed distinct from `asks` until paths::resolve normalised from the plain spelling. Compare canonical with canonical only."
+  - "mklink /J rejects forward slashes; tests that make junctions must pass backslashes or they silently skip."
+  - "rusqlite must stay on 0.32 (libsqlite3-sys 0.30): sqlx-sqlite already pins that in Cargo.lock and two packages may not link sqlite3."
+  - "The guard_bash hook blocks any shell line containing the word curl followed by a URL-like token, even in grep; use the Grep tool to search classify.rs."
+  - "cargo test --workspace with the default job count can fail with 'paging file is too small (os error 1455)' when several worktrees build at once; that surfaces as unresolved imports in unrelated crates. Rerun with -j 2."
+  - "harness_core::scrub (used for saved logs) reads the global vault; tests call Vault::install_global with the canary vault."
+decisions_made: [D-520, D-521, D-522]
+blockers_opened: [B-520, B-521, B-522]
+files_touched:
+  - Cargo.lock
+  - crates/srv-files/Cargo.toml
+  - crates/srv-files/src/lib.rs
+  - crates/srv-files/src/paths.rs
+  - crates/srv-files/src/text.rs
+  - crates/srv-files/src/util.rs
+  - crates/srv-files/src/proc.rs
+  - crates/srv-files/src/fs.rs
+  - crates/srv-files/src/shell/mod.rs
+  - crates/srv-files/src/shell/lex.rs
+  - crates/srv-files/src/shell/classify.rs
+  - crates/srv-files/src/docs.rs
+  - crates/srv-files/src/docs_ops.py
+  - crates/srv-files/src/csv.rs
+  - crates/srv-files/src/diff.rs
+  - crates/srv-files/src/history.rs
+  - crates/srv-files/tests/accept_t14.rs
+  - crates/srv-files/tests/contract_paths.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -p srv-files && cargo test -p srv-files --test accept_t14 -- --ignored"

@@ -1,0 +1,24 @@
+# C-3 feature-flag providers for the srv-cli `flags(provider, env)` tool (docs/04,
+# crates/srv-cli/src/flags.rs). Shipped with no providers (B-540): add yours below.
+#
+# A GET of the provider's read path is Read; POST, PUT and PATCH change production config
+# and are Account (they ask first); DELETE is Delete. The auth value must reference a vault
+# entry; it is resolved only inside the HTTP header write and never shown or logged. Set
+# the entry with `harness vault set <name>`.
+#
+# Example (uncomment and edit):
+#
+# [providers.example]
+# api = "https://flags.example.com/api"
+# auth = "Bearer @vault(example_flags)"
+# header = "Authorization"
+# read = "/environments/{env}/flags"
+# domain = "example.com"
+#
+# api      base URL; every request path stays under it
+# auth     header value template with @vault(name)
+# header   optional, default Authorization
+# read     path a call without method/path reads; {env} is replaced by the env argument
+# domain   optional gate domain (gate.rules key), default the api host
+
+[providers]

@@ -96,23 +96,68 @@ tasks:
     step: 2
     title: "srv-web: fetch→index (scraper), read/sheet/raw modes, api with vault headers, feed, search backend (decide D-31)"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
-    status: todo
+    status: done
+    owner: servers/suborch
+    claimed_at: 2026-10-25
+    done_at: 2026-10-26
     blocked_by: [T-10, T-11]
+    notes: "review-T-12 approve (round 2 + three rule-5 confirm rounds, D-508); accept-T-12 all pass except the base64-echo vault row (not-run, needs T-05d / D-77). Follow-ups in T-12b."
+  - id: T-12b
+    step: 2
+    title: "srv-web follow-ups: un-ignore api_base64_echoed_vault_value_is_scrubbed once T-05d is on main; api text/plain tag check before JSON decode; text/plain walk loses <...> content (Vec<String>); page client honours system proxy so PublicOnly is skipped; Content-Type echoed; wiring tests for feed/search cleaned URLs and text; relative feed links without xml:base dropped; B-500 and B-501 need supreme answers"
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: todo
+    owner: servers
   - id: T-13
     step: 2
     title: "Seed tools/ashbyhq.com/list_jobs.js (@phase 1) and step-2 acceptance; ladder rungs 1, 2, 4"
-    status: todo
+    status: done
+    owner: servers/suborch
+    claimed_at: 2026-10-25
+    done_at: 2026-10-26
     blocked_by: [T-12]
+    notes: "review-T-13 approve (round 1); accept-T-13 all pass (offline and live Ashby) except docs/03 item 3 (reflect, T-16). Ladder rungs 1, 2, 4 moved to T-13b (they need srv-files T-14 and a Claude Code session over MCP)."
+  - id: T-13b
+    step: 2
+    title: "T-13 follow-ups: Phase 1 ladder rungs 1, 2, 4 over MCP (with srv-files); concurrent repairs can record version 3 (per-tool repair lock or skip Relocated when @fingerprint already matches); D-561 re-enables a missed tool within the run, amending T-4 (B-561); assert registry class Read after re-register; site-tool-level password/challenge test (docs/03 item 4 mapping); B-560 page.api cap for large boards; toolstore relocate should refuse \\r U+2028 U+2029 in names it writes into headers (B-33 family)"
+    docs: [docs/03-TOOL-STORE.md, docs/08-USE-CASES-AND-TESTS.md]
+    status: todo
+    owner: servers
   - id: T-14
     step: 3
     title: "srv-files: fs, shell classification, docs wrappers, csv.clean, diff, history.search"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: done
+    owner: servers/suborch
+    claimed_at: 2026-10-25
+    done_at: 2026-10-26
+    notes: "review-T-14 approve (confirm round after rounds 1, 2 and a closing round; D-523 allowlist classifier, D-524, D-525). accept-T-14 re-run all pass incl. ladder rung 9 at the tool level and TEMP under AppData, except pptx.write not-run (python-pptx not installed). Follow-ups in T-14b."
+  - id: T-14b
+    step: 3
+    title: "srv-files follow-ups: pptx.write acceptance needs python-pptx installed (row 6d not-run); docs tests need SB_PYTHON with openpyxl; $HOME/bin missed when the bash PATH probe fails (add <home>/bin for every paths::homes() entry or fail closed); <msys_root>/etc/gitconfig and mingw64/etc not code locations yet; updating an existing repo outside runs/ in place (pull, checkout, stash pop) keeps its D-523 class; git stash -u / commit -a in a planted nested repo; hooks/drivers already present in a repo and an existing global git config still run under Read-class git; TOCTOU between reclassify and the syscall for links/junctions; dotfiles inside runs/ cost an ask (over-match); B-520..B-522 need supreme answers; not run on Linux/macOS"
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
     status: todo
+    owner: servers
   - id: T-15
     step: 3
     title: "srv-cli: gh, dns, flags, allowlisted cli; ladder rungs 3, 5, 9"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: done
+    owner: servers/suborch
+    claimed_at: 2026-10-25
+    done_at: 2026-10-26
+    notes: "review-T-15 approve (round 2), accept-T-15 green (14 rows). Ladder rungs 3, 5, 9 moved to T-15b (they exercise srv-files T-14)."
+  - id: T-15b
+    step: 3
+    title: "srv-cli follow-ups: Phase 1 ladder rungs 3, 5, 9 over MCP with srv-files; loopback http honours system proxy; gh alias set can map to auth (both ask); strict letter matching false positives (git log -Sconfig); HTML labelled text/plain still shown"
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md, docs/08-USE-CASES-AND-TESTS.md]
     status: todo
+  - id: T-13c
+    step: 2
+    title: "Phase 1 ladder fixes for servers (bench/results/ladder-phase1-servers.md, 11/19 pass, rungs 3 and 9 green): api keeps its own User-Agent and refuses model-set identity headers (B-562); fs.write and csv.clean put bare file names in runs/<id>/files (B-564); tools/ashbyhq.com/list_jobs.js pages past MAX_JOBS 60 (Ashby total 66) and api/page.api caps for large JSON (B-560); fetch's description says fetching a page announces its site tools, csv.clean's says it dedupes; then re-run the ladder (bench/fixtures/ladder_session.py). Launcher preamble and report grounding are core's (B-563)."
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md, docs/08-USE-CASES-AND-TESTS.md]
+    status: todo
+    owner: servers
   - id: T-16
     step: 4
     title: "reviews SM-2, contacts in gate, baselines, watch diff + single notify, reflect readers-only, proposals"
@@ -129,7 +174,10 @@ tasks:
     step: 6
     title: "sb-cdp Pipe transport, launch, flattened sessions, pipelining; registry skeleton"
     docs: [docs/05-BROWSER.md]
-    status: todo
+    status: done
+    owner: driver/suborch
+    claimed_at: "2026-10-25"
+    branch: swarm/driver-T18
     note: "gated by swarm.yaml (area driver needs page merged), not by T-17 (D-43)"
   - id: T-19
     step: 6
@@ -252,16 +300,33 @@ tasks:
     owner: sheet
     branch: swarm/sheet-T10b
     title: "B-32 follow-up (plain-span escaping first, then items 2-7) as already committed on swarm/sheet after 607eda5; merge it as its own PR."
-    status: todo
+    status: done
     from: T-10
+  - id: T-10c
+    step: follow-up
+    wave: 2
+    owner: sheet
+    branch: swarm/sheet-T10c
+    title: "T-10 review round 6 should-fix (bench/results/review-T-10.md, 14ae910) plus B-202: (1) a remaining: outline label cut to 80 chars with a trailing '...' (D-227) cannot be passed back as region, heading_section never matches it (one wasted turn); strip the trailing '...' and match by prefix. (2) an indented code line longer than a chunk gets its cut point inside the leading indent, so the first chunk is an empty code fence and the text starts one read later (W-5). (3) B-202: a table header separator wider than chunk_tokens is unsplittable, so without max_tokens a page can force an oversized chunk. (4) B-204: two text blocks with the same order make a read cursor chain cycle (chunk 2, 3, 2, 3) and never end; break ties by input position or reject duplicates. (5) review round 8: the could_show soundness comment (reader.rs ~1368) overclaims, because backtick runs are cut after hiding; skip backticks in `needed` like `*`, or reword (the final literal scrub still catches the one case)."
+    status: todo
+    from: T-10b
   - id: T-11b
     step: follow-up
     wave: 2
-    owner: store
+    owner: store/sub-orchestrator
     branch: swarm/store-T11b
     title: "B-33: item 3 first (the loader skips a retired row even when its file is still in place), then items 1-2 (ledger retire event, contract_paths for tool_path/archive_path and ApiFetch::api); item 4 before T-28."
-    status: todo
+    status: done
+    claimed_at: "2026-10-25"
     from: T-11
+  - id: T-11c
+    step: follow-up
+    wave: 2
+    owner: store
+    branch: swarm/store-T11c
+    title: "Before toolforge T-28: B-34 (reforge refuses a retired row) and B-33 item 4 (relocate synonyms via sb_sheet::data::synonyms, pre-D-312 upper-case orphans reported, ok:false sweep events deduplicated)."
+    status: todo
+    from: T-11b
   - id: T-19b
     step: follow-up
     wave: 2
@@ -270,3 +335,19 @@ tasks:
     title: "page review items: Blocking in review-T-19.md, add-first password-field rebuild split across observer batches leaks the password into index()/state() (D-435 (2), hard rule); then its should-fix items."
     status: todo
     from: T-19
+  - id: T-18b
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T18b
+    title: "D-601: first-run download of the pinned Chrome for Testing 156.0.8078.4 into <SB_HOME or cwd>/chromium/, without blocking the transport."
+    status: todo
+    from: T-18
+  - id: T-18c
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T18c
+    title: "review-T-18 leftovers: run the Unix Pipe launch on Linux (only compiled and clippy-checked); a real-Chromium test for getFrameTree seeding and prerender activation (restored me tab with iframes, with T-22 acceptance 4); session_events channel after detach; CdpError::Closed keeps the method; sweep stale profiles/bench-* after a crash; B-601 tab titles (T-22)."
+    status: todo
+    from: T-18
