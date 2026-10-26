@@ -1,8 +1,9 @@
 //! Contract paths (pr-ready step 4, D-74): every item agent-memory/interfaces.yaml lists for
 //! toolstore under I-7 and I-12, at exactly that path, so a moved or renamed item fails to
-//! compile here. `ToolStore::tool_path` and `ToolStore::archive_path` are deprecated (D-72)
-//! and are pinned by `tests_review::deprecated_path_builders_return_the_empty_path_on_bad_input`
-//! instead, so this file stays free of `#[allow(deprecated)]`.
+//! compile here. Signatures that callers implement or pass around (`ApiFetch::api`, the root
+//! `fingerprint`) are pinned exactly. `ToolStore::tool_path` and `ToolStore::archive_path` are
+//! deprecated (D-72) but still public: `deprecated_path_builders_stay_public` names them, with
+//! `#[allow(deprecated)]` on that one test fn only (B-33 item 2).
 
 #![allow(unused_imports)]
 
@@ -33,11 +34,17 @@ use toolstore::runner::{
 };
 use toolstore::{parse_header, ArgSpec, FpItem, ToolHeader, ToolKind};
 
+use std::path::PathBuf;
+use std::time::Duration;
+
 /// The I-7 `ToolStore` methods exist under these names (fn items, never called).
 #[test]
 fn toolstore_methods_exist() {
     let _ = ToolStore::load;
     let _ = ToolStore::scan;
+    // D-315, IC-305: the runtime loader that skips retired tools.health rows.
+    let _ = ToolStore::scan_live;
+    let _ = ToolStore::load_live;
     let _ = ToolStore::try_tool_path;
     let _ = ToolStore::try_archive_path;
     let _ = ToolStore::record;
@@ -51,4 +58,40 @@ fn toolstore_methods_exist() {
     let _ = ToolStore::set_pinned;
     let _ = ToolStore::log_invariant;
     let _ = ToolStore::sweep;
+}
+
+/// D-72, B-33 item 2: the deprecated path builders stay public at these paths with these
+/// signatures, and bad input still gives the empty path.
+#[test]
+#[allow(deprecated)]
+fn deprecated_path_builders_stay_public() {
+    let _: fn(&ToolStore, &str, &str) -> PathBuf = ToolStore::tool_path;
+    let _: fn(&ToolStore, &str, &str, i32) -> PathBuf = ToolStore::archive_path;
+    let dir = tempfile::tempdir().unwrap();
+    let ts = ToolStore::new(dir.path());
+    assert_eq!(ts.tool_path("luma.com", "../../evil"), PathBuf::new());
+    assert_eq!(ts.archive_path("..", "x", 1), PathBuf::new());
+}
+
+/// I-12 `ApiFetch::api(&self, url, remaining)`: implemented outside the crate (srv-web) and
+/// called through a trait object, so its exact signature is pinned both ways.
+#[test]
+fn api_fetch_signature() {
+    struct Fixed;
+    impl ApiFetch for Fixed {
+        fn api(&self, url: &str, remaining: Duration) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({ "url": url, "ms": remaining.as_millis() as u64 }))
+        }
+    }
+    let call: fn(&dyn ApiFetch, &str, Duration) -> Result<serde_json::Value, String> =
+        |f, u, d| f.api(u, d);
+    let v = call(&Fixed, "https://example.org/a", Duration::from_millis(5)).unwrap();
+    assert_eq!(v["url"], "https://example.org/a");
+    assert_eq!(v["ms"], 5);
+}
+
+/// I-7 root `fingerprint(tool, index)`, pinned with its exact signature.
+#[test]
+fn fingerprint_signature() {
+    let _: fn(&Tool, &[sb_sheet::IndexRow]) -> FingerprintResult = toolstore::fingerprint;
 }
