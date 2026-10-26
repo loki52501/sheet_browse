@@ -208,8 +208,7 @@ pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> 
                     .iter()
                     .find(|l| l.rel.as_deref().is_none_or(|r| r == "alternate"))
                     .or_else(|| e.links.first())
-                    .map(|l| l.href.clone())
-                    .filter(|h| http::parse_url(h).is_ok())
+                    .and_then(|l| http::clean_url(&l.href))
                     .unwrap_or_default(),
                 date: e
                     .published
@@ -311,11 +310,7 @@ pub mod ical {
                     format!("at {}. {summary}", self.location)
                 };
             }
-            let url = if crate::http::parse_url(&self.url).is_ok() {
-                self.url
-            } else {
-                String::new()
-            };
+            let url = crate::http::clean_url(&self.url).unwrap_or_default();
             Item {
                 title: escape::name(&self.summary, TITLE_MAX),
                 url,

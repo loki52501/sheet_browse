@@ -530,6 +530,18 @@ fn meta_charset(bytes: &[u8]) -> Option<String> {
 
 /// Parses an http(s) URL from a tool argument. Credentials in the URL are refused (they
 /// would be logged with the arguments; headers through `api` are the way to send them).
+/// Longest URL a tool hands the model as a value (a feed link, a search hit).
+pub(crate) const URL_MAX: usize = 2000;
+
+/// A URL from a page, feed or search backend as the model may see it: parsed by
+/// [`parse_url`] and re-serialised (the URL standard percent-encodes `<`, `>`, quotes and
+/// spaces, so no markup survives, rule 5), or `None` when it is not a valid http(s) URL or
+/// is longer than [`URL_MAX`].
+pub(crate) fn clean_url(s: &str) -> Option<String> {
+    let u = parse_url(s).ok()?.to_string();
+    (u.len() <= URL_MAX).then_some(u)
+}
+
 pub(crate) fn parse_url(s: &str) -> Result<Url, String> {
     let s = s.trim();
     let url = Url::parse(s).map_err(|_| "not a valid absolute URL".to_string())?;
@@ -578,6 +590,14 @@ mod tests {
         assert!(parse_url("https://user:pw@x.org/").is_err());
         assert!(parse_url("not a url").is_err());
         assert!(parse_url("file:///etc/passwd").is_err());
+        // review-T-12 closing round: a URL value never carries markup and is capped.
+        let u = clean_url(
+            "https://f.test/d/<script>stealCookies()</script><!DOCTYPE html><html>?q=<b>#<i>",
+        )
+        .unwrap();
+        assert!(!u.contains('<') && !u.contains('>'), "{u}");
+        assert!(clean_url(&format!("https://f.test/{}", "a".repeat(URL_MAX))).is_none());
+        assert!(clean_url("javascript:alert(1)").is_none());
     }
 
     #[test]

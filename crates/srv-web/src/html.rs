@@ -812,10 +812,13 @@ impl<'a> Walker<'a> {
                     .descendent_elements()
                     .filter(|o| o.value().name() == "option")
                 {
-                    let label = o
-                        .attr("label")
-                        .map(str::to_string)
-                        .unwrap_or_else(|| o.text().collect::<String>());
+                    // collect_text skips script, style and template source (rule 5):
+                    // o.text() would hand their markup to the model.
+                    let label = o.attr("label").map(str::to_string).unwrap_or_else(|| {
+                        let mut s = String::new();
+                        collect_text(*o, false, &mut s, true);
+                        s.split_whitespace().collect::<Vec<_>>().join(" ")
+                    });
                     let label = escape::name(&label, OPTION_MAX);
                     if o.attr("selected").is_some() && selected.is_none() {
                         selected = Some(label.clone());
@@ -1422,6 +1425,28 @@ mod tests {
 
     fn page(html: &str) -> Doc {
         parse(html, &Url::parse("https://example.com/a/b").unwrap())
+    }
+
+    #[test]
+    fn option_labels_carry_no_script_source() {
+        // review-T-12 closing round, Blocking 1: o.text() returned script/template source.
+        let d = page(
+            r#"<html><body><label for="s">Pick</label><select id="s">
+            <option>A<script><!DOCTYPE html><html><body><iframe src=x></script></option>
+            <option>B<style>p{}</style><template><head><meta></template></option>
+            </select></body></html>"#,
+        );
+        let sel = d
+            .index
+            .iter()
+            .find(|r| r.role == "combobox" || r.role == "listbox");
+        let sel = sel.expect("select row");
+        let all = format!("{:?} {:?}", sel.state.options, sel.state.value);
+        for bad in ["<", "DOCTYPE", "iframe", "script", "meta", "p{}"] {
+            assert!(!all.contains(bad), "{bad} in {all}");
+        }
+        assert!(sel.state.options.iter().any(|o| o == "A"), "{all}");
+        assert!(sel.state.options.iter().any(|o| o == "B"), "{all}");
     }
 
     #[test]

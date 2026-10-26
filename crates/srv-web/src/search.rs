@@ -64,13 +64,14 @@ pub fn parse_answer(v: &Value) -> Answer {
         .map(|rs| {
             rs.iter()
                 .filter_map(|r| {
-                    let url = r.get("url")?.as_str()?;
-                    http::parse_url(url).ok()?;
-                    let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("");
+                    let url = http::clean_url(r.get("url")?.as_str()?)?;
+                    let s = |k: &str| {
+                        crate::html::fragment_text(r.get(k).and_then(Value::as_str).unwrap_or(""))
+                    };
                     Some(Hit {
-                        title: escape::name(s("title"), TITLE_MAX),
-                        url: url.to_string(),
-                        snippet: escape::name(s("content"), SNIPPET_MAX),
+                        title: escape::name(&s("title"), TITLE_MAX),
+                        url,
+                        snippet: escape::name(&s("content"), SNIPPET_MAX),
                     })
                 })
                 .collect()
