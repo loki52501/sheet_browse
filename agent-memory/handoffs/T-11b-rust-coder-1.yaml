@@ -1,0 +1,23 @@
+from: rust-coder (area store)
+to: store sub-orchestrator, then reviewer and tester
+task: T-11b
+date: "2026-10-25"
+state: "B-33 items 1, 2, 3 done in three commits on swarm/store-T11b (955326d D-315 live loader, 9ef13ef D-316 retire with failed archive, 6a447e4 contract paths). ToolStore::scan_live / load_live (async, &dyn MemoryStore) read tools.health for the site folder (skipped for _generic) and _generic, skip any tool whose own-folder row is retired with why `retired (v<N>)`, so a retired site tool no longer shadows the _generic tool of the same name; a memory error is Err. Sync scan/load unchanged, docs say they do not consult tools.health. retire() on a failed archive step writes ok:true tools.retire (archived: null, archive_failed: <rel>) then ok:false tools.archive and returns Ok(None); record() is Ok with the row retired; sweep pushes SweepAction::Retired { archived: None } and saves the row; next sweep archives with ok:true tools.archive. cargo fmt --check, clippy -p toolstore --all-targets -D warnings and cargo test -p toolstore are green: lib 122, accept_t11 41, contract_paths 4."
+not_done: "Nothing in the brief. Not done by design: callers (srv-web, sb-mcp, toolforge) still to switch to load_live when they land (D-315); IC-305 is supreme's to apply to interfaces.yaml; B-33 item 4 notes (relocate synonym table, pre-D-312 upper-case orphans, no dedup of repeated ok:false file events) are for toolforge T-28."
+gotchas:
+  - "cargo test --workspace NOT verified green by the coder. First run: everything up to harness step1_accept passed, then step1_accept exited 143 (killed by my 595 s timeout wrapper, not a test failure). Second run (--no-fail-fast, -j 2): stopped by Claude Code for low system memory, no result. cargo test --workspace --no-run -j 2 compiles clean. The tester should run the workspace gate when memory allows."
+  - "A cargo probe that dies with 0xc000012d (commit limit, other worktrees building) is cached as failed in target/.rustc_info.json, and every later cargo clippy fails the same way until that file is deleted. Delete it and rerun; it is only a cache."
+  - "Python pathlib write_text on Windows writes CRLF unless newline='\\n' is passed; the repo is LF (eol=lf)."
+  - "sweep's retire call is now plain `?`: the brief asked to keep an `Err(e @ StoreError::Memory(_)) => return Err(e)` arm, but with the file-error branch gone the other arm would be the same `return Err(e)`, and the only non-memory error left (BadPath) is refused by try_tool_path just above. retire itself keeps the Memory arm on archive_with."
+  - "record_with(store, result, set_mtime) is a new pub(crate) seam (like sweep_with) so the 5-miss retire can be tested with a failing set-mtime step."
+  - "Proved the tests can fail: removing the retired filter in scan_dir turns 3 live-loader tests red; dropping the ok:true tools.retire event on the failed-archive path turns 4 red (3 lib, 1 accept). Both restored."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/toolstore/src/loader.rs
+  - crates/toolstore/src/lib.rs
+  - crates/toolstore/src/lifecycle.rs
+  - crates/toolstore/src/tests_review.rs
+  - crates/toolstore/tests/accept_t11.rs
+  - crates/toolstore/tests/contract_paths.rs
+verify: "cargo test -p toolstore"
