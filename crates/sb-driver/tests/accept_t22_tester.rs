@@ -1,4 +1,4 @@
-//! T-22 acceptance, tester round 1, against the real D-34 build (chromium-1248), public API
+//! T-22 acceptance, tester rounds 1 and 2, against the real D-34 build (chromium-1248), public API
 //! only (plus the registry and CDP views the driver exposes). docs/05 acceptance 4 (registry:
 //! two popups with their opener, a same-origin iframe with a nested one, a cross-port and a
 //! cross-site iframe as one opaque row each, never read inside) and acceptance 5 (settle(): SPA
@@ -6,6 +6,11 @@
 //! w(3s) on endless mutations, never-ending requests, CSS animation loops, an EventSource
 //! stream and a mix), plus B-4 #2 (close), B-4 #8 (a request started after settle began holds
 //! it), B-4 #9 / B-614 (slow submit), B-601 (titles), and the password rule in a frame.
+//!
+//! Round 2 (rows 13a to 13f): D-625 (no settled answer while a request is in flight, w(10s),
+//! settle cap 6000, a request started before settle), the act window ending by input + 3 s
+//! across a document change, the row scrub inside a same-origin frame, act refused in a
+//! cross-origin frame with nothing clicked, and challenge-widget frames never walked (D-628).
 //!
 //! Every page is written here and served from 127.0.0.1 (a second port for cross-origin, the
 //! host name `localhost` for a cross-site, out-of-process frame). No network. One browser at a
@@ -26,6 +31,7 @@ use sb_driver::{
 };
 use sb_sheet::{FieldValue, IndexRow, PageMeta, SkeletonOpts};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -42,6 +48,13 @@ const OPAQUE_MARK: &str = "zq-opaque-marker-t22t";
 /// A preset password attribute (not a vault value); it must never reach `index()`.
 const PRESET_PW: &str = "zq-preset-pw-t22t";
 const RUNS: usize = 5;
+/// D-626 sanity: open()'s navigation part on loopback (round 1 measured 0.25 to 0.53 s).
+const NAV_SANITY: Duration = Duration::from_millis(1500);
+/// Round 2 (b): block the page's main thread 200 ms of every 220 ms.
+const BUSY_JS: &str = "setInterval(() => { const t = performance.now(); \
+                       while (performance.now() - t < 200) {} }, 220);";
+/// Round 2 (d): requests to `/clicked` (a click inside a cross-origin frame), any port.
+static CLICKS: AtomicUsize = AtomicUsize::new(0);
 
 fn canary() -> String {
     std::env::var("SB_VAULT_CANARY")
@@ -227,6 +240,92 @@ fn route(path: &str, query: &str) -> Option<Reply> {
              <label>Hinted <input id=hint type=password placeholder=Hint value=\"{PRESET_PW}\"></label>\
              <button type=button>Sign in</button></form>"
         )),
+        // Round 2 (b): the act window. A click logs `t22-click` (the reference instant, from
+        // Runtime.consoleAPICalled), then: `m=net` starts a never-answered request and endless
+        // mutations, `m=mut` endless mutations only; both navigate to the never-settling mix
+        // page `at` ms later (a document change inside the window). `m=busy`: as `net`, and
+        // the main thread is blocked 200 ms of every 220 ms (in-page calls answer late); the
+        // next document is busy the same way.
+        "/win" => {
+            let at = param(query, "at").unwrap_or("1000").to_string();
+            let m = param(query, "m").unwrap_or("mut");
+            let net = if m == "net" || m == "busy" {
+                format!("fetch('http://127.0.0.1:{p2}/hang?w').catch(() => {{}});")
+            } else {
+                String::new()
+            };
+            let (busy, to) = if m == "busy" {
+                (BUSY_JS.to_string(), format!("/busy-page?p2={p2}"))
+            } else {
+                (String::new(), format!("/cap?k=mix&p2={p2}"))
+            };
+            html(format!(
+                "<title>Window</title>{STYLE}<h1>Window</h1><p id=t>0</p>\
+                 <button id=go onclick=\"console.log('t22-click'); {net} {busy} \
+                 setInterval(() => {{ document.getElementById('t').textContent = \
+                 String(Date.now()); }}, 10); setTimeout(() => {{ \
+                 location.href = '{to}'; }}, {at});\">Go window</button>"
+            ))
+        }
+        "/busy-page" => html(format!(
+            "<title>Busy</title>{STYLE}<h1>Busy</h1><p id=t>0</p><button>Busy button</button>\
+             <script>fetch('http://127.0.0.1:{p2}/hang?b').catch(() => {{}}); {BUSY_JS} \
+             setInterval(() => {{ document.getElementById('t').textContent = \
+             String(Date.now()); }}, 10);</script>"
+        )),
+        // Round 2 (c): the canary goes into this same-origin frame at run time only.
+        "/scrub-host" => html(format!(
+            "<title>Scrub host</title>{STYLE}<h1>Scrub host</h1>\
+             <iframe id=sf title=\"Scrub frame\" src=/scrub-frame \
+             style=\"width:640px;height:420px\"></iframe><button>Host after</button>"
+        )),
+        "/scrub-frame" => html(format!(
+            "<title>Scrub frame</title>{STYLE}<h2 id=h>Heading</h2><p id=near>near</p>\
+             <div id=cap class=captcha style=\"width:120px;height:40px\"></div>\
+             <button id=t>text</button><button id=al>x</button>\
+             <label>Titled <input id=ti></label><input id=v aria-label=Value>\
+             <label>Pick <select id=sel><option>one</option><option id=o2>two</option>\
+             </select></label>"
+        )),
+        // Round 2 (d): cross-origin frames with a counter the test reads (the frame's own
+        // world and the server's /clicked log).
+        "/xo-host" => html(format!(
+            "<title>XO host</title>{STYLE}<h1>XO host</h1>\
+             <iframe id=xp title=\"Cross port\" src=\"http://127.0.0.1:{p2}/xo-frame?m=port\"></iframe>\
+             <iframe id=xs title=\"Cross site\" src=\"http://localhost:{p2}/xo-frame?m=site\"></iframe>\
+             <iframe id=xn title=\"Cross never\" src=\"http://127.0.0.1:{p2}/xo-frame?m=never\"></iframe>\
+             <button>Host after</button>"
+        )),
+        "/xo-frame" => html(format!(
+            "<title>XO frame</title>{STYLE}\
+             <button id=b onclick=\"window.__n = (window.__n || 0) + 1; \
+             fetch('/clicked?' + location.search.slice(1)).catch(() => {{}});\">Frame button</button>\
+             <input id=i aria-label=\"Frame field\">"
+        )),
+        "/clicked" => {
+            CLICKS.fetch_add(1, Ordering::SeqCst);
+            Reply::Page("ok".into())
+        }
+        // Round 2 (e): a challenge widget frame holding a frame that later adds a third; a
+        // normal same-origin frame beside it (walked, so the probe can tell the two apart).
+        "/chw-host" => html(format!(
+            "<title>Challenge host</title>{STYLE}<h1>Challenge host</h1>\
+             <iframe id=cw title=\"Widget containing a Cloudflare security challenge\" \
+             src=/chw1 style=\"width:360px;height:220px\"></iframe>\
+             <iframe id=nf title=\"Normal frame\" src=/chw-normal></iframe>\
+             <button>Outside button</button>"
+        )),
+        "/chw1" => html(format!(
+            "{STYLE}<button>Inside one</button><iframe title=two src=/chw2 \
+             style=\"width:300px;height:160px\"></iframe>"
+        )),
+        "/chw2" => html(format!(
+            "{STYLE}<button>Inside two</button><script>setTimeout(() => {{ \
+             const f = document.createElement('iframe'); f.title = 'three'; f.src = '/chw3'; \
+             document.body.append(f); }}, 300);</script>"
+        )),
+        "/chw3" => html("<button>Inside three</button>".into()),
+        "/chw-normal" => html(format!("{STYLE}<button>Normal frame button</button>")),
         "/api/slow" => {
             let ms = param(query, "ms")
                 .and_then(|m| m.parse().ok())
@@ -795,6 +894,13 @@ async fn cap_open(kind: &str) {
         d.close(tab).await.expect("close");
         let commit = commit.unwrap_or_else(|| panic!("{kind}: no main-frame commit seen"));
         let to_commit = commit.saturating_duration_since(t0);
+        // Tester round 2, D-626 check: only the navigation (createTarget, the install ack,
+        // Page.navigate, the commit) is outside the 3 s; on loopback it is short, so no
+        // settle work hides before the commit.
+        assert!(
+            to_commit <= NAV_SANITY,
+            "{kind}: open() took {to_commit:?} to the commit > {NAV_SANITY:?}"
+        );
         let after = back.saturating_duration_since(commit);
         assert!(
             after <= limit,
@@ -1381,4 +1487,649 @@ async fn row08_password_in_a_frame_is_only_empty_or_filled() {
         in_run.is_empty(),
         "run dir files hold the canary: {in_run:?}"
     );
+}
+// ---------------------------------------------------------------------------------------
+// Round 2: the review-T-22 round 1 fixes (D-625, the act window cap, the row scrub in a
+// frame, D-628 opaque and challenge frames at call time).
+
+/// `js` in the page's own world of `frame` (a debug path: the frame's own state).
+async fn frame_js(d: &Driver, tab: TabId, frame: u32, js: &str) -> Value {
+    let ctx = d
+        .wait_registry(CAP, |r| r.default_context(tab, frame).cloned())
+        .await
+        .expect("the frame's main world");
+    let v = d
+        .cdp()
+        .call(
+            Some(&ctx.session),
+            "Runtime.evaluate",
+            json!({"expression": js, "contextId": ctx.id, "returnByValue": true}),
+        )
+        .await
+        .expect("Runtime.evaluate in the frame");
+    v.pointer("/result/value").cloned().unwrap_or(Value::Null)
+}
+
+/// `decl` called in the `sb` world of `frame` (a debug path into the runtime's own state).
+async fn sb_probe(d: &Driver, tab: TabId, frame: u32, decl: &str) -> Value {
+    let ctx = d
+        .wait_registry(CAP, |r| r.sb_context(tab, frame).cloned())
+        .await
+        .expect("the frame's sb world");
+    let v = d
+        .cdp()
+        .call(
+            Some(&ctx.session),
+            "Runtime.callFunctionOn",
+            json!({"functionDeclaration": decl, "executionContextId": ctx.id,
+                   "returnByValue": true}),
+        )
+        .await
+        .expect("probe");
+    v.pointer("/result/value").cloned().unwrap_or(Value::Null)
+}
+
+/// Whether the frame's runtime ever ran a based walk: `index()` answers `no base` until the
+/// first `walk({base})` (D-405 (2)), and this probe issues no ids.
+const WALKED_PROBE: &str = "function () { const sb = globalThis.__sb; \
+    if (!sb) return 'no runtime'; const r = sb.index(); \
+    return r && r.why ? r.why : 'walked'; }";
+
+/// Wait (a condition, capped) until the page world's `expr` is true.
+async fn until_page(d: &Driver, tab: TabId, expr: &str, cap: Duration) -> bool {
+    let t0 = Instant::now();
+    loop {
+        if page_js(d, tab, expr).await == json!(true) {
+            return true;
+        }
+        if t0.elapsed() >= cap {
+            return false;
+        }
+        // Polling the page's own flag; the condition is above, capped.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// (a) review blocking 1: `w(10s)` on a 5 s request and `settle` with cap_ms 6000 on a 4 s
+/// request, each started 100 ms in. Neither may say settled while its request is in flight:
+/// a settled answer needs the request's response to have landed (the page's flag).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row13a_long_waits_never_report_settled_while_a_request_is_in_flight() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/quiet")).await.expect("open");
+    assert!(d.settle(tab, SettleOpts::default()).await.unwrap().settled);
+    let ctx = rig.ctx(Class::Read);
+    for run in 0..2 {
+        // w(10s), fetch 5000 ms.
+        page_js(
+            d,
+            tab,
+            "window.__d = false; setTimeout(() => fetch('/api/slow?ms=5000').then((r) => r.text())\
+             .then(() => { window.__d = true; }), 100); 1",
+        )
+        .await;
+        let t0 = Instant::now();
+        let r = d.act(tab, "w(10s)", &ctx).await.expect("w(10s)");
+        let took = t0.elapsed();
+        let done = page_js(d, tab, "window.__d").await;
+        let settled = r.steps[0].settled;
+        println!(
+            "row13a run {run} w(10s) on 5 s: {took:?} settled {settled:?} response landed {done}"
+        );
+        assert_eq!(r.steps[0].outcome, StepOutcome::Ok, "{r:?}");
+        assert!(
+            settled != Some(true) || done == json!(true),
+            "w(10s) said settled at {took:?} while the 5 s request was in flight"
+        );
+        assert!(took <= Duration::from_millis(10_340), "{took:?}");
+        assert!(
+            until_page(d, tab, "window.__d", CAP).await,
+            "the 5 s request ended"
+        );
+
+        // settle cap 6000, fetch 4000 ms.
+        page_js(
+            d,
+            tab,
+            "window.__d = false; setTimeout(() => fetch('/api/slow?ms=4000').then((r) => r.text())\
+             .then(() => { window.__d = true; }), 100); 1",
+        )
+        .await;
+        let t0 = Instant::now();
+        let s = d
+            .settle(
+                tab,
+                SettleOpts {
+                    cap_ms: 6000,
+                    ..SettleOpts::default()
+                },
+            )
+            .await
+            .expect("settle 6000");
+        let took = t0.elapsed();
+        let done = page_js(d, tab, "window.__d").await;
+        println!("row13a run {run} settle(cap 6000) on 4 s: {took:?} {s:?} response landed {done}");
+        assert!(
+            !s.settled || done == json!(true),
+            "settle(cap 6000) said settled at {took:?} while the 4 s request was in flight"
+        );
+        assert!(took <= Duration::from_millis(6040), "{took:?}");
+        assert!(
+            until_page(d, tab, "window.__d", CAP).await,
+            "the 4 s request ended"
+        );
+    }
+}
+
+/// (b) review blocking 2: the act window, its last call and that call's answer included,
+/// ends by input + 3 s + 40 ms, also when the document changes inside the window. The input
+/// instant is the click handler's `console.log` as the event stream saw it (later than the
+/// input, so the measured window is a little shorter than the real one; the act's own start,
+/// before the gate read and actionability, is reported too).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row13b1_the_act_window_ends_by_input_plus_3_s_with_a_document_change() {
+    act_window(&[
+        ("net", 1000),
+        ("net", 2000),
+        ("net", 2800),
+        ("mut", 300),
+        ("mut", 450),
+    ])
+    .await;
+}
+
+/// (b) as above on a page whose main thread is blocked 200 ms of every 220 ms, so in-page
+/// calls answer late: without a document change, and with one at 1 s (to a busy page too).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row13b2_the_act_window_ends_by_input_plus_3_s_on_a_busy_page() {
+    act_window(&[("busy", 99_999), ("busy", 1000)]).await;
+}
+
+/// Each `(mode, at)` of `/win` twice, each in a new tab: act `c` on its button, timed from
+/// the click's console line to act()'s return.
+async fn act_window(variants: &[(&str, u32)]) {
+    let rig = rig().await;
+    let d = &rig.d;
+    let ctx = rig.ctx(Class::Submit);
+    let limit = SETTLE_CAP + SLACK;
+    let mut worst = Duration::ZERO;
+    let mut worst_total = Duration::ZERO;
+    for &(mode, at) in variants {
+        for run in 0..2 {
+            let url = rig.with_p2(&format!("/win?m={mode}&at={at}"));
+            let tab = d.open(&url).await.expect("open");
+            let ix = d.index(tab).await.expect("index");
+            let go = by_name(&ix, "Go window").elem();
+            let mut rx = d.cdp().events();
+            let click = tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(ev)
+                            if ev.method == "Runtime.consoleAPICalled"
+                                && ev.params.pointer("/args/0/value").and_then(Value::as_str)
+                                    == Some("t22-click") =>
+                        {
+                            return Some(Instant::now())
+                        }
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            continue
+                        }
+                        Err(_) => return None,
+                    }
+                }
+            });
+            let t0 = Instant::now();
+            let r = d.act(tab, &format!("c{go}"), &ctx).await.expect("act");
+            let end = Instant::now();
+            let total = end - t0;
+            let at_click = tokio::time::timeout(Duration::from_secs(1), click)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .expect("the click's console line was seen");
+            let window = end.saturating_duration_since(at_click);
+            let navigated = r.steps[0]
+                .consequences
+                .iter()
+                .any(|c| matches!(c, Consequence::Navigated { .. }));
+            println!(
+                "row13b {mode} nav at {at} ms run {run}: act {total:?}, from the click {window:?}, \
+                 settled {:?}, navigated {navigated}, outcome {:?}",
+                r.steps[0].settled, r.steps[0].outcome
+            );
+            worst = worst.max(window);
+            worst_total = worst_total.max(total);
+            assert_eq!(r.steps[0].outcome, StepOutcome::Ok, "{r:?}");
+            assert_eq!(r.steps[0].settled, Some(false), "never settles: {r:?}");
+            assert!(
+                window <= limit,
+                "{mode} nav at {at}: the act ended {window:?} after the click > {limit:?}"
+            );
+            d.close(tab).await.expect("close");
+        }
+    }
+    println!("row13b SUMMARY worst from the click {worst:?}, worst act total {worst_total:?}");
+}
+
+/// (c) review blocking 3, rule 2: the canary in role, name (text, aria-label, title), value,
+/// heading, nearby text and an option, inside a same-origin iframe: 0 hits in index() (serde,
+/// Debug, skeleton), the literal in its place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row13c_canary_in_a_same_origin_frame_never_reaches_index() {
+    let rig = rig().await;
+    rig.vault.install_global();
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/scrub-host")).await.expect("open");
+    let fu = rig.url("/scrub-frame");
+    let frame = d
+        .wait_registry(CAP, |r| {
+            r.frames(tab)?
+                .into_iter()
+                .find(|f| f.url == fu && !f.opaque)
+                .map(|f| f.frame)
+        })
+        .await
+        .expect("the same-origin frame");
+    let c = serde_json::to_string(&canary()).unwrap();
+    let js = format!(
+        "(() => {{ const c = {c}; const $ = (i) => document.getElementById(i);\
+         $('cap').setAttribute('role', c);\
+         $('t').textContent = 'text ' + c;\
+         $('al').setAttribute('aria-label', 'label ' + c);\
+         $('ti').setAttribute('title', 'title ' + c);\
+         $('v').value = c;\
+         $('h').textContent = 'Heading ' + c;\
+         $('near').textContent = 'near ' + c;\
+         $('o2').textContent = 'opt ' + c;\
+         return 1; }})()"
+    );
+    assert_eq!(frame_js(d, tab, frame, &js).await, json!(1));
+    let ix = d.index(tab).await.expect("index");
+    let wire = serde_json::to_string(&ix).unwrap();
+    let dbg = format!("{ix:?}");
+    let sk = skeleton(&ix, &rig.url("/scrub-host"), "Scrub host");
+    let hits = [&wire, &dbg, &sk].iter().filter(|s| has_canary(s)).count();
+    let mine: Vec<&IndexRow> = ix.iter().filter(|r| r.frame == frame).collect();
+    let lit = |s: &str| s.contains("@vault(pw)");
+    let count = |f: &dyn Fn(&IndexRow) -> bool| mine.iter().filter(|r| f(r)).count();
+    let roles = count(&|r| lit(&r.role));
+    let names = count(&|r| lit(&r.name));
+    let values = count(&|r| matches!(&r.state.value, Some(FieldValue::Text(t)) if lit(t)));
+    let headings = count(&|r| r.heading.as_deref().is_some_and(lit));
+    let nearby = count(&|r| r.nearby.as_deref().is_some_and(lit));
+    let options = count(&|r| r.state.options.iter().any(|o| lit(o)));
+    println!(
+        "row13c frame {frame}: {} rows in the frame; canary hits {hits}; literal in role {roles}, \
+         name {names}, value {values}, heading {headings}, nearby {nearby}, options {options}",
+        mine.len()
+    );
+    assert_eq!(
+        hits, 0,
+        "a vault value is in index() (serde, Debug or skeleton)"
+    );
+    assert!(!mine.is_empty(), "the frame was read");
+    assert!(roles >= 1, "the canary reached a role (and was scrubbed)");
+    assert!(names >= 3, "text, aria-label and title names: {names}");
+    assert!(values >= 1, "a field value");
+    assert!(headings >= 1, "a heading");
+    let ledger = format!("{:?}", rig.store.ledger());
+    assert!(!has_canary(&ledger), "the ledger holds the canary");
+}
+
+/// (d) D-628, review should-fix 2: act on `#fN.x` in a cross-origin frame (cross-port in
+/// process, cross-site OOPIF) fails before any read, and nothing is clicked or typed: the
+/// frame's own counter, its field and the server's /clicked log stay empty. The ids exist:
+/// the test walks the frame itself through the debug path first, so a driver that did not
+/// refuse would find and click them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row13d_act_in_a_cross_origin_frame_fails_and_clicks_nothing() {
+    let rig = rig().await;
+    let d = &rig.d;
+    CLICKS.store(0, Ordering::SeqCst);
+    let tab = d.open(&rig.with_p2("/xo-host")).await.expect("open");
+    let p2 = rig.port2;
+    let want = [
+        ("port", format!("http://127.0.0.1:{p2}/xo-frame?m=port")),
+        ("site", format!("http://localhost:{p2}/xo-frame?m=site")),
+    ];
+    let ix = d.index(tab).await.expect("index");
+    for (what, u) in &want {
+        let frame = d
+            .wait_registry(CAP, |r| {
+                let f = r.frames(tab)?.into_iter().find(|f| &f.url == u)?;
+                r.sb_context(tab, f.frame)?;
+                Some(f.frame)
+            })
+            .await
+            .unwrap_or_else(|| panic!("{what}: the frame with an sb world"));
+        assert!(
+            d.frames(tab)
+                .await
+                .unwrap()
+                .iter()
+                .any(|f| f.frame == frame && f.opaque),
+            "{what}: opaque"
+        );
+        assert!(!ix.iter().any(|r| r.frame == frame), "{what}: never read");
+        let ids = sb_probe(
+            d,
+            tab,
+            frame,
+            "function () { const sb = globalThis.__sb; if (!sb) return 'no runtime';\
+             sb.walk({base: 1}); const rows = sb.index();\
+             if (!Array.isArray(rows)) return JSON.stringify(rows);\
+             const f = (n) => { const r = rows.find((x) => x.name === n); return r ? r.id : null; };\
+             return [f('Frame button'), f('Frame field')]; }",
+        )
+        .await;
+        println!("row13d {what}: frame {frame}, ids from the debug walk {ids}");
+        let b = ids
+            .pointer("/0")
+            .and_then(Value::as_u64)
+            .expect("button id");
+        let i = ids.pointer("/1").and_then(Value::as_u64).expect("field id");
+        for prog in [
+            format!("c#f{frame}.{b}"),
+            format!("t#f{frame}.{i}=zq-typed"),
+        ] {
+            let r = d
+                .act(tab, &prog, &rig.ctx(Class::Submit))
+                .await
+                .expect("act");
+            println!("row13d {what} {prog}: {:?}", r.steps);
+            match &r.steps[0].outcome {
+                StepOutcome::Failed { why } => assert!(
+                    why.contains("OPAQUE") || why.contains("cross-origin"),
+                    "{what}: {why}"
+                ),
+                o => panic!("{what} {prog}: the step ran: {o:?}"),
+            }
+        }
+        let state = frame_js(
+            d,
+            tab,
+            frame,
+            "[window.__n || 0, document.getElementById('i').value]",
+        )
+        .await;
+        println!("row13d {what}: in-frame counter and field {state}");
+        assert_eq!(
+            state,
+            json!([0, ""]),
+            "{what}: something was clicked or typed"
+        );
+    }
+    // A cross-origin frame nobody walked: an act into it must not read inside (the driver's
+    // based walk would show in the frame's runtime), and must click nothing.
+    let nu = format!("http://127.0.0.1:{p2}/xo-frame?m=never");
+    let never = d
+        .wait_registry(CAP, |r| {
+            let f = r.frames(tab)?.into_iter().find(|f| f.url == nu)?;
+            r.sb_context(tab, f.frame)?;
+            Some(f.frame)
+        })
+        .await
+        .expect("the never-walked frame");
+    assert_eq!(
+        sb_probe(d, tab, never, WALKED_PROBE).await,
+        json!("no base")
+    );
+    for prog in [format!("c#f{never}.1"), format!("t#f{never}.2=zq-typed")] {
+        let r = d
+            .act(tab, &prog, &rig.ctx(Class::Submit))
+            .await
+            .expect("act");
+        println!("row13d never {prog}: {:?}", r.steps);
+        assert!(
+            matches!(&r.steps[0].outcome, StepOutcome::Failed { .. }),
+            "never {prog}: the step ran: {r:?}"
+        );
+    }
+    let walked = sb_probe(d, tab, never, WALKED_PROBE).await;
+    let state = frame_js(
+        d,
+        tab,
+        never,
+        "[window.__n || 0, document.getElementById('i').value]",
+    )
+    .await;
+    println!("row13d never: frame {never} runtime {walked}, counter and field {state}");
+    assert_eq!(
+        walked,
+        json!("no base"),
+        "the driver read inside frame {never}"
+    );
+    assert_eq!(
+        state,
+        json!([0, ""]),
+        "never: something was clicked or typed"
+    );
+    // A click would have sent /clicked at once; one page round trip first, so a request
+    // already sent has reached the server.
+    page_js(d, tab, "1").await;
+    assert_eq!(CLICKS.load(Ordering::SeqCst), 0, "the server saw a click");
+    // Control: the counter works (a click through the frame's own world).
+    let port_frame = d
+        .with_registry(|r| {
+            r.frames(tab)?
+                .into_iter()
+                .find(|f| f.url == want[0].1)
+                .map(|f| f.frame)
+        })
+        .unwrap();
+    frame_js(
+        d,
+        tab,
+        port_frame,
+        "document.getElementById('b').click(); 1",
+    )
+    .await;
+    let t0 = Instant::now();
+    while CLICKS.load(Ordering::SeqCst) == 0 && t0.elapsed() < CAP {
+        // Waiting for the test server's own log (the condition), capped.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        CLICKS.load(Ordering::SeqCst),
+        1,
+        "control: the log counts a click"
+    );
+}
+
+/// (e) D-5, D-628: a challenge widget frame (by its title) holding a same-origin frame that
+/// holds a third one added later is never walked: the runtime in each of the three frames
+/// still answers `no base` after index() (twice), settle(), frames(), tabs() and acts into
+/// two of them (each a CHALLENGE stop). A normal same-origin frame beside it is walked (the
+/// probe tells the two apart).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row13e_nested_frames_in_a_challenge_widget_are_never_walked() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/chw-host")).await.expect("open");
+    let p = rig.port;
+    let urls = ["/chw1", "/chw2", "/chw3"].map(|u| format!("http://127.0.0.1:{p}{u}"));
+    let normal = format!("http://127.0.0.1:{p}/chw-normal");
+    let ix1 = d.index(tab).await.expect("index");
+    let frames: Vec<u32> = d
+        .wait_registry(CAP, |r| {
+            let all = r.frames(tab)?;
+            let mut out = Vec::new();
+            for u in &urls {
+                let f = all.iter().find(|f| &f.url == u)?;
+                r.sb_context(tab, f.frame)?;
+                out.push(f.frame);
+            }
+            Some(out)
+        })
+        .await
+        .expect("three nested frames with sb worlds");
+    let nf = d
+        .wait_registry(CAP, |r| {
+            r.frames(tab)?
+                .into_iter()
+                .find(|f| f.url == normal)
+                .map(|f| f.frame)
+        })
+        .await
+        .expect("the normal frame");
+    let frames = &frames;
+    let check = |stage: &'static str| async move {
+        for f in frames {
+            let w = sb_probe(d, tab, *f, WALKED_PROBE).await;
+            assert_eq!(w, json!("no base"), "{stage}: frame {f} was walked");
+        }
+    };
+    check("after the first index()").await;
+    let ix = d.index(tab).await.expect("index");
+    for ix in [&ix1, &ix] {
+        let widget = ix
+            .iter()
+            .find(|r| r.flags.challenge)
+            .unwrap_or_else(|| panic!("a CHALLENGE row: {ix:#?}"));
+        assert_eq!(widget.child_frame, Some(frames[0]), "{widget:?}");
+        by_name(ix, "Outside button");
+        for f in frames {
+            assert!(!ix.iter().any(|r| r.frame == *f), "frame {f} was read");
+        }
+        for n in ["Inside one", "Inside two", "Inside three"] {
+            assert!(!ix.iter().any(|r| r.name == n), "{n} is in index()");
+        }
+    }
+    by_name(&ix, "Normal frame button");
+    assert_eq!(
+        sb_probe(d, tab, nf, WALKED_PROBE).await,
+        json!("walked"),
+        "control: the normal frame is walked"
+    );
+    check("after the second index()").await;
+    let s = d.settle(tab, SettleOpts::default()).await.expect("settle");
+    println!("row13e settle {s:?}");
+    d.frames(tab).await.expect("frames");
+    d.tabs().await.expect("tabs");
+    check("after settle, frames and tabs").await;
+    for f in [frames[1], frames[2]] {
+        let r = d
+            .act(tab, &format!("c#f{f}.1"), &rig.ctx(Class::Submit))
+            .await
+            .expect("act");
+        println!(
+            "row13e act into frame {f}: stopped {:?} steps {:?}",
+            r.stopped, r.steps
+        );
+        assert_eq!(
+            r.stopped.as_ref().map(|s| s.class),
+            Some(Class::Challenge),
+            "{r:?}"
+        );
+    }
+    check("after the acts").await;
+    println!("row13e frames {frames:?} never walked; normal frame {nf} walked");
+}
+
+/// (f) D-625: a request the tab started before settle began is not waited for, but while it
+/// is in flight at the end, settle() and w(d) say settled false (for any cap); once it ends,
+/// settle says true. Another tab's request in flight does not make this tab unsettled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row13f_a_request_started_before_settle_makes_it_unsettled() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/quiet")).await.expect("open");
+    assert!(d.settle(tab, SettleOpts::default()).await.unwrap().settled);
+    let mut rx = d.cdp().events();
+    page_js(
+        d,
+        tab,
+        "window.__d = false; fetch('/api/slow?ms=4000').then((r) => r.text())\
+         .then(() => { window.__d = true; }); 1",
+    )
+    .await;
+    // The driver has seen the request once the test has (the same event stream).
+    tokio::time::timeout(CAP, async {
+        loop {
+            match rx.recv().await {
+                Ok(ev)
+                    if ev.method == "Network.requestWillBeSent"
+                        && ev
+                            .params
+                            .pointer("/request/url")
+                            .and_then(Value::as_str)
+                            .is_some_and(|u| u.contains("ms=4000")) =>
+                {
+                    return
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => panic!("event stream closed"),
+            }
+        }
+    })
+    .await
+    .expect("the request was announced");
+    let t0 = Instant::now();
+    let s = d.settle(tab, SettleOpts::default()).await.expect("settle");
+    let took = t0.elapsed();
+    let done = page_js(d, tab, "window.__d").await;
+    println!("row13f settle with a pre-settle request: {took:?} {s:?} landed {done}");
+    assert!(
+        !s.settled,
+        "settled while the earlier request is in flight: {s:?}"
+    );
+    assert!(
+        took < Duration::from_millis(1500),
+        "not waited for: {took:?}"
+    );
+    let t0 = Instant::now();
+    let s = d
+        .settle(
+            tab,
+            SettleOpts {
+                cap_ms: 6000,
+                ..SettleOpts::default()
+            },
+        )
+        .await
+        .expect("settle 6000");
+    let done = page_js(d, tab, "window.__d").await;
+    println!(
+        "row13f settle(cap 6000): {:?} {s:?} landed {done}",
+        t0.elapsed()
+    );
+    assert!(
+        !s.settled || done == json!(true),
+        "settle(cap 6000) settled while the earlier request is in flight"
+    );
+    let t0 = Instant::now();
+    let r = d.act(tab, "w(2s)", &rig.ctx(Class::Read)).await.expect("w");
+    let done = page_js(d, tab, "window.__d").await;
+    println!(
+        "row13f w(2s): {:?} {:?} landed {done}",
+        t0.elapsed(),
+        r.steps
+    );
+    assert!(
+        r.steps[0].settled != Some(true) || done == json!(true),
+        "w(2s) settled while the request is in flight"
+    );
+    assert!(
+        until_page(d, tab, "window.__d", CAP).await,
+        "the request ended"
+    );
+    let s = d.settle(tab, SettleOpts::default()).await.expect("settle");
+    println!("row13f settle after it ended: {s:?}");
+    assert!(s.settled, "{s:?}");
+    // Another tab's request in flight does not count for this tab.
+    let b = d.open(&rig.url("/quiet")).await.expect("open b");
+    page_js(
+        d,
+        b,
+        &format!(
+            "fetch('http://127.0.0.1:{}/hang?other').catch(() => {{}}); 1",
+            rig.port2
+        ),
+    )
+    .await;
+    let s = d.settle(tab, SettleOpts::default()).await.expect("settle");
+    println!("row13f settle with another tab's request in flight: {s:?}");
+    assert!(s.settled, "another tab's request: {s:?}");
 }
