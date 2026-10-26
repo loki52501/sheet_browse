@@ -10,6 +10,12 @@
 //! * A firing ([`Runner::fire`]) records `schedules.last_run`, creates a run folder and a
 //!   `runs` row (status running, `parent_run` = the schedule's run, H-4), launches it through
 //!   a [`Launcher`] (D-106), then writes `report.md` from the ledger and sets ended/status.
+//! * A watch firing is checked after its session ends ([`crate::watch`], D-140): the state in
+//!   `files/watch.txt` against `memory.baselines`, one notification on change, and a
+//!   `Watch:` line in `report.md`.
+//! * [`run_preamble`] is what a launcher puts before the task in the session's prompt
+//!   (B-563): the run id, the files path, cite only this run's tool results; `prompt.md`
+//!   stays the task.
 //! * Due rule (D-116): the next occurrence strictly after the latest of `last_run`, the first
 //!   time this loop saw the schedule, and the loop's last attempt. Missed occurrences coalesce
 //!   into one firing; a schedule whose previous firing still runs skips.
@@ -19,6 +25,7 @@ use crate::memory::{ts_now, LedgerEvent, MemoryError, MemoryStore, Run, RunStatu
 pub use crate::memory::{Schedule, ScheduleKind};
 use crate::run::{RunFolder, RunId};
 use crate::vault::scrub;
+use crate::watch as watching;
 use async_trait::async_trait;
 use croner::parser::{CronParser, Seconds, Year};
 use croner::Cron;
@@ -236,6 +243,32 @@ pub struct LaunchRequest<'a> {
     pub schedule: Option<&'a Schedule>,
 }
 
+/// The text a launcher puts before the task in a session's prompt (B-563, D-140 (10)): the
+/// run id, the absolute `files/` path, and "cite only what tools returned in this run"; for
+/// a watch firing also where to write the watched state ([`watching::WATCH_FILE`]). Scrubbed.
+/// One line per item, no blank line inside, ends with a newline.
+pub fn run_preamble(req: &LaunchRequest<'_>) -> String {
+    let files = std::path::absolute(req.run.files()).unwrap_or_else(|_| req.run.files());
+    let files = files.to_string_lossy().replace('\\', "/");
+    let mut p = format!(
+        "Harness run {id}.\n\
+         Save deliverables in this folder: {files}\n\
+         Cite only what tools returned in this run; earlier runs and memory are not evidence \
+         for this one.\n",
+        id = req.run.id
+    );
+    if let Some(s) = req.schedule.filter(|s| s.kind == ScheduleKind::Watch) {
+        p.push_str(&format!(
+            "This is a watch run for \"{target}\": write the current watched state as plain \
+             text to {files}/{file} (the harness compares it with the last run and notifies \
+             the user on change).\n",
+            target = watching::target_key(s),
+            file = watching::WATCH_FILE,
+        ));
+    }
+    scrub(&p)
+}
+
 /// How the session ended. `code: None` means it was killed by a signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchExit {
@@ -428,6 +461,27 @@ impl Runner {
             }
         }
 
+        let watch_line = match spec.schedule.filter(|s| s.kind == ScheduleKind::Watch) {
+            None => None,
+            Some(s) => {
+                let skip = self.watch_skip(&folder.id, launch_problem.is_some()).await;
+                let now = self.clock.now();
+                match watching::check(self.store.as_ref(), &ledger, &self.runs_root, s, now, skip)
+                    .await
+                {
+                    Ok(w) => Some(w.report_line()),
+                    Err(e) => {
+                        let line = scrub(&format!(
+                            "Watch: {}: check failed ({e}), nothing sent",
+                            watching::target_key(s)
+                        ));
+                        first_err.get_or_insert(e);
+                        Some(line)
+                    }
+                }
+            }
+        };
+
         let events: Vec<LedgerEvent> = match self.store.ledger_events(&folder.id).await {
             Ok(rows) => rows.into_iter().map(|(_, e)| e).collect(),
             Err(e) => {
@@ -443,8 +497,16 @@ impl Runner {
         }
         match ledger::write_report(&folder, &prompt, &events) {
             Ok(text) => {
+                let mut out = text.clone();
                 if let (RunStatus::Failed, Some(why)) = (status, &launch_problem) {
-                    if let Err(e) = std::fs::write(folder.report_md(), mark_failed(&text, why)) {
+                    out = mark_failed(&out, why);
+                }
+                if let Some(line) = &watch_line {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                if out != text {
+                    if let Err(e) = std::fs::write(folder.report_md(), out) {
                         first_err.get_or_insert(e.into());
                     }
                 }
@@ -468,6 +530,24 @@ impl Runner {
             schedule: spec.schedule.map(|s| s.id),
             launch_problem,
         })
+    }
+}
+
+impl Runner {
+    /// Why a watch firing's state must not be trusted, if it must not: the session failed,
+    /// or the ledger says the run stopped (a challenge or a refused step, D-140 (3)).
+    async fn watch_skip(&self, run: &RunId, launch_failed: bool) -> Option<String> {
+        if launch_failed {
+            return Some("the session failed".into());
+        }
+        match self.store.ledger_events(run).await {
+            Ok(rows) => {
+                let events: Vec<LedgerEvent> = rows.into_iter().map(|(_, e)| e).collect();
+                (ledger::run_status(&events) == RunStatus::Stopped)
+                    .then(|| "the run stopped".into())
+            }
+            Err(_) => Some("the ledger could not be read".into()),
+        }
     }
 }
 

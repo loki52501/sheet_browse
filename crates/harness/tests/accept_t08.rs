@@ -47,6 +47,19 @@ const CAP: Duration = Duration::from_secs(30);
 /// A real `*/1` firing: up to 60 s to the next minute boundary, plus start-up and the run.
 const CAP_MINUTE: Duration = Duration::from_secs(100);
 const DEFAULT_ADMIN_URL: &str = "postgres://sb@127.0.0.1:5433/postgres";
+
+/// The task part of a `claude -p` session's stdin: what follows the run preamble and its
+/// blank line (B-563, D-140 (10)). Asserts the preamble names the run.
+fn task_of(stdin: &str, run: &str) -> String {
+    assert!(
+        stdin.starts_with(&format!("Harness run {run}.\n")),
+        "stdin lacks the run preamble"
+    );
+    stdin
+        .split_once("\n\n")
+        .map(|(_, t)| t.to_owned())
+        .unwrap_or_default()
+}
 const CHILD_VAR: &str = "SB_T08_CHILD";
 
 // ------------------------------------------------------------------ throwaway database
@@ -788,7 +801,7 @@ async fn acc4_schedule_add_fires_with_real_harness_and_harnessd() {
         "claude argv (B-192 denials)"
     );
     let stdin = std::fs::read_to_string(calls.join(format!("{}.stdin", run.0))).unwrap();
-    assert_eq!(stdin, "say hi");
+    assert_eq!(task_of(&stdin, &run.0), "say hi");
     let envs = std::fs::read_to_string(calls.join(format!("{}.env", run.0))).unwrap();
     assert!(envs.contains(&format!("SB_RUN_ID={}\n", run.0)), "{envs}");
     let root = envs
@@ -801,7 +814,7 @@ async fn acc4_schedule_add_fires_with_real_harness_and_harnessd() {
         std::fs::canonicalize(&runs).unwrap()
     );
     let answer = std::fs::read_to_string(folder.join("files/answer.md")).unwrap();
-    assert_eq!(answer, "fake claude: say hi");
+    assert_eq!(answer, format!("fake claude: {stdin}"));
     let s2 = store
         .schedule_list()
         .await
@@ -1493,7 +1506,7 @@ async fn child_claude_launcher_stdin_scrub() {
         "the prompt must not be in argv (B-192 denials)"
     );
     let stdin = std::fs::read_to_string(calls.join(format!("{}.stdin", f.run.0))).unwrap();
-    assert_eq!(stdin, scrubbed);
+    assert_eq!(task_of(&stdin, &f.run.0), scrubbed);
     let envs = std::fs::read_to_string(calls.join(format!("{}.env", f.run.0))).unwrap();
     assert!(envs.contains(&format!("SB_RUN_ID={}\n", f.run.0)), "{envs}");
     let root = envs
@@ -1507,7 +1520,8 @@ async fn child_claude_launcher_stdin_scrub() {
     );
     let answer = std::fs::read_to_string(runs_abs.join(&f.run.0).join("files/answer.md")).unwrap();
     assert!(!answer.contains(&c), "answer.md holds the vault value");
-    assert!(answer.starts_with("fake claude: --version\n"), "{answer}");
+    assert!(answer.starts_with("fake claude: Harness run "), "{answer}");
+    assert!(answer.contains("\n\n--version\n"), "{answer}");
     assert!(answer.contains("leaked: @vault(test)"), "{answer}");
     let row = store.run_get(&f.run).await.unwrap().unwrap();
     assert_eq!(row.prompt, scrubbed, "runs.prompt");

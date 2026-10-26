@@ -5,7 +5,7 @@
 //! CONTRACT modules (I-1..I-4, agent-memory/interfaces.yaml): `class`, `memory`, `gate`,
 //! `vault`, `mcp`, and `run::RunId`. Change them only through `interface_changes`.
 //! Owned by area core (not contract): `ask` (FileAsker, D-105), `ledger`, `run::RunFolder`,
-//! `sched` (skeleton).
+//! `sched` (I-13 draft), `watch` (T-16, D-140).
 
 pub mod ask;
 pub mod class;
@@ -18,6 +18,7 @@ pub mod sched;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod vault;
+pub mod watch;
 
 pub use ask::FileAsker;
 pub use class::{Class, Mode};

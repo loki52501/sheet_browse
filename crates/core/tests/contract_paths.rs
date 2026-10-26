@@ -1,7 +1,8 @@
 //! Contract paths (pr-ready section 4): every harness-core item `agent-memory/interfaces.yaml`
 //! names (its `rust` paths and the methods its `name` leads with) must exist at exactly
 //! that path and signature, so a wrong path fails compilation here.
-//! Covers I-4 (vault) so far; other interfaces are added as their tasks touch them.
+//! Covers I-4 (vault) and I-13 (sched, watch) so far; other interfaces are added as their
+//! tasks touch them.
 
 use std::path::{Path, PathBuf};
 
@@ -62,4 +63,44 @@ fn vault_error_variants() {
         VaultError::ValueInLiteral { name: "n".into() },
     ];
     assert_eq!(errors.len(), 3);
+}
+
+/// I-13 (draft), as touched by T-16 (B-197, D-140): every listed sched path, the new
+/// `LaunchRequest.schedule` field, `run_preamble`, and the `watch` module items.
+#[test]
+fn sched_paths_and_launch_request_schedule() {
+    use harness_core::memory::Schedule;
+    use harness_core::run::RunFolder;
+    #[allow(unused_imports)]
+    use harness_core::sched::{
+        changed_dir, next_after, notify_changed, parse_cron, run_preamble, Clock, Finished, Fired,
+        LaunchError, LaunchExit, LaunchRequest, Launcher, ManualClock, RunSpec, Runner, SchedError,
+        Scheduler, SystemClock, CHANGED_DIR, FIRE_TOOL, LAUNCH_TOOL,
+    };
+    use harness_core::watch::{
+        normalise, state_hash, target_key, WatchCheck, WatchOutcome, CHECK_TOOL, NOTIFICATIONS_LOG,
+        NOTIFICATION_FILE, NOTIFY_TOOL, WATCH_FILE,
+    };
+    fn _req<'a>(run: &'a RunFolder, s: Option<&'a Schedule>) -> LaunchRequest<'a> {
+        LaunchRequest {
+            run,
+            runs_root: Path::new("runs"),
+            prompt: "",
+            schedule: s,
+        }
+    }
+    let _ = _req;
+    let _: fn(&LaunchRequest<'_>) -> String = run_preamble;
+    let _: fn(&str) -> String = normalise;
+    let _: fn(&str) -> String = state_hash;
+    let _: fn(&Schedule) -> String = target_key;
+    let _: fn(&WatchCheck) -> String = WatchCheck::report_line;
+    let _: Option<WatchOutcome> = None;
+    let _: [&str; 5] = [
+        WATCH_FILE,
+        NOTIFICATION_FILE,
+        NOTIFICATIONS_LOG,
+        CHECK_TOOL,
+        NOTIFY_TOOL,
+    ];
 }

@@ -391,7 +391,16 @@ async fn a_run_scrubs_prompt_slug_row_session_input_and_answer() {
     assert_clean(&row.prompt, true, "runs.prompt");
     assert_clean(&row.folder, false, "runs.folder");
     let stdin = std::fs::read_to_string(fake_dir.join("stdin.txt")).unwrap();
-    assert_eq!(stdin, format!("{LITERAL} please log in"));
+    // The run preamble (B-563, D-140 (10)), one blank line, then the scrubbed task.
+    assert_clean(&stdin, true, "session stdin");
+    assert!(
+        stdin.starts_with(&format!("Harness run {}.\n", f.run.0)),
+        "stdin lacks the run preamble"
+    );
+    assert_eq!(
+        stdin.split_once("\n\n").map(|(_, t)| t),
+        Some(format!("{LITERAL} please log in").as_str())
+    );
     let answer = std::fs::read_to_string(f.folder.join("files").join(ANSWER_FILE)).unwrap();
     assert_clean(&answer, true, "answer.md");
     assert_eq!(answer, format!("Logged in with {LITERAL}. Done."));

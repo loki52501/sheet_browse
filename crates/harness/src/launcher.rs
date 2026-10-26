@@ -1,7 +1,8 @@
 //! The default [`Launcher`] (D-106, D-116, D-124): a fresh Claude Code session per run.
 //!
 //! * Scheduled runs (`harnessd`): `claude -p` with the prompt on stdin (not argv, so a prompt
-//!   starting with `-` is never read as a flag and Windows quoting cannot split it). stdout,
+//!   starting with `-` is never read as a flag and Windows quoting cannot split it), after the
+//!   run preamble ([`harness_core::sched::run_preamble`], B-563, D-140) and a blank line. stdout,
 //!   the session's answer, is scrubbed and written to `files/answer.md`; stderr is inherited
 //!   (it reaches harnessd's terminal unscrubbed; tool results in it were scrubbed by the tool
 //!   servers already). A session is capped at [`ClaudeLauncher::max_session`] wall-clock time
@@ -9,7 +10,8 @@
 //!   is killed (its process tree on Windows) and the launch fails. Its stdout is capped at
 //!   [`ClaudeLauncher::max_answer_bytes`]; the rest is read and dropped.
 //! * `harness run`: interactive `claude <prompt>` with inherited stdio, no cap (the user is
-//!   at the terminal).
+//!   at the terminal), and no preamble (argv through the `claude.cmd` shim cannot carry its
+//!   newlines safely).
 //!
 //! Every session gets `--disallowedTools` with [`DISALLOWED_TOOLS`] (B-192): a session must
 //! not answer its own asks, change gate rules or vault entries through the CLI (rule 4).
@@ -18,7 +20,7 @@
 
 use crate::CliError;
 use async_trait::async_trait;
-use harness_core::sched::{LaunchError, LaunchExit, LaunchRequest, Launcher};
+use harness_core::sched::{run_preamble, LaunchError, LaunchExit, LaunchRequest, Launcher};
 use harness_core::vault::scrub;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -212,6 +214,11 @@ pub fn answer_text(kept: &[u8], total: usize, cap: usize) -> String {
     )
 }
 
+/// What a `claude -p` session reads on stdin: [`run_preamble`], a blank line, the task.
+pub fn session_prompt(req: &LaunchRequest<'_>) -> String {
+    format!("{}\n{}", run_preamble(req), req.prompt)
+}
+
 #[async_trait]
 impl Launcher for ClaudeLauncher {
     async fn launch(&self, req: LaunchRequest<'_>) -> Result<LaunchExit, LaunchError> {
@@ -236,7 +243,7 @@ impl Launcher for ClaudeLauncher {
             .stdout
             .take()
             .ok_or_else(|| LaunchError("no stdout pipe".into()))?;
-        let prompt = req.prompt.as_bytes().to_vec();
+        let prompt = session_prompt(&req).into_bytes();
         let write = async move {
             let r = stdin.write_all(&prompt).await;
             drop(stdin); // EOF: the session starts.
@@ -351,6 +358,29 @@ mod tests {
         let mut want = vec![" -h say hi"];
         want.extend(deny);
         assert_eq!(argv(&i.command(&i.program, &req, tmp.path())), want);
+    }
+
+    /// B-563 (D-140 (10)): a `-p` session reads the run preamble, one blank line, then the
+    /// task; the preamble itself has no blank line, so the task is everything after the first.
+    #[test]
+    fn session_prompt_is_preamble_then_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = RunFolder::create(tmp.path(), "x", "x").unwrap();
+        let req = LaunchRequest {
+            run: &run,
+            runs_root: tmp.path(),
+            prompt: "-h say hi\n\nsecond paragraph",
+            schedule: None,
+        };
+        let p = session_prompt(&req);
+        assert!(p.starts_with(&format!("Harness run {}.\n", run.id)), "{p}");
+        assert!(
+            p.contains("Cite only what tools returned in this run"),
+            "{p}"
+        );
+        let (pre, task) = p.split_once("\n\n").unwrap();
+        assert_eq!(format!("{pre}\n"), run_preamble(&req));
+        assert_eq!(task, "-h say hi\n\nsecond paragraph");
     }
 
     #[test]
