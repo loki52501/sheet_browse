@@ -238,6 +238,14 @@ fn write_card(run_dir: &Path, next: &AtomicU64, mut doc: CardFile) -> io::Result
 /// reason, a bare `create_new` still closes it (an empty answer is not a yes or no, and
 /// [`answer`] refuses a closed ask). `AlreadyExists` when the ask was already closed.
 fn close_answer(answer: &Path) -> io::Result<()> {
+    close_answer_with(answer, claim)
+}
+
+/// [`close_answer`] with the temp-file claim passed in, so a test can make it fail.
+fn close_answer_with(
+    answer: &Path,
+    claim: impl FnOnce(&Path, &str) -> io::Result<()>,
+) -> io::Result<()> {
     let err = match claim(answer, &format!("{TIMED_OUT}\n")) {
         Ok(()) => return Ok(()),
         Err(e) => e,
@@ -346,13 +354,20 @@ impl Asker for FileAsker {
         };
         let n = open.n;
         // The watch is armed after the card exists; the one read right after arming catches
-        // an answer that landed in between, so none can slip past.
+        // an answer that landed in between, so none can slip past. It is armed on the
+        // blocking pool, raced against the card's deadline: on Windows `watch` blocks until
+        // the watcher's own thread acks, which can take a while on a loaded machine, and
+        // must neither hold an executor thread nor stretch the ask past its timer. If the
+        // deadline wins, the watcher is dropped on the blocking thread when it is ready.
         let dir = asks_dir(&self.run_dir);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let watcher = notify::recommended_watcher(move |_res: notify::Result<notify::Event>| {
-            let _ = tx.send(());
-        })
-        .and_then(|mut w| w.watch(&dir, RecursiveMode::NonRecursive).map(|()| w));
+        let arm = tokio::task::spawn_blocking(move || {
+            notify::recommended_watcher(move |_res: notify::Result<notify::Event>| {
+                let _ = tx.send(());
+            })
+            .and_then(|mut w| w.watch(&dir, RecursiveMode::NonRecursive).map(|()| w))
+            .map_err(|e| e.to_string())
+        });
         let path = open.answer.clone();
         eprintln!(
             "{}",
@@ -372,7 +387,15 @@ impl Asker for FileAsker {
             )
         );
 
-        let _watcher = match watcher {
+        let armed = match tokio::time::timeout_at(deadline, arm).await {
+            // The timer ran out before the watch was armed: close the ask (an answer that
+            // landed is read there).
+            Err(_) => return self.close(card, &mut open).await,
+            Ok(Ok(armed)) => armed,
+            // A failed join becomes a fixed text (its message could carry a panic payload).
+            Ok(Err(_)) => Err("watch task failed".to_owned()),
+        };
+        let _watcher = match armed {
             Ok(w) => w,
             Err(e) => {
                 self.diag(&format!("ask {n}: cannot watch for the answer: {e}"));
@@ -482,5 +505,161 @@ mod tests {
         let left: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
         assert_eq!(left.len(), 1, "temp files are removed");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fresh folder under the OS temp dir.
+    fn tmp_dir(tag: &str) -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "sb-ask-{tag}-{}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed),
+            chrono::Utc::now().timestamp_micros()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// D-123 (1), the no-hard-link path: the target holds the whole text, the temp file is
+    /// gone, and a second claim is `AlreadyExists` and leaves the first text alone.
+    #[test]
+    fn claim_without_links_publishes_whole_and_no_clobber() {
+        let dir = tmp_dir("nolink");
+        let target = dir.join("1.json");
+        let text = format!("{{\"n\": 1, \"what\": \"{}\"}}\n", "x".repeat(100_000));
+        let tmp = dir.join(".1.json.a.tmp");
+        std::fs::write(&tmp, &text).unwrap();
+        claim_without_links(&tmp, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), text);
+        assert!(!tmp.exists(), "the temp file was renamed away");
+        assert_eq!(names(&dir), vec!["1.json".to_owned()]);
+
+        let tmp2 = dir.join(".1.json.b.tmp");
+        std::fs::write(&tmp2, "{\"n\": 2}\n").unwrap();
+        let err = claim_without_links(&tmp2, &target).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), text);
+        assert!(
+            tmp2.exists(),
+            "the caller (claim) removes its own temp file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D-123 (1): a failed rename removes the placeholder, so no empty card or answer is
+    /// left behind, and the name can be claimed again.
+    #[test]
+    fn claim_without_links_failed_rename_leaves_no_placeholder() {
+        let dir = tmp_dir("nolink-fail");
+        let target = dir.join("1.answer");
+        let missing = dir.join(".1.answer.missing.tmp");
+        let err = claim_without_links(&missing, &target).unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(
+            !target.exists(),
+            "placeholder removed after the failed rename"
+        );
+        assert!(names(&dir).is_empty(), "{:?}", names(&dir));
+
+        let tmp = dir.join(".1.answer.ok.tmp");
+        std::fs::write(&tmp, "yes\n").unwrap();
+        claim_without_links(&tmp, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "yes\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D-123 (3): when the temp-file claim fails for an I/O reason, a bare `create_new`
+    /// still closes the ask with an empty answer (no yes or no), and a late reply is refused.
+    #[test]
+    fn close_answer_falls_back_to_create_new() {
+        let dir = tmp_dir("close-fallback");
+        let target = dir.join("1.answer");
+        let denied = |_: &Path, _: &str| -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "no temp file",
+            ))
+        };
+        close_answer_with(&target, denied).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
+        assert_eq!(parse_answer(""), None, "an empty answer is not an answer");
+        let late = claim(&target, "yes\n").unwrap_err();
+        assert_eq!(late.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
+
+        // Already closed: the fallback reports AlreadyExists and changes nothing.
+        let err = close_answer_with(&target, denied).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
+
+        // Both fail (no folder): the claim's own error comes back and nothing is created.
+        let gone = dir.join("missing").join("1.answer");
+        let err = close_answer_with(&gone, denied).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!gone.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn proceed_card() -> AskCard {
+        AskCard {
+            class: crate::class::Class::Account,
+            what: "change the email".into(),
+            site: None,
+            values: Vec::new(),
+            timeout: std::time::Duration::from_millis(1),
+            on_timeout: OnTimeout::Proceed,
+        }
+    }
+
+    /// D-123 (3): a close that fails (the ask could not be claimed, so a late answer may
+    /// still be taken) is `TimeoutSkip`, even for a card that proceeds on timeout. Controls:
+    /// the same card closed normally proceeds, and a closed but unreadable answer skips.
+    #[tokio::test]
+    async fn a_failed_close_is_timeout_skip() {
+        let root = tmp_dir("close-skip");
+        let fa = FileAsker::new(
+            &root,
+            RunId("2026-10-25T00-00-00-close".into()),
+            Arc::new(Vault::in_memory([])),
+        );
+        let card = proceed_card();
+
+        let mut open = OpenAsk {
+            n: 1,
+            answer: root.join("no-such-folder").join("1.answer"),
+            open: true,
+        };
+        assert_eq!(fa.close(&card, &mut open).await, AskOutcome::TimeoutSkip);
+        assert!(!open.open, "settled: the guard does not retry on drop");
+        assert!(!open.answer.exists());
+
+        let mut open = OpenAsk {
+            n: 2,
+            answer: root.join("2.answer"),
+            open: true,
+        };
+        assert_eq!(fa.close(&card, &mut open).await, AskOutcome::TimeoutProceed);
+        assert_eq!(
+            std::fs::read_to_string(&open.answer).unwrap(),
+            format!("{TIMED_OUT}\n")
+        );
+
+        std::fs::write(root.join("3.answer"), "").unwrap();
+        let mut open = OpenAsk {
+            n: 3,
+            answer: root.join("3.answer"),
+            open: true,
+        };
+        assert_eq!(fa.close(&card, &mut open).await, AskOutcome::TimeoutSkip);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

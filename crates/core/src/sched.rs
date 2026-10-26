@@ -42,7 +42,9 @@ pub const LAUNCH_TOOL: &str = "launch";
 const DB_RETRY_MAX: Duration = Duration::from_secs(60);
 const DB_RETRY_MIN: Duration = Duration::from_millis(500);
 
+/// `#[non_exhaustive]` (D-85): a new failure kind is not a breaking change for matchers.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SchedError {
     #[error("cron {cron:?}: {why}")]
     BadCron { cron: String, why: String },

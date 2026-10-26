@@ -293,7 +293,7 @@ pub async fn execute(cli: Cli, ctx: &Ctx, out: &mut dyn Write) -> Result<(), Cli
                 .map_err(|e: harness_core::class::UnknownMode| CliError::Usage(e.to_string()))?;
             ctx.store()
                 .await?
-                .gate_rule_set(&domain, &class, GateRule { mode, strict }, &note)
+                .gate_rule_set(&domain, &class, GateRule { mode, strict }, &scrub(&note))
                 .await?;
             writeln!(
                 out,
@@ -678,16 +678,18 @@ async fn print_ledger(ctx: &Ctx, run: &str, out: &mut dyn Write) -> Result<(), C
     let store = ctx.store().await?;
     let id = RunId(run.to_owned());
     let Some(r) = store.run_get(&id).await? else {
-        return Err(CliError::NotFound(format!("no run {run}")));
+        return Err(CliError::NotFound(format!("no run {}", clean(run))));
     };
     writeln!(
         out,
         "run {}  {}  started {}  ended {}  parent {}{}",
-        r.id,
+        clean(&r.id.0),
         status_str(r.status),
         ts_cell(Some(r.started)),
         ts_cell(r.ended),
-        r.parent_run.as_ref().map_or("-", |p| p.0.as_str()),
+        r.parent_run
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |p| clean(&p.0)),
         if r.strict { "  strict" } else { "" }
     )?;
     let events = store.ledger_events(&id).await?;
@@ -852,14 +854,24 @@ async fn tools(ctx: &Ctx, cmd: ToolsCmd, out: &mut dyn Write) -> Result<(), CliE
             )?;
         }
         ToolsCmd::Pin { tool } => {
-            let (d, n) = split_tool(&tool)?;
+            let (d, n) = known_tool(&ts, store.as_ref(), &tool).await?;
             let h = ts.set_pinned(store.as_ref(), d, n, true).await?;
-            writeln!(out, "{d}/{n}: pinned ({})", tool_status(h.status))?;
+            writeln!(
+                out,
+                "{}: pinned ({})",
+                clean(&format!("{d}/{n}")),
+                tool_status(h.status)
+            )?;
         }
         ToolsCmd::Unpin { tool } => {
-            let (d, n) = split_tool(&tool)?;
+            let (d, n) = known_tool(&ts, store.as_ref(), &tool).await?;
             let h = ts.set_pinned(store.as_ref(), d, n, false).await?;
-            writeln!(out, "{d}/{n}: unpinned ({})", tool_status(h.status))?;
+            writeln!(
+                out,
+                "{}: unpinned ({})",
+                clean(&format!("{d}/{n}")),
+                tool_status(h.status)
+            )?;
         }
         ToolsCmd::Retire {
             tool,
@@ -868,6 +880,25 @@ async fn tools(ctx: &Ctx, cmd: ToolsCmd, out: &mut dyn Write) -> Result<(), CliE
         } => retire(&ts, store.as_ref(), &tool, why, no_commit, out).await?,
     }
     Ok(())
+}
+
+/// `<domain>/<name>` of a tool that has a `tools.health` row or a file on disk. Pinning or
+/// unpinning anything else is refused (NotFound) instead of creating a row named with
+/// whatever was typed (D-124 (1)).
+async fn known_tool<'a>(
+    ts: &ToolStore,
+    store: &dyn MemoryStore,
+    tool: &'a str,
+) -> Result<(&'a str, &'a str), CliError> {
+    let (d, n) = split_tool(tool)?;
+    let on_disk = ts.try_tool_path(d, n)?.is_file();
+    if !on_disk && ts.health(store, d, n).await?.is_none() {
+        return Err(CliError::NotFound(format!(
+            "no tool {}",
+            clean(&format!("{d}/{n}"))
+        )));
+    }
+    Ok((d, n))
 }
 
 /// T-7 retire by the user: status retired with its why, file moved to `_archive/`, and the
@@ -881,15 +912,16 @@ async fn retire(
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
     let (d, n) = split_tool(tool)?;
+    let id = clean(&format!("{d}/{n}"));
     let path = ts.try_tool_path(d, n)?;
     let row = ts.health(store, d, n).await?;
     if row.as_ref().is_some_and(|h| h.pinned) {
         return Err(CliError::Usage(format!(
-            "{d}/{n} is pinned; `harness tools unpin {d}/{n}` first"
+            "{id} is pinned; `harness tools unpin {id}` first"
         )));
     }
     if row.is_none() && !path.is_file() {
-        return Err(CliError::NotFound(format!("no tool {d}/{n}")));
+        return Err(CliError::NotFound(format!("no tool {id}")));
     }
     let mut h = row.unwrap_or(ToolHealth {
         domain: d.to_owned(),
@@ -911,11 +943,15 @@ async fn retire(
     store.tool_health_set(h.clone()).await?;
     let moved = ts.archive(d, n, h.version)?;
     match &moved {
-        Some(to) => writeln!(out, "{d}/{n}: retired, archived to {}", to.display())?,
-        None => writeln!(out, "{d}/{n}: retired (no file to archive)")?,
+        Some(to) => writeln!(
+            out,
+            "{id}: retired, archived to {}",
+            clean(&to.display().to_string())
+        )?,
+        None => writeln!(out, "{id}: retired (no file to archive)")?,
     }
     if let (Some(to), false) = (moved, no_commit) {
-        let msg = format!("tools: retire {d}/{n} by the user (T-7)");
+        let msg = format!("tools: retire {id} by the user (T-7)");
         let paths: Vec<PathBuf> = vec![path, to];
         let hash = ts.git_commit(&paths, &msg)?;
         writeln!(out, "committed {hash}")?;

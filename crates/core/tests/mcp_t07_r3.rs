@@ -114,6 +114,9 @@ fn poll_card(path: PathBuf, n: u64, done: Arc<AtomicBool>) -> std::thread::JoinH
             if finished {
                 break;
             }
+            // Give the core back between reads: a reader that never yields competes with
+            // the asker's blocking-pool and watcher threads on a loaded machine.
+            std::thread::yield_now();
         }
         s
     })

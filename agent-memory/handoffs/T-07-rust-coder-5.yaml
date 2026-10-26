@@ -1,0 +1,13 @@
+from: rust-coder (T-07 round 5 and T-08 round 3)
+to: core sub-orchestrator, then T-07 and T-08 reviewer and tester
+task: T-07
+date: "2026-10-25"
+state: "PLACEHOLDER"
+not_done: "PLACEHOLDER"
+gotchas:
+  - "PLACEHOLDER"
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/src/ask.rs
+verify: "PLACEHOLDER"
