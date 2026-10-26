@@ -209,6 +209,15 @@ blockers:
     task: T-18
     question: "D-601 gives the pinned path as <home>/chromium/156.0.8078.4/chrome-<platform>/chrome(.exe), but the macOS Chrome for Testing archive has no 'chrome' binary. And is an empty SB_CHROMIUM or SB_HOME 'set'?"
     default_taken: "macOS resolves to chrome-mac-arm64 (or chrome-mac-x64)/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing; Windows and Linux follow D-601 exactly (chrome-win64/chrome.exe, chrome-linux64/chrome). An empty SB_CHROMIUM or SB_HOME counts as unset. A set source that names a missing file is an error naming SB_CHROMIUM, never a fall-through."
+  - id: B-500
+    task: T-12
+    question: "docs/04 W-2 says fetch(mode=\"raw\") returns the cleaned HTML of <main> or the densest block (60 k chars) 'for tools that need structure', but CLAUDE.md rule 5 says the model never receives raw HTML except from screenshot and video.*. Which wins for the model-facing fetch tool?"
+    default_taken: "Rule 5 wins. fetch(mode=raw) is refused with ToolError::Args naming B-500 before any request; mode=read (with region) and mode=sheet are the structured views. The W-2 raw renderer exists as srv_web::html::raw_main_html (cleaned: no script/style/comments, attribute allowlist, no password or card values, capped at 60 k chars) for in-process site-tool hosts, and is never returned to the model. If supreme wants raw for the model, that is a CLAUDE.md change, not a srv-web one."
+    needs_user: false
+  - id: B-501
+    task: T-12
+    question: "fetch follows redirects (W-2), but the gate classified the call by the requested URL's domain. A redirect to another registrable domain therefore reads that domain without its own gate.rules lookup (a `stop` rule on the target domain does not fire). Classify again per hop, refuse cross-domain redirects, or accept for Read GETs?"
+    default_taken: "Accepted for Phase 1: fetch is a Read GET, reads only, and the browser path has the same property on navigation. The final URL is in the tool event's consequences.url, so the ledger shows where the read landed. api (W-3) does not follow redirects to another host at all. Revisit if a domain stop rule must also cover reads reached by redirect."
     needs_user: false
 interface_changes:
   - id: B-194
