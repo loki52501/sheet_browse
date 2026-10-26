@@ -20,7 +20,7 @@ tasks:
     step: 1
     title: "core-pg: implement MemoryStore with sqlx; recall fusion; recursive neighbors; append-only trigger"
     docs: [docs/02-MEMORY.md]
-    status: doing
+    status: done   # merged 960c7b1 under D-87; red acceptance rows -> follow-up tasks
     owner: core/suborch
     claimed_at: "2026-10-23"
     blocked_by: [T-02]
@@ -28,21 +28,21 @@ tasks:
     step: 1
     title: "core::gate: classes, classifier hooks, gate.rules lookup, ask cards with 60 s timeout semantics, stop"
     docs: [docs/01-HARNESS-CORE.md]
-    status: doing
+    status: done   # merged 960c7b1 under D-87; red acceptance rows -> follow-up tasks
     owner: core/suborch
     claimed_at: "2026-10-23"
   - id: T-05
     step: 1
     title: "core::vault: age-encrypted file + keychain key, resolve_into(sink), scrub()"
     docs: [docs/01-HARNESS-CORE.md]
-    status: doing
+    status: done   # merged 960c7b1 under D-87; red acceptance rows -> follow-up tasks
     owner: core/suborch
     claimed_at: "2026-10-23"
   - id: T-06
     step: 1
     title: "core::ledger + run folder + report.md generator"
     docs: [docs/01-HARNESS-CORE.md]
-    status: doing
+    status: done   # merged 960c7b1 under D-87; red acceptance rows -> follow-up tasks
     owner: core/suborch
     claimed_at: "2026-10-23"
     blocked_by: [T-03]
@@ -50,7 +50,7 @@ tasks:
     step: 1
     title: "core::mcp::serve wrapper (classify, gate, vault at sink, scrub, ledger, duration)"
     docs: [docs/01-HARNESS-CORE.md]
-    status: doing
+    status: done   # merged 960c7b1 under D-87; red acceptance rows -> follow-up tasks
     owner: core/suborch
     claimed_at: "2026-10-23"
     blocked_by: [T-04, T-05, T-06]
@@ -58,7 +58,7 @@ tasks:
     step: 1
     title: "core::sched loop + harnessd + harness CLI (run, schedule, vault, gate, tools, ledger, db)"
     docs: [docs/01-HARNESS-CORE.md]
-    status: doing
+    status: done   # merged 960c7b1 under D-87; red acceptance rows -> follow-up tasks
     owner: core/suborch
     claimed_at: "2026-10-23"
     blocked_by: [T-07]
@@ -66,7 +66,7 @@ tasks:
     step: 1
     title: "Fake echo server + step-1 acceptance tests incl. vault leak grep"
     docs: [docs/01-HARNESS-CORE.md, docs/02-MEMORY.md]
-    status: doing
+    status: done   # merged 960c7b1 under D-87; red acceptance rows -> follow-up tasks
     owner: core/suborch
     claimed_at: "2026-10-23"
     blocked_by: [T-08]
@@ -89,8 +89,9 @@ tasks:
     claimed_at: "2026-10-23"
     done_at: "2026-10-23"
     reports: [bench/results/review-T-11.md, bench/results/accept-T-11.md]
-    shipped: [T-1, T-2, T-3, T-4, T-7, T-9, G-4, "T-5 (reforge, ask, confirm; not auto @expects)", D-53, D-300..D-311]
-    deferred: "T-6 growth, T-8 promotion and T-5 auto @expects are reflect/toolforge work (T-16, T-28); G-5 hand-edit reset needs a content hash tools.health lacks; vault canary row waits for T-05; role aliases switch to sb_sheet::data (D-59) after sheet merges."
+    shipped: [T-1, T-2, T-3, T-4, T-7, T-9, G-4, "T-5 (reforge, ask, confirm; not auto @expects)", D-53, D-300..D-311, "D-78 batch, merged to main 83bfdb5: B-31 (1) lower-case names and reforge @name check (D-312), (2) check_repair refuses @kind change and @phase lowering (D-313), (3) G-4 canary fed into the re-forge source, (4) archive fails closed with mtime set before rename, sweep logs ok:false per failed file and goes on (D-314); tool_path/archive_path #[deprecated] (D-72); fingerprint role aliases from sb_sheet::data::{aria_roles, alias_for}, built-in map dropped (D-59, B-300); tests/contract_paths.rs"]
+    deferred: "T-6 growth, T-8 promotion and T-5 auto @expects are reflect/toolforge work (T-16, T-28); G-5 hand-edit reset needs a content hash tools.health lacks; real-vault canary plant waits for T-05 (accept-T-11.md Deferred; B-312: switch vault_keys to harness_core::vault::vault_refs then). B-33: (3) loader skips a retired row whose file is still in place, with (1) retire/archive ledger contradiction and (2) contract_paths gaps, before servers T-13 merges; (4) relocate synonym table, pre-D-312 upper-case orphans, ok:false dedup before toolforge T-28."
+    follow_up: "D-78 batch done 2026-10-25 on swarm/store after the f493fd3 merge: B-31 items 1-5, D-72 deprecations, D-59/B-300 role aliases from sb_sheet::data; D-312, D-313, D-314. Commits 93a2e4d, 66f74a6 (sweep survives a read-only or failed archive), tests 119a5db, cb55252; review-T-11.md approve, accept-T-11.md green 63/63."
   - id: T-12
     step: 2
     title: "srv-web: fetch→index (scraper), read/sheet/raw modes, api with vault headers, feed, search backend (decide D-31)"
@@ -188,3 +189,83 @@ tasks:
     title: "Re-run Phase 1 baseline (no regression) + Phase 2 ladder; bench/results/phase2-<date>.md"
     status: todo
     blocked_by: [T-27, T-28]
+  - id: T-03b
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T03b
+    title: "T-03 red acceptance rows after merge 960c7b1: D-115 typo inside a longer subject (Vasnth in Vasanth Raghavan) must still hit (bench/results/accept-T-03.md)."
+    status: todo
+    from: T-03
+  - id: T-04b
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T04b
+    title: "T-04 red acceptance rows: B-190/D-120 (1) accepted domain is the UTS-46 non-transitional A-label a URL host carries; MemStore D-115 Vasnth example (bench/results/accept-T-04.md)."
+    status: todo
+    from: T-04
+  - id: T-05b
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T05b
+    title: "T-05 red acceptance rows: short-entry repair through `harness vault set <name>` end to end (bench/results/accept-T-05.md)."
+    status: todo
+    from: T-05
+  - id: T-05c
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T05c
+    title: "D-84 not done at merge: Vault::open_for_set returns a VaultEditor (set, remove, names, save; no resolve_into, scrub, install_global), with a test it cannot resolve."
+    status: todo
+    from: T-05
+  - id: T-05d
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T05d
+    title: "D-77/B-151: scrub base64 and base64url spellings of every vault value (both alphabets, padded and unpadded, 3 alignments, trimmed edges, patterns under 8 chars skipped); tests for Basic auth and a JWT payload carrying the canary. Not a hold (D-88), but due before the Phase 1 baseline T-17 (zero vault leaks)."
+    status: todo
+    from: T-05
+  - id: T-07b
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T07b
+    title: "T-07 red acceptance rows: docs/01 end-to-end echo over stdio with PgStore and the canary grep (with T-09), FileAsker card never seen empty or partial (a7 flake), D-119 (7) handler stop line scrubbed and cleaned (bench/results/accept-T-07.md)."
+    status: todo
+    from: T-07
+  - id: T-08b
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T08b
+    title: "D-85 not done at merge: SchedError #[non_exhaustive]. Plus T-08 red acceptance rows: D-124 (1) ledger header and tools pin/unpin/retire echo ids as literals, and `harness gate set --note` stores no vault value (scrub the note before the database; vault rule)."
+    status: todo
+    from: T-08
+  - id: T-10b
+    step: follow-up
+    wave: 2
+    owner: sheet
+    branch: swarm/sheet-T10b
+    title: "B-32 follow-up (plain-span escaping first, then items 2-7) as already committed on swarm/sheet after 607eda5; merge it as its own PR."
+    status: todo
+    from: T-10
+  - id: T-11b
+    step: follow-up
+    wave: 2
+    owner: store
+    branch: swarm/store-T11b
+    title: "B-33: item 3 first (the loader skips a retired row even when its file is still in place), then items 1-2 (ledger retire event, contract_paths for tool_path/archive_path and ApiFetch::api); item 4 before T-28."
+    status: todo
+    from: T-11
+  - id: T-19b
+    step: follow-up
+    wave: 2
+    owner: page
+    branch: swarm/page-T19b
+    title: "page review items: Blocking in review-T-19.md, add-first password-field rebuild split across observer batches leaks the password into index()/state() (D-435 (2), hard rule); then its should-fix items."
+    status: todo
+    from: T-19

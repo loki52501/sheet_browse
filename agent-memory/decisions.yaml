@@ -367,6 +367,48 @@ decisions:
   - id: D-82
     text: "B-413 accepted (I-11 draft): __sbMedia frame() returns {t: null, why} and frames(id, times) returns a single {t: null, why} entry when the call is refused as a whole (no base, unknown id, challenge); per-time failures keep one entry per requested time."
     why: "I-11 named a bare {why} only for list() and cues(), so sb-media (wave 2) had no written shape for whole-call refusals of frame()/frames(); writing it down before sb-media exists costs nothing, and a single t:null entry is distinguishable from per-time failures."
+  - id: D-312
+    text: "B-31 (1), per D-78: tool names are lower case only. domain::valid_name accepts [a-z0-9_-]+ (still no device names, at most 100 bytes), the header parser refuses an @name with an upper-case letter, and ToolStore::reforge refuses a new spec whose @name differs from the name it was called with (StoreError::Invariant-style refusal, no file written)."
+    why: "NTFS and the default macOS volume are case-insensitive, so Register.js and register.js are one file but would be two tools.health rows. Lower-casing at the boundary is simpler than case-folding every health key, docs/03 sets no case rule, and both seeds are already lower case."
+  - id: D-313
+    text: "B-31 (2), per D-78: check_repair refuses a re-forge that changes @kind (either way) or lowers @phase (2 to 1, which gains page.api and runs on fetched HTML). Raising @phase 1 to 2 is allowed."
+    why: "G-4 says a repair may never widen what a tool can do; a reader becoming a planner or a browser tool becoming a fetch tool with api access both widen it, and neither is a repair."
+  - id: D-314
+    text: "B-31 (4), per D-78: ToolStore::archive fails closed. It sets the tool's mtime to now before the rename (a rename keeps it); if that fails, nothing has moved and the error is returned, so an archived file always carries its archive time and sweep's 90-day clock (D-303) is never measured from the tool's old mtime. The mtime is set through a handle that a read-only file grants (FILE_WRITE_ATTRIBUTES on Windows, a read-only open elsewhere). Sweep does not stop on a per-tool file failure (retire, archive, 90-day delete): it writes an ok:false ledger event for that tool or file and goes on with the other tools and domains; memory errors still return."
+    why: "Recording the time in a row would need a tools.health column (contract change, like G-5's content hash); failing the archive keeps the current contract and the caller retries at the next sweep. Setting the mtime before the rename means a failure needs no rollback (a failed rollback would have left a file in _archive with its old mtime), and continuing the sweep keeps one stuck file from blocking every later retire and delete."
+  - id: D-83
+    text: "B-193 accepted (I-3 contract, names only): harness_core::gate::{ANY_DOMAIN, rule_domain, rule_hint, rule_class_key, rule_key} join I-3's rust list as the one canonicaliser for gate.rules keys (D-113, behaviour per D-81), and I-3 gains consumers: [core-pg]. Any other code that writes or looks up gate.rules keys calls these instead of normalising on its own."
+    why: "core-pg's rule_set and lookup already call them (crates/core-pg/src/lib.rs, verified on swarm/core), so they are contract in fact; naming them lets wave-2 consumers find them, and a second normaliser would reopen the look-alike-key problem D-62 and D-81 closed."
+  - id: D-84
+    text: "B-194 accepted with a condition (I-4 contract). VaultError::ValueInLiteral{name} is accepted as proposed. Vault::open_for_set is accepted only if it returns a distinct type, harness_core::vault::VaultEditor, exposing set, remove, names and save, and NOT resolve_into, scrub or install_global; it must not return a Vault. core makes this change before its wave-1 PR, with a compile-fail or API test showing VaultEditor cannot resolve."
+    why: "On swarm/core (0790269) open_for_set returns a full Vault built with strict=false, so the handle that skips D-118's value rules can still resolve values scrub cannot see (short ones, ones inside a literal) and can be installed as the process-wide scrubber; only a doc comment forbids it. The vault is the harness's main safety boundary, so the restriction belongs in the type system (CLAUDE.md: APIs hard to get wrong), and the editor type costs a few lines."
+  - id: D-85
+    text: "B-195 accepted (I-13 draft): Launcher::before_run (provided, default Ok) runs first in Runner::execute, before the prompt is scrubbed; a failure returns SchedError::BeforeRun(LaunchError) with no folder or runs row. harnessd's daemon::ReopenVault re-opens the vault there. The harness-crate launcher constants and ClaudeLauncher fields (D-124) stay harness-internal. Condition: SchedError is marked #[non_exhaustive] in the same change, as VaultError was (D-76)."
+    why: "A vault value added while harnessd runs would otherwise be unknown to the scrubber for every scheduled run until a restart, which is a leak path; re-opening before anything is written closes it, and failing before the runs row keeps a half-started run out of the ledger. SchedError has gained a variant each round, so non_exhaustive keeps srv-cli (wave 2) safe from the next."
+  - id: D-86
+    text: "The repo has a remote: origin = https://github.com/loki52501/sheet_browse.git, with main and every swarm branch pushed. PRs are real GitHub pull requests (gh pr create --base main --head swarm/<branch>); areas push their own branches; the supreme pushes main after every merge. Supersedes D-46 (local-only). Never force-push; never push main from an area session."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core. A real remote gives every merge a PR record and lets areas publish branches without the supreme reading worktrees."
+  - id: D-87
+    text: "Merge rule (overrides docs/10 S-3 and S-8 where they differ): a PR merges when its reviewer report has no Blocking items and cargo test --workspace passes on the merge commit, and no leak hook fired (CLAUDE.md hard rule, kept). A red acceptance item does not block a merge; it becomes a follow-up task on main (T-xxb) owned by the same area. Supreme second-opinion reviews are non-blocking notes filed into blockers.yaml; they never hold a merge or a launch."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core."
+  - id: D-88
+    text: "Holds are abolished: no wave-2 launch or merge waits on a should-fix in another area. D-77's base64 scrub, B-32 item 1 and B-33 item 3 become ordinary follow-up tasks (T-05d, T-10b, T-11b) running in parallel with wave 2."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core."
+  - id: D-89
+    text: "Review loops are capped at two rounds per PR: round 1 review + test, round 2 fixes. After round 2 the PR merges under D-87 and everything left is filed as follow-ups."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core; wave-1 PRs went 3 to 5 rounds."
+  - id: D-90
+    text: "Interface freeze: no amendment to interfaces.yaml until T-17 is done. An area that needs a change works around it locally and files the proposal; the supreme answers 'deferred to wave 4' and moves on. D-84 (VaultEditor) and D-85 (before_run, non_exhaustive SchedError) are the last accepted items; if core has not finished them they become follow-up tasks (T-05c, T-08b), not merge conditions."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core."
+  - id: D-91
+    text: "One PR per task from now on, on branch swarm/<area>-T<nn> (for example swarm/servers-T12, swarm/core-T05d). core's remaining work after its merge, every follow-up, and every wave-2 and wave-3 task each gets its own branch and merges alone."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core; one branch per area made each merge wait for the area's slowest task."
+  - id: D-92
+    text: "The supreme relaunches any stopped area session itself, without asking, with scripts/swarm/launch.ps1 (Start-Process wt.exe form, TMP on F:/sb-swarm/tmp-<area>). It still asks the user only about: a merge conflict it cannot resolve, a vault or captcha rule, or deleting something."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core."
+  - id: D-93
+    text: "Supreme checkpoint commits at most once per hour, one line. Decisions only when they change what someone else must do."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core."
   - id: D-122
     text: "T-09 placement (H-6, H-2, H-3, H-5, docs/01 and docs/02 step-1 acceptance). The fake echo server is an example of the harness crate (crates/harness/examples/echo.rs): a stdio MCP server on core::mcp::serve_io with a PgStore-backed ledger and the real Vault, never an installed bin. The step-1 acceptance lives in crates/harness/tests/step1_accept.rs, spawns the echo example over stdio (as Claude Code will), runs against the compose Postgres in a throwaway sb_t_* database (D-100), and greps stdout, stderr, ledger.events, every table, ledger.jsonl and runs/ for SB_VAULT_CANARY. The scheduler item drives `harness schedule add` through the real CLI and a harnessd loop with the T-08 Clock seam and a fake Launcher in place of claude (rule 1)."
     why: "echo needs core and core-pg, and harness is the only crate above both; an example keeps a test tool out of the installed bins, and going through stdio exercises the wrapper on the path production uses instead of calling dispatch in-process like accept_t07."

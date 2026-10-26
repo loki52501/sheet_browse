@@ -1,0 +1,15 @@
+from: reviewer-5 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-25"
+state: "Reviewed 66f74a6 (fixes for the three Should fix items of round 93a2e4d) and appended '## Round: review fixes (66f74a6)' to bench/results/review-T-11.md. Verdict for the whole branch: approve, Blocking none; merge_gate.py store prints gate ok. On a clean git archive of 66f74a6: cargo test -p toolstore 116 lib + 35 accept_t11 + 1 contract_paths pass, clippy --workspace -D warnings and fmt --check exit 0. Mutations M1-M5 (write(true) touch, sweep propagating archive/retire/delete errors, D-312 unlogged, set_mtime after rename) each fail a lib test. The Windows FILE_WRITE_ATTRIBUTES handle works on a read-only file (run). On Unix, File::open plus futimens is correct: explicit times need the caller to own the file, and the open mode is not checked (read, not run)."
+not_done: "Should fix: 1. accept_t11.rs:2271-2285 d312 case (b) log assertion is vacuous: case (c) already left why = 'rejected: ... (D-312)', and M4 passes all accept tests. Assert why changed and names signup. 2. accept_t11.rs:2461: the real-failure fail-closed acceptance for D-314 is gone. accept-T-11.md still cites d314_archive_fails_closed_when_mtime_cannot_be_set, which matches 0 tests and exits 0. Restore it with share_mode(0) on Windows or mode 0o000 on Unix. 3. lifecycle.rs:612: the memory-error guard in sweep has no test (M6 passes everything). Add a sweep test with fail_set. Nits are in the review file."
+gotchas:
+  - "A tester was editing crates/toolstore/tests/accept_t11.rs in this worktree during the review (uncommitted). Test the commit from a git archive export in the scratchpad, and stage by explicit path."
+  - "cargo test with a name filter that matches nothing exits 0, so an acceptance row whose test was renamed shows a false pass."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-11.md
+  - agent-memory/handoffs/T-11-reviewer-5.yaml
+verify: "python scripts/swarm/merge_gate.py store"

@@ -14,6 +14,11 @@
 # proposals item:         reflect writes forge proposals, _generic merges, pinned-tool retirements
 
 blockers:
+  - id: B-33
+    task: T-11
+    question: "Supreme second-opinion review of the store D-78 follow-up (merged 83bfdb5; 0 blocking) left items for toolstore. (1) sweep logs a failed archive as an ok:false tools.retire event while retire() has already saved the row Retired, so the ledger never gets an ok:true retire for that tool and its only retire event contradicts the row (lifecycle.rs 210, 277, 614). (2) tests/contract_paths.rs does not name ToolStore::tool_path or archive_path from outside the crate (only an in-crate test does), so they could become pub(crate) unnoticed, and it does not pin ApiFetch::api(&self, &str, Duration) or the root fn fingerprint. (3) note, safety-relevant: a retire whose archive step fails leaves the retired tool's file in tools/<domain>/, where the loader still finds it. (4) notes: relocate keeps its own name-synonym table beside sb_sheet::data::synonyms (fingerprint.rs 26); tools with upper-case names written before D-312 become orphans nothing retires or reports; a file step that keeps failing appends an ok:false event every sweep with no dedup."
+    default_taken: "Not merge blockers. Area store fixes (3) before servers T-13 merges (the loader must skip a row whose status is retired even when its file is still in place), and (1) and (2) in the same change. (4) before toolforge T-28, which drives reforge and sweep."
+    needs_user: false
   - id: B-102
     task: T-03
     question: "The shared compose Postgres (sheetbrowse-postgres-1) restarted backends three times this session: 'server process (PID n) exited with exit code 2' at 08:34:53, 09:13:49 and 09:19:33 UTC, each followed by ~2 min of recovery mode, while several worktrees ran tests. Cause unknown (container shm is the Docker default 64 MB; HNSW builds and parallel workers use shared memory). Should compose set shm_size (e.g. 256mb) or should areas serialise DB-heavy test runs?"

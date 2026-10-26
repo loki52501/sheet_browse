@@ -4,6 +4,7 @@ Launch sub-orchestrator sessions, one Windows Terminal tab per area, each in its
   scripts\swarm\launch.ps1 -Areas core,sheet,store,page          # wave 1
   scripts\swarm\launch.ps1 -Areas servers,driver                 # wave 2
   scripts\swarm\launch.ps1 -Areas core -Resume                   # reopen an existing worktree
+  scripts\swarm\launch.ps1 -Areas core,page -Restart -Brief prompts/suborch/WAVE2.md
   scripts\swarm\launch.ps1 -Areas core,page -Restart             # fresh session on an existing worktree,
                                                                   # told to commit WIP, merge main, resume
 
@@ -18,7 +19,8 @@ that tells claude to read prompts/suborch/<area>.md from its own worktree.
 param(
   [Parameter(Mandatory=$true)][string[]]$Areas,
   [switch]$Resume,
-  [switch]$Restart
+  [switch]$Restart,
+  [string]$Brief   # extra brief every launched session reads after its own, e.g. prompts/suborch/WAVE2.md
 )
 if ($Restart) { $Resume = $true }
 $ErrorActionPreference = "Stop"
@@ -59,6 +61,7 @@ foreach ($a in $Areas) {
   $stateDir = Join-Path $wt ".claude\state"
   New-Item -ItemType Directory -Force $stateDir | Out-Null
   $first = "Read prompts/suborch/$a.md completely. It is your launch brief from the supreme orchestrator; follow it as your instructions."
+  if ($Brief) { $first += " Then read $Brief completely; it overrides your launch brief where they differ, and its section for area $a is your task list." }
   if ($Restart) {
     # claude --continue finds no transcript in a worktree, so a restart is a fresh session told where it stopped.
     $first += " This is a restart: an earlier session for this area was stopped. Before anything else run git status and git log --oneline main..HEAD, read your newest handoffs in agent-memory/handoffs/ including the supreme comment lines at their end, commit any work in progress you find, merge main into your branch, then continue from the first unfinished step. Use the pr-ready skill before you mark anything pr_open."
