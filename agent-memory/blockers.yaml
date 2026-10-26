@@ -171,6 +171,11 @@ blockers:
     question: "B-192 follow-up: srv-files now treats a run's asks/, ledger.jsonl, report.md and prompt.md (and the run folder and runs root) as outside scratch, so fs.write, fs.move, fs.delete and shell redirections into asks/<n>.answer are Delete and ask. Claude Code's built-in Write and Bash tools are not behind the gate and can still write that file."
     default_taken: "srv-files closes its own route (D-520 (2)); the general fix stays with B-192 (an answer the session cannot forge)."
     needs_user: false
+  - id: B-526
+    task: T-14
+    question: "For area core: harness-core test mcp_t07::file_asker_stderr_has_no_canary (crates/core/tests/mcp_t07.rs:1602) fails 3/3 when TEMP is a longer path (e.g. F:/sb-swarm/tmp-servers/t14acc-F) and passes with the default TEMP. The FileAsker stderr line 'ask: cannot create <temp path>\\asks: ...; skipped, nobody saw' is cut by the core line-length cap before 'nobody saw', so the assertion depends on the temp path length. Found by the T-14 acceptance re-run; no srv-files code involved."
+    default_taken: "Not a servers fix. Core shortens the path in that line (or puts the fail-closed words first) so the cap never cuts them, or asserts on a prefix. Until then run the workspace suite with a short TEMP."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core
