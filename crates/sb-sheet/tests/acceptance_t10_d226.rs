@@ -459,16 +459,32 @@ fn d226_1_password_value_with_a_long_backtick_run_never_shows_in_code() {
 
 // ---------------------------------------------------------------- D-226 (1)+(2)
 
+/// max_tokens values swept at a tiny chunk_tokens (1 and 3), where every read re-plans many
+/// one-token pieces and a full 1..=60 sweep took about 30 s in debug (round 6). Every value up
+/// to 12 (what is left runs out inside a heading prefix, a depth-4 list prefix, a 10-backtick
+/// fence or a D-225 backslash), then a spread up to 60, so both extremes (1 and 60) stay.
+const SMALL_CHUNK_MAX_TOKENS: [usize; 18] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 23, 31, 42, 59, 60,
+];
+
 /// D-226 (1)+(2), B-201 P4: fixed overhead (prefix, close fence, table separator, D-225
-/// backslash) counts against max_tokens. For every page, max_tokens 1..=60 and several
-/// chunk_tokens, each read stays within what max_tokens leaves, the sequence stays within
-/// max_tokens, and it ends either `truncated` or at the natural end.
+/// backslash) counts against max_tokens. For every page and chunk_tokens 0, 1, 3, 20, 400
+/// (max_tokens 1..=60 at chunk 0, 20 and 400; [`SMALL_CHUNK_MAX_TOKENS`] at chunk 1 and 3),
+/// each read stays within what max_tokens leaves, the sequence stays within max_tokens, and it
+/// ends either `truncated` or at the natural end.
 #[test]
 fn d226_2_overhead_never_pushes_a_read_past_max_tokens() {
+    let mut cases = 0usize;
     for (name, page) in overhead_pages() {
         let full = alnum(body(&read(&[], &page, &opts(100_000)).markdown));
         for chunk in [0usize, 1, 3, 20, 400] {
-            for m in 1..=60usize {
+            let sweep: Vec<usize> = if (1..=3).contains(&chunk) {
+                SMALL_CHUNK_MAX_TOKENS.to_vec()
+            } else {
+                (1..=60).collect()
+            };
+            for m in sweep {
+                cases += 1;
                 let o = ReadOpts {
                     max_tokens: Some(m),
                     ..opts(chunk)
@@ -504,6 +520,7 @@ fn d226_2_overhead_never_pushes_a_read_past_max_tokens() {
             }
         }
     }
+    assert_eq!(cases, 8 * (3 * 60 + 2 * SMALL_CHUNK_MAX_TOKENS.len()));
 }
 
 /// D-226 (2): when what max_tokens leaves cannot hold the next unit's overhead plus a word, the
