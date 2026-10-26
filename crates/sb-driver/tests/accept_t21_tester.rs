@@ -5,6 +5,12 @@
 //! absolute paths and a junction, in-page counters for the gate, and a frame click on a
 //! scrolled page with a tight target.
 //!
+//! Round 2 adds: a nested frame below the fold (row 10c), a typed value longer than every
+//! cap echoed into headings, the title, the URL, a dialog and a new tab (row 15), input
+//! that must not reach a focused descendant (row 16), a timer dialog between steps
+//! (row 17), a non-2xx re-fetch and format characters in download names (row 18) and a
+//! stale target after a navigation (row 19).
+//!
 //! Real Chromium (D-34), pages from a local HTTP server, one browser at a time. Run with
 //! `--test-threads=1`. Set `SB_VAULT_CANARY` to a unique string; the tests never print it.
 
@@ -41,6 +47,24 @@ fn pid() -> u32 {
 fn dl_body(path: &str) -> String {
     format!("T21 tester body {path} {}", pid())
 }
+
+/// The long vault value (key `long`): the canary, then enough to cross every cap (60, 120,
+/// 150, 200). Never printed.
+fn long_value() -> String {
+    format!("{}-{}", canary(), "w".repeat(140))
+}
+
+/// Unicode format (Cf) characters a page could use to disguise a name.
+fn is_cf(c: char) -> bool {
+    matches!(c as u32,
+        0xAD | 0x600..=0x605 | 0x61C | 0x6DD | 0x70F | 0x180E | 0x200B..=0x200F
+        | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB)
+}
+
+/// Headings the long-echo pages fill: the value after a pad of this many `p`s. 0 and 140
+/// cross the index's 150 cut; 51, 52 and 53 leave 9, 8 and 7 value characters before the
+/// diff's 60 cut.
+const PADS: &str = "[0, 10, 51, 52, 53, 140]";
 
 const HOSTILE: &str = "Two #12 [x](#3) ``` fence";
 
@@ -150,6 +174,122 @@ fn page(path: &str) -> Option<(String, String, Vec<u8>)> {
                () => {{ window.keys += 1; }});</script>"
         ),
         "/up" => "<title>Up</title><input type=file id=f aria-label=CV>".to_string(),
+        // Row 15: a typed value echoed into headings, the title and the URL (same document),
+        // into a new tab's title, and into an alert.
+        "/long" => format!(
+            "<title>Long</title>{style}\
+             <h1 id=h0>Hello</h1><h2 id=h1>a</h2><h2 id=h2>b</h2><h2 id=h3>c</h2>\
+             <h2 id=h4>d</h2><h2 id=h5>e</h2>\
+             <input id=e aria-label=Echo oninput=\"fill(this.value)\">\
+             <button id=open onclick=\"window.open('/long-title')\">Open</button>\
+             <button id=al onclick=\"alert('You typed: ' + document.getElementById('e').value)\">Alert</button>\
+             <script>function fill(v) {{\
+               {PADS}.forEach((p, i) => {{ document.getElementById('h' + i).textContent = 'p'.repeat(p) + v; }});\
+               document.title = v;\
+               history.replaceState(null, '', '/long?v=' + encodeURIComponent(v));\
+             }}</script>"
+        ),
+        "/long-title" => "<title>T</title><h1>t</h1><script>document.title = 'x'.repeat(100) + \
+             opener.document.getElementById('e').value;</script>"
+            .to_string(),
+        "/long-get" => format!(
+            "<title>Long get</title>{style}\
+             <form id=lg action=/long-land method=get><input id=q name=q aria-label=Query></form>"
+        ),
+        "/long-land" => format!(
+            "<title>Land</title><h1 id=h0>x</h1><h2 id=h1>x</h2><h2 id=h2>x</h2><h2 id=h3>x</h2>\
+             <h2 id=h4>x</h2><h2 id=h5>x</h2>\
+             <script>const v = new URLSearchParams(location.search).get('q') || '';\
+               {PADS}.forEach((p, i) => {{ document.getElementById('h' + i).textContent = 'p'.repeat(p) + v; }});\
+               document.title = v;</script>"
+        ),
+        // Row 16: a modal dialog autofocuses its Pay button; a password field in a container.
+        "/focus" => format!(
+            "<title>Focus</title>{style}\
+             <dialog id=dlg aria-label=\"Confirm payment\"><p>Pay 10 EUR?</p>\
+               <button id=pay autofocus onclick=\"this.dataset.n = +(this.dataset.n || 0) + 1\">Pay now</button>\
+             </dialog>\
+             <fieldset id=box aria-label=Login><legend>Login</legend>\
+               <input id=secret type=password aria-label=Secret></fieldset>\
+             <input id=plain aria-label=Plain>\
+             <script>window.keys = 0; window.secretInputs = 0;\
+               document.addEventListener('keydown', (e) => {{ window.keys += 1; \
+                 window.keyAt = e.target.id || e.target.localName; }}, true);\
+               document.getElementById('secret').addEventListener('input', () => {{ window.secretInputs += 1; }});\
+               document.getElementById('dlg').showModal();</script>"
+        ),
+        // Row 16: a div dialog (not focusable itself) whose Pay button has autofocus.
+        "/focus2" => format!(
+            "<title>Focus 2</title>{style}\
+             <div id=dlg2 role=dialog aria-modal=true aria-label=\"Confirm payment\"><p>Pay 10 EUR?</p>\
+               <button id=pay2 autofocus onclick=\"this.dataset.n = +(this.dataset.n || 0) + 1\">Pay now</button>\
+             </div>\
+             <div id=box2 role=group aria-label=Login>\
+               <input id=secret2 type=password aria-label=Secret></div>\
+             <input id=plain2 aria-label=Plain>\
+             <script>window.keys = 0; window.secretInputs = 0;\
+               document.addEventListener('keydown', (e) => {{ window.keys += 1; \
+                 window.keyAt = e.target.id || e.target.localName; }}, true);\
+               document.getElementById('secret2').addEventListener('input', () => {{ window.secretInputs += 1; }});</script>"
+        ),
+        // Row 17: dialogs from timers between steps.
+        "/timer" => format!(
+            "<title>Timer</title>{style}\
+             <button id=arm onclick=\"setTimeout(() => alert('from a timer'), 900)\">Arm</button>\
+             <button id=arm0 onclick=\"setTimeout(() => alert('right away'), 0)\">Arm now</button>\
+             <button id=hid style=\"display:none\">Hidden</button>\
+             <button id=cnt onclick=\"this.dataset.n = +(this.dataset.n || 0) + 1\">Count</button>\
+             <input id=ti aria-label=Later>"
+        ),
+        // Row 18: re-fetches that answer an error status; names with format characters.
+        "/dls2" => format!(
+            "<title>Downloads 2</title>{style}\
+             <a id=e500 href=/dl-e500>e500</a>\
+             <a id=e404 href=/dl-e404>e404</a>\
+             <a id=rlo href=/dl-rlo>rlo</a>\
+             <a id=zw href=/dl-zw>zw</a>\
+             <a id=attrc download=\"pay&#x202E;fdp&#x200B;-{p}.exe\" href=/dl-attrc>attrc</a>"
+        ),
+        "/dl-e500" => return attach(format!("attachment; filename=\"err500-{p}.txt\"")),
+        "/dl-e404" => return attach(format!("attachment; filename=\"err404-{p}.txt\"")),
+        "/dl-rlo" => {
+            return attach(format!(
+                "attachment; filename*=UTF-8''inv%E2%80%AEtxt-{p}.exe"
+            ))
+        }
+        "/dl-zw" => {
+            return attach(format!(
+                "attachment; filename*=UTF-8''re%E2%80%8Bpo%EF%BB%BFrt%E2%81%A6-{p}.txt"
+            ))
+        }
+        "/dl-attrc" => {
+            return Some((
+                "text/plain".into(),
+                String::new(),
+                dl_body(path).into_bytes(),
+            ))
+        }
+        // Row 10c: an iframe inside an iframe, both below the fold.
+        "/nest" => "<title>Nest</title><style>body{margin:0}</style>\
+             <button id=decoy style=\"position:fixed;left:0;top:0;width:190px;height:140px\" \
+               onclick=\"document.getElementById('r').textContent = 'miss'\">Decoy</button>\
+             <div style=\"height:1300px\"></div>\
+             <iframe id=outer src=/nest-outer style=\"position:absolute;left:200px;top:1300px;\
+               width:320px;height:240px;border:4px solid #000;padding:6px\"></iframe>\
+             <div style=\"height:3000px\"></div>\
+             <p id=r style=\"position:fixed;right:0;top:0\">none</p>"
+            .to_string(),
+        "/nest-outer" => "<title>Outer</title><style>body{margin:0}</style>\
+             <div style=\"height:700px\">outer</div>\
+             <iframe id=inner src=/nest-inner style=\"position:absolute;left:30px;top:700px;\
+               width:200px;height:150px;border:3px solid #333;padding:5px\"></iframe>\
+             <div style=\"height:1500px\"></div>"
+            .to_string(),
+        "/nest-inner" => "<title>Inner</title><style>body{margin:0}</style>\
+             <button id=b style=\"position:absolute;left:10px;top:10px;width:8px;height:8px;\
+               padding:0;border:0\" onclick=\"top.document.getElementById('r').textContent = 'hit'; \
+               this.dataset.n = +(this.dataset.n || 0) + 1\">I</button>"
+            .to_string(),
         "/framed" | "/framed-in" => "<title>Framed</title><style>body{margin:0}</style>\
              <button id=decoy style=\"position:fixed;left:0;top:0;width:190px;height:140px\" \
                onclick=\"document.getElementById('r').textContent = 'miss'\">Decoy</button>\
@@ -165,6 +305,11 @@ fn page(path: &str) -> Option<(String, String, Vec<u8>)> {
         _ => return None,
     };
     Some(html(body))
+}
+
+/// What an error answer carries (row 18): it must never be saved.
+fn error_body() -> String {
+    format!("T21 tester ERROR PAGE {}", pid())
 }
 
 /// Requests per path (query stripped).
@@ -204,7 +349,20 @@ async fn serve() -> u16 {
                     .get_or_insert_with(HashMap::new)
                     .entry(path.clone())
                     .or_default() += 1;
+                // Row 18: the second request to these links answers an error status.
+                let again = hits(&path) > 1;
+                let error = match path.as_str() {
+                    "/dl-e500" if again => Some("500 Internal Server Error"),
+                    "/dl-e404" if again => Some("404 Not Found"),
+                    _ => None,
+                };
                 let (status, ct, extra, body) = match page(&path) {
+                    _ if error.is_some() => (
+                        error.unwrap_or_default(),
+                        "text/plain".into(),
+                        String::new(),
+                        error_body().into_bytes(),
+                    ),
                     Some((ct, ex, b)) => ("200 OK", ct, ex, b),
                     None => ("404 Not Found", "text/plain".into(), String::new(), vec![]),
                 };
@@ -282,11 +440,10 @@ async fn rig() -> Rig {
     .await
     .expect("launch");
     let port = serve().await;
-    let vault = Arc::new(Vault::in_memory([(
-        "pw".to_string(),
-        canary(),
-        EntryKind::Secret,
-    )]));
+    let vault = Arc::new(Vault::in_memory([
+        ("pw".to_string(), canary(), EntryKind::Secret),
+        ("long".to_string(), long_value(), EntryKind::Secret),
+    ]));
     let store = Arc::new(MemStore::new());
     let harness = Harness {
         store: store.clone(),
@@ -1173,4 +1330,588 @@ async fn row10a_frame_click_in_view_hits_an_8px_target() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn row10b_frame_click_below_the_fold_hits_the_target() {
     frame_click("/framed", true).await;
+}
+// ---------------------------------------------------------------------------------------
+// Row 10c (round 2): an iframe inside an iframe, both below the fold, 8 px target.
+// ---------------------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row10c_nested_frames_below_the_fold_hit_the_target() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let ctx = rig.ctx(Class::Submit);
+    let tab = d.open(&rig.url("/nest")).await.expect("open");
+    page_js(d, tab, "scrollTo(0, 400)").await;
+    let inner = d
+        .wait_registry(CAP, |r| {
+            r.frames(tab)?
+                .into_iter()
+                .find(|f| f.url.ends_with("/nest-inner") && r.sb_context(tab, f.frame).is_some())
+                .map(|f| f.frame)
+        })
+        .await
+        .expect("the inner frame with its sb world");
+    // Both frames start below their parent's fold.
+    let below = page_js(
+        d,
+        tab,
+        "(() => { const o = document.getElementById('outer'); \
+         const i = o.contentDocument.getElementById('inner'); \
+         return o.getBoundingClientRect().top > innerHeight && \
+           i.getBoundingClientRect().top > o.contentWindow.innerHeight; })()",
+    )
+    .await;
+    assert_eq!(
+        below, true,
+        "the outer and the inner frame start below the fold"
+    );
+    sb_eval(
+        d,
+        tab,
+        inner,
+        "function () { return globalThis.__sb.walk({ base: 1 }); }",
+        &[],
+    )
+    .await;
+    let b = id_of(d, tab, inner, "#b").await;
+    let res = act(d, tab, &format!("c#f{inner}.{b}"), &ctx).await;
+    let where_ = page_js(
+        d,
+        tab,
+        "JSON.stringify({ r: document.getElementById('r').textContent, sy: scrollY, \
+         vh: innerHeight, outer: document.getElementById('outer').getBoundingClientRect(), \
+         outerSy: document.getElementById('outer').contentWindow.scrollY })",
+    )
+    .await;
+    println!("row10c landing: {where_}; step: {:?}", res.steps[0]);
+    assert!(ok_steps(&res), "{res:?}");
+    assert_eq!(
+        page_js(d, tab, "document.getElementById('r').textContent").await,
+        "hit",
+        "landed: {where_}"
+    );
+    let n = sb_eval(
+        d,
+        tab,
+        inner,
+        "function () { return +(document.getElementById('b').dataset.n || 0); }",
+        &[],
+    )
+    .await;
+    assert_eq!(n, 1, "the inner button's own counter");
+}
+
+// ---------------------------------------------------------------------------------------
+// Row 15 (round 2, review Blocking 1): a typed value longer than every cap, echoed.
+// ---------------------------------------------------------------------------------------
+
+/// Every string form of a result that can leave the driver.
+fn forms_of(res: &ActResult) -> Vec<String> {
+    let mut out = vec![
+        format!("{res:?}"),
+        serde_json::to_string(&res.steps).unwrap(),
+        serde_json::to_string(&res.stopped).unwrap(),
+        res.diff.clone().unwrap_or_default(),
+    ];
+    for s in &res.steps {
+        if let StepOutcome::Failed { why } = &s.outcome {
+            out.push(why.clone());
+        }
+        for c in &s.consequences {
+            out.push(serde_json::to_string(c).unwrap());
+            out.push(format!("{c:?}"));
+        }
+    }
+    out
+}
+
+/// Neither the canary nor the long value's first 8 characters (so no prefix of 8 or more)
+/// is in any form, in any ASCII case. Never prints a form.
+fn no_value(forms: &[String], what: &str) {
+    let c = canary().to_ascii_lowercase();
+    let p8: String = long_value()
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    for (i, f) in forms.iter().enumerate() {
+        let f = f.to_ascii_lowercase();
+        assert!(!f.contains(&c), "{what}: the canary is in form #{i}");
+        assert!(
+            !f.contains(&p8),
+            "{what}: an 8-char prefix of the value is in form #{i}"
+        );
+    }
+}
+
+/// The process-wide scrubber of an earlier test (row 6) holds the canary; replace it with
+/// one that knows nothing, so these checks see only what the driver itself scrubs.
+fn neutral_global() {
+    Vault::in_memory([(
+        "unrelated".to_string(),
+        "unrelated-value-t21r2".to_string(),
+        EntryKind::Secret,
+    )])
+    .install_global();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row15_long_echo_never_leaves_whole_or_cut() {
+    let rig = rig().await;
+    neutral_global();
+    let d = &rig.d;
+    let ctx = rig.ctx(Class::Submit);
+    let mut every: Vec<String> = Vec::new();
+
+    // (1) Same document: six headings (two cut by the index at 150, three at the diff's
+    // 60 with 9, 8 and 7 value characters before the cut), the title, the URL, and a new
+    // tab whose title is 100 x then the value (cut at 120).
+    let tab = d.open(&rig.url("/long")).await.expect("open /long");
+    let e = r(d, tab, "#e").await;
+    let open = r(d, tab, "#open").await;
+    let res = act(d, tab, &format!("t{e}=@vault(long); c{open}"), &ctx).await;
+    let forms = forms_of(&res);
+    no_value(&forms, "same-document echo");
+    every.extend(forms);
+    let echoed = sb_eval(
+        d,
+        tab,
+        0,
+        "function (v) { return document.getElementById('h0').textContent === v && \
+         document.getElementById('h3').textContent === 'p'.repeat(52) + v && \
+         document.title === v && location.href.endsWith('?v=' + encodeURIComponent(v)); }",
+        &[json!(long_value())],
+    )
+    .await;
+    assert_eq!(echoed, json!(true), "the page echoed the value");
+    println!("row15 (1) result: {res:?}");
+    assert!(ok_steps(&res), "{res:?}");
+    assert!(res.diff.is_some(), "a diff: {res:?}");
+    assert!(
+        res.steps[1]
+            .consequences
+            .iter()
+            .any(|c| matches!(c, Consequence::OpenedTab { .. })),
+        "{res:?}"
+    );
+
+    // (2) An alert with the value after 11 characters.
+    let al = r(d, tab, "#al").await;
+    let res = act(d, tab, &format!("t{e}=@vault(long); c{al}"), &ctx).await;
+    let forms = forms_of(&res);
+    no_value(&forms, "alert echo");
+    every.extend(forms);
+    println!("row15 (2) result: {res:?}");
+    assert!(
+        matches!(res.steps.last().and_then(|s| s.consequences.last()),
+            Some(Consequence::Dialog { text }) if text.starts_with("You typed: ")),
+        "{res:?}"
+    );
+    d.dialog(tab, true, None).await.expect("accept");
+
+    // (3) A GET form: the value goes into the URL and the next page's headings and title.
+    let t3 = d.open(&rig.url("/long-get")).await.expect("open /long-get");
+    let q = r(d, t3, "#q").await;
+    let res = act(d, t3, &format!("t{q}=@vault(long); k{q}=Enter"), &ctx).await;
+    let forms = forms_of(&res);
+    no_value(&forms, "GET form echo");
+    every.extend(forms);
+    let landed = sb_eval(
+        d,
+        t3,
+        0,
+        "function (v) { return document.title === v && \
+         document.getElementById('h4').textContent === 'p'.repeat(53) + v; }",
+        &[json!(long_value())],
+    )
+    .await;
+    assert_eq!(landed, json!(true), "the landing page echoed the value");
+    println!("row15 (3) result: {res:?}");
+    assert!(ok_steps(&res), "{res:?}");
+    assert!(
+        res.steps[1]
+            .consequences
+            .iter()
+            .any(|c| matches!(c, Consequence::Navigated { .. })),
+        "{res:?}"
+    );
+    let diff = res.diff.clone().expect("a diff");
+    assert!(diff.contains("+ heading"), "{diff}");
+
+    // (4) tabs() and frames(). Without a process-wide vault the driver has nothing to
+    // scrub them with (it keeps no vault outside act): reported, not asserted. With the
+    // vault installed, as the MCP server does at start, they are clean.
+    let raw_leak = d.tabs().await.unwrap().iter().any(|t| {
+        let l = format!("{} {}", t.1, t.2).to_ascii_lowercase();
+        l.contains(&canary().to_ascii_lowercase())
+    });
+    println!("note: tabs() before install_global holds the canary: {raw_leak}");
+    rig.vault.install_global();
+    let tabs = d.tabs().await.expect("tabs");
+    assert!(tabs.len() >= 3, "three tabs");
+    let mut shown = Vec::new();
+    for (t, url, title) in &tabs {
+        shown.push(format!("{t:?} {url} {title}"));
+        for f in d.frames(*t).await.expect("frames") {
+            shown.push(format!("{f:?}"));
+        }
+    }
+    no_value(&shown, "tabs() and frames()");
+    every.extend(shown.clone());
+    println!("row15 (4) tabs and frames: {shown:?}");
+    assert!(
+        tabs.iter().any(|t| t.2.contains("@vault(long)")),
+        "a title is shown as the literal"
+    );
+
+    // (5) The ledger and the run dir.
+    let ledger = format!("{:?}", rig.store.ledger());
+    no_value(&[ledger], "ledger");
+    let in_run = files_containing(&rig.run_dir(), canary().as_bytes());
+    assert!(
+        in_run.is_empty(),
+        "canary in {} run-dir files",
+        in_run.len()
+    );
+    no_value(&every, "all forms together");
+    let Rig { d, home, .. } = rig;
+    d.shutdown(Duration::from_secs(10)).await;
+    let all = files_containing(home.path(), canary().as_bytes());
+    println!(
+        "note: files under the test home holding the canary after shutdown: {}",
+        all.len()
+    );
+    for p in &all {
+        println!(
+            "note:   {}",
+            p.strip_prefix(home.path()).unwrap_or(p).display()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Row 16 (round 2, review Blocking 2, D-615): input never reaches a focused descendant.
+// ---------------------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row16_input_never_reaches_a_focused_descendant() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let nav = rig.ctx(Class::Navigate);
+
+    // (i) A modal <dialog> whose Pay now button got autofocus from showModal().
+    let tab = d.open(&rig.url("/focus")).await.expect("open /focus");
+    assert_eq!(
+        page_js(d, tab, "document.activeElement.id").await,
+        "pay",
+        "the modal dialog autofocused Pay now"
+    );
+    let dlg = r(d, tab, "#dlg").await;
+    let res = act(d, tab, &format!("k{dlg}=Enter"), &nav).await;
+    let key_at = page_js(d, tab, "window.keyAt || null").await;
+    let active = page_js(d, tab, "document.activeElement.id").await;
+    println!("row16 (i) Enter on a modal <dialog>: key went to {key_at}, active {active}: {res:?}");
+    assert_eq!(
+        page_js(d, tab, "+(document.getElementById('pay').dataset.n || 0)").await,
+        0,
+        "Pay now was pressed"
+    );
+    assert!(
+        res.stopped.is_none(),
+        "the gate let the dialog row run: {res:?}"
+    );
+    match &res.steps[0].outcome {
+        // The <dialog> element itself took focus: the key may only have gone to it.
+        StepOutcome::Ok => assert_eq!(key_at, "dlg", "the key reached a descendant"),
+        StepOutcome::Failed { why } => {
+            assert!(why.contains("did not take focus"), "{res:?}");
+            assert_eq!(
+                page_js(d, tab, "window.keys").await,
+                0,
+                "a key reached the page"
+            );
+        }
+    }
+
+    // (ii) A div dialog (not focusable) whose Pay now button has autofocus.
+    let t2 = d.open(&rig.url("/focus2")).await.expect("open /focus2");
+    assert_eq!(
+        page_js(d, t2, "document.activeElement.id").await,
+        "pay2",
+        "Pay now has autofocus"
+    );
+    let pays = || page_js(d, t2, "+(document.getElementById('pay2').dataset.n || 0)");
+    let dlg2 = r(d, t2, "#dlg2").await;
+    let res = act(d, t2, &format!("k{dlg2}=Enter"), &nav).await;
+    println!("row16 (ii) Enter on a div dialog: {res:?}");
+    assert_eq!(pays().await, 0, "Pay now was pressed");
+    assert_eq!(
+        page_js(d, t2, "window.keys").await,
+        0,
+        "a key reached the page"
+    );
+    assert!(
+        res.stopped.is_none(),
+        "the gate let the dialog row run: {res:?}"
+    );
+    assert!(
+        matches!(&res.steps[0].outcome, StepOutcome::Failed { why } if why.contains("did not take focus")),
+        "{res:?}"
+    );
+
+    // (iii) A container whose password field holds focus: nothing is typed.
+    let focused = page_js(
+        d,
+        t2,
+        "document.getElementById('secret2').focus(); document.activeElement.id",
+    )
+    .await;
+    assert_eq!(focused, "secret2");
+    let boxed = r(d, t2, "#box2").await;
+    // Pay: above any class the gate gives a container, so only the focus check can stop it.
+    let res = act(d, t2, &format!("t{boxed}=x"), &rig.ctx(Class::Pay)).await;
+    println!("row16 (iii) type into the container: {res:?}");
+    assert_eq!(
+        page_js(d, t2, "document.getElementById('secret2').value === ''").await,
+        true,
+        "something was typed into the password field"
+    );
+    assert_eq!(page_js(d, t2, "window.secretInputs").await, 0);
+    assert_eq!(page_js(d, t2, "window.keys").await, 0);
+    assert!(res.stopped.is_none(), "{res:?}");
+    assert!(
+        matches!(&res.steps[0].outcome, StepOutcome::Failed { why } if why.contains("did not take focus")),
+        "{res:?}"
+    );
+    assert_eq!(pays().await, 0);
+
+    // (iv) The fieldset on /focus, its password field focused: nothing is typed.
+    let focused = page_js(
+        d,
+        tab,
+        "document.getElementById('dlg').close(); document.getElementById('secret').focus(); \
+         document.activeElement.id",
+    )
+    .await;
+    assert_eq!(focused, "secret");
+    let keys = page_js(d, tab, "window.keys").await;
+    let boxed = r(d, tab, "#box").await;
+    let res = act(d, tab, &format!("t{boxed}=x"), &rig.ctx(Class::Pay)).await;
+    println!("row16 (iv) type into the fieldset: {res:?}");
+    assert_eq!(
+        page_js(d, tab, "document.getElementById('secret').value === ''").await,
+        true,
+        "something was typed into the password field"
+    );
+    assert_eq!(page_js(d, tab, "window.secretInputs").await, 0);
+    assert_eq!(page_js(d, tab, "window.keys").await, keys);
+    assert!(!matches!(res.steps[0].outcome, StepOutcome::Ok), "{res:?}");
+
+    // Control: the element itself still takes focus and gets the text.
+    let plain = r(d, t2, "#plain2").await;
+    let res = act(d, t2, &format!("t{plain}=ok"), &rig.ctx(Class::Fill)).await;
+    assert!(ok_steps(&res), "{res:?}");
+    assert_eq!(
+        page_js(d, t2, "document.getElementById('plain2').value").await,
+        "ok"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// Row 17 (round 2, review Should-fix 1, D-618): a timer dialog between steps.
+// ---------------------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row17_a_timer_dialog_between_steps_stops_at_once() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let ctx = rig.ctx(Class::Submit);
+    let tab = d.open(&rig.url("/timer")).await.expect("open /timer");
+    let arm = r(d, tab, "#arm").await;
+    let arm0 = r(d, tab, "#arm0").await;
+    let hid = r(d, tab, "#hid").await;
+    let cnt = r(d, tab, "#cnt").await;
+    let ti = r(d, tab, "#ti").await;
+    let counted = || page_js(d, tab, "+(document.getElementById('cnt').dataset.n || 0)");
+
+    for (prog, text) in [
+        // The alert opens 900 ms later, while step 2 waits for a hidden button.
+        (format!("c{arm}; c{hid}; c{cnt}"), "from a timer"),
+        // The alert opens at once, before step 2 types.
+        (format!("c{arm0}; t{ti}=later; c{cnt}"), "right away"),
+    ] {
+        let t0 = std::time::Instant::now();
+        let res = act(d, tab, &prog, &ctx).await;
+        let took = t0.elapsed();
+        println!("row17 {prog}: {took:?} {res:?}");
+        let at = res
+            .steps
+            .iter()
+            .position(|s| {
+                s.consequences
+                    .contains(&Consequence::Dialog { text: text.into() })
+            })
+            .unwrap_or_else(|| panic!("no Dialog: {res:?}"));
+        assert_eq!(
+            at + 1,
+            res.steps.len(),
+            "a step ran after the dialog: {res:?}"
+        );
+        assert!(
+            res.stopped.is_none(),
+            "a dialog is not a gate stop: {res:?}"
+        );
+        assert!(
+            !res.steps.iter().any(|s| matches!(&s.outcome,
+                StepOutcome::Failed { why } if why.contains("not answering"))),
+            "{res:?}"
+        );
+        assert!(took < Duration::from_millis(2500), "stalled: {took:?}");
+        d.dialog(tab, true, None).await.expect("accept");
+        assert_eq!(counted().await, 0, "the step after the dialog ran");
+        assert_eq!(
+            page_js(d, tab, "document.getElementById('ti').value").await,
+            "",
+            "the step after the dialog typed"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Row 18 (round 2, review Should-fix 2 and 3, D-619): an error re-fetch is not saved;
+// format characters leave download names.
+// ---------------------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row18_error_refetch_not_saved_and_format_chars_stripped() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let ctx = rig.ctx(Class::Submit);
+    let tab = d.open(&rig.url("/dls2")).await.expect("open /dls2");
+    let listing = |dir: &Path| -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    for (sel, path, code) in [("#e500", "/dl-e500", "500"), ("#e404", "/dl-e404", "404")] {
+        let el = r(d, tab, sel).await;
+        let mut events = d.cdp().events();
+        let res = act(d, tab, &format!("c{el}"), &ctx).await;
+        let (name, guid) = download_of(&res);
+        assert_eq!(download_end(&mut events, &guid).await, "canceled", "{path}");
+        let before = hits(path);
+        let err = d
+            .download(tab, &guid, true)
+            .await
+            .expect_err("an error answer is not saved");
+        let why = err.to_string();
+        println!(
+            "row18 {path}: download(true) -> Err({why}); hits {before} -> {}",
+            hits(path)
+        );
+        assert_eq!(hits(path), before + 1, "{path} was fetched again");
+        assert!(
+            why.contains(code) || why.contains("RESPONSE_CODE"),
+            "{path}: {why}"
+        );
+        assert!(files_with(rig.home.path(), error_body().as_bytes()).is_empty());
+        assert!(files_with(rig.home.path(), dl_body(path).as_bytes()).is_empty());
+        assert_eq!(
+            listing(&rig.files()),
+            Vec::<String>::new(),
+            "{path}: files/ left over"
+        );
+        assert!(!user_downloads_has(&name));
+    }
+
+    for (sel, path) in [
+        ("#rlo", "/dl-rlo"),
+        ("#zw", "/dl-zw"),
+        ("#attrc", "/dl-attrc"),
+    ] {
+        let el = r(d, tab, sel).await;
+        let mut events = d.cdp().events();
+        let res = act(d, tab, &format!("c{el}"), &ctx).await;
+        let (name, guid) = download_of(&res);
+        println!("row18 {path}: shown name {name:?}");
+        assert!(
+            !name.chars().any(is_cf),
+            "{path}: a format char is shown: {name:?}"
+        );
+        assert_eq!(download_end(&mut events, &guid).await, "canceled", "{path}");
+        let saved = d
+            .download(tab, &guid, true)
+            .await
+            .unwrap_or_else(|e| panic!("{path}: {e}"))
+            .expect("a path");
+        let fname = saved.file_name().unwrap().to_string_lossy().to_string();
+        println!("row18 {path}: saved as {fname:?}");
+        assert!(
+            !fname.chars().any(is_cf),
+            "{path}: a format char on disk: {fname:?}"
+        );
+        assert!(fname.contains(&pid().to_string()), "{path}: {fname:?}");
+        let files = std::fs::canonicalize(rig.files()).unwrap();
+        let real = std::fs::canonicalize(&saved).unwrap();
+        assert_eq!(real.parent(), Some(files.as_path()), "{path}");
+        assert_eq!(std::fs::read(&saved).unwrap(), dl_body(path).as_bytes());
+    }
+    let left = listing(&rig.files());
+    assert!(
+        left.iter()
+            .all(|n| !n.chars().any(is_cf) && !n.ends_with(".part")),
+        "{left:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// Row 19 (round 2, review Should-fix 5, D-618): a stale target is a failed step, not a stop.
+// ---------------------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row19_a_stale_target_after_navigation_is_a_failed_step() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/links")).await.expect("open /links");
+    let noop = r(d, tab, "#noop").await;
+    let blank = r(d, tab, "#blank").await;
+    let search = r(d, tab, "input[aria-label=Search]").await;
+    let nav = r(d, tab, "#nav").await;
+    let res = act(d, tab, &format!("c{nav}"), &rig.ctx(Class::Navigate)).await;
+    assert!(
+        res.steps[0].consequences.contains(&Consequence::Navigated {
+            url: rig.url("/welcome")
+        }),
+        "{res:?}"
+    );
+    for (prog, class) in [
+        (format!("c{noop}"), Class::Fill),
+        (format!("c{noop}"), Class::Read),
+        (format!("c{blank}"), Class::Navigate),
+        (format!("t{search}=x"), Class::Read),
+        (format!("k{search}=Enter"), Class::Fill),
+    ] {
+        let res = act(d, tab, &prog, &rig.ctx(class)).await;
+        println!("row19 {prog} under {class:?}: {res:?}");
+        assert!(
+            res.stopped.is_none(),
+            "a stale target is not a gate stop: {res:?}"
+        );
+        assert_eq!(res.steps.len(), 1, "{res:?}");
+        assert!(
+            matches!(&res.steps[0].outcome, StepOutcome::Failed { why } if why == "stale" || why == "gone"),
+            "{res:?}"
+        );
+    }
+    // A removed element in the live document: gone, a failed step.
+    let p = r(d, tab, "p").await;
+    page_js(d, tab, "document.querySelector('p').remove()").await;
+    let res = act(d, tab, &format!("c{p}"), &rig.ctx(Class::Fill)).await;
+    println!("row19 removed element: {res:?}");
+    assert!(res.stopped.is_none(), "{res:?}");
+    assert!(
+        matches!(&res.steps[0].outcome, StepOutcome::Failed { why } if why == "gone" || why == "stale"),
+        "{res:?}"
+    );
+    assert_eq!(page_js(d, tab, "location.pathname").await, "/welcome");
 }
