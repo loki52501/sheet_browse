@@ -16,12 +16,23 @@
 //! assertion message prints read output that may hold the canary: messages name the case and the
 //! reading only.
 
+//!
+//! Round 8 (D-231 as implemented in 465e9b8): the `d231_*` tests at the end. The no-password
+//! output is pinned to round-7 behaviour by a digest of every read, skeleton and sheet on each
+//! fixture page here (digests taken by running the same test against the round-7 reader.rs,
+//! c550253); a password value that never shows leaves every read byte-identical; values that
+//! show only scattered in the line (renderer, label, escape-dropped and collapsed readings) are
+//! hidden with several other values on the page; multibyte and emoji values cross cells with
+//! in-cell pipes. Every leak check of these tests also reads `\|` as `|`.
+
 use std::collections::HashMap;
+
+mod common;
 
 use sb_sheet::data::alias_for;
 use sb_sheet::{
-    read, skeleton, BlockKind, ElemRef, FieldValue, IndexRow, ReadOpts, ReadOutput, SkeletonOpts,
-    Span, State, TextBlock,
+    find, find_lines, read, sheet, skeleton, BlockKind, ElemRef, FieldValue, FindOpts, IndexRow,
+    PageMeta, ReadOpts, ReadOutput, SheetOpts, SkeletonOpts, Span, State, TextBlock,
 };
 
 // ---------------------------------------------------------------- builders
@@ -1067,4 +1078,617 @@ fn d231_value_with_an_in_cell_pipe_across_cells_never_shows() {
         }
     }
     assert!(leaks.is_empty(), "joined value shows: {leaks:?}");
+}
+
+// ---------------------------------------------------------------- round 8 (D-231, 465e9b8)
+
+/// A fixed word for the pages built without any password value (the digests must not depend on
+/// the canary, and with no password row on the page nothing there is a secret).
+const PLAIN: &str = "Plainword7";
+
+/// The D-231 table rows of `d231_value_with_an_in_cell_pipe_across_cells_never_shows`, as a
+/// page builder.
+fn pipe_cells_page(c: &str) -> (Vec<IndexRow>, Vec<TextBlock>, Secrets) {
+    let v1 = format!("{c} | Zu12|tail91");
+    let v2 = format!("{c}Zv | Zv12|tail92");
+    let v3 = format!("{c} | Zw|12 | tail93");
+    let v4 = format!("{c}|Zx | Zx12345678");
+    let rows = vec![
+        password(7, &v1),
+        password(8, &v2),
+        password(9, &v3),
+        password(10, &v4),
+    ];
+    let blocks = vec![
+        para(1, &words("top", 10)),
+        trow(2, true, vec![txt("Name"), txt("Value"), txt("Note")]),
+        trow(
+            3,
+            false,
+            vec![
+                txt(&format!("keep x1 {c}")),
+                txt("Zu12|tail91 keep y1"),
+                txt("keep z1"),
+            ],
+        ),
+        trow(
+            4,
+            false,
+            vec![
+                link(&format!("{c}Zv"), 81),
+                txt("Zv12|tail92 keep y2"),
+                txt("keep z2"),
+            ],
+        ),
+        trow(
+            5,
+            false,
+            vec![
+                txt(&format!("keep x3 {c}")),
+                link("Zw|12", 80),
+                txt("tail93 keep z3"),
+            ],
+        ),
+        trow(
+            6,
+            false,
+            vec![
+                txt(&format!("keep x4 {c}|Zx")),
+                link("Zx12345678", 79),
+                txt("keep z4"),
+            ],
+        ),
+        para(7, &words("end", 10)),
+    ];
+    let s = Secrets::new(vec![
+        ("plain | plain with an in-cell pipe", v1),
+        ("link | plain with an in-cell pipe", v2),
+        ("plain | link | plain with an in-cell pipe", v3),
+        ("pipe in cell 1, link after", v4),
+    ]);
+    (rows, blocks, s)
+}
+
+/// Every line kind the reader renders, with no password value: link, button, checkbox and
+/// textbox forms (with text, empty, unknown id), punctuation glued to forms, pipes in plain
+/// cells and in link text, an all-empty row, brackets, `***`, backtick runs in text and code,
+/// link shapes in code, whitespace runs, lines posing as reader lines, multibyte and emoji
+/// text, a list item, a quote and a long paragraph to chunk.
+fn mixed_page() -> (Vec<IndexRow>, Vec<TextBlock>) {
+    let rows = vec![
+        row(30, "link", "Home"),
+        row(31, "checkbox", "Remember me"),
+        button(32, "Go | now"),
+        row(33, "textbox", "Search"),
+        row(34, "link", "Docs [v2]"),
+    ];
+    let blocks = vec![
+        hd(1, 1, vec![txt("Mixed "), link("Home", 30), txt(" page")]),
+        para(2, "chunk 2 of 3"),
+        para(3, "truncated: max_tokens 9 reached"),
+        para(4, "remaining:"),
+        p(
+            5,
+            vec![
+                txt("see ("),
+                link("Home", 30),
+                txt(")."),
+                link("", 35),
+                txt(" and "),
+                link("Go | now", 32),
+                link("x", 31),
+                txt("`````"),
+                txt(" back"),
+            ],
+        ),
+        para(6, "[fake](#3) and ](#4) [x] *** a   b\t\tc\n d"),
+        para(7, "na\u{ef}ve \u{65e5}\u{672c}\u{8a9e} \u{1f511} \u{1f469}\u{200d}\u{1f4bb} e\u{301} \u{3a9}|\u{3bb}"),
+        hd(8, 2, vec![txt("Table "), link("Docs [v2]", 34)]),
+        trow(9, true, vec![txt("A"), txt("B|C"), txt("D")]),
+        trow(10, false, vec![txt("x|y"), link("p|q", 36), txt("")]),
+        trow(11, false, vec![txt(""), txt(""), txt("")]),
+        trow(
+            12,
+            false,
+            vec![
+                link("Go | now", 32),
+                txt("\u{1f511}|\u{65e5}\u{672c}"),
+                txt("end"),
+            ],
+        ),
+        blk(
+            13,
+            BlockKind::Code,
+            None,
+            vec![
+                txt("\n\nlet a = [x](#3);\n"),
+                link("Home", 30),
+                txt("(#4) ```````````` done\n\n\n"),
+            ],
+        ),
+        blk(
+            14,
+            BlockKind::ListItem,
+            Some(1),
+            vec![link("Search", 33), txt(": type "), txt("here")],
+        ),
+        blk(
+            15,
+            BlockKind::Quote,
+            None,
+            vec![txt("quoted "), link("Remember me", 31), txt(" text")],
+        ),
+        para(16, &words("tail", 40)),
+    ];
+    (rows, blocks)
+}
+
+/// The fixture pages of this file with every password row removed (so no value is on the
+/// page), the register page and the mixed page.
+fn plain_pages() -> Vec<(&'static str, Vec<IndexRow>, Vec<TextBlock>)> {
+    let strip = |(mut rows, blocks, _): (Vec<IndexRow>, Vec<TextBlock>, Secrets)| {
+        rows.retain(|r| r.state.input_type.as_deref() != Some("password"));
+        (rows, blocks)
+    };
+    let mut v = Vec::new();
+    for (name, page) in [
+        ("link_then_plain", strip(link_then_plain(PLAIN))),
+        ("table_page", strip(table_page(PLAIN))),
+        ("three_spans", strip(three_spans(PLAIN))),
+        ("heading_page", strip(heading_page(PLAIN))),
+        ("keep_page", strip(keep_page(PLAIN))),
+        ("sweep_page", strip(sweep_page(PLAIN))),
+        ("pipe_cells_page", strip(pipe_cells_page(PLAIN))),
+        (
+            "register",
+            (common::register_rows(), common::register_text()),
+        ),
+        ("mixed_page", mixed_page()),
+    ] {
+        v.push((name, page.0, page.1));
+    }
+    v
+}
+
+/// FNV-1a 64 over each piece followed by a 0xff separator.
+fn fnv(pieces: &[String]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for p in pieces {
+        for b in p.bytes().chain(std::iter::once(0xff)) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
+}
+
+/// The read sweep of the round-8 comparisons: chunk 0, 30 and 8 to the end, and chains under
+/// max_tokens 5 (chunk 0), 23 (chunk 0) and 40 (chunk 10).
+fn sweep_opts() -> Vec<ReadOpts> {
+    vec![
+        opts(0, None),
+        opts(30, None),
+        opts(8, None),
+        opts(0, Some(5)),
+        opts(0, Some(23)),
+        opts(10, Some(40)),
+    ]
+}
+
+/// Every output of every read of the sweep: markdown, chunk numbers, `remaining:` entries and
+/// cursor.
+fn read_outputs(rows: &[IndexRow], blocks: &[TextBlock]) -> Vec<String> {
+    let mut out = Vec::new();
+    for o in sweep_opts() {
+        let bound = o.max_tokens.map_or(2000, |m| m + 4);
+        for r in read_chain(rows, blocks, &o, bound) {
+            out.push(r.markdown.clone());
+            out.push(format!("{} of {}", r.chunk, r.chunks));
+            for e in &r.remaining {
+                out.push(format!("{} / {}", e.heading, e.words));
+            }
+            out.push(r.cursor.map(|c| c.0).unwrap_or_default());
+        }
+    }
+    out
+}
+
+/// The skeleton, the whole-page sheet and find_lines for a fixed query.
+fn index_outputs(rows: &[IndexRow], blocks: &[TextBlock]) -> Vec<String> {
+    let meta = PageMeta {
+        url: "http://127.0.0.1:8000/p.html".into(),
+        title: "Page".into(),
+        site_tools: None,
+        dialog: None,
+    };
+    let hits = find(
+        rows,
+        blocks,
+        &FindOpts {
+            query: "home search docs".into(),
+            k: 3,
+        },
+    );
+    vec![
+        skeleton(rows, blocks, &SkeletonOpts { meta }),
+        sheet(rows, blocks, &SheetOpts::default()),
+        find_lines(rows, &hits),
+    ]
+}
+
+/// Digests of every page's reads and of its skeleton, sheet and find_lines, taken with no
+/// password value on the page by running `d231_no_password_output_matches_round_7` with
+/// SB_T10_R8_PRINT=1 against the round-7 reader.rs (c550253, the code accepted in round 7
+/// except for D-231), then restoring reader.rs.
+const ROUND7_DIGESTS: &[(&str, u64, u64)] = &[
+    ("link_then_plain", 0x65154c837b358e12, 0xf1d5c236bb35507e),
+    ("table_page", 0x798f617977f80c43, 0x5c7f7b4b0d795aba),
+    ("three_spans", 0xe3118b5433cc33cc, 0x6459f0f6f964aa18),
+    ("heading_page", 0x7062c5fd4fdde59b, 0xc11c222e0632539c),
+    ("keep_page", 0xf34e014125e6d95c, 0x3f4d4bf1d5918da7),
+    ("sweep_page", 0x8b171d28c649cca7, 0x1982207ed008aae8),
+    ("pipe_cells_page", 0xd94774e6542e02da, 0x5c7f7b4b0d795aba),
+    ("register", 0x0ffdd9c85e1ce1c2, 0xc5513d9788442c17),
+    ("mixed_page", 0xb56e934511c2a7ef, 0xa9bd6028271fc774),
+];
+
+/// D-231 fast path (no password value): every read, the skeleton, the sheet and find_lines on
+/// each fixture page are byte-identical to round 7's (digests above).
+#[test]
+fn d231_no_password_output_matches_round_7() {
+    let print = std::env::var("SB_T10_R8_PRINT").is_ok();
+    let mut diffs = Vec::new();
+    for (name, rows, blocks) in plain_pages() {
+        let r = fnv(&read_outputs(&rows, &blocks));
+        let i = fnv(&index_outputs(&rows, &blocks));
+        if print {
+            println!("    (\"{name}\", 0x{r:016x}, 0x{i:016x}),");
+        }
+        match ROUND7_DIGESTS.iter().find(|(n, _, _)| *n == name) {
+            Some((_, r7, i7)) => {
+                if *r7 != r {
+                    diffs.push(format!("{name}: reads differ from round 7"));
+                }
+                if *i7 != i {
+                    diffs.push(format!(
+                        "{name}: skeleton/sheet/find_lines differ from round 7"
+                    ));
+                }
+            }
+            None => diffs.push(format!("{name}: no round-7 digest")),
+        }
+    }
+    assert!(diffs.is_empty(), "{diffs:?}");
+}
+
+/// The alphanumerics of `line`, every other one from `skip`, `n` of them: a spelling whose
+/// characters are a subsequence of the line but which is not contiguous in it.
+fn every_other(line: &str, skip: usize, n: usize) -> String {
+    line.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .skip(skip)
+        .step_by(2)
+        .take(n)
+        .collect()
+}
+
+fn is_subsequence(needle: &str, hay: &str) -> bool {
+    let mut it = hay.chars();
+    needle.chars().all(|c| it.any(|h| h == c))
+}
+
+/// D-231 prefilter, both ways: a password value whose characters are absent from every line
+/// (the check is skipped) and one whose characters are a subsequence of a body line but that
+/// shows in no reading (the full check runs and hides nothing) leave every read byte-identical
+/// to the read with no password value; the skeleton, sheet and find_lines are the same under
+/// both values.
+#[test]
+fn d231_a_value_that_never_shows_leaves_every_read_unchanged() {
+    let absent = "\u{14a}q~\u{14a}q~\u{14a}q~\u{14a}q~\u{14a}q~".to_string();
+    let mut diffs = Vec::new();
+    for (name, rows, blocks) in plain_pages() {
+        let base = read_outputs(&rows, &blocks);
+        // The subsequence value comes from the longest body line of the full read.
+        let full = read(&rows, &blocks, &opts(100_000, None));
+        let longest = body(&full.markdown)
+            .lines()
+            .max_by_key(|l| l.len())
+            .unwrap_or("")
+            .to_string();
+        let all_text: String = base.join("\n");
+        let readings = [
+            all_text.clone(),
+            visible(&all_text),
+            label_view(&all_text),
+            squeeze(&all_text),
+            alnum(&all_text),
+            all_text.replace("\\|", "|"),
+        ];
+        let sub = (0..6)
+            .map(|skip| every_other(&longest, skip, 12))
+            .find(|s| s.len() == 12 && !readings.iter().any(|r| r.contains(s.as_str())))
+            .unwrap_or_else(|| panic!("{name}: no subsequence decoy found"));
+        assert!(
+            is_subsequence(&sub, &longest),
+            "{name}: decoy not a subsequence"
+        );
+        let mut idx = Vec::new();
+        for value in [&absent, &sub] {
+            let mut r2 = rows.clone();
+            r2.push(password(900, value));
+            if read_outputs(&r2, &blocks) != base {
+                let which = if value == &absent {
+                    "absent-chars value"
+                } else {
+                    "subsequence value"
+                };
+                diffs.push(format!("{name}: reads changed by a {which}"));
+            }
+            idx.push(index_outputs(&r2, &blocks));
+        }
+        if idx[0] != idx[1] {
+            diffs.push(format!(
+                "{name}: skeleton/sheet/find_lines differ between the two values"
+            ));
+        }
+    }
+    assert!(diffs.is_empty(), "{diffs:?}");
+}
+
+/// The leaks of `check_page` and of `chains` more, every reading also with `\|` read as `|`.
+fn check_page_esc(
+    rows: &[IndexRow],
+    blocks: &[TextBlock],
+    s: &Secrets,
+    chains: &[(usize, Option<usize>)],
+) -> Vec<String> {
+    let mut leaks = Vec::new();
+    let mut sweep = vec![(0usize, None), (30, None)];
+    sweep.extend_from_slice(chains);
+    for (chunk, m) in sweep {
+        let bound = m.map_or(2000, |m| m + 4);
+        let outs = read_chain(rows, blocks, &opts(chunk, m), bound);
+        let at = format!("chunk {chunk} max {m:?}");
+        s.leaks_in_chain(&outs, &at, &mut leaks);
+        let unesc: Vec<ReadOutput> = outs
+            .iter()
+            .map(|o| ReadOutput {
+                markdown: o.markdown.replace("\\|", "|"),
+                ..o.clone()
+            })
+            .collect();
+        s.leaks_in_chain(&unesc, &format!("{at} with \\| read as |"), &mut leaks);
+    }
+    leaks
+}
+
+/// Several password values: decoys that never show (one with characters absent from the page,
+/// some with characters spread through a line) and targets that show only in a reading where
+/// the raw line holds their characters scattered: the renderer's reading (`(` then a link
+/// form), the label reading (a button's quoted label then `.`), the escape-dropped reading (an
+/// in-cell `\|`), the collapsed reading of a code block with a line break where the value has a
+/// space (the block holds no space at all), a value whose `~` occurs only at the end of a long
+/// line, and two values in one line.
+fn scattered_page(c: &str) -> (Vec<IndexRow>, Vec<TextBlock>, Secrets) {
+    let vals: Vec<(&'static str, String)> = vec![
+        (
+            "decoy, chars absent",
+            "\u{14a}q~\u{14a}q~\u{14a}q~\u{14a}q~\u{14a}q~".into(),
+        ),
+        ("decoy, spread through a line", "keepZq1234abend".into()),
+        ("decoy, canary head", format!("{c}NeverHere99")),
+        (
+            "decoy, spread through the long line",
+            "lw0lw1lw2lw3lw4".into(),
+        ),
+        ("renderer reading", format!("{c}(Zq1234ab")),
+        ("label reading", format!("{c}Zc.tailC9876")),
+        ("escape-dropped reading", format!("{c} | Zu12|tail91")),
+        ("collapsed code line break", format!("{c} Zy12345678")),
+        ("tilde late in a long line", format!("{c}(Q~9876543")),
+        ("two in one line, first", format!("{c}A(Zm111111")),
+        ("two in one line, second", format!("{c}B(Zn222222")),
+    ];
+    let mut rows: Vec<IndexRow> = vals
+        .iter()
+        .enumerate()
+        .map(|(i, (_, v))| password(300 + i as u32, v))
+        .collect();
+    rows.push(button(5, "Send"));
+    let blocks = vec![
+        para(1, &words("top", 10)),
+        p(
+            2,
+            vec![
+                txt(&format!("keep a {c}(")),
+                link("Zq1234ab", 86),
+                txt(" end"),
+            ],
+        ),
+        blk(
+            3,
+            BlockKind::Quote,
+            None,
+            vec![link(&format!("{c}Zc"), 5), txt(".tailC9876 keep")],
+        ),
+        trow(4, true, vec![txt("Name"), txt("Value"), txt("Note")]),
+        trow(
+            5,
+            false,
+            vec![
+                txt(&format!("keep u {c}")),
+                txt("Zu12|tail91 keep w"),
+                txt("keep v"),
+            ],
+        ),
+        blk(
+            6,
+            BlockKind::Code,
+            None,
+            vec![txt(&format!("{c}\nZy12345678;"))],
+        ),
+        p(
+            7,
+            vec![
+                txt(&words("lw", 40)),
+                txt(&format!(" {c}(")),
+                link("Q~9876543", 77),
+            ],
+        ),
+        p(
+            8,
+            vec![
+                txt(&format!("x {c}A(")),
+                link("Zm111111", 70),
+                txt(") and "),
+                txt(&format!("{c}B(")),
+                link("Zn222222", 71),
+                txt(") done"),
+            ],
+        ),
+        para(9, &words("end", 10)),
+    ];
+    (rows, blocks, Secrets::new(vals))
+}
+
+/// D-231 prefilter (could_show) never skips a value that shows: with eleven password values on
+/// the page, each target that shows only scattered in its line is hidden, in every reading, at
+/// chunk 0, 30, 3 and under max_tokens 23, and the skeleton; the plain text around it stays.
+#[test]
+fn d231_prefilter_never_skips_a_value_scattered_in_the_line() {
+    let c = canary();
+    let (rows, blocks, s) = scattered_page(&c);
+    let mut leaks = check_page_esc(&rows, &blocks, &s, &[(3, None), (0, Some(23))]);
+    let sk = skeleton(&rows, &blocks, &SkeletonOpts::default());
+    if let Some(l) = s.leak_in(&sk) {
+        leaks.push(format!("skeleton: {l}"));
+    }
+    assert!(leaks.is_empty(), "a value shows: {leaks:?}");
+    let b = full_body(&rows, &blocks);
+    for gone in ["](#86)", "](#5)", "](#77)", "](#70)", "](#71)"] {
+        assert!(!b.contains(gone), "contributing link form {gone} kept");
+    }
+    for keep in [
+        "keep a",
+        " end",
+        "keep u",
+        "keep w",
+        "keep v",
+        "lw00 lw01",
+        "lw39",
+        "x ",
+        ") and",
+        ") done",
+    ] {
+        assert!(b.contains(keep), "plain text {keep:?} lost");
+    }
+    // The quote: the button form is hidden whole, `.tailC9876` hidden, ` keep` stays.
+    let quote = b
+        .lines()
+        .find(|l| l.starts_with('>'))
+        .expect("the quote is in the body");
+    assert!(
+        quote.contains("***") && quote.ends_with(" keep") && !quote.contains("tailC"),
+        "the quote is not hidden as D-230 says"
+    );
+}
+
+/// Multibyte and emoji values (2-, 3- and 4-byte chars, a ZWJ sequence, a combining accent)
+/// across table cells with in-cell pipes: plain | plain, link | plain, plain | link | plain and a
+/// pipe next to an emoji in cell 1 with a link after. Hidden in every reading (also with `\|`
+/// read as `|`), at chunk 0, 30, 1, 3 and under max_tokens 23; the other cell text stays and a
+/// row where a link cell contributes keeps its cells.
+#[test]
+fn d231_multibyte_and_emoji_values_across_cells_with_in_cell_pipes() {
+    let c = canary();
+    let v1 = format!("{c}\u{e9} | \u{65e5}\u{672c}|\u{8a9e}\u{1f511}9");
+    let v2 = format!("{c}\u{1f511} | \u{1f469}\u{200d}\u{1f4bb}|\u{f1}12345");
+    let v3 = format!("{c}\u{fc} | \u{3a9}|\u{3bb} | \u{7d42}\u{308f}\u{308a}");
+    let v4 = format!("{c}|\u{1f642}\u{1e9e} | Zx\u{65e5}\u{672c}\u{8a9e}\u{30c6}\u{30b9}\u{30c8}");
+    let v5 = format!("{c}e\u{301} | o\u{308}|x1234567");
+    let rows = vec![
+        password(7, &v1),
+        password(8, &v2),
+        password(9, &v3),
+        password(10, &v4),
+        password(11, &v5),
+    ];
+    let blocks = vec![
+        para(1, &words("top", 10)),
+        trow(2, true, vec![txt("Name"), txt("Value"), txt("Note")]),
+        trow(
+            3,
+            false,
+            vec![
+                txt(&format!("keep a1 {c}\u{e9}")),
+                txt("\u{65e5}\u{672c}|\u{8a9e}\u{1f511}9 keep b1"),
+                txt("keep z1"),
+            ],
+        ),
+        trow(
+            4,
+            false,
+            vec![
+                link(&format!("{c}\u{1f511}"), 60),
+                txt("\u{1f469}\u{200d}\u{1f4bb}|\u{f1}12345 keep b2"),
+                txt("keep z2"),
+            ],
+        ),
+        trow(
+            5,
+            false,
+            vec![
+                txt(&format!("keep a3 {c}\u{fc}")),
+                link("\u{3a9}|\u{3bb}", 61),
+                txt("\u{7d42}\u{308f}\u{308a} keep c3"),
+            ],
+        ),
+        trow(
+            6,
+            false,
+            vec![
+                txt(&format!("keep a4 {c}|\u{1f642}\u{1e9e}")),
+                link("Zx\u{65e5}\u{672c}\u{8a9e}\u{30c6}\u{30b9}\u{30c8}", 62),
+                txt("keep z4"),
+            ],
+        ),
+        trow(
+            7,
+            false,
+            vec![
+                txt(&format!("keep a5 {c}e\u{301}")),
+                txt("o\u{308}|x1234567 keep b5"),
+                txt("keep z5"),
+            ],
+        ),
+        para(8, &words("end", 10)),
+    ];
+    let s = Secrets::new(vec![
+        ("2/3/4-byte plain | plain", v1),
+        ("emoji link | ZWJ plain", v2),
+        ("plain | link | plain, Greek and kana", v3),
+        ("pipe by an emoji in cell 1, link after", v4),
+        ("combining accents plain | plain", v5),
+    ]);
+    let leaks = check_page_esc(&rows, &blocks, &s, &[(1, None), (3, None), (0, Some(23))]);
+    assert!(leaks.is_empty(), "a value shows: {leaks:?}");
+    let b = full_body(&rows, &blocks);
+    for gone in ["](#60)", "](#61)", "](#62)"] {
+        assert!(!b.contains(gone), "contributing link form {gone} kept");
+    }
+    for keep in [
+        "keep a1", "keep b1", "keep z1", "keep b2", "keep z2", "keep a3", "keep c3", "keep a4",
+        "keep z4", "keep a5", "keep b5", "keep z5",
+    ] {
+        assert!(b.contains(keep), "cell text {keep:?} lost");
+    }
+    // Rows where a link cell contributes keep their three cells (4 unescaped separators).
+    for (k, mark) in ["keep z2", "keep a3", "keep a4"].iter().enumerate() {
+        let line = b
+            .lines()
+            .find(|l| l.contains(mark))
+            .unwrap_or_else(|| panic!("row {k} is in the body"));
+        let seps = line.replace("\\|", "").matches('|').count();
+        assert_eq!(seps, 4, "row with {mark:?} lost a cell separator");
+    }
 }
