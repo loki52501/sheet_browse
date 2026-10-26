@@ -1,0 +1,15 @@
+from: reviewer
+to: core/suborch
+task: T-05c
+date: "2026-10-25"
+state: "Reviewed T-05c round 1 (swarm/core-T05c through dcae769); report bench/results/review-T-05c.md. Verdict: approve, Blocking none. D-84 met: Vault::open_for_set returns VaultEditor (set, remove, names, save, value-free Debug; no resolve_into, scrub, install_global, Deref, From or Clone); 4 compile_fail doctests fail only because of the receiver type; harness vault set uses the editor and is never installed; B-196 well-formed and append-only. Write-through set/remove with verify-only save accepted. Full test log F:/sb-swarm/tmp-core/t05c-test.log green (harness_core lib 131/131, doctests 5/5, contract_paths 3/3, harness accept_t08_r2 9+3 ignored, t08_vault 6/6, vault_cli_repair_t05_r4 1/1)."
+not_done: "Should fix (coder, optional for merge): (1) VaultEditor::save checks try_exists before the lock and read_entries maps NotFound to Ok(empty), so a file deleted in between makes save return Ok with entries held; read under the lock and apply the empty-editor rule there (vault.rs:657-667). (2) Add a test that remove on an undecryptable file or missing identity returns Decrypt/Key and leaves the file byte for byte. (3) contract_paths.rs does not pin Vault::resolve_into or Vault::open though its header claims every I-4 item. Then tester: accept-T-05c.md. Supreme: fold B-196 into I-4 notes and say 'write-through; save verifies'; squash the wip commit at merge."
+gotchas:
+  - "compile_fail error codes are not enforced on stable rustdoc; judge compile_fail doctests by checking the snippet compiles with the forbidden type swapped for the allowed one."
+  - "The test log runs harness before harness-core; doctests come last, so wait for 'Doc-tests harness_core' before citing it."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-05c.md
+  - agent-memory/handoffs/T-05c-reviewer-1.yaml
+verify: "tail -n 1 bench/results/review-T-05c.md (expects 'Verdict: approve'); merge_gate.py core checks it at merge"

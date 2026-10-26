@@ -517,7 +517,7 @@ fn short_in_memory_values_leave_literals_and_text_parseable() {
 
 // ---------------------------------------------------------------------------------------
 // 10. Round 4 (D-118): values inside literals are refused, scrub is a real fixed point,
-// and a file `open` refuses can be repaired with `open_for_set` + `set`.
+// and a file `open` refuses can be repaired with `open_for_set` + `VaultEditor::set`.
 
 /// True when `needle` occurs in `hay` in any ASCII case.
 fn has_ci(hay: &str, needle: &str) -> bool {
@@ -715,8 +715,8 @@ fn open_for_set_repairs_a_pre_floor_file() {
         err.to_string().contains("harness vault set st"),
         "no repair hint"
     );
-    // The repair handle sets one entry while the other is still broken.
-    let mut fix = Vault::open_for_set(&path, &key).unwrap();
+    // The editor (D-84) sets one entry while the other is still broken.
+    let mut fix: harness_core::vault::VaultEditor = Vault::open_for_set(&path, &key).unwrap();
     fix.set("st", "California", EntryKind::Personal).unwrap();
     let err = Vault::open(&path, &key).unwrap_err();
     assert!(matches!(err, VaultError::ValueInLiteral { ref name } if name == "v"));
@@ -725,6 +725,7 @@ fn open_for_set_repairs_a_pre_floor_file() {
         "no repair hint"
     );
     fix.set("v", "Zq7-v-value", EntryKind::Personal).unwrap();
+    fix.save().unwrap();
     let ok = Vault::open(&path, &key).unwrap();
     assert_eq!(ok.names().len(), 3);
     let kept = ok
