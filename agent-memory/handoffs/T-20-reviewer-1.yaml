@@ -1,0 +1,16 @@
+from: driver/reviewer-1
+to: driver/suborch, then rust-coder
+task: T-20
+date: "2026-10-26"
+state: "Round 1 review of 8a32525 (handoff 64405ae), diff 0d7bae6..HEAD, in bench/results/review-T-20.md: Verdict changes, 2 Blocking. (1) The 5 s cap is not strict: ANSWER_GRACE (300 ms) is added to every attempt, wait and bringToFront (actionable.rs:227, 311, 325), so the worst case is about 5.6 s while the text says 'after 5.0 s'; the test allows 5.35 s (chromium_t20.rs:23). (2) The B-4 #6 retry wait is the first DOM mutation (CHANGE_FN), not settle() and not the schedule; on a page that keeps mutating, retries run back to back; no test catches a broken executed schedule. No cargo was run (brief: low memory, the tester runs cargo concurrently)."
+not_done: "Rust-coder: fix both Blocking items. Then the Should-fix items: (a) no give_back of a base on Lost (runtime.rs:317-321; a bfcache restore can reuse it); (b) tidy_why lets a page id attribute forge '(OVERLAY #N)' or '(#N)'; (c) tests for 'Lost twice is not retried' and 'open failure closes the tab'; (d) D-605 vs the me profile: E-2's hidden window plus bringToFront stealing focus; B-606 should go to supreme or the user; (e) record the median-of-3 '< 50 ms' weakening. Then round 2."
+gotchas:
+  - "act() in injected.js answers 'stale', not 'no base', for a document without a base (resolve(), injected.js:286), so the driver's NoBase re-walk path never fires through act()."
+  - "describe() in injected.js appends the raw id attribute, so whys carry page-controlled text that contains spaces, parentheses and '#'."
+  - "Page.createIsolatedWorld with an existing world name reuses that world (InspectorPageAgent caches worlds by name), so sb_ctx's fallback does not create a second sb world."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-20.md
+  - agent-memory/handoffs/T-20-reviewer-1.yaml
+verify: "python scripts/swarm/merge_gate.py driver --worktree ."
