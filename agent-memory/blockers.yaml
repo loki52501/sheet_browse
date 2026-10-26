@@ -230,4 +230,10 @@ interface_changes:
     change: "Names only, no behaviour change: add ANY_DOMAIN, rule_domain, rule_hint, rule_class_key and rule_key (harness_core::gate) to I-3's rust: list, and list core-pg as a consumer. D-113 makes them the one canonicaliser for gate.rules keys and core-pg calls them (crates/core-pg/src/lib.rs rule_set and rule lookup); D-81 records their behaviour but not their names."
     why: "review-T-04 round 3 should-fix 2: their behaviour is already contract in fact, so a wave-2 consumer must be able to find them in I-3. Default: as implemented."
 
+  - id: B-195
+    from: core
+    interface: "harness_core::sched (I-13 draft, D-80)"
+    change: "Additive: trait Launcher gains a provided method fn before_run(&self) -> Result<(), LaunchError> (default Ok); Runner::execute calls it first, before the prompt is scrubbed, and when it fails returns the new variant SchedError::BeforeRun(LaunchError) without creating a folder or runs row. Existing Launcher impls compile unchanged; a match on SchedError without a wildcard arm needs the new arm (none in the workspace). The harness crate adds daemon::ReopenVault (harnessd's launcher wrapper that re-opens the vault in before_run) and launcher::{DISALLOWED_TOOLS, DEFAULT_SESSION_CAP, SESSION_CAP_VAR, DEFAULT_MAX_ANSWER_BYTES, ANSWER_SCRUB_SLACK, parse_session_cap, session_cap_from_env, answer_text}, with ClaudeLauncher fields max_session and max_answer_bytes (D-124)."
+    why: "review-T-08 should-fix 7: harnessd must scrub a vault value added after it started, and the prompt is scrubbed inside Runner::execute, so the re-open has to happen there, before anything is written. Default until supreme answers: as implemented in T-08 round 2."
+
 proposals:
