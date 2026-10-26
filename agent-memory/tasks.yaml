@@ -154,7 +154,7 @@ tasks:
   - id: T-21
     step: 6
     title: "input synthesis + consequence capture; acceptance 3"
-    status: doing
+    status: done
     owner: driver/suborch
     claimed_at: "2026-10-26"
     branch: swarm/driver-T21
@@ -306,3 +306,11 @@ tasks:
     title: "review-T-20 round 2 leftovers: D-606 settle inside wait_slot has no effect (drop it or let it run past the slot; supreme to amend D-606); skip the last wait when the next slot is at or past the deadline; D-607 first-paint wait costs 3 s on a page that never paints; open dropped during Target.createTarget leaks the tab; open accepts any URL scheme; dead NoBase path and unused force in based_ctx; a challenge overlay is retried as a cover; open can wait up to 3 x OPEN_CAP; row 1 < 50 ms flaked once in 20 (72 ms, cause unknown, diagnostics added). B-606 (me scheduling, newWindow focus) needs the user; B-607 is area page."
     status: todo
     from: T-20
+  - id: T-21b
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T21b
+    title: "review-T-21 round 2 leftovers: (1) closed shadow roots: k#/t# on a closed host with focus inside passes the exact-focus check (rule 4 residual, review asks supreme whether to escalate); fail closed with a DOM.describeNode pierce check plus a test; (2) live test of the D-615 delegatesFocus exception (text accepted, password refused); (3) mock-CDP unit tests for the non-2xx re-fetch refusal and the file: scheme refusal; (4) until T-22 network settle, no NoVisibleChange for frame-0 steps classed Submit or higher; (5) take the event mark before the open-dialog check at the top of the act loop (act.rs:304/320); (6) tabs()/frames() rely on core install_global and have no cut-prefix rule (B-613)."
+    status: todo
+    from: T-21
