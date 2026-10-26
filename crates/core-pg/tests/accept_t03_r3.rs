@@ -274,7 +274,6 @@ async fn r3_d115_search_equality_substring_and_score_order() {
 /// must still hit". word_similarity('Vasnth', 'Vasanth Raghavan') is 0.5 on the compose
 /// Postgres, under the default pg_trgm.word_similarity_threshold of 0.6.
 #[tokio::test]
-#[ignore = "red-first T-03 round 4: PgStore search misses Vasnth in Vasanth Raghavan, word_similarity 0.5 under the 0.6 threshold (D-115)"]
 async fn r3_d115_vasnth_typo_inside_longer_subject_hits() {
     let db = TestDb::new().await;
     let s = &db.store;

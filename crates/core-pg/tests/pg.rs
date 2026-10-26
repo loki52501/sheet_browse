@@ -1,6 +1,8 @@
 //! core-pg against a real Postgres (docs/02 acceptance, step 1). Each test gets a throwaway
 //! database `sb_t_<random>` on SB_TEST_DATABASE_URL (D-100), migrated by `PgStore::connect`
-//! and dropped when the test ends, pass or panic. Never the shared `sb` database.
+//! and dropped when the test ends, pass or panic. Never the shared `sb` database. The first
+//! test in a process also drops `sb_t_*` databases older than an hour that a killed run left
+//! behind (review-T-03), and nothing else.
 
 use chrono::{Duration, Utc};
 use core_pg::PgStore;
@@ -10,7 +12,7 @@ use harness_core::run::RunId;
 use serde_json::json;
 use sqlx::Connection;
 use std::hash::{BuildHasher, Hasher};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 const DEFAULT_ADMIN_URL: &str = "postgres://sb@127.0.0.1:5433/postgres";
 
@@ -38,23 +40,125 @@ fn with_db(url: &str, db: &str) -> String {
     }
 }
 
+fn unix_now() -> std::time::Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+}
+
+/// `sb_t_<unix seconds>_<random>`: the creation time in the name lets [`sweep_stale`] age
+/// this helper's databases even where the server cannot tell a database's age.
 fn random_name() -> String {
     static N: AtomicU32 = AtomicU32::new(0);
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
     h.write_u32(std::process::id());
     h.write_u32(N.fetch_add(1, Ordering::Relaxed));
-    h.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default(),
-    );
-    format!("sb_t_{:016x}", h.finish())
+    h.write_u128(unix_now().as_nanos());
+    format!("sb_t_{}_{:016x}", unix_now().as_secs(), h.finish())
+}
+
+/// How old a throwaway database may get before a later test run drops it.
+const STALE_SECS: u64 = 3600;
+
+/// Only names a test helper makes, so a quoted drop can never reach another database.
+fn is_throwaway(name: &str) -> bool {
+    name.strip_prefix("sb_t_").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    })
+}
+
+/// The creation time [`random_name`] wrote into `name`, if it has one.
+fn name_secs(name: &str) -> Option<u64> {
+    let (secs, rest) = name.strip_prefix("sb_t_")?.split_once('_')?;
+    if secs.len() != 10 || rest.is_empty() {
+        return None;
+    }
+    secs.parse().ok()
+}
+
+/// Drops `sb_t_*` databases older than [`STALE_SECS`], once per test process. Age is the
+/// server's own: the modification time of the database's `PG_VERSION` file, written by
+/// `create database`, against the server's `now()` (the compose clock may differ from the
+/// host's, D-112). Where `pg_stat_file` is not allowed (a non-superuser role), only names
+/// carrying a creation time ([`random_name`]) are aged, by the host clock. A drop runs
+/// without `force`, so a database another process still uses is refused by the server and
+/// left alone; every error here is ignored, since a sweep must never fail a test.
+async fn sweep_stale(conn: &mut sqlx::PgConnection) {
+    static SWEPT: AtomicBool = AtomicBool::new(false);
+    if SWEPT.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let aged: Result<Vec<String>, sqlx::Error> = sqlx::query_scalar(
+        r"select datname::text from pg_database
+          where datname like 'sb\_t\_%'
+            and (pg_stat_file('base/' || oid || '/PG_VERSION', true)).modification
+                < now() - make_interval(secs => $1)",
+    )
+    .bind(STALE_SECS as f64)
+    .fetch_all(&mut *conn)
+    .await;
+    let stale: Vec<String> = match aged {
+        Ok(names) => names,
+        Err(_) => {
+            let names: Vec<String> = sqlx::query_scalar(
+                r"select datname::text from pg_database where datname like 'sb\_t\_%'",
+            )
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap_or_default();
+            let now = unix_now().as_secs();
+            names
+                .into_iter()
+                .filter(|n| name_secs(n).is_some_and(|t| t + STALE_SECS < now))
+                .collect()
+        }
+    };
+    for name in stale.into_iter().filter(|n| is_throwaway(n)) {
+        let sql = format!("drop database if exists \"{name}\"");
+        if let Err(e) = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(&mut *conn)
+            .await
+        {
+            eprintln!("left stale test database {name} (in use?): {e}");
+        }
+    }
+}
+
+#[test]
+fn sweep_touches_only_throwaway_names() {
+    assert!(is_throwaway("sb_t_1798000000_00ff00ff00ff00ff"));
+    assert!(is_throwaway("sb_t_a03_00ff"));
+    for other in [
+        "sb",
+        "postgres",
+        "sb_t_",
+        "sb_test",
+        "sb_t_X",
+        "sb_t_a\"; drop",
+        "xsb_t_1",
+    ] {
+        assert!(!is_throwaway(other), "{other}");
+    }
+    assert_eq!(name_secs("sb_t_1798000000_00ff"), Some(1_798_000_000));
+    assert_eq!(name_secs("sb_t_a03_00ff"), None);
+    assert_eq!(name_secs("sb_t_00ff00ff00ff00ff"), None);
+    let fresh = random_name();
+    assert!(is_throwaway(&fresh), "{fresh}");
+    assert!(name_secs(&fresh).is_some_and(|t| t + 60 > unix_now().as_secs()));
 }
 
 struct TestDb {
     store: PgStore,
     name: String,
+}
+
+impl TestDb {
+    fn url(&self) -> String {
+        with_db(&admin_url(), &self.name)
+    }
 }
 
 impl TestDb {
@@ -69,6 +173,7 @@ impl TestDb {
                  at the repo root or set SB_TEST_DATABASE_URL"
             )
             });
+        sweep_stale(&mut conn).await;
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!("create database {name}")))
             .execute(&mut conn)
             .await
@@ -873,4 +978,85 @@ async fn search_follows_d115_like_memstore() {
         .map(|h| h.id)
         .collect();
     assert_eq!(ids, [exact_word, person]);
+}
+
+// ------------------------------------------------------------------ D-114, D-125 connect
+
+#[tokio::test]
+async fn connect_ignores_a_migration_this_binary_lacks() {
+    // D-114: another worktree applied a migration (version 9999) this build does not have.
+    let db = TestDb::new().await;
+    sqlx::query(
+        r"insert into _sqlx_migrations (version, description, success, checksum, execution_time)
+          values (9999, 'only in a newer worktree', true, '\x00'::bytea, 0)",
+    )
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    let again = PgStore::connect(&db.url())
+        .await
+        .unwrap_or_else(|e| panic!("second connect refused the extra migration: {e}"));
+    let kept: i64 =
+        sqlx::query_scalar("select count(*) from _sqlx_migrations where version = 9999")
+            .fetch_one(again.pool())
+            .await
+            .unwrap();
+    assert_eq!(kept, 1, "the foreign row is left alone");
+    again
+        .touch_contact("x@y.example", "email", "")
+        .await
+        .unwrap();
+    assert!(again.contact("x@y.example").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn every_pooled_session_uses_the_d125_trigram_cutoff() {
+    let db = TestDb::new().await;
+    let pool = db.store.pool();
+    // Hold as many connections as the pool may open, so most of them are fresh sessions.
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        held.push(pool.acquire().await.unwrap());
+    }
+    for conn in &mut held {
+        let cutoff: String = sqlx::query_scalar("show pg_trgm.word_similarity_threshold")
+            .fetch_one(&mut **conn)
+            .await
+            .unwrap();
+        assert_eq!(cutoff, "0.5");
+    }
+    drop(held);
+
+    let person = db
+        .store
+        .remember(Fact::new(
+            "Vasanth Raghavan",
+            "role",
+            "staff engineer",
+            src(SourceKind::User, "t"),
+        ))
+        .await
+        .unwrap();
+    let hits = db.store.search("Vasnth", 5).await.unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!((hits[0].id, hits[0].why), (person, Why::Trigram));
+    assert!((hits[0].score - 0.5).abs() < 1e-6, "{}", hits[0].score);
+
+    // `subject %> $1` stays index-able: with sequential scans off the plan uses the gin index.
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::raw_sql("set enable_seqscan = off")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let plan: Vec<String> = sqlx::query_scalar(
+        "explain (costs off) select id from memory.facts where subject %> 'Vasnth'",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .unwrap();
+    sqlx::raw_sql("reset enable_seqscan")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(plan.iter().any(|l| l.contains("Index Scan")), "{plan:?}");
 }

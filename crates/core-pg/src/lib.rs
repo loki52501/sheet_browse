@@ -52,6 +52,10 @@ impl PgStore {
     /// Every pooled session starts with `hnsw.iterative_scan = relaxed_order` (a startup
     /// option, no extra round trip), so a filtered `recall` keeps scanning the HNSW index
     /// until 20 rows pass the filter (pgvector 0.8) and stays one query.
+    ///
+    /// Every pooled session also runs `set pg_trgm.word_similarity_threshold = 0.5` once,
+    /// when it opens (D-125), so `search`'s `subject %> $1` keeps using the trigram index
+    /// with the 0.5 cut-off instead of pg_trgm's default 0.6.
     pub async fn connect(url: &str) -> Result<PgStore> {
         let opts: PgConnectOptions = url
             .parse()
@@ -60,6 +64,12 @@ impl PgStore {
         let pool = PgPoolOptions::new()
             .max_connections(8)
             .acquire_timeout(Duration::from_secs(10))
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::raw_sql(TRGM_THRESHOLD_SQL).execute(conn).await?;
+                    Ok(())
+                })
+            })
             .connect_with(opts)
             .await
             .map_err(|e| backend(format!("connecting: {} ({SETUP_HINT})", describe(&e))))?;
@@ -357,11 +367,17 @@ from fused join memory.facts f on f.id = fused.id
 order by fused.score desc, f.id
 limit $6";
 
+/// D-125: the trigram tier's cut-off, set on every pooled session by [`PgStore::connect`].
+/// A custom `pg_trgm.*` setting is accepted before the extension is loaded in the session
+/// and applies once it is.
+const TRGM_THRESHOLD_SQL: &str = "set pg_trgm.word_similarity_threshold = 0.5";
+
 /// D-115. Exact tier: the subject equals the query case- and punctuation-insensitively
 /// (lowercased, every non-alphanumeric run one space, trimmed) for 1.0, or the query is a
 /// case-insensitive substring of subject, key or value for 0.9. Trigram tier, for what
 /// exact missed: `$1 <% subject` (written `subject %> $1` so the trigram index applies)
-/// scored by `word_similarity($1, subject)`. Ordered by score; tier, newest `seen_at` and
+/// at `word_similarity >= 0.5` (D-125, [`TRGM_THRESHOLD_SQL`]) scored by
+/// `word_similarity($1, subject)`. Ordered by score; tier, newest `seen_at` and
 /// id break ties.
 const SEARCH_SQL: &str = "
 with q as (
@@ -952,7 +968,9 @@ impl MemoryStore for PgStore {
 ///   with the OS keychain key; a missing file is an empty vault. It is installed as the
 ///   process-wide scrubber before anything else is written;
 /// * `SB_RUNS_ROOT` (default `runs` in the current directory);
-/// * `SB_RUN_ID`: the run the launching session created (its folder must exist). Without it
+/// * `SB_RUN_ID`: the run the launching session created; its folder and its `runs` row
+///   (`run_get(id) == Some`) must both exist, else `MemoryError::Invalid` naming the run id
+///   (B-175: a run with no row would make every ask read as strict). Without it
 ///   the server starts its own run: folder `<ts>-<executable name>` and a `runs` row with
 ///   status `running`.
 ///
