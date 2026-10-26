@@ -262,6 +262,14 @@ tasks:
     status: doing
     claimed_at: "2026-10-25"
     from: T-11
+  - id: T-11c
+    step: follow-up
+    wave: 2
+    owner: store
+    branch: swarm/store-T11c
+    title: "Before toolforge T-28: B-34 (reforge refuses a retired row) and B-33 item 4 (relocate synonyms via sb_sheet::data::synonyms, pre-D-312 upper-case orphans reported, ok:false sweep events deduplicated)."
+    status: todo
+    from: T-11b
   - id: T-19b
     step: follow-up
     wave: 2
