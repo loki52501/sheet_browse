@@ -991,7 +991,6 @@ fn d230_plain_span_keeps_its_non_value_text() {
 /// with a link after. Red-first at c8bd2e4 (D-231 recorded, not yet implemented): committed
 /// `#[ignore]`d so the suite stays green; run with `--ignored`.
 #[test]
-#[ignore = "red-first: D-231 not implemented at c8bd2e4"]
 fn d231_value_with_an_in_cell_pipe_across_cells_never_shows() {
     let c = canary();
     let v1 = format!("{c} | Zu12|tail91");
