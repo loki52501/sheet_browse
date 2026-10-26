@@ -190,6 +190,53 @@ impl CdpSender {
         self.start(session, method, params).await
     }
 
+    /// [`CdpSender::start`] with `params` given as serialized JSON (an object), for params
+    /// that carry a secret (a vault value on its way into `Input.insertText`, H-2, D-55).
+    /// The message is built in one buffer of exact size (it never reallocates), and that
+    /// buffer is zeroed when the transport is done with it; the pipe zeroes its framing copy
+    /// too. `params` must be valid JSON: it is not parsed or checked here. Errors name the
+    /// method only, never the params.
+    pub fn start_raw(
+        &self,
+        session: Option<&str>,
+        method: &str,
+        params: &[u8],
+    ) -> impl Future<Output = Result<Value, CdpError>> + Send + 'static {
+        let deadline = tokio::time::Instant::now() + COMMAND_TIMEOUT;
+        let method = method.to_string();
+        let (tx, rx) = oneshot::channel();
+        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
+        let bytes = raw_message(id, &method, session, params);
+        let queued = self.push(id, bytes, Slot::Caller(tx)).map(|id| {
+            let guard = SlotGuard {
+                shared: self.shared.clone(),
+                id,
+            };
+            (rx, guard)
+        });
+        async move {
+            let (rx, guard) = match queued {
+                Some(q) => q,
+                None => return Err(CdpError::Closed { method }),
+            };
+            let outcome = tokio::time::timeout_at(deadline, rx).await;
+            drop(guard);
+            match outcome {
+                Err(_) => Err(CdpError::Timeout {
+                    method,
+                    after: COMMAND_TIMEOUT,
+                }),
+                Ok(Err(_)) => Err(CdpError::Closed { method }),
+                Ok(Ok(Ok(v))) => Ok(v),
+                Ok(Ok(Err((code, message)))) => Err(CdpError::Protocol {
+                    method,
+                    code,
+                    message,
+                }),
+            }
+        }
+    }
+
     fn queue(&self, session: Option<&str>, method: &str, params: Value, slot: Slot) -> Option<u64> {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let mut msg = serde_json::Map::new();
@@ -200,6 +247,11 @@ impl CdpSender {
             msg.insert("sessionId".into(), Value::from(s));
         }
         let bytes = Bytes::from(serde_json::to_vec(&Value::Object(msg)).ok()?);
+        self.push(id, bytes, slot)
+    }
+
+    /// Register the reply slot of message `id` and hand the message to the writer.
+    fn push(&self, id: u64, bytes: Bytes, slot: Slot) -> Option<u64> {
         {
             let mut replies = lock(&self.shared.replies);
             replies.as_mut()?.insert(id, slot);
@@ -222,6 +274,38 @@ impl CdpSender {
     pub fn is_closed(&self) -> bool {
         *self.shared.closed.borrow()
     }
+}
+
+/// A message buffer that is zeroed when its last [`Bytes`] handle drops.
+struct Wiped(Vec<u8>);
+
+impl AsRef<[u8]> for Wiped {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for Wiped {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+
+/// `{"id":..,"method":..,"sessionId":..,"params":<params>}` in one buffer of exact size.
+fn raw_message(id: u64, method: &str, session: Option<&str>, params: &[u8]) -> Bytes {
+    // Method and session are ours (CDP names and ids); serde_json quotes them.
+    let head = format!(
+        "{{\"id\":{id},\"method\":{}{},\"params\":",
+        Value::from(method),
+        session
+            .map(|s| format!(",\"sessionId\":{}", Value::from(s)))
+            .unwrap_or_default()
+    );
+    let mut buf = Vec::with_capacity(head.len() + params.len() + 1);
+    buf.extend_from_slice(head.as_bytes());
+    buf.extend_from_slice(params);
+    buf.push(b'}');
+    Bytes::from_owner(Wiped(buf))
 }
 
 struct Inner {
@@ -317,6 +401,16 @@ impl Cdp {
         params: Value,
     ) -> Result<Value, CdpError> {
         self.start(session, method, params).await
+    }
+
+    /// See [`CdpSender::start_raw`].
+    pub fn start_raw(
+        &self,
+        session: Option<&str>,
+        method: &str,
+        params: &[u8],
+    ) -> impl Future<Output = Result<Value, CdpError>> + Send + 'static {
+        self.inner.sender.start_raw(session, method, params)
     }
 
     /// A handle that can queue commands without keeping the tasks alive.
@@ -771,5 +865,48 @@ mod tests {
         let r = tokio::time::timeout(Duration::from_millis(1), call).await;
         assert!(r.is_err());
         assert_eq!(h.cdp.pending(), 0);
+    }
+
+    /// start_raw puts the caller's serialized params on the wire as they are, with the same
+    /// envelope as start, and its reply and errors reach the caller (naming the method only).
+    #[tokio::test]
+    async fn raw_params_go_out_as_given_and_errors_name_the_method_only() {
+        let mut h = harness();
+        let secret = "canary-\"quoted\"-é";
+        let params = format!("{{\"text\":{}}}", Value::from(secret));
+        let a = h
+            .cdp
+            .start_raw(Some("S1"), "Input.insertText", params.as_bytes());
+        let b = h.cdp.start_raw(None, "Input.insertText", b"{}");
+        let m = h.next_sent().await;
+        assert_eq!(m["method"], "Input.insertText");
+        assert_eq!(m["sessionId"], "S1");
+        assert_eq!(m["params"]["text"], secret);
+        let m2 = h.next_sent().await;
+        assert!(m2.get("sessionId").is_none(), "{m2}");
+        assert_eq!(m2["params"], json!({}));
+        assert_ne!(m["id"], m2["id"]);
+        h.inject(json!({"id": m["id"], "sessionId": "S1", "result": {}}))
+            .await;
+        h.inject(json!({"id": m2["id"], "error": {"code": -32000, "message": "no focus"}}))
+            .await;
+        assert_eq!(within("raw reply", a).await.unwrap(), json!({}));
+        let e = within("raw error", b).await.unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "Input.insertText: cdp error -32000: no focus"
+        );
+        assert!(!format!("{e:?}").contains("canary"));
+    }
+
+    #[test]
+    fn raw_messages_are_built_without_reallocating() {
+        let b = raw_message(7, "M.x", Some("S"), br#"{"a":1}"#);
+        assert_eq!(
+            &b[..],
+            br#"{"id":7,"method":"M.x","sessionId":"S","params":{"a":1}}"#
+        );
+        let b = raw_message(8, "M.y", None, b"{}");
+        assert_eq!(&b[..], br#"{"id":8,"method":"M.y","params":{}}"#);
     }
 }

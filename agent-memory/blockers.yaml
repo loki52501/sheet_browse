@@ -230,6 +230,26 @@ blockers:
     question: "For area page: describe() in injected.js appends the raw id attribute (and the first class), so a page id such as 'x (OVERLAY #12)' or 'x (#99)' can spell the driver's own element refs inside a cover why ('covered by div#x (OVERLAY #12) (OVERLAY #40)'). Should describe() escape or drop ids and classes that hold whitespace, parentheses or '#', and cap them?"
     default_taken: "sb-driver neutralises it on its side (review-T-20 round 2): tidy_why rebuilds the why around the page text (covered by D (OVERLAY #n), covered by D (#n), covered by D, does not receive pointer events (hit D)), keeps only the ref it parsed at the end, and maps every character of D's tag and id or class outside letters, digits, '-' and '_' to '_' (40 characters each); the driver's act wrapper also reports document ids with whitespace, parentheses or '#' that occur in the why, which are neutralised first. Residual gap: an id with whitespace inside an open or closed shadow root is not in that report, so 'covered by tag#x (#99)' with id 'x (#99)' on a shadow-DOM element without an indexed ancestor still reads as ref #99. Proposed for page: describe() neutralises the id and class the same way (or emits them as a separate field), which closes it for every caller."
     needs_user: false
+  - id: B-608
+    task: T-21
+    question: "CDP cannot pause a download, and B-4 #9 asks that a download is stopped and asked with nothing landing before the answer. What should Driver::download(allow=true) do?"
+    default_taken: "D-611: the browser denies every download (nothing lands) and download(allow=true) fetches the URL again with the page's cookies (Network.loadNetworkResource) or decodes a data: URL. Cost: blob: URLs (script-built exports), POST-only downloads and one-time links cannot be fetched again; download() answers an error naming the scheme for blob: and the server's answer otherwise. Alternative if the user prefers exact bytes: allow into a private staging folder outside runs/<id>/files and move on allow, delete on deny (bytes on disk before the answer)."
+    needs_user: false
+  - id: B-610
+    task: T-21
+    question: "B-7 writes u#9=files/cv.pdf while the brief says upload paths are relative to the run's files folder. Is the leading files/ part of the path?"
+    default_taken: "D-609: a leading files/ names the files folder itself, so u#9=files/cv.pdf and u#9=cv.pdf both read runs/<id>/files/cv.pdf; anything with .., a root, a drive or UNC prefix, or that resolves (after symlinks) outside the folder is refused."
+    needs_user: false
+  - id: B-611
+    task: T-21
+    question: "H-2 memory hygiene for typed vault values: the insertText message is built in a zeroized buffer (sb_cdp::start_raw) and the pipe zeroes its framing copy, but the WebSocket backend copies every message into a String for tungstenite, which is not zeroed. Does WebSocket need the same treatment?"
+    default_taken: "No change in T-21: Pipe is the default transport (D-600) and the only one the driver launches; WebSocket attaches to an already running Chrome and is not used for vault typing yet. Proposed for whoever enables it: send Message::Binary from the Bytes, or zeroize the String after the send."
+    needs_user: false
+  - id: B-612
+    task: T-21
+    question: "ToolCtx::ask documents 'a step whose live class exceeds self.class' as a mid-call ask. Should Driver::act ask instead of stopping when a step's live class is above ctx.class?"
+    default_taken: "Stop (H-1.4 and the T-21 brief): ActResult.stopped carries the live class, the why and the element, and no later step runs. sb-mcp can turn that stop into an ask and run the rest of the program again under the approved class. A CHALLENGE is always a stop (D-5)."
+    needs_user: false
 interface_changes:
   - id: B-401
     from: page/suborch
@@ -349,5 +369,10 @@ interface_changes:
     interface: "I-8 (sb-cdp), I-9 (sb-driver)"
     change: "Additive only; every I-8/I-9 path and signature is unchanged. sb_cdp: Cdp, CdpError, CdpSender (start, call, start_then, pending, is_closed), Event, Observer, COMMAND_TIMEOUT, Pipe::{launch, pid, pids, kill}, DROP_KILL_CAP, process_running, WebSocket::connect, devtools_active_port, parse_devtools_active_port. CdpSender::start_then(session, method, params, then) -> bool queues a command whose reply the reader task hands to `then` synchronously, in wire order with the events (no 10 s timeout; dropped uncalled on close). sb_driver: DriverError::Launch, impl From<CdpError> for DriverError, Driver::{launch_with, cdp, with_registry, wait_registry, pid, pids, profile_dir, shutdown}, Registry (with take_seeds, tracks, seed_frame_tree), Seed, ExecContext, SB_WORLD, LaunchEnv, launch_args, resolve_chromium, platform_dir, binary_name, CHROMIUM_VERSION. The registry also applies Target.targetDestroyed (removes the tab) and Target.targetInfoChanged for prerender activation (B-602 lists the events it applies)."
     why: "review-T-18 round 1 asked for the additive items to be listed for the supreme; round 2 adds start_then and the seed API because Page.enable does not replay existing frames (review should-fix 6) and the seed must be applied at its place in the event stream. Default until supreme answers: as implemented in T-18 round 2."
+  - id: B-609
+    from: driver
+    interface: "I-8 (sb-cdp)"
+    change: "Additive only: sb_cdp::Cdp::start_raw(session: Option<&str>, method: &str, params: &[u8]) and sb_cdp::CdpSender::start_raw(same), returning the same future as start. params is serialized JSON given as bytes (not parsed); the message is built in one buffer of exact size that is zeroed when the transport drops it, and Pipe's writer zeroes its framing copy after every write. Errors name the method only. No existing signature changes. Also behaviour, no signature change, I-9: Driver::open uses the browser's startup tab once (D-610); Driver::launch denies downloads (D-611); popups run when their first navigation starts (D-612); Driver::act gates every step against ctx.class (D-608)."
+    why: "T-21: a vault value goes into the Input.insertText message bytes inside ToolCtx::resolve_into (H-2, D-55); start(Value) would leave unzeroed copies of it in a serde_json Value and its serialization. crates/sb-cdp/tests/contract_paths.rs b609_additive_paths_resolve uses both paths. Default until supreme answers: as implemented."
 
 proposals:

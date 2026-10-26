@@ -38,3 +38,11 @@ fn b604_additive_paths_resolve() {
     assert_eq!(sb_cdp::COMMAND_TIMEOUT.as_secs(), 10);
     assert!(sb_cdp::DROP_KILL_CAP.as_secs() > 0);
 }
+
+/// B-609 (additive, pending in interface_changes): a command whose params are given as
+/// serialized JSON, in a buffer zeroed after the write (T-21, H-2).
+#[test]
+fn b609_additive_paths_resolve() {
+    let _ = |c: &sb_cdp::Cdp| c.start_raw(Some("S"), "Input.insertText", b"{}");
+    let _ = |s: &sb_cdp::CdpSender| s.start_raw(None, "Input.insertText", b"{}");
+}

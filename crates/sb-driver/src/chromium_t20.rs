@@ -21,6 +21,9 @@ const CAP: Duration = Duration::from_secs(30);
 /// Allowed overrun of the 5 s cap: timer and task scheduling only. No call or wait of the
 /// step ends after the budget (D-606).
 const CAP_TOLERANCE: Duration = Duration::from_millis(40);
+/// T-21: `Driver::act` reads the live index for the per-step gate (rule 4) before the step's
+/// 5 s budget starts: one round trip on these small pages.
+const GATE_READ: Duration = Duration::from_millis(60);
 
 const STYLE: &str = "<style>body{margin:0} button{position:absolute;left:100px;top:100px;\
                      width:120px;height:40px}</style>";
@@ -114,10 +117,12 @@ pub(crate) fn tool_ctx(dir: &std::path::Path) -> ToolCtx {
         runs_root: dir.to_path_buf(),
         run: None,
     };
+    // The highest class below Challenge: T-21's per-step gate (rule 4) never stops these
+    // actionability tests ("Buy" buttons are Pay); a CHALLENGE still stops.
     ToolCtx::new(
         RunId("t20".into()),
         dir.join("t20"),
-        Class::Read,
+        Class::Pay,
         &harness,
         ToolRegistry::new(vec![]),
     )
@@ -185,6 +190,9 @@ const PROBE: &str = "function (id) {
   const efp = document.elementFromPoint;
   document.elementFromPoint = function (x, y) {
     const hit = efp.call(document, x, y);
+    // T-21: only hit tests inside an attempt count (the gate's index() before a step
+    // hit-tests rows too).
+    if (P.hits.length >= P.starts.length) return hit;
     P.hits.push(performance.now());
     return hit;
   };
@@ -364,7 +372,7 @@ async fn acceptance_2_actionability_with_retry_and_runtime_install() {
     );
     assert!(r.stopped.is_none());
     assert!(d_took >= ACT_CAP, "{d_took:?}");
-    assert!(d_took <= ACT_CAP + CAP_TOLERANCE, "{d_took:?}");
+    assert!(d_took <= ACT_CAP + CAP_TOLERANCE + GATE_READ, "{d_took:?}");
 
     // D-606, observed in the page: on a page that mutates every 10 ms, attempt k still
     // starts at its slot (0, 50, 100, 250, 500, then 500 ms after the previous answer). The
@@ -466,7 +474,7 @@ async fn acceptance_2_actionability_with_retry_and_runtime_install() {
     let (cx, cy) = centre(&d, covered, "#n").await;
     assert!((p.x - cx).abs() < 1.0 && (p.y - cy).abs() < 1.0, "{p:?}");
 
-    // Through Driver::act: a stale id fails the step at once, and the input itself is T-21.
+    // Through Driver::act: a stale id fails the step at once; a live one is clicked (T-21).
     let r = d.act(covered, &format!("c{b}"), &ctx).await.expect("act");
     assert_eq!(
         r.steps[0].outcome,
@@ -478,14 +486,15 @@ async fn acceptance_2_actionability_with_retry_and_runtime_install() {
         .act(covered, &format!("c{n}; c{n}"), &ctx)
         .await
         .expect("act");
-    assert_eq!(r.steps.len(), 1, "stops at the first step not done");
+    assert_eq!(r.steps.len(), 2, "{:?}", r.steps);
     assert!(
-        matches!(&r.steps[0].outcome, StepOutcome::Failed { why } if why.starts_with("not done: input synthesis is T-21")),
+        r.steps.iter().all(|s| s.outcome == StepOutcome::Ok),
         "{:?}",
-        r.steps[0]
+        r.steps
     );
 
-    // A challenge page stops the program (H-1.4) without retrying.
+    // A challenge page stops the program (H-1.4) without retrying: since T-21 the per-step
+    // gate sees the challenge in the live index and stops before actionability.
     let ch = d.open(&url("/challenge")).await.expect("open /challenge");
     let cb = id_of(&d, ch, "#b").await;
     let t0 = Instant::now();
@@ -500,11 +509,10 @@ async fn acceptance_2_actionability_with_retry_and_runtime_install() {
     );
     assert_eq!(r.steps.len(), 2, "{:?}", r.steps);
     assert_eq!(r.steps[0].outcome, StepOutcome::Ok, "w() settles");
-    assert_eq!(
-        r.steps[1].outcome,
-        StepOutcome::Failed {
-            why: "challenge".into()
-        }
+    assert!(
+        matches!(&r.steps[1].outcome, StepOutcome::Failed { why } if why.starts_with("CHALLENGE at")),
+        "{:?}",
+        r.steps[1]
     );
     let stop = r.stopped.expect("a challenge stops the program");
     assert_eq!(stop.class, Class::Challenge);

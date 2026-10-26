@@ -6,6 +6,8 @@
 //! registry (B-4 #2). `tabs` and `frames` are answered from the registry.
 //! T-20: the page runtime (B-4 #3, D-604), `open`, and actionability with retry (B-4 #6,
 //! D-603) behind `act`.
+//! T-21: input synthesis (B-4 #7), the per-step gate against `ctx.class` (rule 4, H-1.4),
+//! consequence capture (B-4 #9) with `dialog` and `download`, and the B-8 diff.
 
 use harness_core::gate::StopReason;
 use harness_core::ToolCtx;
@@ -19,9 +21,13 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+mod act;
 mod actionable;
 #[cfg(test)]
 mod chromium_t20;
+mod consequence;
+mod diff;
+mod input;
 mod launch;
 mod registry;
 mod runtime;
@@ -31,6 +37,7 @@ pub use launch::{
 };
 pub use registry::{ExecContext, Registry, Seed, SB_WORLD};
 
+use consequence::{lock_events, Events};
 use launch::ProfileDir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -192,9 +199,14 @@ fn lock(m: &Mutex<Registry>) -> MutexGuard<'_, Registry> {
 }
 
 /// The client observer for a driver: runs for every event, before any subscriber sees it.
-/// It applies the event to the registry, signals the change and sends the attach follow-up.
-fn observer(registry: Arc<Mutex<Registry>>, changed: Arc<watch::Sender<u64>>) -> Observer {
-    Box::new(move |e, cdp| observe(&registry, &changed, e, cdp))
+/// It applies the event to the registry and the consequence log (B-4 #9), signals the change
+/// and sends the attach follow-up.
+fn observer(
+    registry: Arc<Mutex<Registry>>,
+    events: Arc<Mutex<Events>>,
+    changed: Arc<watch::Sender<u64>>,
+) -> Observer {
+    Box::new(move |e, cdp| observe(&registry, &events, &changed, e, cdp))
 }
 
 fn bump(changed: &watch::Sender<u64>) {
@@ -203,6 +215,7 @@ fn bump(changed: &watch::Sender<u64>) {
 
 fn observe(
     registry: &Arc<Mutex<Registry>>,
+    events: &Arc<Mutex<Events>>,
     changed: &Arc<watch::Sender<u64>>,
     e: &Event,
     cdp: &CdpSender,
@@ -215,6 +228,23 @@ fn observe(
         r.apply(e.session.as_deref(), &e.method, &e.params);
         (attached.is_some_and(|sid| r.tracks(sid)), r.take_seeds())
     };
+    // Never under the registry lock (readers take the registry, then the log).
+    lock_events(events).apply(e.session.as_deref(), &e.method, &e.params);
+    // D-612: a popup (target=_blank, window.open) starts its first navigation while paused,
+    // and its runtime install cannot reply until it runs (no renderer answers before that:
+    // measured on chromium-1248, the popup never loaded). Its navigation has started in the
+    // browser, so the install is registered there already: run it now.
+    if e.method == "Page.frameStartedNavigating" {
+        if let Some(sid) = e.session.as_deref() {
+            let waiting = {
+                let r = lock(registry);
+                r.tracks(sid) && !r.installed(sid)
+            };
+            if waiting {
+                drop(cdp.start(Some(sid), "Runtime.runIfWaitingForDebugger", json!({})));
+            }
+        }
+    }
     if let Some(sid) = attached {
         let seed = seeds.iter().any(|s| s.session == sid && !s.replay_contexts);
         on_attached(registry, changed, sid, tracked, seed, cdp);
@@ -332,7 +362,12 @@ impl Drop for CloseOnDrop<'_> {
 pub struct Driver {
     cdp: Cdp,
     registry: Arc<Mutex<Registry>>,
+    /// Navigations, dialogs and stopped downloads, as the observer saw them (B-4 #9).
+    events: Arc<Mutex<Events>>,
     changed: watch::Receiver<u64>,
+    /// The browser's own first tab (about:blank, opened by nobody), kept for the first
+    /// `open`, so the model's first tab is tab 1 and no stray window stays (D-610).
+    spare: Mutex<Option<String>>,
     /// Element id bases per tab frame (D-604).
     bases: Mutex<runtime::Bases>,
     /// The launch profile: `me` never brings a tab to front (B-606).
@@ -374,16 +409,19 @@ impl Driver {
                 .map_err(|e| DriverError::Launch(format!("start {}: {e}", chromium.display())))?,
         );
         let registry = Arc::new(Mutex::new(Registry::new()));
+        let events = Arc::new(Mutex::new(Events::default()));
         let (changed_tx, changed) = watch::channel(0u64);
         let cdp = Cdp::with_observer(
             pipe.clone() as Arc<dyn Transport>,
-            observer(registry.clone(), Arc::new(changed_tx)),
+            observer(registry.clone(), events.clone(), Arc::new(changed_tx)),
         );
         // From here a failure drops the Driver, which kills the browser and the profile.
         let driver = Driver {
             cdp,
             registry,
+            events,
             changed,
+            spare: Mutex::new(None),
             bases: Mutex::new(runtime::Bases::default()),
             kind: opts.profile,
             pipe: Some(pipe),
@@ -398,8 +436,24 @@ impl Driver {
             "Target.setAutoAttach",
             json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true}),
         );
+        // B-4 #9: every download stops before a byte lands and is reported; the user's
+        // answer comes through `download` (D-611).
+        let downloads = driver.cdp.start(
+            None,
+            "Browser.setDownloadBehavior",
+            json!({"behavior": "deny", "eventsEnabled": true}),
+        );
         discover.await?;
         attach.await?;
+        downloads.await?;
+        // Targets that already exist are attached before setAutoAttach replies (wire order).
+        let spare = driver.with_registry(|r| match r.tabs().as_slice() {
+            [(t, url, _)] if (url.is_empty() || url == "about:blank") && r.opener(*t).is_none() => {
+                r.target_id(*t).map(str::to_string)
+            }
+            _ => None,
+        });
+        *driver.spare.lock().unwrap_or_else(|e| e.into_inner()) = spare;
         Ok(driver)
     }
 
@@ -472,23 +526,42 @@ impl Driver {
         // wait for renderer-side commands queued before it: a target created with the URL, or
         // navigated before that reply, committed without Page events or the sb world (seen
         // on chromium-1248).
-        let created = self
-            .cdp
-            .call(
-                None,
-                "Target.createTarget",
-                json!({ "url": "about:blank", "newWindow": true }),
-            )
-            .await?;
-        let target = created
-            .get("targetId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| DriverError::Cdp("Target.createTarget: no targetId".into()))?
-            .to_string();
-        // No half-open tab is left behind: on an error, and when this future is dropped.
+        // The browser's untouched first tab is used once instead of a new window (D-610).
+        let spare = self
+            .spare
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .filter(|t| {
+                self.with_registry(|r| {
+                    r.tab_by_target(t)
+                        .and_then(|tab| r.frame_url(tab, 0))
+                        .is_some_and(|u| u.is_empty() || u == "about:blank")
+                })
+            });
+        let target = match &spare {
+            Some(t) => t.clone(),
+            None => {
+                let created = self
+                    .cdp
+                    .call(
+                        None,
+                        "Target.createTarget",
+                        json!({ "url": "about:blank", "newWindow": true }),
+                    )
+                    .await?;
+                created
+                    .get("targetId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| DriverError::Cdp("Target.createTarget: no targetId".into()))?
+                    .to_string()
+            }
+        };
+        // No half-open tab is left behind: on an error, and when this future is dropped. The
+        // browser's first tab is never closed here (it may be its last window).
         let mut guard = CloseOnDrop {
             cdp: &self.cdp,
-            target: Some(target.clone()),
+            target: spare.is_none().then(|| target.clone()),
         };
         let tab = self.open_target(&target, url).await?;
         guard.target = None;
@@ -556,8 +629,9 @@ impl Driver {
 
     /// I-9 `act(tab, program, ctx) -> ActResult`. The gate has already passed the program's
     /// class (`ctx.class`); a CHALLENGE row reached mid-program stops it (H-1.4), and so does
-    /// a step whose live class exceeds `ctx.class`. `@vault(k)` in `t#` steps is resolved only
-    /// inside `ctx.resolve_into`, straight into the `Input.insertText` message.
+    /// a step whose live class exceeds `ctx.class`, before its input. `@vault(k)` in `t#`
+    /// steps is resolved only inside `ctx.resolve_into`, straight into the `Input.insertText`
+    /// message. Uploads (`u#`) read from `ctx.run_dir/files/`; downloads are saved there.
     pub async fn act(
         &self,
         tab: TabId,
@@ -593,26 +667,28 @@ impl Driver {
         todo!("T-22")
     }
 
-    /// Answer a paused dialog (B-4 #9).
+    /// Answer a paused dialog (B-4 #9): accept or dismiss it; `text` answers a prompt. The
+    /// page continues. An error when no dialog is open on the tab.
     pub async fn dialog(
         &self,
         tab: TabId,
         accept: bool,
         text: Option<&str>,
     ) -> Result<(), DriverError> {
-        let _ = (tab, accept, text);
-        todo!("T-21")
+        self.answer_dialog(tab, accept, text).await
     }
 
-    /// After the ask: let a stopped download land in `runs/<id>/files/`, or cancel it.
+    /// After the ask: let a stopped download land in `runs/<id>/files/` (returns the path it
+    /// was saved to), or cancel it (`None`). `guid` is from [`Consequence::Download`]; each
+    /// download is answered once. The browser stopped it before any byte landed, so an
+    /// allowed one is fetched again with the page's cookies (B-608: not `blob:` URLs).
     pub async fn download(
         &self,
         tab: TabId,
         guid: &str,
         allow: bool,
     ) -> Result<Option<PathBuf>, DriverError> {
-        let _ = (tab, guid, allow);
-        todo!("T-21")
+        self.answer_download(tab, guid, allow).await
     }
 
     /// I-9 `settle` (B-4 #8).
@@ -750,7 +826,8 @@ mod tests {
             out,
             inbound: Mutex::new(Some(inbound)),
         });
-        let cdp = Cdp::with_observer(mock, observer(registry.clone(), Arc::new(tx)));
+        let events = Arc::new(Mutex::new(Events::default()));
+        let cdp = Cdp::with_observer(mock, observer(registry.clone(), events, Arc::new(tx)));
         Wired {
             cdp,
             registry,
@@ -998,11 +1075,17 @@ mod tests {
             out,
             inbound: Mutex::new(Some(inbound)),
         });
-        let cdp = Cdp::with_observer(mock, observer(registry.clone(), Arc::new(tx)));
+        let events = Arc::new(Mutex::new(Events::default()));
+        let cdp = Cdp::with_observer(
+            mock,
+            observer(registry.clone(), events.clone(), Arc::new(tx)),
+        );
         let d = Driver {
             cdp,
             registry,
+            events,
             changed,
+            spare: Mutex::new(None),
             bases: Mutex::new(runtime::Bases::default()),
             kind,
             pipe: None,
@@ -1255,5 +1338,211 @@ mod tests {
         );
         assert_eq!(w.attempts, 2);
         assert!(s.quiet(), "no attempt after the failed wait");
+    }
+
+    // ---- T-21 over the mock transport: what goes on the wire ----
+
+    const INDEX: &str = "return sb.index();";
+    const POST: &str = "const ix = sb.index();";
+
+    /// A ctx approving `class`, with one vault entry `pw` holding `value`.
+    fn vault_ctx(dir: &Path, class: harness_core::Class, value: &str) -> ToolCtx {
+        use harness_core::testing::{MemStore, ScriptedAsker};
+        use harness_core::{Harness, RunId, ToolRegistry, Vault};
+        let harness = Harness {
+            store: Arc::new(MemStore::new()),
+            vault: Arc::new(Vault::in_memory([(
+                "pw".to_string(),
+                value.to_string(),
+                harness_core::vault::EntryKind::Secret,
+            )])),
+            asker: Arc::new(ScriptedAsker::new()),
+            runs_root: dir.to_path_buf(),
+            run: None,
+        };
+        ToolCtx::new(
+            RunId("t21".into()),
+            dir.join("t21"),
+            class,
+            &harness,
+            ToolRegistry::new(vec![]),
+        )
+    }
+
+    /// The canary of these tests (never printed).
+    fn canary() -> String {
+        std::env::var("SB_VAULT_CANARY")
+            .ok()
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| "canary-t21-mock-not-a-secret".to_owned())
+    }
+
+    impl Script {
+        /// The based walk of the first call into context 2, answered.
+        async fn walked(&mut self) {
+            let walk = self.call(WALK, 2).await;
+            self.value(&walk, json!({"count": 3, "settled": null}))
+                .await;
+        }
+    }
+
+    /// H-2, D-55, B-4 #7: the vault value is resolved into the Input.insertText message and
+    /// nowhere else; select-all and insertText are queued together after the focusing act
+    /// call (no round trip between them); the result carries no value.
+    #[tokio::test]
+    async fn a_vault_value_goes_only_into_the_insert_text_message() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        let home = tempfile::tempdir().unwrap();
+        let secret = canary();
+        let ctx = vault_ctx(home.path(), harness_core::Class::Fill, &secret);
+        let pw_row = json!([{"id": 7, "frame": 0, "role": "textbox", "name": "Password",
+            "state": {"input_type": "password"}}]);
+        let mut wire: Vec<Vec<u8>> = Vec::new();
+        let (r, ()) = tokio::join!(d.act(tab, "t#7=@vault(pw)", &ctx), async {
+            s.walked().await;
+            let ix = s.call(INDEX, 2).await;
+            s.value(&ix, pw_row.clone()).await;
+            let act = s.call(ACT, 2).await;
+            assert_eq!(
+                act["params"]["arguments"][1]["value"],
+                json!({"focus": true})
+            );
+            s.value(&act, json!({"x": 10, "y": 20, "op": {"focused": true}}))
+                .await;
+            // All three on the wire before any reply.
+            let mut queued = Vec::new();
+            for _ in 0..3 {
+                let raw = tokio::time::timeout(Duration::from_secs(5), s.sent.recv())
+                    .await
+                    .expect("queued")
+                    .expect("open");
+                wire.push(raw.to_vec());
+                queued.push(serde_json::from_slice::<Value>(&raw).expect("json"));
+            }
+            let methods: Vec<&str> = queued
+                .iter()
+                .map(|m| m["method"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(
+                methods,
+                [
+                    "Input.dispatchKeyEvent",
+                    "Input.dispatchKeyEvent",
+                    "Input.insertText"
+                ]
+            );
+            assert_eq!(queued[0]["params"]["commands"], json!(["selectAll"]));
+            assert_eq!(queued[2]["sessionId"], "S1");
+            assert!(
+                queued[2]["params"]["text"].as_str() == Some(secret.as_str()),
+                "the resolved value is the insertText text"
+            );
+            for m in &queued {
+                s.reply(m, json!({})).await;
+            }
+            let post = s.call(POST, 2).await;
+            // B-4 #9: settle with the 150 ms quiet window, capped at 500 ms.
+            assert_eq!(
+                post["params"]["arguments"][0]["value"],
+                json!({"quiet": 150, "cap": 500})
+            );
+            let mut after = pw_row.clone();
+            after[0]["state"]["value"] = json!({"kind": "filled"});
+            s.value(&post, json!({"settled": true, "index": after}))
+                .await;
+        });
+        let r = r.expect("act");
+        assert_eq!(r.steps.len(), 1);
+        assert_eq!(r.steps[0].outcome, StepOutcome::Ok, "{:?}", r.steps);
+        assert!(
+            !r.steps[0]
+                .consequences
+                .contains(&Consequence::NoVisibleChange),
+            "filled is a change"
+        );
+        assert_eq!(r.diff, None, "a value change prints nothing");
+        let dbg = format!("{r:?}");
+        assert!(!dbg.contains(&secret), "the value is not in the result");
+        let insert_only = wire
+            .iter()
+            .filter(|m| m.windows(secret.len()).any(|w| w == secret.as_bytes()))
+            .count();
+        assert_eq!(insert_only, 1, "only the insertText message carries it");
+        assert!(s.quiet(), "nothing after the window");
+    }
+
+    /// Rule 4, H-1.4: a step whose live class is above ctx.class stops before any input; the
+    /// steps after it do not run.
+    #[tokio::test]
+    async fn a_submit_step_under_a_fill_approval_sends_nothing() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        let home = tempfile::tempdir().unwrap();
+        let ctx = vault_ctx(home.path(), harness_core::Class::Fill, &canary());
+        let rows = json!([
+            {"id": 7, "frame": 0, "role": "textbox", "name": "Email", "form": "f1"},
+            {"id": 14, "frame": 0, "role": "button", "name": "Sign in", "form": "f1",
+             "flags": {"submit": true}, "state": {"submitish": true}}
+        ]);
+        let (r, ()) = tokio::join!(d.act(tab, "c#14; t#7=x", &ctx), async {
+            s.walked().await;
+            let ix = s.call(INDEX, 2).await;
+            s.value(&ix, rows.clone()).await;
+        });
+        let r = r.expect("act");
+        assert_eq!(r.steps.len(), 1);
+        let stop = r.stopped.expect("stopped");
+        assert_eq!(stop.class, harness_core::Class::Submit);
+        assert_eq!(stop.element.as_deref(), Some("#14"));
+        // No act call, no Input.*, and the diff reuses the index the gate read.
+        assert!(s.quiet(), "nothing after the gate's index read");
+        assert_eq!(r.diff, None);
+    }
+
+    /// B-4 #9: a click whose handler opens alert() never gets its mouseReleased reply; the
+    /// dialog ends the window, the step reports it, and nothing else is sent to the page.
+    #[tokio::test]
+    async fn a_dialog_ends_a_click_whose_release_never_answers() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        let home = tempfile::tempdir().unwrap();
+        let ctx = vault_ctx(home.path(), harness_core::Class::Navigate, &canary());
+        let rows = json!([{"id": 5, "frame": 0, "role": "button", "name": "Alert"}]);
+        let (r, ()) = tokio::join!(d.act(tab, "c#5; c#5", &ctx), async {
+            s.walked().await;
+            let ix = s.call(INDEX, 2).await;
+            s.value(&ix, rows.clone()).await;
+            let act = s.call(ACT, 2).await;
+            s.value(&act, json!({"x": 10, "y": 20})).await;
+            let mv = s.expect("Input.dispatchMouseEvent").await;
+            let down = s.expect("Input.dispatchMouseEvent").await;
+            let up = s.expect("Input.dispatchMouseEvent").await;
+            assert_eq!(up["params"]["type"], "mouseReleased");
+            s.reply(&mv, json!({})).await;
+            s.reply(&down, json!({})).await;
+            s.send(json!({"sessionId": "S1", "method": "Page.javascriptDialogOpening",
+                "params": {"message": "Sure? [ok](#9)", "type": "confirm", "url": "https://a.test/"}}))
+                .await;
+        });
+        let r = r.expect("act");
+        assert_eq!(r.steps.len(), 1, "the program stops at the dialog");
+        assert_eq!(r.steps[0].outcome, StepOutcome::Ok);
+        assert_eq!(
+            r.steps[0].consequences,
+            [Consequence::Dialog {
+                text: "Sure? (ok)(＃9)".into()
+            }]
+        );
+        assert_eq!(r.diff, None, "the page is paused: no read");
+        assert!(s.quiet(), "no in-page call while the dialog is open");
+        let (answer, ()) = tokio::join!(d.dialog(tab, false, Some("typed")), async {
+            let h = s.expect("Page.handleJavaScriptDialog").await;
+            assert_eq!(h["sessionId"], "S1");
+            assert_eq!(h["params"], json!({"accept": false, "promptText": "typed"}));
+            s.reply(&h, json!({})).await;
+        });
+        answer.expect("answered");
+        assert!(d.dialog(tab, true, None).await.is_err(), "answered once");
     }
 }

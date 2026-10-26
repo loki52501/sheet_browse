@@ -6,15 +6,10 @@
 //! capped at the slot, then the slot itself (the schedule is the condition, rule 6). No call
 //! or wait ends after the budget. The final `why` becomes the step error (B-8).
 //!
-//! Also the T-20 part of `Driver::act`: parse with `sb_act`, run actionability per step,
-//! one `StepResult` per step run. Input synthesis is T-21.
+//! The act loop that uses it is in `act.rs` (T-21).
 
 use crate::runtime::CallError;
-use crate::{
-    ActResult, Driver, DriverError, Profile, SettleOpts, StepOutcome, StepResult, TabId, ToolCtx,
-};
-use harness_core::gate::StopReason;
-use harness_core::Class;
+use crate::{Driver, DriverError, Profile, SettleOpts, StepOutcome, TabId};
 use sb_act::{Scroll, Step};
 use sb_sheet::ElemRef;
 use serde_json::{json, Value};
@@ -41,13 +36,76 @@ const NOT_ANSWERING: &str = "not answering";
 /// with a `#`, the ids in the document that contain whitespace, `(`, `)` or `#` and occur
 /// in the why come back as `odd`, so the driver can neutralise them: such an id could pose
 /// as the driver's own `(OVERLAY #n)` or `(#n)` ref (B-607).
-const ACT_FN: &str = "function (id) {
+///
+/// T-21: on a point, the frame's offset is added in the page (B-4 #7): from a frame below
+/// the top, each same-origin `frameElement`'s content box is added on the way up, so the
+/// point is in the tab's viewport, where `Input.dispatchMouseEvent` wants it; a frame whose
+/// parent cannot be reached (cross-origin) answers a terminal why. Then `op`, when given,
+/// runs on the element in the same round trip: `{focus: true}` focuses it and reports
+/// whether it took focus (type and key steps), `{select: choice}` picks the option whose
+/// label, then value, then case-folded label is `choice` and dispatches `input` and
+/// `change` (B-4 #7). Its answer comes back as `op`.
+const ACT_FN: &str = "function (id, op) {
   const sb = globalThis.__sb;
   if (!sb) return { why: 'no runtime' };
   if (document.visibilityState === 'hidden') return { why: 'hidden tab' };
+  const deepActive = () => {
+    let a = document.activeElement;
+    while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+    return a;
+  };
+  const runOp = (el) => {
+    if (op.focus) {
+      el.focus({ preventScroll: true });
+      const a = deepActive();
+      return { focused: !!a && (a === el || el.contains(a)) };
+    }
+    if (typeof op.select === 'string') {
+      if (el.localName !== 'select') return { why: 'not a select element' };
+      const norm = (t) => String(t).replace(/\\s+/g, ' ').trim();
+      const opts = Array.from(el.options);
+      const want = norm(op.select);
+      const low = want.toLowerCase();
+      const o = opts.find((x) => norm(x.label || x.text) === want) ||
+        opts.find((x) => x.value === op.select) ||
+        opts.find((x) => norm(x.label || x.text).toLowerCase() === low);
+      if (!o) return { why: 'no option matches (' + opts.length + ' options)' };
+      if (o.disabled) return { why: 'the option is disabled' };
+      o.selected = true;
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { selected: true };
+    }
+    return { why: 'unknown op' };
+  };
   return sb.act(id).then((a) => {
     const w = a && a.why;
-    if (typeof w !== 'string' || w.indexOf('#') < 0) return a;
+    if (typeof w !== 'string') {
+      if (!a || typeof a.x !== 'number' || typeof a.y !== 'number') return a;
+      let x = a.x;
+      let y = a.y;
+      try {
+        let win = window;
+        while (win !== win.top) {
+          const fe = win.frameElement;
+          if (!fe) return { why: 'cross-origin frame' };
+          const r = fe.getBoundingClientRect();
+          const cs = win.parent.getComputedStyle(fe);
+          x += r.left + fe.clientLeft + (parseFloat(cs.paddingLeft) || 0);
+          y += r.top + fe.clientTop + (parseFloat(cs.paddingTop) || 0);
+          win = win.parent;
+        }
+      } catch (e) {
+        return { why: 'cross-origin frame' };
+      }
+      const out = { x: x, y: y };
+      if (op) {
+        const el = sb.resolve(id);
+        out.op = el && !el.why ? runOp(el) : { why: 'gone' };
+      }
+      return out;
+    }
+    if (w.indexOf('#') < 0) return a;
     const odd = [];
     for (const e of document.querySelectorAll('[id]')) {
       const v = e.id;
@@ -113,8 +171,8 @@ pub(crate) fn classify_why(why: &str) -> WhyKind {
     }
 }
 
-/// Where to act, in the frame's viewport (CSS pixels). T-21 adds the frame's offset for
-/// frames other than 0.
+/// Where to act, in the tab's viewport (CSS pixels): the page adds the offset of a frame
+/// other than 0 (T-21).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Point {
     pub x: f64,
@@ -305,7 +363,7 @@ pub(crate) fn step_label(step: &Step) -> String {
 }
 
 /// The element an input step acts on (needs actionability first).
-fn input_target(step: &Step) -> Option<ElemRef> {
+pub(crate) fn input_target(step: &Step) -> Option<ElemRef> {
     match step {
         Step::Type { target, .. }
         | Step::Select { target, .. }
@@ -378,6 +436,7 @@ fn step_failure(e: DriverError, frame: u32) -> Result<String, DriverError> {
 impl Driver {
     /// B-4 #6: `Ok(point)` once the element is actionable, `Err(why)` with the final answer
     /// (D-603, D-606). The outer error is the driver's own failure (tab gone, browser closed).
+    #[cfg(test)]
     pub(crate) async fn actionable(
         &self,
         tab: TabId,
@@ -389,12 +448,39 @@ impl Driver {
     /// [`Driver::actionable`] with the budget given (tests use a short one). Every call and
     /// wait is capped at `t0 + cap`; an attempt the budget cuts short leaves the previous
     /// answer as the why.
+    #[cfg(test)]
     pub(crate) async fn actionable_within(
         &self,
         tab: TabId,
         elem: ElemRef,
         cap: Duration,
     ) -> Result<Result<Point, Why>, DriverError> {
+        Ok(self
+            .actionable_op_within(tab, elem, None, cap)
+            .await?
+            .map(|(p, _)| p))
+    }
+
+    /// [`Driver::actionable`] plus `op` (see [`ACT_FN`]) run on the element in the same
+    /// round trip once it is actionable; the op's answer comes back with the point (`Null`
+    /// without an op). The point is in the tab's viewport (the frame offset is added).
+    pub(crate) async fn actionable_op(
+        &self,
+        tab: TabId,
+        elem: ElemRef,
+        op: Option<&Value>,
+    ) -> Result<Result<(Point, Value), Why>, DriverError> {
+        self.actionable_op_within(tab, elem, op, ACT_CAP).await
+    }
+
+    async fn actionable_op_within(
+        &self,
+        tab: TabId,
+        elem: ElemRef,
+        op: Option<&Value>,
+        cap: Duration,
+    ) -> Result<Result<(Point, Value), Why>, DriverError> {
+        let args = [json!(elem.id), op.cloned().unwrap_or(Value::Null)];
         let t0 = Instant::now();
         let deadline = t0 + cap;
         let mut st = Attempts {
@@ -408,11 +494,12 @@ impl Driver {
             if Instant::now() >= deadline {
                 return Ok(Err(st.out_of_time()));
             }
-            let answer = match self
-                .call_sb(tab, elem.frame, ACT_FN, &[json!(elem.id)], deadline)
-                .await
-            {
-                Ok(v) => parse_answer(&v),
+            let mut op_answer = Value::Null;
+            let answer = match self.call_sb(tab, elem.frame, ACT_FN, &args, deadline).await {
+                Ok(v) => {
+                    op_answer = v.get("op").cloned().unwrap_or(Value::Null);
+                    parse_answer(&v)
+                }
                 Err(CallError::Deadline) | Err(CallError::Driver(DriverError::Timeout(_))) => {
                     return Ok(Err(st.out_of_time()))
                 }
@@ -427,7 +514,7 @@ impl Driver {
             st.attempts += 1;
             st.first.get_or_insert_with(|| t0.elapsed());
             let mut a = match answer {
-                Ok(p) => return Ok(Ok(p)),
+                Ok(p) => return Ok(Ok((p, op_answer))),
                 Err(a) => a,
             };
             if a.why == HIDDEN_TAB {
@@ -525,7 +612,7 @@ impl Driver {
 
     /// `w(d)`: settle in the page with `d` as the cap (B-7; network settle is T-22). A page
     /// that does not answer by `d` plus [`W_GRACE`] fails the step, not the program.
-    async fn wait_step(&self, tab: TabId, d: Duration) -> Result<StepEnd, DriverError> {
+    pub(crate) async fn wait_step(&self, tab: TabId, d: Duration) -> Result<StepEnd, DriverError> {
         let cap_ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let opts = json!({"quiet": SettleOpts::default().quiet_ms, "cap": cap_ms});
         let deadline = Instant::now() + d + W_GRACE;
@@ -550,86 +637,9 @@ impl Driver {
             )),
         }
     }
-
-    /// The T-20 body of [`Driver::act`]: one `StepResult` per step run, stopping at the
-    /// first failure, at `?s`, or at a challenge (H-1.4).
-    pub(crate) async fn act_steps(
-        &self,
-        tab: TabId,
-        program: &str,
-        ctx: &ToolCtx,
-    ) -> Result<ActResult, DriverError> {
-        // TODO(T-21): check each step's live class against ctx.class (stop when higher) and
-        // resolve `@vault(k)` only inside ctx.resolve_into, straight into Input.insertText.
-        let _ = ctx;
-        if !self.with_registry(|r| r.has_tab(tab)) {
-            return Err(DriverError::TabGone(tab));
-        }
-        let steps = sb_act::parse(program)?;
-        if steps.is_empty() {
-            return Err(DriverError::Parse(sb_act::ParseError {
-                step: 1,
-                at: 0,
-                msg: "the program has no steps".into(),
-            }));
-        }
-        let mut out = Vec::with_capacity(steps.len());
-        let mut stopped = None;
-        for (i, step) in steps.iter().enumerate() {
-            let (outcome, settled) = match (step, input_target(step)) {
-                (Step::Wait(d), _) => self.wait_step(tab, *d).await?,
-                (Step::StopHere, _) => (StepOutcome::Ok, None),
-                (_, Some(elem)) => match self.actionable(tab, elem).await? {
-                    // TODO(T-21): input synthesis (B-4 #7) at `p`, then consequences (B-4 #9).
-                    Ok(p) => (
-                        StepOutcome::Failed {
-                            why: format!(
-                                "not done: input synthesis is T-21 (target actionable at {:.1}, {:.1})",
-                                p.x, p.y
-                            ),
-                        },
-                        None,
-                    ),
-                    Err(w) => {
-                        if w.kind == WhyKind::Challenge {
-                            stopped = Some(StopReason {
-                                class: Class::Challenge,
-                                why: format!("CHALLENGE at {elem}: stopped, hand back to the user"),
-                                element: Some(elem.to_string()),
-                            });
-                        }
-                        (StepOutcome::Failed { why: w.text }, None)
-                    }
-                },
-                // TODO(T-21): sc(down|up|#N).
-                (_, None) => (
-                    StepOutcome::Failed {
-                        why: "not done: scrolling is T-21".into(),
-                    },
-                    None,
-                ),
-            };
-            let end = !matches!(outcome, StepOutcome::Ok) || matches!(step, Step::StopHere);
-            out.push(StepResult {
-                n: i + 1,
-                step: step_label(step),
-                outcome,
-                consequences: Vec::new(),
-                settled,
-            });
-            if end {
-                break;
-            }
-        }
-        Ok(ActResult {
-            steps: out,
-            diff: None,
-            stopped,
-        })
-    }
 }
 
-type StepEnd = (StepOutcome, Option<bool>);
+pub(crate) type StepEnd = (StepOutcome, Option<bool>);
 
 #[cfg(test)]
 mod tests {

@@ -104,11 +104,17 @@ impl Transport for Pipe {
 }
 
 fn write_thread(mut w: impl Write, mut rx: mpsc::Receiver<Bytes>) {
+    // One framing buffer, zeroed after every write: a message may carry a vault value on its
+    // way into Input.insertText (H-2). It grows only while empty, so no copy is left behind.
+    let mut framed: Vec<u8> = Vec::new();
     while let Some(msg) = rx.blocking_recv() {
-        let mut framed = Vec::with_capacity(msg.len() + 1);
+        framed.reserve(msg.len() + 1);
         framed.extend_from_slice(&msg);
         framed.push(0);
-        if w.write_all(&framed).is_err() {
+        drop(msg);
+        let ok = w.write_all(&framed).is_ok();
+        zeroize::Zeroize::zeroize(&mut framed);
+        if !ok {
             return;
         }
     }

@@ -3540,6 +3540,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -3549,6 +3550,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "harness-core",
+ "percent-encoding",
  "sb-act",
  "sb-cdp",
  "sb-sheet",
@@ -3557,6 +3559,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

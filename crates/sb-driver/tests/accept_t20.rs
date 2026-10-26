@@ -27,6 +27,9 @@ const ACT_CAP: Duration = Duration::from_secs(5);
 /// Allowed overrun of the 5 s cap: timer and task scheduling only. Since round 2 no call or
 /// wait of the step ends after the budget (D-606; the same tolerance the coder's test uses).
 const CAP_TOLERANCE: Duration = Duration::from_millis(40);
+/// T-21: `Driver::act` reads the live index for the per-step gate (rule 4) before the step's
+/// 5 s budget starts: one round trip on these small pages.
+const GATE_READ: Duration = Duration::from_millis(60);
 /// D-603 waits, then 500 ms steps.
 const SCHEDULE_MS: [f64; 5] = [0.0, 50.0, 100.0, 250.0, 500.0];
 
@@ -158,10 +161,12 @@ async fn rig(vault: Vault) -> Rig {
         runs_root: home.path().join("runs"),
         run: None,
     };
+    // T-21: the highest class below Challenge, so the per-step gate (rule 4) never stops
+    // these actionability rows ("Buy" buttons are Pay); a CHALLENGE still stops.
     let ctx = ToolCtx::new(
         RunId("accept-t20".into()),
         home.path().join("runs").join("accept-t20"),
-        Class::Read,
+        Class::Pay,
         &harness,
         ToolRegistry::new(vec![]),
     );
@@ -257,6 +262,9 @@ const PROBE: &str = "function (id) {
   const efp = document.elementFromPoint;
   document.elementFromPoint = function (x, y) {
     const hit = efp.call(document, x, y);
+    // T-21: only hit tests inside an attempt count (the gate's index() before a step
+    // hit-tests rows too).
+    if (P.hits.length >= P.starts.length) return hit;
     P.hits.push(performance.now());
     P.what.push(hit ? (hit.getAttribute('class') || hit.id || hit.localName) : 'nothing');
     return hit;
@@ -418,13 +426,9 @@ async fn row1_row2_covered_first_answer_under_50ms_then_retry_succeeds() {
             "first answer: the button is covered by div.cookie"
         );
         firsts.push(first_ub);
-        // Row 2: the retry after the cover went succeeds (input itself is T-21).
+        // Row 2: the retry after the cover went succeeds, and the click is done (T-21).
         assert_eq!(r.steps.len(), 1);
-        assert!(
-            why_of(&r, 0).starts_with("not done: input synthesis is T-21 (target actionable at"),
-            "{:?}",
-            r.steps[0]
-        );
+        assert_eq!(r.steps[0].outcome, StepOutcome::Ok, "{:?}", r.steps[0]);
         assert!(p.starts.len() >= 2, "it was retried: {p:?}");
         assert_eq!(p.what.last().map(String::as_str), Some("b"), "{p:?}");
         assert!(took >= Duration::from_millis(250), "it waited: {took:?}");
@@ -527,7 +531,7 @@ async fn row3_disabled_button_gives_disabled() {
         "disabled is answered before the hit test"
     );
     assert!(p.starts.len() > 5, "disabled is retryable (D-603): {p:?}");
-    assert!(took <= ACT_CAP + CAP_TOLERANCE, "{took:?}");
+    assert!(took <= ACT_CAP + CAP_TOLERANCE + GATE_READ, "{took:?}");
     rig.d.shutdown(Duration::from_secs(10)).await;
 }
 
@@ -554,7 +558,7 @@ async fn row4_row5_five_second_cap_and_backoff_schedule() {
     );
     assert!(r.stopped.is_none());
     assert!(took >= ACT_CAP, "{took:?}");
-    assert!(took <= ACT_CAP + CAP_TOLERANCE, "{took:?}");
+    assert!(took <= ACT_CAP + CAP_TOLERANCE + GATE_READ, "{took:?}");
 
     // Row 5: one start and one hit test per attempt (the page never changes).
     assert_eq!(p.starts.len(), p.hits.len(), "{p:?}");
@@ -671,8 +675,10 @@ async fn row6_gone_stale_challenge_fail_at_once() {
         p.starts.len()
     );
     assert_eq!(r.steps.len(), 1);
-    assert_eq!(why_of(&r, 0), "challenge");
-    assert_eq!(p.starts.len(), 1, "a challenge is not retried");
+    // T-21: the per-step gate sees the challenge page in the live index and stops before
+    // any actionability attempt (H-1.4, rule 4).
+    assert!(why_of(&r, 0).starts_with("CHALLENGE at"), "{:?}", r.steps);
+    assert_eq!(p.starts.len(), 0, "a challenge is not attempted");
     let stop = r.stopped.expect("a challenge stops the program");
     assert_eq!(stop.class, Class::Challenge);
     let want = format!("#{cb}");
@@ -730,11 +736,7 @@ async fn row7_runtime_reinstalled_and_ids_never_repeat() {
     }
     // A new id works on the live document; the previous document's id is stale.
     let r = d.act(tab, &format!("c#{b3}"), &rig.ctx).await.expect("act");
-    assert!(
-        why_of(&r, 0).starts_with("not done: input synthesis is T-21"),
-        "{:?}",
-        r.steps
-    );
+    assert_eq!(r.steps[0].outcome, StepOutcome::Ok, "{:?}", r.steps);
     let r = d.act(tab, &format!("c#{n}"), &rig.ctx).await.expect("act");
     assert_eq!(why_of(&r, 0), "stale");
     rig.d.shutdown(Duration::from_secs(10)).await;
@@ -949,7 +951,7 @@ async fn cap_and_schedule(path: &str, label: &str) {
         "{why}"
     );
     assert!(took >= ACT_CAP, "{took:?}");
-    assert!(took <= ACT_CAP + CAP_TOLERANCE, "cap: {took:?}");
+    assert!(took <= ACT_CAP + CAP_TOLERANCE + GATE_READ, "cap: {took:?}");
     assert_eq!(p.starts.len(), p.hits.len(), "{p:?}");
     for (i, w) in waits.iter().enumerate() {
         let want = SCHEDULE_MS.get(i).copied().unwrap_or(500.0);

@@ -753,6 +753,12 @@ impl Registry {
         }
     }
 
+    /// The tab a session belongs to: its own page session or one of its out-of-process
+    /// iframes' (a dialog or download reported there is the tab's).
+    pub(crate) fn tab_of_session(&self, session: &str) -> Option<TabId> {
+        self.owner(Some(session)).map(|(t, _)| t)
+    }
+
     /// True once the renderer has acknowledged the session's runtime install: a navigation
     /// started after this gets `__sb` in its document (B-4 #3).
     pub(crate) fn installed(&self, session: &str) -> bool {

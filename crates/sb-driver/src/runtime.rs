@@ -77,6 +77,10 @@ const WALK_FN: &str = "async function (base, settle, paintCap) {
   return { count: w ? w.count : 0, settled: settled };
 }";
 
+/// Remote objects the driver holds (by-reference results) live in this group and are
+/// released with `Runtime.releaseObjectGroup` once used.
+pub(crate) const OBJECT_GROUP: &str = "sb-driver";
+
 /// How long `open` waits for the document's first paint at most (D-607).
 pub(crate) const PAINT_CAP_MS: u32 = 3000;
 
@@ -388,12 +392,76 @@ impl Driver {
         args: &[Value],
         deadline: Instant,
     ) -> Result<Value, CallError> {
+        Ok(self.call_sb_doc(tab, frame, decl, args, deadline).await?.0)
+    }
+
+    /// [`Driver::call_sb`] that also says which document answered (its key, as
+    /// [`Driver::sb_key`] reports it), so a caller can tell whether a navigation replaced it.
+    pub(crate) async fn call_sb_doc(
+        &self,
+        tab: TabId,
+        frame: u32,
+        decl: &str,
+        args: &[Value],
+        deadline: Instant,
+    ) -> Result<(Value, String), CallError> {
         let mut retried = false;
         loop {
             let old = self.sb_key(tab, frame);
             let r = async {
                 let ctx = self.based_ctx(tab, frame, deadline, None, false).await?;
-                self.raw_call(&ctx, decl, args, deadline).await
+                let v = self.raw_call(&ctx, decl, args, deadline).await?;
+                Ok((v, doc_key(&ctx)))
+            }
+            .await;
+            match r {
+                Err(CallError::Lost) if !retried => {
+                    retried = true;
+                    self.next_ctx(tab, frame, old, deadline).await;
+                }
+                r => return r,
+            }
+        }
+    }
+
+    /// [`Driver::call_sb`] returning the result by reference: the `RemoteObject` (with an
+    /// `objectId` in group [`OBJECT_GROUP`] for an object), for CDP commands that take an
+    /// element (`DOM.setFileInputFiles`). Returns (session, remote object).
+    pub(crate) async fn call_sb_ref(
+        &self,
+        tab: TabId,
+        frame: u32,
+        decl: &str,
+        args: &[Value],
+        deadline: Instant,
+    ) -> Result<(String, Value), CallError> {
+        let mut retried = false;
+        loop {
+            let old = self.sb_key(tab, frame);
+            let r = async {
+                let ctx = self.based_ctx(tab, frame, deadline, None, false).await?;
+                let args: Vec<Value> = args.iter().map(|a| json!({ "value": a })).collect();
+                let params = json!({
+                    "functionDeclaration": decl,
+                    "executionContextId": ctx.id,
+                    "arguments": args,
+                    "returnByValue": false,
+                    "awaitPromise": true,
+                    "objectGroup": OBJECT_GROUP,
+                });
+                let v = self
+                    .cdp_until(&ctx.session, "Runtime.callFunctionOn", params, deadline)
+                    .await?;
+                if let Some(ex) = v.get("exceptionDetails") {
+                    return Err(CallError::Driver(DriverError::Cdp(format!(
+                        "Runtime.callFunctionOn: page exception: {}",
+                        exception_text(ex)
+                    ))));
+                }
+                Ok((
+                    ctx.session.clone(),
+                    v.get("result").cloned().unwrap_or(Value::Null),
+                ))
             }
             .await;
             match r {
