@@ -676,7 +676,11 @@ fn set_refuses_values_inside_literals_and_leaves_the_file_alone() {
     match v.set(&format!("k_{cf}"), "unrelated-value", EntryKind::Secret) {
         Err(e @ VaultError::ValueInLiteral { .. }) => {
             let shown = format!("{e} {e:?}");
-            assert!(shown.contains("\"zip\""), "the value's entry is named");
+            // An all-alphanumeric canary makes cf the `test` value too, so either entry may be named.
+            assert!(
+                shown.contains("\"zip\"") || (cf == c && shown.contains("\"test\"")),
+                "the value's entry is named"
+            );
             assert!(
                 !has_ci(&shown, &cf) && !shown.contains(&c),
                 "a value leaked"
