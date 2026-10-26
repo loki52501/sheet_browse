@@ -353,7 +353,7 @@ fn seed_tools_parse_and_load() {
     assert_eq!(jobs.header.kind, ToolKind::Reader);
     assert!(skeleton_line(&rep.tools)
         .unwrap()
-        .contains("ashbyhq.list_jobs(org?)"));
+        .contains("ashbyhq.list_jobs(org?,offset?,q?)"));
 }
 
 // ---------------------------------------------------------------- T-7
