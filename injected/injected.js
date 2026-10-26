@@ -182,6 +182,8 @@
     gone: [], // [{ t, keys, parent }] removed sensitive field signatures, oldest first (D-435 (2)); keys null: match all; parent: WeakRef, D-439
     born: [], // [{ t, ref, parent }] recently added non-sensitive value fields, WeakRefs only (D-438 (1))
     nearPw: new WeakMap(), // value field added next to a live sensitive field -> { t, parent: WeakRef } (D-443 (1))
+    outSens: new WeakSet(), // sensitive value fields a mutation batch removed (moved or re-attached later: D-444 (2))
+    hid: null, // per-index() memo { d, g }: parent -> holds a hidden sensitive value field (D-444 (1))
     ids: new WeakMap(), // Element -> id
     refs: new Map(), // id -> WeakRef<Element>
     rec: new WeakMap(), // Element -> walk decision (cached between walks)
@@ -904,6 +906,66 @@
     return false;
   }
 
+  // Visibility-swap show toggles (D-444 (1)): a synced twin shown while the password gets
+  // display:none, or a clone added and the password hidden and kept, add and remove nothing
+  // that the batch rules see. A value field is not read while its parent directly holds a
+  // sensitive value field that is not displayed, or while it is the only value field of a
+  // wrapper whose parent has another child holding a single value field, a hidden sensitive
+  // one (twin and password each alone in sibling wrappers). Parent-local: one pass over a
+  // parent's children, memoized per index() call (S.hid).
+  const hidSens = (s) => {
+    try {
+      return sensitive(s) && !displayed(s);
+    } catch (e) {
+      return true; // unreadable: count it (fail closed)
+    }
+  };
+  // The single value field in n (n itself or its subtree), else null (none or two or more).
+  function onlyField(n) {
+    if (n.localName === "input" || n.localName === "textarea") return valueField(n) ? n : null;
+    if (typeof n.querySelectorAll !== "function") return null;
+    let one = null;
+    for (const f of n.querySelectorAll("input,textarea")) {
+      if (!valueField(f)) continue;
+      if (one) return null;
+      one = f;
+    }
+    return one;
+  }
+  const holder = (n) => (n && (n.nodeType === 1 || n.nodeType === 11) ? n : null); // element or shadow root
+  function twinOfHiddenPw(el) {
+    const w = holder(el.parentNode);
+    if (!w) return false;
+    const m = S.hid || (S.hid = { d: new WeakMap(), g: new WeakMap() });
+    let d = m.d.get(w);
+    if (d === undefined) {
+      d = false;
+      for (const s of w.children) {
+        if ((s.localName === "input" || s.localName === "textarea") && valueField(s) && hidSens(s)) {
+          d = true;
+          break;
+        }
+      }
+      m.d.set(w, d);
+    }
+    if (d) return true;
+    const g = holder(w.parentNode);
+    if (!g || onlyField(w) !== el) return false;
+    let h = m.g.get(g);
+    if (h === undefined) {
+      h = null;
+      for (const c of g.children) {
+        const f = onlyField(c);
+        if (f && hidSens(f)) {
+          h = c;
+          break;
+        }
+      }
+      m.g.set(g, h);
+    }
+    return h !== null; // never w: its only field is el, which is not sensitive here
+  }
+
   // Every read of a field's value goes through here (index, state, text and fingerprint use
   // index rows; names and keys never read a value).
   function fieldValue(el, role) {
@@ -912,12 +974,12 @@
       const t = String(el.type).toLowerCase();
       if (NOVALUE_INPUT.has(t)) return undefined;
       if (t === "file") return { kind: el.files && el.files.length ? "filled" : "empty" };
-      if (sensitive(el) || nearLivePw(el)) return { kind: filledNoRead(el) };
+      if (sensitive(el) || nearLivePw(el) || twinOfHiddenPw(el)) return { kind: filledNoRead(el) };
       const v = el.value;
       return v ? { kind: "text", text: v.slice(0, VALUE_CAP) } : { kind: "empty" };
     }
     if (tag === "textarea") {
-      if (sensitive(el) || nearLivePw(el)) return { kind: filledNoRead(el) };
+      if (sensitive(el) || nearLivePw(el) || twinOfHiddenPw(el)) return { kind: filledNoRead(el) };
       const v = el.value;
       return v ? { kind: "text", text: v.slice(0, VALUE_CAP) } : { kind: "empty" };
     }
@@ -1398,6 +1460,7 @@
     ensure();
     if (S.selfCh) return [selfRow()];
     S.layout = hasLayout();
+    S.hid = null; // fieldValue's twin memo is valid for this call only (D-444 (1))
     const L = S.layout;
     const vp = viewport();
     const vpArea = Math.max(1, vp.w * vp.h);
@@ -1887,7 +1950,8 @@
   // window, so a later removal of a sensitive field marks the ones that match its keys and the
   // ones added to the same parent: all of them when every field the parent lost was sensitive,
   // else a single one (D-442, D-443 (2)). One that was added next to a live sensitive field is
-  // never read until that field goes or the window ends (nearLivePw, D-443 (1)).
+  // never read until that field goes or the window ends (nearLivePw, D-443 (1)); a sensitive
+  // field that was moved in that batch or re-attached by it counts as already there (D-444 (2)).
   // Remove-first across batches (D-439, Vue out-in, a
   // re-render split by an await): a parent that lost exactly one value field, a sensitive one,
   // and gained none is remembered (WeakRef) with the removal; the first later batch within the
@@ -1970,6 +2034,15 @@
       return false;
     }
   }
+  // An added field that is not sensitive (a throwing read counts as sensitive: it is then left
+  // out of the key match, so more fields are marked, fail closed).
+  function plainField(f) {
+    try {
+      return !sensitive(f);
+    } catch (err) {
+      return false;
+    }
+  }
   function markSens(f) {
     S.sens.add(f);
     if (S.walked && !S.full) markDirty(f);
@@ -1998,6 +2071,7 @@
             s = sensitive(f);
           } catch (err) { /* s stays true */ }
           if (!s) continue;
+          S.outSens.add(f);
           e.sens++;
           let keys = null; // identity unreadable: remember a match-all entry (D-438 (3), fail closed)
           try {
@@ -2021,8 +2095,10 @@
         // adds exactly one value field to this parent within the window inherits (D-439); one
         // out and two or more in with no key match: all of them inherit (D-443 (3), N5). A key
         // match leaves the rest to the key check below; a key that cannot be read marks all.
+        // Only the non-sensitive added fields count for that key match: a new (hidden)
+        // password with the old one's key does not stand the rule down (D-444 (3), Y5).
         if (!e.add) e.gone.parent = new WeakRef(p);
-        else if (e.add.length === 1 || !addKeyHit(e.gone.keys, e.add)) for (const f of e.add) S.sens.add(f);
+        else if (e.add.length === 1 || !addKeyHit(e.gone.keys, e.add.filter(plainField))) for (const f of e.add) S.sens.add(f);
       }
     }
     for (const g of gone) if (g.keys === null || g.keys.length || g.parent) S.gone.push(g);
@@ -2092,7 +2168,9 @@
       if (p && typeof p.querySelectorAll === "function") {
         let n = 0;
         for (const s of p.querySelectorAll("input,textarea")) {
-          if (fresh.has(s) || !valueField(s)) continue;
+          // a sensitive field this or an earlier batch removed and that is back in the page
+          // (moved in this batch, or re-attached) was there before the copy (D-444 (2), Y3, Y3d)
+          if ((fresh.has(s) && !S.outSens.has(s)) || !valueField(s)) continue;
           if (S.sens.has(s) || (n++ < NEAR_MAX && sensitive(s))) v.push({ s, keys: undefined });
         }
       }

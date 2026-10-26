@@ -939,3 +939,105 @@ test("O2 D-443: a JS-timed exit with no animation never reads the value, mid-exi
 test("O3 D-443: an exit class on the wrapper with the transition on the inner input never reads the value", async (t) => {
   await overlapCase(t, 3, "O3 child transition");
 });
+
+// D-444 (1) (review-T-19 round 8 Y6, Y7, runs/reviewer-13/probe-r13-chromium.js): show toggles
+// that swap visibility instead of adding and removing fields. Click Show, settle(), read in the
+// same evaluate, read again, and read once the page clock is past the click + 2.1 s (past the
+// D-443 overlap mask). The world-sb getter counter on the password and the plain field stays
+// installed for every read.
+function twinRead(o, n, settle) {
+  return o.ev(async (a) => {
+    const sb = globalThis.__sb;
+    const s = a.settle ? await sb.settle() : null;
+    sb.walk({ dirty: true });
+    const out = [sb.index(), sb.text(), sb.fingerprint('textbox "User" textbox "Email" textbox "City"')];
+    for (const el of document.querySelectorAll("input")) out.push(sb.state(el), sb.name(el));
+    const st = (id) => sb.state(document.getElementById(id)).value;
+    const r = { settled: s ? s.settled : null, pw: !!document.getElementById("acct" + a.n), copy: null };
+    if (document.getElementById("q" + a.n)) r.copy = st("q" + a.n);
+    r.user = st("user");
+    r.email = st("email");
+    r.city = st("city");
+    sb.walk({});
+    out.push(sb.index(), sb.text());
+    r.blob = JSON.stringify(out);
+    return r;
+  }, { n, settle });
+}
+async function twinCase(t, n, label) {
+  const CAN = "d444-canary-y" + n;
+  const o = await open("d444-twins.html");
+  await o.page.fill("#acct" + n, CAN);
+  await o.page.fill("#user", "ada");
+  await o.page.fill("#email", "ada@example.com");
+  await o.page.fill("#city", "London");
+  await o.ev(() => globalThis.__sb.index());
+  await o.ev((ids) => {
+    const proto = HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    globalThis.__d444 = {};
+    Object.defineProperty(proto, "value", {
+      configurable: true,
+      get() {
+        if (ids.includes(this.id)) globalThis.__d444[this.id] = (globalThis.__d444[this.id] || 0) + 1;
+        return desc.get.call(this);
+      },
+      set: desc.set,
+    });
+  }, ["acct" + n, "q" + n]);
+  const t0 = await o.ev(() => performance.now());
+  await o.page.click("#b" + n, { noWaitAfter: true });
+  const same = await twinRead(o, n, true);
+  const next = await twinRead(o, n, false);
+  await o.page.waitForFunction((at) => performance.now() > at + 2100, t0, { polling: 50 });
+  const late = await twinRead(o, n, false);
+  const reads = await o.ev(() => globalThis.__d444);
+  t.diagnostic(`${label}: settled ${same.settled}; copy kinds same ${same.copy && same.copy.kind}, ` +
+    `next ${next.copy && next.copy.kind}, late ${late.copy && late.copy.kind}; reads ${JSON.stringify(reads)}`);
+  assert.equal(same.settled, true, label + ": settle() settled");
+  assert.deepEqual(reads, {}, label + ": a value getter was called");
+  for (const [k, r] of Object.entries({ same, next, late })) {
+    assert.ok(r.pw, label + " " + k + ": the password stays in the page");
+    assert.ok(!r.blob.includes(CAN), label + " " + k + ": the value is in __sb output");
+    assert.ok(r.copy && (r.copy.kind === "empty" || r.copy.kind === "filled"), label + " " + k + ": copy " + JSON.stringify(r.copy));
+    assert.deepEqual(r.user, { kind: "text", text: "ada" }, label + " " + k + ": User");
+    assert.deepEqual(r.email, { kind: "text", text: "ada@example.com" }, label + " " + k + ": Email (control)");
+    assert.deepEqual(r.city, { kind: "text", text: "London" }, label + " " + k + ": City (control)");
+  }
+}
+
+test("Y6 D-444: clone and hide (copy added, password display:none and kept) never reads the value, also past 2 s", async (t) => {
+  await twinCase(t, 6, "Y6 clone and hide");
+});
+
+test("Y7 D-444: a synced twin present from load, display flipped by Show, never reads the value", async (t) => {
+  await twinCase(t, 7, "Y7 twin");
+});
+
+test("Y7w D-444: twin and password alone in sibling wrappers, the wrappers' display flipped, never reads the value", async (t) => {
+  await twinCase(t, 8, "Y7w sibling wrappers");
+});
+
+test("Y7i D-444: twin and password alone in sibling wrappers, the inputs' display flipped, never reads the value", async (t) => {
+  await twinCase(t, 9, "Y7i sibling wrappers, inputs flipped");
+});
+
+test("D-444 control: an ordinary visible form with no hidden sensitive field reads its text fields", async () => {
+  const o = await open("d444-twins.html");
+  await o.page.fill("#email", "ada@example.com");
+  await o.page.fill("#city", "London");
+  await o.page.fill("#pwc", "d444-control-canary");
+  await o.page.fill("#user", "ada");
+  const r = await o.ev(() => {
+    const sb = globalThis.__sb;
+    sb.walk({ dirty: true });
+    const rows = sb.index();
+    const v = (id) => sb.state(document.getElementById(id)).value;
+    return { blob: JSON.stringify([rows, sb.text()]), email: v("email"), city: v("city"), user: v("user"), pw: v("pwc") };
+  });
+  assert.ok(!r.blob.includes("d444-control-canary"));
+  assert.deepEqual(r.email, { kind: "text", text: "ada@example.com" }, "Email in a wrapper next to a visible password's wrapper");
+  assert.deepEqual(r.city, { kind: "text", text: "London" }, "City next to a hidden field that is not sensitive");
+  assert.deepEqual(r.user, { kind: "text", text: "ada" });
+  assert.ok(r.pw.kind === "empty" || r.pw.kind === "filled");
+});

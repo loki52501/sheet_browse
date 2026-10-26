@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Show toggles that swap visibility</title>
+<script>
+  // D-444 (1) (review-T-19 round 8 Y6, Y7, runs/reviewer-13/probe-r13-chromium.js): show
+  // toggles that add or remove nothing the batch rules can see. The plain field shares no key
+  // with the password (no name, label or aria-label in common) and holds its value.
+  // Y6: clone and hide (legacy jQuery show-password plugins): the copy is added after the
+  // password, the password gets display:none and stays in the page.
+  function cloneHide() {
+    const o = document.getElementById("acct6");
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = "q6";
+    n.value = o.value;
+    o.after(n);
+    o.style.display = "none";
+  }
+  // Y7: a twin text input present from load, kept in sync by an input listener; Show flips
+  // the display of both (Vue v-show, Angular [hidden] twins).
+  function flipTwin() {
+    document.getElementById("acct7").style.display = "none";
+    document.getElementById("q7").style.display = "";
+  }
+  // Y7 in sibling wrappers: twin and password each alone in a wrapper; Show flips the wrappers.
+  function flipWrappers() {
+    document.getElementById("pw8").style.display = "none";
+    document.getElementById("tw8").style.display = "";
+  }
+  // Y7 in sibling wrappers, the inputs' own display flipped.
+  function flipInWrappers() {
+    document.getElementById("acct9").style.display = "none";
+    document.getElementById("q9").style.display = "";
+  }
+  const sync = (from, to) => { document.getElementById(to).value = from.value; };
+</script>
+</head>
+<body>
+<form id="f6"><div id="w6"><input id="acct6" type="password" aria-label="Account key six"></div>
+  <button id="b6" type="button" onclick="cloneHide()">Show six</button></form>
+<form id="f7"><div id="w7"><input id="acct7" type="password" aria-label="Account key seven" oninput="sync(this, 'q7')"><input id="q7" type="text" style="display:none"></div>
+  <button id="b7" type="button" onclick="flipTwin()">Show seven</button></form>
+<form id="f8"><div id="g8"><div id="pw8"><input id="acct8" type="password" aria-label="Account key eight" oninput="sync(this, 'q8')"></div><div id="tw8" style="display:none"><input id="q8" type="text"></div></div>
+  <button id="b8" type="button" onclick="flipWrappers()">Show eight</button></form>
+<form id="f9"><div id="g9"><span><input id="acct9" type="password" aria-label="Account key nine" oninput="sync(this, 'q9')"></span><span><input id="q9" type="text" style="display:none"></span></div>
+  <button id="b9" type="button" onclick="flipInWrappers()">Show nine</button></form>
+<!-- control: an ordinary visible form, no hidden sensitive field; text fields keep reading -->
+<form id="fc"><div id="gc"><div><input id="email" type="email" aria-label="Email"></div><div><input id="pwc" type="password" aria-label="Control key"></div></div>
+  <div><input id="city" aria-label="City"><input id="note" type="text" aria-label="Note" style="display:none"></div></form>
+<input id="user" aria-label="User">
+</body>
+</html>

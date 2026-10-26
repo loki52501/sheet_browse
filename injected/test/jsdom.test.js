@@ -1627,3 +1627,94 @@ test("an SPA login swap that removes email and password and adds two fields in o
   same(byName(rows, "Display name").state.value, { kind: "text", text: "Ada Lovelace" });
   same(byName(rows, "City").state.value, { kind: "text", text: "London" });
 });
+
+// ------------------------------------------------------------------ D-444
+// review-T-19 round 8 (runs/reviewer-13/probe-r13-jsdom.js Y3, Y3d, Y5): a password moved or
+// re-attached in the copy's batch counts as present for the overlap mask (D-444 (2)); the
+// one-out-many-in key match ignores a new sensitive field (D-444 (3)). Every password and copy
+// holds the canary; reads counts their value getter calls, mid reads included.
+test("a password moved or re-attached in the copy's batch, and a new password with the old key, never let the copy read (D-444 (2), (3))", async () => {
+  const keyed = (hidden) => async (j) => {
+    const n = j.spy(j.mk('<input id="q9" type="text">'));
+    const p2 = j.spy(j.mk('<input id="acct2" type="password" aria-label="Account key"' + (hidden ? ' style="display:none"' : "") + ">"));
+    j.$("acct").replaceWith(n, p2);
+    await tick();
+    j.mid = [readNow(j), j.sb.state(n).value];
+    return [n];
+  };
+  const cases = [
+    // Y3: one batch appends the copy and moves the password after it (w.append(copy, pw))
+    ["Y3 append(copy, pw) in the password's parent", async (j) => {
+      const n = j.spy(j.mk('<input id="q9" type="text">'));
+      j.$("w").append(n, j.$("acct"));
+      await tick();
+      j.mid = [readNow(j), j.sb.state(n).value];
+      j.$("acct").remove();
+      return [n];
+    }, [{ kind: "filled" }]],
+    // Y3x: the same move into another parent (the removal and the add have different targets)
+    ["Y3x append(copy, pw) into another parent", async (j) => {
+      const n = j.spy(j.mk('<input id="q9" type="text">'));
+      j.$("z").append(n, j.$("acct"));
+      await tick();
+      j.mid = [readNow(j), j.sb.state(n).value];
+      j.$("acct").remove();
+      return [n];
+    }, [{ kind: "filled" }]],
+    // Y3d: the password detached in an earlier batch, re-attached in the copy's batch
+    ["Y3d pw detached, then one batch adds the copy and re-attaches pw", async (j) => {
+      const pw = j.$("acct");
+      pw.remove();
+      await tick();
+      const n = j.spy(j.mk('<input id="q9" type="text">'));
+      j.$("w").append(n, pw);
+      await tick();
+      j.mid = [readNow(j), j.sb.state(n).value];
+      pw.remove();
+      return [n];
+    }, [{ kind: "filled" }]],
+    // Y5: one batch replaces the password with [copy, a display:none password with its label]
+    ["Y5 pw -> [copy, hidden new pw, same label]", keyed(true), [{ kind: "masked" }]],
+    // Y5v: the same with a visible new password (only D-444 (3) applies)
+    ["Y5v pw -> [copy, visible new pw, same label]", keyed(false), [{ kind: "masked" }]],
+  ];
+  for (const postload of [false, true]) {
+    for (const [name, step, want] of cases) {
+      const k = name + (postload ? ", after load" : ", while loading");
+      const r = await leakShape(step, postload);
+      assert.equal(r.c.reads, 0, k + ": a value getter was called");
+      assert.ok(!r.blob.includes(r.CANARY), k + ": " + r.blob);
+      sameMasked(r.states, want, k);
+      assert.ok(!r.j.mid[0].includes(r.CANARY), k + " (mid): " + r.j.mid[0]);
+      assert.ok(r.j.mid[1].kind === "empty" || r.j.mid[1].kind === "filled", k + " (mid): " + JSON.stringify(r.j.mid[1]));
+    }
+  }
+});
+
+// D-444 (1) in jsdom (no layout: displayed() walks computed display): a value field next to a
+// hidden password in its parent, or alone in a wrapper beside a wrapper holding only a hidden
+// password, reads empty|filled (the accepted cost); next to a visible password it reads.
+test("a field next to a hidden password reads empty|filled; next to a visible one it reads (D-444 (1))", () => {
+  const CANARY = "twin-canary-444";
+  const c = { reads: 0 };
+  const { doc, win, sb } = jsdom(
+    '<form id="a"><div><input id="e1" aria-label="Email one" value="a@x.io"><input id="p1" type="password" style="display:none"></div></form>' +
+    '<form id="b"><div><div><input id="e2" aria-label="Email two" value="b@x.io"></div><div hidden><input id="p2" type="password"></div></div></form>' +
+    '<form id="c"><div><div><input id="e3" aria-label="Email three" value="c@x.io"></div><div><input id="p3" type="password"></div></div>' +
+    '<div><input id="e4" aria-label="Email four" value="d@x.io"><input id="n4" aria-label="Note" style="display:none" value="n"></div></form>' +
+    '<form id="d"><div><div><input id="e5" aria-label="Email five" value="e@x.io"><input id="e6" aria-label="Name" value="Ada"></div>' +
+    '<div hidden><input id="p5" type="password"></div></div></form>');
+  for (const id of ["p1", "p2", "p3", "p5"]) spied(win, doc.getElementById(id), CANARY, c);
+  sb.walk({ base: 1 });
+  const v = (id) => JSON.parse(JSON.stringify(sb.state(doc.getElementById(id)).value));
+  const masked = (s) => s.kind === "empty" || s.kind === "filled";
+  assert.ok(masked(v("e1")), "same parent as a hidden password: " + JSON.stringify(v("e1")));
+  assert.ok(masked(v("e2")), "alone in a wrapper beside a hidden password's wrapper: " + JSON.stringify(v("e2")));
+  same(v("e3"), { kind: "text", text: "c@x.io" }, "beside a visible password's wrapper");
+  same(v("e4"), { kind: "text", text: "d@x.io" }, "next to a hidden field that is not sensitive");
+  // a wrapper with two value fields is not a twin wrapper (D-444 (1) wants each alone)
+  same(v("e5"), { kind: "text", text: "e@x.io" }, "a two-field wrapper beside a hidden password");
+  same(v("e6"), { kind: "text", text: "Ada" });
+  assert.equal(c.reads, 0);
+  assert.ok(!JSON.stringify([sb.index(), sb.text()]).includes(CANARY));
+});
