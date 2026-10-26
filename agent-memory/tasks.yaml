@@ -112,7 +112,17 @@ tasks:
     step: 3
     title: "srv-cli: gh, dns, flags, allowlisted cli; ladder rungs 3, 5, 9"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: done
+    owner: servers/suborch
+    claimed_at: 2026-10-25
+    done_at: 2026-10-26
+    notes: "review-T-15 approve (round 2), accept-T-15 green (14 rows). Ladder rungs 3, 5, 9 moved to T-15b (they exercise srv-files T-14)."
+  - id: T-15b
+    step: 3
+    title: "srv-cli follow-ups: Phase 1 ladder rungs 3, 5, 9 over MCP with srv-files; loopback http honours system proxy; gh alias set can map to auth (both ask); strict letter matching false positives (git log -Sconfig); HTML labelled text/plain still shown"
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md, docs/08-USE-CASES-AND-TESTS.md]
     status: todo
+    owner: servers
   - id: T-16
     step: 4
     title: "reviews SM-2, contacts in gate, baselines, watch diff + single notify, reflect readers-only, proposals"
