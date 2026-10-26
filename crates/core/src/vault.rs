@@ -36,9 +36,11 @@
 //! and a value inside a literal could not be told from it. Empty values are allowed and
 //! scrub nothing. Both errors name the entry, never the value, and tell the user to run
 //! `harness vault set <name>`; [`Vault::open_for_set`] skips these rules so that command
-//! can repair such a file. `set` on that handle (and on [`Vault::in_memory`]) checks only
-//! the entry being set; `set` on a handle from `open` checks every entry of the re-read
-//! file. The withheld marker is the fail-closed output of an `in_memory` vault whose
+//! can repair such a file. It returns a [`VaultEditor`], not a `Vault` (D-84): the editor
+//! sets, removes and lists entries but cannot resolve a value, scrub, or be installed as
+//! the process-wide scrubber. `set` on the editor (and on [`Vault::in_memory`]) checks
+//! only the rules involving the entry being set; `set` on a vault from `open` checks
+//! every entry of the re-read file. The withheld marker is the fail-closed output of an `in_memory` vault whose
 //! automaton could not be built, and of any scrub that hits the pass cap.
 //!
 //! Plaintext hygiene: values, decrypted plaintext, the serialized TOML and every
@@ -114,7 +116,7 @@ enum Check<'a> {
     /// Every entry: `open`, and `set` on a vault from `open`.
     All,
     /// Only what involves this entry: its own value, and every value against its
-    /// `@vault(name)`. `set` on a vault from `in_memory` or `open_for_set`: problems the
+    /// `@vault(name)`. `set` on an `in_memory` vault or a `VaultEditor`: problems the
     /// set did not make are left for `open` to report, so they can be fixed one at a time.
     Only(&'a str),
 }
@@ -277,8 +279,8 @@ pub struct Vault {
     entries: BTreeMap<String, Entry>,
     backing: Option<Backing>,
     scrubber: Arc<Scrubber>,
-    /// `set` checks every entry ([`Check::All`]): a vault from `open`. A vault from
-    /// `in_memory` or `open_for_set` checks only the entry being set.
+    /// `set` checks every entry ([`Check::All`]): a vault from `open`. An `in_memory`
+    /// vault checks only the entry being set (as does a [`VaultEditor`]).
     strict: bool,
 }
 
@@ -302,16 +304,24 @@ impl Vault {
         Vault::with_backing(entries, path, key, true)
     }
 
-    /// For `harness vault set` only: [`Vault::open`] without the D-118 value rules, so a
-    /// file `open` refuses (an entry under the floor or inside a literal, written by an
-    /// older build or by hand) can be repaired. `set` on this handle checks only the entry
-    /// it sets; the other entries are kept as they are, and `open` keeps refusing the file,
-    /// naming the next entry to fix, until every one is fixed. Its scrub over-scrubs a
-    /// short value and cannot see a value inside a literal, so never install it as the
-    /// process-wide scrubber.
-    pub fn open_for_set(path: &Path, key: &KeySource) -> Result<Vault, VaultError> {
+    /// For `harness vault set` only (D-84): opens `path` without the D-118 value rules, so
+    /// a file `open` refuses (an entry under the floor or inside a literal, written by an
+    /// older build or by hand) can be repaired. It returns a [`VaultEditor`], not a
+    /// `Vault`: the editor can set, remove and list entries but cannot resolve a value,
+    /// scrub or be installed as the process-wide scrubber, because a vault that skipped
+    /// the value rules may hold values scrub cannot see. `set` on the editor checks only
+    /// the rules involving the entry it sets; the other entries are kept as they are, and `open` keeps
+    /// refusing the file, naming the next entry to fix, until every one is fixed. A
+    /// missing file opens as an empty editor without touching the key (D-101).
+    pub fn open_for_set(path: &Path, key: &KeySource) -> Result<VaultEditor, VaultError> {
         let entries = read_entries(path, key)?;
-        Vault::with_backing(entries, path, key, false)
+        Ok(VaultEditor {
+            entries,
+            backing: Backing {
+                path: path.to_path_buf(),
+                key: key.clone(),
+            },
+        })
     }
 
     fn with_backing(
@@ -369,8 +379,8 @@ impl Vault {
     /// `ValueInLiteral`; both are refused before the file or key is touched when this
     /// handle's entries already show it (D-118). On a vault from `open` every entry of the
     /// re-read file is checked, except that the entry being set replaces a same-name entry
-    /// that broke a rule; on a vault from `open_for_set` or `in_memory` only the entry
-    /// being set is checked, so a file `open` refuses can be repaired one entry at a
+    /// that broke a rule; on an `in_memory` vault (and on a [`VaultEditor`]) only the
+    /// entry being set is checked, so a file `open` refuses can be repaired one entry at a
     /// time. For a file-backed vault
     /// the whole read-modify-write runs under an exclusive lock on `<vault file>.lock`:
     /// the current file is re-read and decrypted (so entries set by other processes since
@@ -381,42 +391,19 @@ impl Vault {
     /// cannot be built, `ScrubUnavailable` and nothing changes. If the vault is the
     /// installed global one, the global scrub follows.
     pub fn set(&mut self, name: &str, value: &str, kind: EntryKind) -> Result<(), VaultError> {
-        if let Some(bad) = invalid_name_at(name) {
-            return Err(VaultError::BadReference(bad));
-        }
-        check_value(name, value)?;
-        let entry = || Entry {
-            value: Zeroizing::new(value.to_owned()),
-            kind,
-        };
-        // Against this handle's entries first, before any lock, file or key is touched.
-        let mut next = clone_entries(&self.entries);
-        next.insert(name.to_owned(), entry());
-        check_entries(&next, Check::Only(name))?;
         let check = if self.strict {
             Check::All
         } else {
             Check::Only(name)
         };
-        let (next, scrubber) = match &self.backing {
-            None => {
-                let scrubber = Scrubber::try_build(&next)?;
-                (next, scrubber)
-            }
-            Some(backing) => {
-                drop(next);
-                let lock = lock_exclusive(&backing.path)?;
-                let (identity, mut next) = current_locked(backing, &self.entries)?;
-                next.insert(name.to_owned(), entry());
-                check_entries(&next, check)?;
-                let scrubber = Scrubber::try_build(&next)?;
-                let ciphertext = encrypt_entries(&identity, &next)?;
-                write_atomic(&backing.path, &ciphertext)?;
-                // Closing the handle releases the lock.
-                drop(lock);
-                (next, scrubber)
-            }
-        };
+        let (next, scrubber) = set_entry(
+            &self.entries,
+            self.backing.as_ref(),
+            check,
+            name,
+            value,
+            kind,
+        )?;
         let scrubber = Arc::new(scrubber);
         replace_global_if_installed(&self.scrubber, &scrubber);
         self.entries = next;
@@ -476,6 +463,223 @@ impl Vault {
     pub fn install_global(&self) {
         *GLOBAL.write().unwrap_or_else(|e| e.into_inner()) = Some(self.scrubber.clone());
         PANIC_HOOK.call_once(install_panic_hook);
+    }
+}
+
+/// The shared `set` of [`Vault`] and [`VaultEditor`]: validates `name` and `value`, then
+/// (for a file-backed handle, under the lock) re-reads the file, applies the change,
+/// checks per `check`, builds the scrubber and writes the file. Returns the new entries
+/// and their scrubber; the caller swaps them in.
+fn set_entry(
+    entries: &BTreeMap<String, Entry>,
+    backing: Option<&Backing>,
+    check: Check<'_>,
+    name: &str,
+    value: &str,
+    kind: EntryKind,
+) -> Result<(BTreeMap<String, Entry>, Scrubber), VaultError> {
+    if let Some(bad) = invalid_name_at(name) {
+        return Err(VaultError::BadReference(bad));
+    }
+    check_value(name, value)?;
+    let entry = || Entry {
+        value: Zeroizing::new(value.to_owned()),
+        kind,
+    };
+    // Against this handle's entries first, before any lock, file or key is touched.
+    let mut next = clone_entries(entries);
+    next.insert(name.to_owned(), entry());
+    check_entries(&next, Check::Only(name))?;
+    match backing {
+        None => {
+            let scrubber = Scrubber::try_build(&next)?;
+            Ok((next, scrubber))
+        }
+        Some(backing) => {
+            drop(next);
+            let lock = lock_exclusive(&backing.path)?;
+            let (identity, mut next) = current_locked(backing, entries)?;
+            next.insert(name.to_owned(), entry());
+            check_entries(&next, check)?;
+            let scrubber = Scrubber::try_build(&next)?;
+            let ciphertext = encrypt_entries(&identity, &next)?;
+            write_atomic(&backing.path, &ciphertext)?;
+            // Closing the handle releases the lock.
+            drop(lock);
+            Ok((next, scrubber))
+        }
+    }
+}
+
+/// The handle [`Vault::open_for_set`] returns (D-84, I-4): edits a vault file that
+/// [`Vault::open`] may refuse, for `harness vault set` only. It has `set`, `remove`,
+/// `names` and `save`, and nothing that reads a value back: no `resolve_into`, no
+/// `scrub`, no `install_global`, no `Deref` to or conversion into a [`Vault`]. A vault
+/// opened without the D-118 value rules may hold values scrub cannot see (short ones,
+/// ones inside a literal), so this type can neither resolve them nor become the
+/// process-wide scrubber. `Debug` prints nothing of the entries.
+///
+/// `set` and `remove` write through: each runs its whole read-modify-write under the
+/// exclusive `<vault file>.lock`, as [`Vault::set`] does, so concurrent writers never
+/// drop each other's entries. `save` closes the editor after checking the file decrypts.
+///
+/// ```no_run
+/// use harness_core::vault::{EntryKind, KeySource, Vault, VaultEditor, VaultError};
+/// # fn f(path: &std::path::Path, key: &KeySource) -> Result<(), VaultError> {
+/// let mut editor: VaultEditor = Vault::open_for_set(path, key)?;
+/// editor.set("site_pw", "a value of 4 or more chars", EntryKind::Secret)?;
+/// let _names: Vec<(String, EntryKind)> = editor.names();
+/// editor.remove("old_entry")?;
+/// editor.save()?;
+/// # Ok(()) }
+/// ```
+///
+/// It cannot resolve a value:
+///
+/// ```compile_fail,E0599
+/// # use harness_core::vault::{KeySource, Vault};
+/// # fn f(path: &std::path::Path, key: &KeySource) {
+/// let editor = Vault::open_for_set(path, key).unwrap();
+/// let _ = editor.resolve_into("@vault(k)", |r| r.expose().len());
+/// # }
+/// ```
+///
+/// It cannot be installed as the process-wide scrubber:
+///
+/// ```compile_fail,E0599
+/// # use harness_core::vault::{KeySource, Vault};
+/// # fn f(path: &std::path::Path, key: &KeySource) {
+/// let editor = Vault::open_for_set(path, key).unwrap();
+/// editor.install_global();
+/// # }
+/// ```
+///
+/// It cannot scrub:
+///
+/// ```compile_fail,E0599
+/// # use harness_core::vault::{KeySource, Vault};
+/// # fn f(path: &std::path::Path, key: &KeySource) {
+/// let editor = Vault::open_for_set(path, key).unwrap();
+/// let _ = editor.scrub("text");
+/// # }
+/// ```
+///
+/// It is not a `Vault` and does not deref to one:
+///
+/// ```compile_fail,E0308
+/// # use harness_core::vault::{KeySource, Vault};
+/// # fn f(path: &std::path::Path, key: &KeySource) {
+/// let editor = Vault::open_for_set(path, key).unwrap();
+/// let _: &Vault = &editor;
+/// # }
+/// ```
+pub struct VaultEditor {
+    // Values are kept only for the checks in `set` and are never handed out.
+    entries: BTreeMap<String, Entry>,
+    backing: Backing,
+}
+
+impl fmt::Debug for VaultEditor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("VaultEditor(..)")
+    }
+}
+
+impl VaultEditor {
+    /// Adds or replaces an entry and re-encrypts the file, as [`Vault::set`] does, except
+    /// that only the entry being set is checked against the D-118 value rules: its own
+    /// value (`ValueTooShort`, `ValueInLiteral`) and every value against its
+    /// `@vault(name)`. Problems in other entries are left for `open` to report, so a
+    /// refused file can be repaired one entry at a time. `ScrubUnavailable` writes nothing.
+    pub fn set(&mut self, name: &str, value: &str, kind: EntryKind) -> Result<(), VaultError> {
+        let (next, _scrubber) = set_entry(
+            &self.entries,
+            Some(&self.backing),
+            Check::Only(name),
+            name,
+            value,
+            kind,
+        )?;
+        self.entries = next;
+        Ok(())
+    }
+
+    /// Removes entry `name` from the file under the lock and re-encrypts it. A name the
+    /// file does not hold (or a missing file) is `Unknown(name)`, and nothing is written
+    /// and no key is generated. The name is not checked against `[A-Za-z0-9_.-]+`, so an
+    /// entry written by hand under a bad name can be removed. `ScrubUnavailable` writes
+    /// nothing.
+    pub fn remove(&mut self, name: &str) -> Result<(), VaultError> {
+        let unknown = || VaultError::Unknown(name.to_owned());
+        let path = &self.backing.path;
+        if !path.try_exists()? {
+            return Err(unknown());
+        }
+        let lock = lock_exclusive(path)?;
+        let ciphertext = match std::fs::read(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(unknown()),
+            Err(e) => return Err(VaultError::Io(e)),
+        };
+        let identity = load_identity(&self.backing.key)?.ok_or_else(|| {
+            VaultError::Key("vault file exists but its age identity is missing".into())
+        })?;
+        let mut next = decrypt_entries(&identity, &ciphertext)?;
+        if next.remove(name).is_none() {
+            return Err(unknown());
+        }
+        // Removing an entry cannot break a D-118 rule; the scrubber is built only so that,
+        // as with `set`, a file no scrubber could cover is never written.
+        Scrubber::try_build(&next)?;
+        let ciphertext = encrypt_entries(&identity, &next)?;
+        write_atomic(path, &ciphertext)?;
+        // Closing the handle releases the lock.
+        drop(lock);
+        self.entries = next;
+        Ok(())
+    }
+
+    /// Entry names and kinds as of the last `open_for_set`, `set` or `remove`; never values.
+    pub fn names(&self) -> Vec<(String, EntryKind)> {
+        self.entries
+            .iter()
+            .map(|(k, e)| (k.clone(), e.kind))
+            .collect()
+    }
+
+    /// Closes the editor. `set` and `remove` have already written the file (write-through),
+    /// so `save` writes nothing: it takes the lock and checks that the file on disk
+    /// decrypts with the key, so a caller that wants confirmation gets an error instead of
+    /// a silent bad write. A missing file is fine only when the editor holds no entries
+    /// (nothing was ever written); otherwise it is `Io(NotFound)`. The existence check and
+    /// the decrypt both happen under the lock, so a file deleted while `save` waits for
+    /// the lock is reported, not passed. The values held in memory are zeroed on drop.
+    pub fn save(self) -> Result<(), VaultError> {
+        let path = &self.backing.path;
+        // An empty editor on a missing file is ok whatever happens next, so it returns
+        // without creating the lock file (or the directory) for nothing.
+        if self.entries.is_empty() && !path.try_exists()? {
+            return Ok(());
+        }
+        #[cfg(test)]
+        tests::before_save_lock(path);
+        let lock = lock_exclusive(path)?;
+        let result = match std::fs::read(path) {
+            Ok(ciphertext) => load_identity(&self.backing.key)?
+                .ok_or_else(|| {
+                    VaultError::Key("vault file exists but its age identity is missing".into())
+                })
+                .and_then(|identity| decrypt_entries(&identity, &ciphertext))
+                .map(drop),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.entries.is_empty() => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(VaultError::Io(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "vault file is missing"),
+            )),
+            Err(e) => Err(VaultError::Io(e)),
+        };
+        // Closing the handle releases the lock.
+        drop(lock);
+        result
     }
 }
 
@@ -1933,8 +2137,9 @@ mod tests {
             strict.set("other", &format!("{c}-o"), EntryKind::Secret),
             Err(VaultError::ValueTooShort { name, .. }) if name == "st"
         ));
-        // open_for_set opens it; set fixes one entry while another is still broken.
-        let mut fix = Vault::open_for_set(&path, &key).unwrap();
+        // open_for_set opens it as a VaultEditor (D-84); set fixes one entry while another
+        // is still broken.
+        let mut fix: VaultEditor = Vault::open_for_set(&path, &key).unwrap();
         fix.set("st", "a1z9", EntryKind::Personal).unwrap();
         match Vault::open(&path, &key) {
             Err(e @ VaultError::ValueInLiteral { .. }) => {
@@ -1942,7 +2147,7 @@ mod tests {
             }
             other => panic!("expected ValueInLiteral, got {other:?}"),
         }
-        // The new value is still checked on a repair handle.
+        // The new value is still checked on the editor.
         assert!(matches!(
             fix.set("v", "a1", EntryKind::Personal),
             Err(VaultError::ValueTooShort { .. })
@@ -1959,6 +2164,259 @@ mod tests {
         assert!(ok
             .resolve_into("@vault(test)", |r| r.expose() == c)
             .unwrap());
+    }
+
+    /// File names in `dir`, sorted (for "nothing was created" checks).
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn editor_remove_drops_the_entry_from_the_file() {
+        let c = canary();
+        let keep = format!("{c}-keep");
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+        Vault::open(&path, &key)
+            .unwrap()
+            .set("test", &c, EntryKind::Secret)
+            .unwrap();
+        // A file `open` refuses (a short entry): the editor can remove the broken entry.
+        write_raw(&path, &key, &[("test", &c), ("keep", &keep), ("st", "a1z")]);
+        assert!(matches!(
+            Vault::open(&path, &key),
+            Err(VaultError::ValueTooShort { name, .. }) if name == "st"
+        ));
+        let mut ed = Vault::open_for_set(&path, &key).unwrap();
+        ed.remove("st").unwrap();
+        ed.remove("test").unwrap();
+        assert_eq!(ed.names(), vec![("keep".to_owned(), EntryKind::Personal)]);
+        ed.save().unwrap();
+        // Re-opened from disk: only `keep` is left, and the file opens again.
+        let after = Vault::open(&path, &key).unwrap();
+        assert_eq!(
+            after.names(),
+            vec![("keep".to_owned(), EntryKind::Personal)]
+        );
+        assert!(matches!(
+            after.resolve_into("@vault(test)", |_| ()),
+            Err(VaultError::Unknown(n)) if n == "test"
+        ));
+        assert!(
+            after
+                .resolve_into("@vault(keep)", |r| r.expose() == keep)
+                .unwrap(),
+            "remove lost the entry it was not asked to remove"
+        );
+        let ct = std::fs::read(&path).unwrap();
+        assert!(
+            !ct.windows(c.len()).any(|w| w == c.as_bytes()),
+            "value stored in plaintext"
+        );
+    }
+
+    #[test]
+    fn editor_remove_of_a_missing_name_or_file_writes_nothing() {
+        let c = canary();
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+        // Missing file: Unknown, and no vault file, lock file or key is created.
+        let mut ed = Vault::open_for_set(&path, &key).unwrap();
+        assert!(ed.names().is_empty());
+        assert!(matches!(
+            ed.remove("test"),
+            Err(VaultError::Unknown(n)) if n == "test"
+        ));
+        assert!(
+            file_names(&dir.0).is_empty(),
+            "remove on a missing vault file created a file"
+        );
+        // Existing file, name it does not hold: Unknown and the file is left byte for
+        // byte (age encryption is randomized, so any rewrite would change the bytes).
+        Vault::open(&path, &key)
+            .unwrap()
+            .set("test", &c, EntryKind::Secret)
+            .unwrap();
+        let mut ed = Vault::open_for_set(&path, &key).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            ed.remove("nope"),
+            Err(VaultError::Unknown(n)) if n == "nope"
+        ));
+        assert!(
+            std::fs::read(&path).unwrap() == before,
+            "remove of an unknown name rewrote the vault file"
+        );
+        assert_eq!(ed.names(), vec![("test".to_owned(), EntryKind::Secret)]);
+        // File deleted since open_for_set: Unknown, and nothing is written back.
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            ed.remove("test"),
+            Err(VaultError::Unknown(n)) if n == "test"
+        ));
+        assert!(!path.exists(), "remove re-created a deleted vault file");
+    }
+
+    #[test]
+    fn editor_save_checks_the_file_decrypts() {
+        let c = canary();
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+        // Nothing set on a missing file: ok, and no vault file, lock file or key appears.
+        Vault::open_for_set(&path, &key).unwrap().save().unwrap();
+        assert!(
+            file_names(&dir.0).is_empty(),
+            "save of an empty editor created a file"
+        );
+        // A good file: set wrote it, save confirms it.
+        let mut ed = Vault::open_for_set(&path, &key).unwrap();
+        ed.set("test", &c, EntryKind::Secret).unwrap();
+        ed.save().unwrap();
+        assert!(
+            Vault::open(&path, &key)
+                .unwrap()
+                .resolve_into("@vault(test)", |r| r.expose() == c)
+                .unwrap(),
+            "the set did not reach the file"
+        );
+        // The file no longer decrypts: garbage, or a file encrypted to another key.
+        let mut garbage = Vault::open_for_set(&path, &key).unwrap();
+        garbage
+            .set("other", &format!("{c}-o"), EntryKind::Secret)
+            .unwrap();
+        let foreign = Vault::open_for_set(&path, &key).unwrap();
+        std::fs::write(&path, b"not an age file").unwrap();
+        assert!(matches!(garbage.save(), Err(VaultError::Decrypt)));
+        let other = TempDir::new();
+        let other_key = KeySource::IdentityFile(other.0.join("k"));
+        Vault::open(&other.0.join("v.age"), &other_key)
+            .unwrap()
+            .set("x", &c, EntryKind::Secret)
+            .unwrap();
+        std::fs::copy(other.0.join("v.age"), &path).unwrap();
+        assert!(matches!(foreign.save(), Err(VaultError::Decrypt)));
+        // Entries written, then the file is gone: an error, not a silent ok.
+        let lost = Vault::open_for_set(&other.0.join("v.age"), &other_key).unwrap();
+        std::fs::remove_file(other.0.join("v.age")).unwrap();
+        assert!(matches!(
+            lost.save(),
+            Err(VaultError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+
+    thread_local! {
+        /// Run by `VaultEditor::save` just before it takes the lock (this thread only).
+        static BEFORE_SAVE_LOCK: std::cell::Cell<Option<fn(&Path)>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    pub(super) fn before_save_lock(path: &Path) {
+        if let Some(hook) = BEFORE_SAVE_LOCK.with(|h| h.get()) {
+            hook(path);
+        }
+    }
+
+    #[test]
+    fn editor_save_reports_a_file_deleted_while_it_waits_for_the_lock() {
+        let c = canary();
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+        let mut ed = Vault::open_for_set(&path, &key).unwrap();
+        ed.set("test", &c, EntryKind::Secret).unwrap();
+        // Another process deletes the file after `save` started and before it holds the
+        // lock: any look at the file taken before the lock is stale by then.
+        let delete: fn(&Path) = |p| std::fs::remove_file(p).unwrap();
+        BEFORE_SAVE_LOCK.with(|h| h.set(Some(delete)));
+        let saved = ed.save();
+        BEFORE_SAVE_LOCK.with(|h| h.set(None));
+        assert!(!path.exists());
+        assert!(
+            matches!(
+                &saved,
+                Err(VaultError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound
+            ),
+            "save passed an editor holding entries whose file is gone"
+        );
+    }
+
+    #[test]
+    fn editor_remove_fails_closed_on_a_file_it_cannot_read() {
+        let c = canary();
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key_file = dir.0.join("vault.key");
+        let key = KeySource::IdentityFile(key_file.clone());
+        Vault::open(&path, &key)
+            .unwrap()
+            .set("test", &c, EntryKind::Secret)
+            .unwrap();
+        let good = std::fs::read(&path).unwrap();
+        let mut ed = Vault::open_for_set(&path, &key).unwrap();
+        // Garbage bytes: Decrypt, and the file is left byte for byte.
+        std::fs::write(&path, b"not an age file").unwrap();
+        assert!(matches!(ed.remove("test"), Err(VaultError::Decrypt)));
+        assert!(
+            std::fs::read(&path).unwrap() == b"not an age file",
+            "remove rewrote a vault file it could not decrypt"
+        );
+        // A file encrypted to another key: Decrypt, and the file is left byte for byte.
+        let other = TempDir::new();
+        let other_key = KeySource::IdentityFile(other.0.join("k"));
+        Vault::open(&other.0.join("v.age"), &other_key)
+            .unwrap()
+            .set("test", &c, EntryKind::Secret)
+            .unwrap();
+        std::fs::copy(other.0.join("v.age"), &path).unwrap();
+        let foreign = std::fs::read(&path).unwrap();
+        assert!(matches!(ed.remove("test"), Err(VaultError::Decrypt)));
+        assert!(
+            std::fs::read(&path).unwrap() == foreign,
+            "remove rewrote a vault file encrypted to another key"
+        );
+        // The file's identity is missing: Key, the file is left byte for byte and no new
+        // key is generated (it would orphan the file).
+        std::fs::write(&path, &good).unwrap();
+        std::fs::remove_file(&key_file).unwrap();
+        assert!(matches!(ed.remove("test"), Err(VaultError::Key(_))));
+        assert!(
+            std::fs::read(&path).unwrap() == good,
+            "remove rewrote a vault file whose key is missing"
+        );
+        assert!(
+            !key_file.exists(),
+            "remove generated a key for an existing file"
+        );
+        // The editor still holds what it held.
+        assert_eq!(ed.names(), vec![("test".to_owned(), EntryKind::Secret)]);
+    }
+
+    #[test]
+    fn editor_debug_prints_no_value() {
+        let c = canary();
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+        let mut ed = Vault::open_for_set(&path, &key).unwrap();
+        ed.set("test", &c, EntryKind::Secret).unwrap();
+        let shown = format!("{ed:?} {:?}", Vault::open_for_set(&path, &key));
+        // Neither assertion formats `shown`: on failure it would print the value.
+        assert!(
+            !shown.to_ascii_lowercase().contains(&c.to_ascii_lowercase()),
+            "Debug of a VaultEditor holds a vault value"
+        );
+        assert!(
+            shown == "VaultEditor(..) Ok(VaultEditor(..))",
+            "Debug of a VaultEditor prints more than its type name"
+        );
     }
 
     #[test]
