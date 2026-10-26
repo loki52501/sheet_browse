@@ -1,0 +1,25 @@
+from: rust-coder-4
+to: next
+task: T-04
+date: "2026-10-25"
+state: "Three commits on swarm/core, one per task. 3b66c28 core-pg T-03 round 4: PgStore sets pg_trgm.word_similarity_threshold = 0.5 in PgPoolOptions::after_connect (D-125), SEARCH_SQL keeps `subject %> $1`; red-first ignore on accept_t03_r3::r3_d115_vasnth_typo_inside_longer_subject_hits removed; pg.rs gained connect_ignores_a_migration_this_binary_lacks (D-114, version 9999), every_pooled_session_uses_the_d125_trigram_cutoff, sweep_touches_only_throwaway_names, and the TestDb helper sweeps sb_t_* databases older than 1 h once per process (B-175 was already done in round 3; only the bootstrap doc changed). b829add core T-04 round 4: gate::rule_domain is idna UTS-46 ToASCII (idna = \"1\", 1.1.0 in Cargo.lock, AsciiDenyList::URL, Hyphens::Allow, DnsLength::Ignore) plus an ASCII [a-z0-9_-] label check, 63/253 lengths, one trailing dot stripped; the hand-written subset (map_host_char, host_char, compatibility_form, punycode) is gone; MemStore WORD_SIMILARITY_THRESHOLD = 0.5; both red-first ignores in gate_accept_t04_r3 removed; new gate::tests::d126_stored_key_is_the_idna_a_label (ΒΑΣ.gr, U+1E9E, U+F900, U+3131 and B-190's cases). 3f6fea5 core T-05 round 6: check_entries refuses values inside SCRUB_WITHHELD / SCRUB_UNSETTLED (ValueInLiteral), D-118 (3b) amended in place. Green: cargo test -p harness-core --no-fail-fast (all targets) and cargo test -p core-pg (all targets), cargo test -p harness --test step1_accept (7), cargo clippy -p harness-core -p core-pg --all-targets -D warnings clean, rustfmt --check clean on touched files."
+not_done: "Nothing in this brief. For the supreme or tester: (1) D-126 turned refusals into mappings that tester files asserted, so the T-04 commit changed refused-list entries in gate_accept_t04_r3.rs (r3_rule_domain_refuses_what_it_cannot_map_safely, r3_gate_rule_set_stores_rule_key_and_gate_matches_idn_hosts) and core-pg accept_t03_r3.rs (r3_d113_d120_pg_gate_rule_set_stores_rule_key); the commit body lists each entry; the tester should confirm. (2) B-175 can be closed in blockers.yaml (bootstrap refuses SB_RUN_ID without a runs row since round 3; bootstrap_b175.rs and accept_t03_r3_bootstrap.rs assert refusal); I may not edit blockers.yaml."
+gotchas:
+  - "SB_VAULT_CANARY must contain 'sbcanary' (accept_t03_r3 r3_rule2 asserts it) and must contain a non-alphanumeric character: vault_scrub_t05_fix set_refuses_values_inside_literals_and_leaves_the_file_alone fails with an all-alphanumeric canary (its zip value then equals the canary entry, so the error names the canary's entry instead of zip). sbcanary-<hex> works."
+  - "UTS-46 maps more than D-120's subset refused: default-ignorables (U+200B, U+00AD, U+2060, U+FEFF, U+034F, U+FE0F, U+3164, U+115F) are ignored, compatibility forms (fi, superscript 2, math bold, circled, half-width) map, decomposed letters are NFC'd, U+2800 is valid (xn--bank-yj5b.com). Still refused: ZWJ outside a virama context, U+202E, tag characters, a bad xn-- label, the WHATWG forbidden host code points; '*' and other URL-legal ASCII punctuation inside a name are refused by gate's own label check."
+  - "The shared compose Postgres is loaded by several worktrees at once; a full core-pg or step1_accept run can fail with connect/acquire timeouts (one run saw neighbors_caps_at_500 fail and step1_accept fail at connect + migrate) and pass on rerun. Not a code fault as far as I could tell."
+  - "Python on Windows: open(p,'w') writes CRLF; use newline='' or the file flips to CRLF (git warns). Python string literals with backslash-u escapes in a heredoc fail to parse (unicodeescape); use the Edit tool for those. The write guard blocks the Write tool outside the worktree, including the scratchpad."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core-pg/src/lib.rs
+  - crates/core-pg/tests/pg.rs
+  - crates/core-pg/tests/accept_t03_r3.rs
+  - crates/core/Cargo.toml
+  - Cargo.lock
+  - crates/core/src/gate.rs
+  - crates/core/src/testing.rs
+  - crates/core/tests/gate_accept_t04_r3.rs
+  - crates/core/src/vault.rs
+  - agent-memory/decisions.yaml
+verify: "SB_VAULT_CANARY=sbcanary-x1 CARGO_TARGET_DIR=F:/sb-swarm/tmp-core/target-polish cargo test -p harness-core -p core-pg --no-fail-fast"
