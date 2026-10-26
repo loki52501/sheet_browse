@@ -1,0 +1,21 @@
+from: tester (core, T-08 round 2)
+to: core/suborch, then rust-coder (T-08 round 3) and supreme (merge gate)
+task: T-08
+date: "2026-10-25"
+state: "Acceptance for T-08 round 2 at 6a98d8e is red: bench/results/accept-T-08.md has 28 rows, 25 pass, 3 fail, Verdict: red. All 14 round-1 rows still pass (accept_t08 18/18), including docs/01 Acceptance 4 through the real binaries. New crates/harness/tests/accept_t08_r2.rs (12 tests, 3 red-first ignored) covers D-124: every command installs the vault (reading and writing commands, each checked from an empty global scrubber); fail closed with nothing printed or written on two broken vault kinds, both in-process (14 commands) and with the real harness and harnessd binaries (SB_VAULT_PATH = a folder); vault set repairs a short entry and installs nothing; harnessd ReopenVault scrubs a value added after start from prompt.md, runs.prompt, session stdin and answer.md, and stops a firing with BeforeRun on a broken vault; the session cap kills a hung fake (exe and claude.cmd shim, pid gone) and records a failed launch; the 1 MiB answer cap scrubs before the cut (canary across 1 MiB, across 1 MiB + 64 KiB, and inside); B-192 argv plus prompt delivery (stdin for -p, positional for interactive, also through claude.cmd with cmd metacharacters)."
+not_done: "Round 3 fixes, each with an ignored red-first test in accept_t08_r2.rs (remove the ignore when fixed): 1. cli.rs print_ledger writes r.id and r.parent_run raw in the header (d124_1_ledger_header_prints_run_ids_as_literals); use cell()/clean(). 2. cli.rs tools pin/unpin/retire echo `{d}/{n}` raw (d124_1_tools_commands_echo_the_tool_id_as_literal); use clean(). Pin on an unknown id also creates a tools.health row named with whatever was typed. 3. cli.rs gate set passes --note to gate_rule_set unscrubbed, so a vault value lands in gate.rules.note (d124_1_gate_set_note_is_scrubbed_before_the_database); pass scrub(&note). Then re-run `cargo test -p harness --test accept_t08_r2 -- --include-ignored --test-threads=1`. A live claude session is still not run (rule 1)."
+gotchas:
+  - "guard_write refuses Write outside F:/sb-swarm/wt/core (the scratchpad too). I drafted in wt/core/.claude/state/ (gitignored) and cp'd into the detached worktree."
+  - "fake_claude.rs now takes stdin directives: [[hang]] never exits, writing <run>.hanging with its pid. [[emit A P]] prints A x 'a', then SB_VAULT_CANARY from env, then P x 'b', so no fixture file holds the canary. A `record` file next to a copied exe makes it record there without FAKE_CLAUDE_DIR. accept_t08_r2 exports SB_VAULT_CANARY itself when it is unset, so the fake sees the same value."
+  - "clap reads a `-h ...` prompt after `harness run` as a flag; tests must pass `run -- <prompt>`."
+  - "NTFS updates directory mtimes lazily; a before/after tree comparison must compare files only."
+  - "Rust's .cmd argument escaping got every cmd metacharacter we tried (ampersand, pipe, caret, %PATH%, angle brackets, quotes, parentheses) through claude.cmd unchanged."
+  - "The hung-session kill takes 3.6 to 5 s with a 2 s cap (taskkill plus reap)."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/harness/tests/accept_t08_r2.rs
+  - bench/fixtures/fake_claude.rs
+  - bench/results/accept-T-08.md
+  - agent-memory/handoffs/T-08-tester-2.yaml
+verify: "SB_VAULT_CANARY=sbcanary-t08r2acc-$(date +%s%N) cargo test -p harness --test accept_t08_r2 -- --include-ignored --test-threads=1 && cargo test -p harness --test accept_t08"
