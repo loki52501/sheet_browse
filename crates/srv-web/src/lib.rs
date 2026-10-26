@@ -30,8 +30,9 @@ pub(crate) struct Web {
     pub cfg: Config,
     clients: Result<http::Clients, String>,
     pub cache: cache::Cache,
-    /// Site tools (`<site>.<name>`) disabled for the rest of this process by a fingerprint
-    /// miss (T-4, D-506): never registered again, refused if still called.
+    /// Site tools (`<site>.<name>`) disabled by a fingerprint miss (T-4, D-506): registered
+    /// again only on a fetched page their fingerprint matches or relocates on, and enabled
+    /// again by a clean repair run there (D-561).
     pub disabled: Mutex<HashSet<String>>,
 }
 
@@ -58,6 +59,14 @@ impl Web {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(name.to_string());
+    }
+
+    /// Lifts a [`Web::disable`] after a clean repair run (D-561).
+    pub fn enable(&self, name: &str) {
+        self.disabled
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
     }
 
     pub fn clients(&self) -> Result<&http::Clients, ToolError> {

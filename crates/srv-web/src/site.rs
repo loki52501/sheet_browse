@@ -8,34 +8,39 @@
 //! (D-127). Planners and `@phase 2` tools need the browser and are not registered here.
 //! The T-3 skeleton line goes into `PageMeta.site_tools`.
 //!
-//! Registration honours tool health (D-506): `retired` and `needs_repair` tools are not
-//! registered.
+//! Registration honours tool health (D-506): `retired` tools are not registered. A tool a
+//! fingerprint miss broke (row `needs_repair`, or disabled earlier in this process) is
+//! registered only when its fingerprint matches or relocates on the fetched page (D-561).
 //!
 //! Running one (T-4): the page is the one classify resolved and gated ([`crate::pin`]).
 //! The fingerprint is checked against it first. `match` runs, `partial` runs with a note
-//! (D-505: relocation patches files and belongs to the browser path, which can commit),
-//! `miss` refuses, records `FingerprintMiss` (status needs_repair) and disables the tool
-//! for the rest of the process (D-506). The reader runs in `spawn_blocking` over a
-//! `SheetPage`; `page.api(url)` is a GET limited to the page's registrable domain (D-501)
-//! bridged with `Handle::block_on` and bounded by the run's remaining time (D-64). JSON
-//! strings in the output cannot spell a `[text](#id)` link form.
+//! (D-505), `miss` refuses, records `FingerprintMiss` (status needs_repair) and disables the
+//! tool (D-506). A broken tool's run is a repair (D-561): on `partial` it is relocated, and a
+//! clean run records `Relocated` (`@fingerprint` patched, version + 1, status repaired) or,
+//! on `match`, `Ok` (needs_repair -> repaired, version + 1, D-304), then the tool is enabled
+//! again. srv-web never commits the patched file (D-560). The reader runs in
+//! `spawn_blocking` over a `SheetPage`; `page.api(url)` is a GET limited to the page's
+//! registrable domain (D-501) bridged with `Handle::block_on` and bounded by the run's
+//! remaining time (D-64); a body cut at the cap is reported as such (B-560). JSON strings in
+//! the output cannot spell a `[text](#id)` link form.
 
 use crate::cache::Page;
 use crate::http::{self, host_of};
 use crate::pin::Pins;
 use crate::{escape, Web};
 use async_trait::async_trait;
-use harness_core::memory::{ts_now, ToolStatus};
+use harness_core::memory::{ts_now, ToolHealth, ToolStatus};
 use harness_core::{Class, Classified, ToolCtx, ToolError, ToolHandler, ToolOutput, ToolSpec};
 use reqwest::header::ACCEPT;
 use reqwest::Url;
+use sb_sheet::IndexRow;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use toolstore::{
-    skeleton_line, ApiFetch, FingerprintResult, RunError, RunOutcome, SheetPage, Tool, ToolKind,
-    ToolRunResult, ToolStore,
+    skeleton_line, ApiFetch, FingerprintResult, FpItem, RunError, RunOutcome, SheetPage, Tool,
+    ToolKind, ToolRunResult, ToolStore,
 };
 
 /// Reader output shown to the model, in characters (the runner caps bytes at 64 KiB).
@@ -44,12 +49,18 @@ pub const SITE_OUTPUT_MAX_CHARS: usize = 20_000;
 /// Registers the page's `@phase 1` readers. Returns the page's tool folder and the T-3
 /// skeleton line.
 ///
-/// Tool health is honoured (T-4, D-506): a tool whose `tools.health` row is `retired` or
-/// `needs_repair`, or that a fingerprint miss disabled earlier in this process, is not
-/// registered (and is dropped from the registry if an earlier fetch added it). When the
-/// health rows cannot be read no site tool is registered, and the page's tools an earlier
-/// fetch registered are removed (fail closed).
-pub(crate) async fn register(web: &Arc<Web>, ctx: &ToolCtx, url: &Url) -> (String, Option<String>) {
+/// Tool health is honoured (T-4, D-506): a tool whose `tools.health` row is `retired` is not
+/// registered (and is dropped from the registry if an earlier fetch added it). A tool whose
+/// row is `needs_repair`, or that a fingerprint miss disabled earlier in this process, is
+/// registered only when its fingerprint is not a miss on `index`, the fetched page, so its
+/// next run can repair it (D-561). When the health rows cannot be read no site tool is
+/// registered, and the page's tools an earlier fetch registered are removed (fail closed).
+pub(crate) async fn register(
+    web: &Arc<Web>,
+    ctx: &ToolCtx,
+    url: &Url,
+    index: &[IndexRow],
+) -> (String, Option<String>) {
     let host = host_of(url);
     let root = web.cfg.tools_root.clone();
     let page_url = url.to_string();
@@ -80,14 +91,19 @@ pub(crate) async fn register(web: &Arc<Web>, ctx: &ToolCtx, url: &Url) -> (Strin
     domains.sort_unstable();
     domains.dedup();
     let registry = ctx.registry();
-    let mut unhealthy: Vec<(String, String)> = Vec::new();
+    let mut retired: Vec<(String, String)> = Vec::new();
+    let mut broken: Vec<(String, String)> = Vec::new();
     for d in domains {
         match ctx.store().tool_health(d).await {
-            Ok(rows) => unhealthy.extend(
-                rows.into_iter()
-                    .filter(|h| matches!(h.status, ToolStatus::Retired | ToolStatus::NeedsRepair))
-                    .map(|h| (h.domain, h.name)),
-            ),
+            Ok(rows) => {
+                for h in rows {
+                    match h.status {
+                        ToolStatus::Retired => retired.push((h.domain, h.name)),
+                        ToolStatus::NeedsRepair => broken.push((h.domain, h.name)),
+                        _ => {}
+                    }
+                }
+            }
             Err(_) => {
                 // Fail closed (D-506): health unknown, so none of these tools may run, not
                 // even ones an earlier fetch registered.
@@ -98,11 +114,20 @@ pub(crate) async fn register(web: &Arc<Web>, ctx: &ToolCtx, url: &Url) -> (Strin
             }
         }
     }
+    let listed = |list: &[(String, String)], t: &Tool| {
+        list.iter()
+            .any(|(d, n)| *d == t.domain && *n == t.header.name)
+    };
     let (keep, drop): (Vec<Tool>, Vec<Tool>) = tools.into_iter().partition(|t| {
-        !web.is_disabled(&t.namespaced)
-            && !unhealthy
-                .iter()
-                .any(|(d, n)| *d == t.domain && *n == t.header.name)
+        if listed(&retired, t) {
+            return false;
+        }
+        // D-561: a broken tool is offered again only where its fingerprint holds (match, or
+        // partial and relocatable); its run then repairs it.
+        if web.is_disabled(&t.namespaced) || listed(&broken, t) {
+            return toolstore::fingerprint(t, index) != FingerprintResult::Miss;
+        }
+        true
     });
     for t in &drop {
         registry.remove(&t.namespaced);
@@ -157,7 +182,8 @@ struct SiteTool {
 }
 
 impl SiteTool {
-    async fn record(&self, ctx: &ToolCtx, outcome: RunOutcome) -> Option<String> {
+    /// `record` through toolstore; the error is a note for the model.
+    async fn record_row(&self, ctx: &ToolCtx, outcome: RunOutcome) -> Result<ToolHealth, String> {
         let store = ToolStore::new(&self.web.cfg.tools_root);
         let result = ToolRunResult {
             domain: self.tool.domain.clone(),
@@ -165,14 +191,72 @@ impl SiteTool {
             outcome,
             at: ts_now(),
         };
-        match store.record(&**ctx.store(), result).await {
-            Ok(_) => None,
-            Err(e) => Some(format!(
+        store.record(&**ctx.store(), result).await.map_err(|e| {
+            format!(
                 "note: tool health not recorded ({})",
                 escape::name(&e.to_string(), 200)
-            )),
+            )
+        })
+    }
+
+    async fn record(&self, ctx: &ToolCtx, outcome: RunOutcome) -> Option<String> {
+        self.record_row(ctx, outcome).await.err()
+    }
+
+    /// The tool's row says `needs_repair` (a miss broke it). An unreadable row counts as not
+    /// broken, so nothing is patched on a guess.
+    async fn needs_repair(&self, ctx: &ToolCtx) -> bool {
+        ToolStore::new(&self.web.cfg.tools_root)
+            .health(&**ctx.store(), &self.tool.domain, &self.tool.header.name)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|h| h.status == ToolStatus::NeedsRepair)
+    }
+
+    /// After a relocate patched the file: registers the patched tool in place of this one, so
+    /// the next call checks the new `@fingerprint` (D-561). Left as is when the file cannot be
+    /// read back as the same tool; the next fetch scans it again.
+    async fn reregister(&self, ctx: &ToolCtx) {
+        let old = self.tool.clone();
+        let reread = tokio::task::spawn_blocking(move || {
+            let source = std::fs::read_to_string(&old.path).ok()?;
+            let header = toolstore::parse_header(&source).ok()?;
+            (header.name == old.header.name && header.kind == ToolKind::Reader && header.phase == 1)
+                .then_some(Tool {
+                    header,
+                    source,
+                    ..old
+                })
+        })
+        .await;
+        if let Ok(Some(tool)) = reread {
+            ctx.registry().add(spec(self.web.clone(), tool));
         }
     }
+}
+
+/// The `tools.health.status` spelling (`needs_repair`).
+fn status_name(s: ToolStatus) -> &'static str {
+    match s {
+        ToolStatus::Ephemeral => "ephemeral",
+        ToolStatus::Saved => "saved",
+        ToolStatus::Repaired => "repaired",
+        ToolStatus::NeedsRepair => "needs_repair",
+        ToolStatus::Retired => "retired",
+        ToolStatus::Ask => "ask",
+    }
+}
+
+/// Fingerprint items for a note. A relocate copies page names into `@fingerprint`, so they
+/// are escaped like any page text.
+fn list(items: &[FpItem]) -> String {
+    let joined = items
+        .iter()
+        .map(|m| m.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    escape::name(&joined, 300)
 }
 
 #[async_trait]
@@ -205,41 +289,45 @@ impl ToolHandler for SiteTool {
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput, ToolError> {
         let name = self.tool.namespaced.clone();
         let pinned = self.pins.take(ctx, &args)?;
-        if self.web.is_disabled(&name) {
-            return Err(ToolError::Failed(format!(
-                "{name} is disabled for this run after a fingerprint miss (T-4); use find and \
-                 fetch instead"
-            )));
-        }
         let page = pinned.ok_or_else(|| {
             ToolError::Failed(format!(
                 "{name}: no page from {} fetched in this run; fetch one first",
                 self.tool.domain
             ))
         })?;
+        // D-561: a disabled tool is only registered again on a page its fingerprint holds on,
+        // and its run there is a repair; on a page it misses it is refused below as before.
+        let disabled = self.web.is_disabled(&name);
         let mut notes: Vec<String> = Vec::new();
+        // Set when this run repairs a broken tool by relocation: (missing, new fingerprint).
+        let mut relocated: Option<(Vec<FpItem>, Vec<FpItem>)> = None;
         match toolstore::fingerprint(&self.tool, &page.doc.index) {
             FingerprintResult::Match => {}
-            // D-505: a partial match runs with a note. Relocation patches the tool file and
-            // belongs to the browser path (T-4), which can verify the patched selectors.
-            FingerprintResult::Partial { missing } => notes.push(format!(
-                "note: fingerprint partial, missing {}",
-                missing
-                    .iter()
-                    .map(|m| m.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
+            FingerprintResult::Partial { missing } => {
+                // D-561: a broken tool (needs_repair, or disabled by a miss) is relocated, and
+                // the patch is kept only if the run is clean. A healthy tool's partial match
+                // runs with a note and is not patched (D-505).
+                if disabled || self.needs_repair(ctx).await {
+                    relocated = toolstore::relocate(&self.tool, &page.doc.index)
+                        .map(|fp| (missing.clone(), fp));
+                }
+                if relocated.is_none() {
+                    notes.push(format!(
+                        "note: fingerprint partial, missing {}",
+                        list(&missing)
+                    ));
+                }
+            }
             FingerprintResult::Miss => {
-                // D-506: a miss disables the tool for the rest of this process.
+                // D-506: a miss disables the tool until a fetched page it holds on (D-561).
                 self.web.disable(&name);
                 ctx.registry().remove(&name);
                 let why = format!("fingerprint miss on {}", escape::name(&page.url, 200));
                 let note = self.record(ctx, RunOutcome::FingerprintMiss { why }).await;
                 return Err(ToolError::Failed(format!(
                     "{name} refused: this page does not match the tool's @fingerprint, so it \
-                     was marked needs_repair and disabled for this run; use find and fetch \
-                     instead{}",
+                     was marked needs_repair and disabled for this run until a fetched page \
+                     matches it; use find and fetch instead{}",
                     note.map(|n| format!(" ({n})")).unwrap_or_default()
                 )));
             }
@@ -269,8 +357,33 @@ impl ToolHandler for SiteTool {
         .map_err(|_| ToolError::Failed(format!("{name}: the tool runner crashed")))?;
         match res {
             Ok(mut v) => {
-                if let Some(n) = self.record(ctx, RunOutcome::Ok).await {
-                    notes.push(n);
+                let outcome = match &relocated {
+                    Some((_, fp)) => RunOutcome::Relocated {
+                        fingerprint: fp.clone(),
+                    },
+                    None => RunOutcome::Ok,
+                };
+                match self.record_row(ctx, outcome).await {
+                    Ok(row) => {
+                        // D-561: a clean repair run (relocated, or a match recorded Ok)
+                        // enables a tool a miss disabled.
+                        self.web.enable(&name);
+                        if let Some((missing, _)) = &relocated {
+                            // D-560: srv-web never commits the patched file.
+                            notes.push(format!(
+                                "note: fingerprint relocated (was missing {}); \
+                                 tools/{}/{}.js patched to version {}, status {}; not \
+                                 committed (D-560)",
+                                list(missing),
+                                self.tool.domain,
+                                self.tool.header.name,
+                                row.version,
+                                status_name(row.status)
+                            ));
+                            self.reregister(ctx).await;
+                        }
+                    }
+                    Err(n) => notes.push(n),
                 }
                 escape::json_strings(&mut v);
                 let body = serde_json::to_string_pretty(&v).unwrap_or_else(|_| "null".into());
@@ -341,6 +454,18 @@ impl ApiFetch for PageApi {
                 .map_err(|e| format!("page.api: {e}"))?;
             if !(200..300).contains(&body.status) {
                 return Err(format!("page.api: HTTP {} from {host}", body.status));
+            }
+            if body.truncated {
+                // Cut JSON never parses; say why instead of "not JSON" (B-560).
+                const MB: usize = 1024 * 1024;
+                let shown = if cap >= MB && cap.is_multiple_of(MB) {
+                    format!("{} MB", cap / MB)
+                } else {
+                    format!("{cap} byte")
+                };
+                return Err(format!(
+                    "page.api: {host} answered more than the {shown} cap"
+                ));
             }
             serde_json::from_slice::<Value>(&body.bytes)
                 .map_err(|_| format!("page.api: {host} did not answer with JSON"))

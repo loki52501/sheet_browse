@@ -614,9 +614,12 @@ async fn tool_health_is_honoured_and_a_miss_disables_for_the_process() {
     let out = fetch().await.expect("fetch");
     let line = tools_line(&out.text);
     assert!(line.contains("strict_read"), "{line}");
-    assert!(!line.contains("list_items"), "{line}");
+    // D-561 (T-13): a needs_repair tool is offered again on a page its fingerprint holds on
+    // (list_items' `button"Add to cart"` is on the shop page), so its run can repair it; a
+    // needs_repair or disabled tool on a page it misses is not (fp_miss below).
+    assert!(line.contains("list_items"), "{line}");
     assert!(!line.contains("word_count"), "{line}");
-    assert!(e.registry.get("example.list_items").is_none());
+    assert!(e.registry.get("example.list_items").is_some());
     assert!(e.registry.get("generic.word_count").is_none());
     assert!(e.registry.get("example.fp_miss").is_some());
 
@@ -626,7 +629,8 @@ async fn tool_health_is_honoured_and_a_miss_disables_for_the_process() {
     assert!(err.to_string().contains("disabled for this run"), "{err}");
     assert!(e.registry.get("example.fp_miss").is_none());
 
-    // Even with a healthy row again, the tool stays off for this process.
+    // Even with a healthy row again, the tool stays off for this process on a page it still
+    // misses (D-561: only a page its fingerprint holds on brings it back).
     e.store
         .tool_health_set(health("example.com", "fp_miss", ToolStatus::Saved))
         .await

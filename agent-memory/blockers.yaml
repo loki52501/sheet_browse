@@ -166,6 +166,11 @@ blockers:
     question: "fetch follows redirects (W-2), but the gate classified the call by the requested URL's domain. A redirect to another registrable domain therefore reads that domain without its own gate.rules lookup (a `stop` rule on the target domain does not fire). Classify again per hop, refuse cross-domain redirects, or accept for Read GETs?"
     default_taken: "Accepted for Phase 1: fetch is a Read GET, reads only, and the browser path has the same property on navigation. The final URL is in the tool event's consequences.url, so the ledger shows where the read landed. api (W-3) does not follow redirects to another host at all. Revisit if a domain stop rule must also cover reads reached by redirect."
     needs_user: false
+  - id: B-560
+    task: T-13
+    question: "Live run 2026-10-26: ashbyhq.list_jobs works on jobs.ashbyhq.com/ashby and /linear, but fails on /openai because api.ashbyhq.com/posting-api/job-board/openai answers more than page.api's 5 MB cap (D-501; the answer carries descriptionHtml and descriptionPlain for every job, which the tool drops). Large boards therefore cannot be listed in Phase 1. Raise page.api's cap for JSON (the tool's output is capped at 64 KiB / 20 000 chars anyway), stream-parse and drop known-large fields, or accept?"
+    default_taken: "Accept for now: the 5 MB cap stays (W-2, D-501) and page.api reports a cut body as 'answered more than the 5 MB cap' instead of 'did not answer with JSON', so the model falls back to fetch/find in one turn. Proposed follow-up for the sub-orchestrator: a separate page.api cap (e.g. 32 MB, still bounded by the run's remaining wall time, D-64), since the bytes never reach the model."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core
