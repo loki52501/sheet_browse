@@ -1,0 +1,52 @@
+<!doctype html>
+<!--
+  bench/pages/accept-d444.html: visibility-swap show-password toggles (review-T-19 round 8
+  Blocking, Y6 and Y7; D-444 (1)) for the T-19 acceptance (tester-9, round 4). No field is
+  added or removed by the twin toggle, so no add/remove rule can see it:
+    #pw-t   a password with a text twin #twin-t present from load (display:none), kept in sync
+            by an input listener; Show flips display (password hidden, twin shown)
+    #pw-c   clone and hide: Show adds a neutral text copy #clone-c next to the password and sets
+            the password to display:none, keeping it in the page
+  Control: #user reads its text.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Visibility-swap toggles · acceptance fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } div { margin-top: 4px; min-height: 8px; }</style>
+<script>
+  const $ = (id) => document.getElementById(id);
+  function showTwin() {
+    $("pw-t").style.display = "none";
+    $("twin-t").style.display = "";
+  }
+  function showClone() {
+    const o = $("pw-c");
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = "clone-c";
+    n.name = "clone_c";
+    n.setAttribute("aria-label", "Shown entry");
+    n.value = o.value;
+    o.after(n);
+    o.style.display = "none";
+  }
+  document.addEventListener("DOMContentLoaded", () => {
+    $("pw-t").addEventListener("input", () => { $("twin-t").value = $("pw-t").value; });
+  });
+</script>
+</head>
+<body>
+<main>
+  <h1>Sign in</h1>
+  <form id="f1" action="/login" method="post">
+    <label>User <input id="user" name="user" value="ada"></label>
+    <div id="box-t"><input id="pw-t" name="password" type="password" aria-label="Password">
+      <input id="twin-t" name="entry_t" type="text" aria-label="Visible entry" style="display:none"></div>
+    <button id="show-t" type="button" onclick="showTwin()">Show password</button>
+  </form>
+  <form id="f2" action="/pin" method="post">
+    <div id="box-c"><input id="pw-c" name="pin" type="password" aria-label="PIN"></div>
+    <button id="show-c" type="button" onclick="showClone()">Show PIN</button>
+  </form>
+</main>
+</body>
+</html>
