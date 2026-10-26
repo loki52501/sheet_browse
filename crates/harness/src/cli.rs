@@ -21,8 +21,9 @@
 //! writes anything (rule 2, fail closed), and the error names vault entries, never values.
 //! So everything printed from the database or a run folder, and the binary's error line,
 //! goes through the vault scrub, with control characters replaced so page text cannot drive
-//! the terminal. `vault set` opens the vault with `Vault::open_for_set` (so it can repair an
-//! entry `open` refuses, D-118) and never installs that handle.
+//! the terminal. `vault set` edits the vault through the `VaultEditor` that
+//! `Vault::open_for_set` returns (so it can repair an entry `open` refuses, D-118); that
+//! type cannot resolve, scrub or be installed (D-84).
 
 use crate::{ClaudeLauncher, CliError, Env};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -628,8 +629,9 @@ async fn schedule_list(ctx: &Ctx, out: &mut dyn Write) -> Result<(), CliError> {
 // ---------------------------------------------------------------- vault
 
 /// `harness vault set`: the value comes from [`Ctx::read_secret`] (rpassword, no echo), is
-/// held in `Zeroizing`, and is never printed, logged or put in an error. Opens the vault
-/// with `open_for_set`, so an entry `Vault::open` refuses can be set to a valid value.
+/// held in `Zeroizing`, and is never printed, logged or put in an error. Edits the file
+/// through the `VaultEditor` from `open_for_set`, so an entry `Vault::open` refuses can be
+/// set to a valid value.
 fn vault_set(ctx: &Ctx, name: &str, personal: bool, out: &mut dyn Write) -> Result<(), CliError> {
     let kind = if personal {
         EntryKind::Personal
@@ -637,10 +639,11 @@ fn vault_set(ctx: &Ctx, name: &str, personal: bool, out: &mut dyn Write) -> Resu
         EntryKind::Secret
     };
     // open_for_set: a file `open` refuses (an entry under the D-118 floor) can be repaired
-    // here. Its scrubber is never installed (vault.rs).
-    let mut vault =
+    // here. The VaultEditor it returns has no resolve, scrub or install_global (D-84).
+    let mut editor =
         harness_core::vault::Vault::open_for_set(&ctx.env.vault_path, &ctx.env.vault_key)?;
-    // Vault::set checks the name too; checking first avoids asking for a value it would refuse.
+    // VaultEditor::set checks the name too; checking first avoids asking for a value it
+    // would refuse.
     let name_ok = !name.is_empty()
         && name
             .bytes()
@@ -655,8 +658,10 @@ fn vault_set(ctx: &Ctx, name: &str, personal: bool, out: &mut dyn Write) -> Resu
     if value.is_empty() {
         return Err(CliError::Usage("empty value; nothing stored".into()));
     }
-    vault.set(name, &value, kind)?;
+    // set writes through under the vault lock; save checks the written file decrypts.
+    editor.set(name, &value, kind)?;
     drop(value);
+    editor.save()?;
     writeln!(
         out,
         "vault: {} set ({})",
