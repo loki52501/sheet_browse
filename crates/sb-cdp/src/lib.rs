@@ -1,10 +1,19 @@
-//! sb-cdp (B-3). DRAFT signature for I-8, owned by area driver (T-18).
-//! One writer task, one reader task, reply map by id, flattened sessions, pipelined sends,
-//! events fanned out per session. Backends implement only bytes in / bytes out.
+//! sb-cdp (B-3, D-600). I-8: the [`Transport`] trait and its backends, plus the CDP client
+//! [`Cdp`]: one writer task, one reader task, reply map by id, flattened sessions, pipelined
+//! sends, events fanned out per session, 10 s command timeout (B-4 #11). Backends implement
+//! only bytes in / bytes out.
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::mpsc::Receiver;
+
+mod client;
+mod pipe;
+mod ws;
+
+pub use client::{Cdp, CdpError, CdpSender, Event, Observer, COMMAND_TIMEOUT};
+pub use pipe::{process_running, Pipe, DROP_KILL_CAP};
+pub use ws::{devtools_active_port, parse_devtools_active_port, WebSocket};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -22,18 +31,6 @@ pub trait Transport: Send + Sync {
     fn recv(&self) -> Receiver<Bytes>;
 }
 
-/// `--remote-debugging-pipe` (default). On Windows Chromium reads the pipe from inherited
-/// CRT fds 3/4; std::process cannot pass those, so T-18 needs the lpReserved2 handle
-/// inheritance libuv uses, or `--remote-debugging-io-pipes` (verify against the D-34 build).
-pub struct Pipe {
-    _private: (),
-}
-
-/// Attach to a running Chrome over `ws://` (`--remote-debugging-port`).
-pub struct WebSocket {
-    _private: (),
-}
-
 /// Stub until needed (B-3).
 pub struct ElectronNapi {
     _private: (),
@@ -42,28 +39,6 @@ pub struct ElectronNapi {
 /// Stub until needed (B-3).
 pub struct ExtensionRelay {
     _private: (),
-}
-
-#[async_trait]
-impl Transport for Pipe {
-    async fn send(&self, msg: Bytes) -> Result<(), TransportError> {
-        let _ = msg;
-        todo!("T-18: B-3 pipe")
-    }
-    fn recv(&self) -> Receiver<Bytes> {
-        todo!("T-18: B-3 pipe")
-    }
-}
-
-#[async_trait]
-impl Transport for WebSocket {
-    async fn send(&self, msg: Bytes) -> Result<(), TransportError> {
-        let _ = msg;
-        todo!("T-18: B-3 websocket")
-    }
-    fn recv(&self) -> Receiver<Bytes> {
-        todo!("T-18: B-3 websocket")
-    }
 }
 
 #[async_trait]
