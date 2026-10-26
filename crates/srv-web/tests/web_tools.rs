@@ -396,13 +396,16 @@ async fn api_refuses_html_and_cross_host_redirects() {
     ])
     .await;
     let e = env(config(&server, &["api.test", "other.test"], no_tools())).await;
-    let html_err = call(&e, "api", json!({"url": "http://api.test/page"}))
+    // D-508: an HTML body is one not-shown line pointing at fetch.
+    let html_out = call(&e, "api", json!({"url": "http://api.test/page"}))
         .await
-        .expect_err("html");
+        .expect("html");
     assert!(
-        html_err.to_string().contains("use fetch(url)"),
-        "{html_err}"
+        html_out.text.contains("not shown") && html_out.text.contains("use fetch to read pages"),
+        "{}",
+        html_out.text
     );
+    assert!(!html_out.text.contains('<'), "{}", html_out.text);
     let away = call(
         &e,
         "api",

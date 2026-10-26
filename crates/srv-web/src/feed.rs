@@ -6,8 +6,9 @@
 //! syntax.
 //!
 //! A challenge (the `cf-mitigated` header, a challenge URL or page) stops the call like
-//! fetch does (D-5). An HTML body is refused as not-a-feed whatever its content type
-//! (rule 5). Redirects go through [`http::get_following`] (private-address guard).
+//! fetch does (D-5). A body that does not parse as a feed is refused as not-a-feed and never
+//! echoed, whatever its content type (rule 5, D-508). The request goes through
+//! [`http::get_page`] (one deadline, private-address guard).
 
 use crate::http::{self, host_of};
 use crate::{escape, fetch, html, opt_usize, req_str, Web};
@@ -93,40 +94,49 @@ impl ToolHandler for Feed {
         if let Some(why) = html::challenge_url(&url) {
             return Ok(fetch::challenge_output(&url, &why));
         }
-        let resp = http::get_following(&self.web.cfg, &clients.page, &url, ACCEPT_FEED)
-            .await
-            .map_err(|e| ToolError::Failed(format!("feed: {e}")))?;
-        let body = http::read_capped(resp, self.web.cfg.max_bytes)
-            .await
-            .map_err(|e| ToolError::Failed(format!("feed: {e}")))?;
+        let body = http::get_page(
+            &self.web.cfg,
+            clients,
+            &url,
+            ACCEPT_FEED,
+            http::written_private(&url),
+        )
+        .await
+        .map_err(|e| ToolError::Failed(format!("feed: {e}")))?;
         // D-5 before anything else: a challenge (any status) stops the call.
-        if let Some(stop) = fetch::challenge_stop(&body, "feed").await? {
+        if let Some(stop) = fetch::challenge_by_response(&body) {
             return Ok(stop);
         }
-        if !(200..300).contains(&body.status) {
+        let ok = (200..300).contains(&body.status);
+        let parsed = if ok {
+            parse_with(&body.bytes, body.charset.as_deref())
+        } else {
+            None
+        };
+        let Some(parsed) = parsed else {
+            // Not a feed: the body is never echoed (rule 5). A challenge page under any
+            // status or type still stops the call (D-5).
+            let text = body.text(true);
+            if let Some(stop) = fetch::challenge_in_text(&body, &text, "feed").await? {
+                return Ok(stop);
+            }
+            if !ok {
+                return Err(ToolError::Failed(format!(
+                    "feed: {host} answered HTTP {}",
+                    body.status
+                )));
+            }
             return Err(ToolError::Failed(format!(
-                "feed: {host} answered HTTP {}",
-                body.status
-            )));
-        }
-        // Rule 5: an HTML page is not a feed, whatever its content type says.
-        if fetch::is_html(&body.mime, &body.bytes) {
-            return Err(ToolError::Failed(format!(
-                "feed: {} did not answer with RSS, Atom, JSON Feed or iCal (it sent an HTML \
-                 page); use fetch(url) to read it",
-                host_of(&body.url)
-            )));
-        }
-        let parsed = parse(&body.bytes).ok_or_else(|| {
-            ToolError::Failed(format!(
-                "feed: {host} did not answer with RSS, Atom, JSON Feed or iCal ({})",
+                "feed: {} did not answer with RSS, Atom, JSON Feed or iCal ({}); use \
+                 fetch(url) to read web pages",
+                host_of(&body.url),
                 if body.mime.is_empty() {
-                    "no content type"
+                    "no content type".to_string()
                 } else {
-                    body.mime.as_str()
+                    escape::name(&body.mime, 80)
                 }
-            ))
-        })?;
+            )));
+        };
         let total = parsed.items.len();
         let items: Vec<&Item> = parsed.items.iter().take(limit).collect();
         let mut text = format!(
@@ -153,7 +163,14 @@ impl ToolHandler for Feed {
 
 /// Parses a feed body of any supported kind; `None` when it is none of them.
 pub fn parse(bytes: &[u8]) -> Option<Parsed> {
-    let text = String::from_utf8_lossy(bytes);
+    parse_with(bytes, None)
+}
+
+/// [`parse`] with the response's `charset`. The iCal check runs on the decoded text (a BOM
+/// or the charset honoured, so a UTF-16 calendar is one); XML and JSON feeds are parsed from
+/// the bytes, whose own encoding declaration feed-rs reads.
+pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> {
+    let text = http::decode(bytes, charset, false);
     let start = text.trim_start_matches('\u{feff}').trim_start();
     if start
         .as_bytes()
@@ -216,59 +233,17 @@ pub fn parse(bytes: &[u8]) -> Option<Parsed> {
     })
 }
 
-/// Text of an HTML fragment (feed summaries are often HTML), collapsed.
+/// Text of an HTML fragment (feed summaries and calendar fields are often HTML), collapsed
+/// ([`html::fragment_text`]: only text nodes, so no markup reaches the model).
 fn html_to_text(s: &str) -> String {
-    if !s.contains('<') && !s.contains('&') {
-        return s.split_whitespace().collect::<Vec<_>>().join(" ");
-    }
-    let frag = scraper::Html::parse_fragment(s);
-    let mut out = String::new();
-    for node in frag.tree.root().descendants() {
-        match node.value() {
-            scraper::Node::Text(t) => {
-                let hidden = node.ancestors().any(|a| {
-                    a.value()
-                        .as_element()
-                        .is_some_and(|e| matches!(e.name(), "script" | "style"))
-                });
-                if !hidden {
-                    out.push_str(t);
-                }
-            }
-            // Block edges and line breaks separate words; inline tags do not.
-            scraper::Node::Element(e)
-                if matches!(
-                    e.name(),
-                    "p" | "br"
-                        | "div"
-                        | "li"
-                        | "tr"
-                        | "td"
-                        | "th"
-                        | "h1"
-                        | "h2"
-                        | "h3"
-                        | "h4"
-                        | "h5"
-                        | "h6"
-                        | "blockquote"
-                        | "pre"
-                        | "ul"
-                        | "ol"
-                        | "table"
-                ) =>
-            {
-                out.push(' ');
-            }
-            _ => {}
-        }
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    html::fragment_text(s)
 }
 
 /// A minimal RFC 5545 reader: VEVENTs with SUMMARY, URL, DTSTART, DESCRIPTION, LOCATION.
+/// Every text field goes through [`html_to_text`]: Google and Outlook calendars put `<br>`,
+/// `<a href>` and `<b>` in descriptions.
 pub mod ical {
-    use super::{escape, Item, Parsed, SUMMARY_MAX, TITLE_MAX};
+    use super::{escape, html_to_text, Item, Parsed, SUMMARY_MAX, TITLE_MAX};
 
     /// Parses a VCALENDAR text. Unknown properties and components are ignored.
     pub fn parse(text: &str) -> Parsed {
@@ -295,14 +270,14 @@ pub mod ical {
                     depth_other = depth_other.saturating_sub(1)
                 }
                 _ if depth_other > 0 => {}
-                ("X-WR-CALNAME", _) if cur.is_none() => title = unescape(&value),
+                ("X-WR-CALNAME", _) if cur.is_none() => title = text_value(&value),
                 _ => {
                     if let Some(e) = cur.as_mut() {
                         match name.as_str() {
-                            "SUMMARY" => e.summary = unescape(&value),
+                            "SUMMARY" => e.summary = text_value(&value),
                             "URL" => e.url = value.trim().to_string(),
-                            "DESCRIPTION" => e.description = unescape(&value),
-                            "LOCATION" => e.location = unescape(&value),
+                            "DESCRIPTION" => e.description = text_value(&value),
+                            "LOCATION" => e.location = text_value(&value),
                             "DTSTART" => e.start = date(&value, &params),
                             _ => {}
                         }
@@ -388,6 +363,11 @@ pub mod ical {
             params.to_string(),
             value.to_string(),
         ))
+    }
+
+    /// A TEXT value as the model may see it: unescaped, then reduced to text (rule 5).
+    fn text_value(v: &str) -> String {
+        html_to_text(&unescape(v))
     }
 
     /// TEXT unescaping (RFC 5545 3.3.11).

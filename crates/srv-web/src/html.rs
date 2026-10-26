@@ -35,10 +35,32 @@ const CHALLENGE_TEXT_MAX: usize = 200;
 /// An `onclick` container with more text than this is content, not a button.
 const ONCLICK_TEXT_MAX: usize = 80;
 
-/// Tags whose content is never page text.
+/// Tags whose content is never page text. `xmp`, `plaintext`, `noembed` and `noframes` (like
+/// `script`, `style` and `noscript`) hold raw text: the parser does not read markup inside
+/// them, so their text can be a whole HTML document (`<plaintext>` swallows the rest of the
+/// body). Rule 5: never emitted.
 const SKIP_TAGS: &[&str] = &[
-    "head", "script", "style", "noscript", "template", "svg", "math", "canvas", "object", "embed",
-    "audio", "video", "source", "track", "meta", "link", "title",
+    "head",
+    "script",
+    "style",
+    "noscript",
+    "template",
+    "svg",
+    "math",
+    "canvas",
+    "object",
+    "embed",
+    "audio",
+    "video",
+    "source",
+    "track",
+    "meta",
+    "link",
+    "title",
+    "xmp",
+    "plaintext",
+    "noembed",
+    "noframes",
 ];
 
 /// Tags that start a new text block (as injected.js `BLOCK_TAGS`, plus a few HTML5 ones).
@@ -177,43 +199,87 @@ pub fn parse(html: &str, url: &Url) -> Doc {
     }
 }
 
-/// A `text/plain` body as blocks: one paragraph per blank-line-separated run.
-pub fn plain_text(text: &str) -> Doc {
-    let mut blocks = Vec::new();
-    for (i, para) in text
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .enumerate()
-    {
-        blocks.push(TextBlock {
-            order: u32::try_from(i).unwrap_or(u32::MAX),
-            frame: 0,
-            kind: BlockKind::Paragraph,
-            level: None,
-            landmark: None,
-            heading: None,
-            table: None,
-            header: false,
-            spans: vec![Span {
-                text: escape::text(para)
-                    .split('\n')
-                    .map(escape::block_start)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                elem: None,
-            }],
-        });
+/// A body not declared as HTML (`text/plain`, no content type, anything else fetch reads)
+/// through the same walk as [`parse`] (rule 5, D-508: fail closed by construction). Nothing
+/// decides whether the body "is" HTML: whatever markup it holds is parsed and only text
+/// nodes come out, and text without markup comes out as itself. A `<p>` is put at every
+/// blank line first, so plain text keeps its paragraphs (adding tags cannot let markup
+/// through: the parser still reads all of it). Without a `<title>`, the first block names
+/// the page.
+pub fn parse_text(text: &str, url: &Url) -> Doc {
+    let mut marked = String::with_capacity(text.len() + 64);
+    let mut blank = false;
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.trim().is_empty() {
+            blank = true;
+            continue;
+        }
+        if blank && !marked.is_empty() {
+            marked.push_str("\n<p>\n");
+        } else if !marked.is_empty() {
+            marked.push('\n');
+        }
+        blank = false;
+        marked.push_str(line);
     }
-    let title = text
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .map(|l| escape::name(l, NAME_MAX))
-        .unwrap_or_default();
-    Doc {
-        title,
-        blocks,
-        ..Doc::default()
+    let mut doc = parse(&marked, url);
+    if doc.title.is_empty() {
+        if let Some(b) = doc.blocks.first() {
+            let first = b
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            doc.title = escape::name(&first, TEXT_TITLE_MAX);
+        }
+    }
+    doc
+}
+
+/// Title of a page without a `<title>`: the start of its first block.
+const TEXT_TITLE_MAX: usize = 100;
+
+/// The text of an HTML fragment (a feed summary, an iCal field, a `<title>` or `<textarea>`
+/// that holds markup), whitespace collapsed. Only text nodes outside [`SKIP_TAGS`],
+/// `textarea` and `iframe` come out, so the result holds no markup (rule 5); block edges and
+/// line breaks separate words.
+pub(crate) fn fragment_text(s: &str) -> String {
+    if !s.contains('<') && !s.contains('&') {
+        return s.split_whitespace().collect::<Vec<_>>().join(" ");
+    }
+    let frag = Html::parse_fragment(s);
+    let mut out = String::new();
+    for node in frag.tree.root().descendants() {
+        match node.value() {
+            Node::Text(t) => {
+                let hidden = node.ancestors().any(|a| {
+                    a.value().as_element().is_some_and(|e| {
+                        SKIP_TAGS.contains(&e.name()) || matches!(e.name(), "textarea" | "iframe")
+                    })
+                });
+                if !hidden {
+                    out.push_str(t);
+                }
+            }
+            // Block edges and line breaks separate words; inline tags do not.
+            Node::Element(e) if e.name() == "br" || BLOCK_TAGS.contains(&e.name()) => {
+                out.push(' ');
+            }
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// [`fragment_text`] when `s` holds markup (raw-text and RCDATA content such as a `<title>`
+/// or `<textarea>`), else `s` unchanged.
+fn no_markup(s: &str) -> String {
+    if crate::http::has_tag(s) {
+        fragment_text(s)
+    } else {
+        s.to_string()
     }
 }
 
@@ -730,7 +796,8 @@ impl<'a> Walker<'a> {
                 });
             }
             "textarea" => {
-                let t = e.text().collect::<String>();
+                // RCDATA: markup inside a textarea is text to the parser, not to rule 5.
+                let t = no_markup(&e.text().collect::<String>());
                 state.value = Some(if t.trim().is_empty() {
                     FieldValue::Empty
                 } else if secret {
@@ -1234,7 +1301,8 @@ fn page_title(doc: &Html) -> String {
     };
     doc.select(&sel)
         .next()
-        .map(|t| escape::name(&t.text().collect::<String>(), NAME_MAX))
+        // RCDATA: markup inside a title is text to the parser, not to rule 5.
+        .map(|t| escape::name(&no_markup(&t.text().collect::<String>()), NAME_MAX))
         .unwrap_or_default()
 }
 

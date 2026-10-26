@@ -47,7 +47,8 @@ pub const SITE_OUTPUT_MAX_CHARS: usize = 20_000;
 /// Tool health is honoured (T-4, D-506): a tool whose `tools.health` row is `retired` or
 /// `needs_repair`, or that a fingerprint miss disabled earlier in this process, is not
 /// registered (and is dropped from the registry if an earlier fetch added it). When the
-/// health rows cannot be read no site tool is registered (fail closed).
+/// health rows cannot be read no site tool is registered, and the page's tools an earlier
+/// fetch registered are removed (fail closed).
 pub(crate) async fn register(web: &Arc<Web>, ctx: &ToolCtx, url: &Url) -> (String, Option<String>) {
     let host = host_of(url);
     let root = web.cfg.tools_root.clone();
@@ -78,6 +79,7 @@ pub(crate) async fn register(web: &Arc<Web>, ctx: &ToolCtx, url: &Url) -> (Strin
     let mut domains: Vec<&str> = tools.iter().map(|t| t.domain.as_str()).collect();
     domains.sort_unstable();
     domains.dedup();
+    let registry = ctx.registry();
     let mut unhealthy: Vec<(String, String)> = Vec::new();
     for d in domains {
         match ctx.store().tool_health(d).await {
@@ -86,10 +88,16 @@ pub(crate) async fn register(web: &Arc<Web>, ctx: &ToolCtx, url: &Url) -> (Strin
                     .filter(|h| matches!(h.status, ToolStatus::Retired | ToolStatus::NeedsRepair))
                     .map(|h| (h.domain, h.name)),
             ),
-            Err(_) => return (folder, None),
+            Err(_) => {
+                // Fail closed (D-506): health unknown, so none of these tools may run, not
+                // even ones an earlier fetch registered.
+                for t in &tools {
+                    registry.remove(&t.namespaced);
+                }
+                return (folder, None);
+            }
         }
     }
-    let registry = ctx.registry();
     let (keep, drop): (Vec<Tool>, Vec<Tool>) = tools.into_iter().partition(|t| {
         !web.is_disabled(&t.namespaced)
             && !unhealthy

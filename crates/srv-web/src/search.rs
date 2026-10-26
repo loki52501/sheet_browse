@@ -138,10 +138,9 @@ impl ToolHandler for Search {
             ))
         };
         let clients = self.web.clients()?;
-        let resp = http::get_following(&self.web.cfg, &clients.page, &url, "application/json")
-            .await
-            .map_err(|_| down())?;
-        let body = http::read_capped(resp, self.web.cfg.max_bytes)
+        // The SearXNG URL is operator config (D-31), usually loopback or a compose service
+        // name on a private network: private addresses are allowed.
+        let body = http::get_page(&self.web.cfg, clients, &url, "application/json", true)
             .await
             .map_err(|_| down())?;
         if body.status == 403 || body.status == 429 {

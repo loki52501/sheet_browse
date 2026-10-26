@@ -16,7 +16,7 @@ sb-sheet.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# net: lookup_host for the redirect private-address guard (http::host_is_private).
+# net: lookup_host in the page client's filtering DNS resolver (http::PublicOnly).
 tokio = { workspace = true, features = ["net"] }
 toolstore.workspace = true
 # The node type scraper's tree is made of (scraper does not re-export it).

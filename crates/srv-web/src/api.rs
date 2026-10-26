@@ -12,9 +12,10 @@
 //! are our own text naming only the host (never `reqwest::Error`'s message, which carries
 //! the URL). The wrapper scrubs the returned text against every vault value.
 //!
-//! An HTML response, by content type or by its first bytes, is refused with a pointer to
-//! `fetch` (rule 5). A challenge stops the call like fetch (D-5). JSON strings cannot spell
-//! a `[text](#id)` link form ([`escape::json_strings`]).
+//! Rule 5 fails closed (D-508): the body reaches the model only as JSON or as tag-free
+//! `text/plain`, decided on the decoded text; anything else is one "not shown" line with a
+//! pointer to `fetch` ([`render`]). A challenge stops the call like fetch (D-5). JSON
+//! strings cannot spell a `[text](#id)` link form ([`escape::json_strings`]).
 
 use crate::http::{self, host_of};
 use crate::{escape, fetch, html, opt_str, req_str, Web};
@@ -309,10 +310,20 @@ impl ToolHandler for Api {
             .await
             .map_err(|e| ToolError::Failed(format!("api: {e}")))?;
         // D-5: a challenge stops the call, whatever the status and content type.
-        if let Some(stop) = fetch::challenge_stop(&body, "api").await? {
+        if let Some(stop) = fetch::challenge_by_response(&body) {
             return Ok(stop);
         }
-        let text = render(&body, &req.method)?;
+        let text = match render(&body, &req.method) {
+            Rendered::Shown(t) => t,
+            Rendered::NotShown { line, text } => {
+                // Only a body the model does not see is walked for a challenge: a JSON
+                // string holding widget markup is data, not a page.
+                if let Some(stop) = fetch::challenge_in_text(&body, &text, "api").await? {
+                    return Ok(stop);
+                }
+                line
+            }
+        };
         Ok(ToolOutput {
             summary: Some(format!(
                 "{} {} -> HTTP {}",
@@ -328,65 +339,74 @@ impl ToolHandler for Api {
     }
 }
 
-fn render(body: &http::Body, method: &Method) -> Result<String, ToolError> {
-    let host = host_of(&body.url);
+/// What [`render`] makes of a response.
+enum Rendered {
+    /// The text the model gets.
+    Shown(String),
+    /// The body is not shown: `line` is all the model gets; `text` is the decoded body, for
+    /// the challenge check only.
+    NotShown { line: String, text: String },
+}
+
+/// The suffix of the line for a body that is not shown.
+const NOT_SHOWN: &str = "not shown (not JSON or plain text; use fetch to read pages)";
+
+/// `text` without an XSSI guard line (`)]}'` and the rest of its line).
+fn strip_xssi(text: &str) -> &str {
+    let t = text.trim_start();
+    match t.strip_prefix(")]}'") {
+        Some(rest) => rest.split_once('\n').map_or("", |(_, r)| r),
+        None => text,
+    }
+}
+
+/// Rule 5, D-508: a body reaches the model only as JSON (a JSON content type, or none, and
+/// the decoded text parses; JSON strings may hold HTML, which is data) or as `text/plain`
+/// whose decoded text holds no tag-like sequence ([`http::has_tag`]). Everything else
+/// (HTML, XML, other types, a missing type that is not JSON, text with tags) is one line:
+/// status, type, size, not shown. Nothing here recognises HTML; the rule only lets through
+/// what is known to be data or plain text.
+fn render(body: &http::Body, method: &Method) -> Rendered {
     let mime = body.mime.as_str();
-    let mut head = format!(
-        "HTTP {} {}",
-        body.status,
-        if mime.is_empty() {
-            "(no content type)"
-        } else {
-            mime
-        }
-    );
+    let ctype = if mime.is_empty() {
+        "(no content type)".to_string()
+    } else {
+        escape::name(mime, 80)
+    };
+    let mut head = format!("HTTP {} {ctype}", body.status);
     if body.truncated {
         head.push_str(" (body cut at the 5 MB cap)");
     }
     if *method == Method::HEAD || body.bytes.is_empty() {
-        return Ok(head);
+        return Rendered::Shown(head);
     }
-    // Rule 5: HTML is refused by its declared type and by its first bytes, so a page sent as
-    // text/plain, XML or with no type never reaches the model as text.
-    if fetch::is_html(mime, &body.bytes) {
-        return Err(ToolError::Failed(format!(
-            "api: {host} answered with HTML (HTTP {}); use fetch(url) to read web pages",
-            body.status
-        )));
-    }
-    let shown = if mime.contains("json") || mime.is_empty() || mime == "text/plain" {
-        match serde_json::from_slice::<Value>(&body.bytes) {
-            Ok(mut v) => {
+    let text = body.text(false);
+    let as_json = |t: &str| {
+        serde_json::from_str::<Value>(strip_xssi(t))
+            .ok()
+            .map(|mut v| {
                 escape::json_strings(&mut v);
-                Some(serde_json::to_string_pretty(&v).unwrap_or_default())
-            }
-            Err(_) => None,
+                serde_json::to_string_pretty(&v).unwrap_or_default()
+            })
+    };
+    let shown = if fetch::is_json_type(mime) || mime.is_empty() {
+        as_json(&text)
+    } else if mime == "text/plain" && !http::has_tag(&text) {
+        if http::looks_binary(&text) {
+            return Rendered::Shown(format!(
+                "{head}\n({} bytes of binary data, not shown)",
+                body.bytes.len()
+            ));
         }
+        Some(as_json(&text).unwrap_or_else(|| escape::text(&text)))
     } else {
         None
     };
-    let shown = match shown {
-        Some(s) => s,
-        None if mime.starts_with("text/")
-            || mime.contains("json")
-            || mime.contains("xml")
-            || mime.is_empty() =>
-        {
-            let t = http::decode(&body.bytes, body.charset.as_deref(), false);
-            if t.chars().filter(|c| *c == '\u{FFFD}').count() > t.chars().count() / 10 {
-                return Ok(format!(
-                    "{head}\n({} bytes of binary data, not shown)",
-                    body.bytes.len()
-                ));
-            }
-            escape::text(&t)
-        }
-        None => {
-            return Ok(format!(
-                "{head}\n({} bytes of {mime}, not shown)",
-                body.bytes.len()
-            ))
-        }
+    let Some(shown) = shown else {
+        return Rendered::NotShown {
+            line: format!("{head}, {} bytes, {NOT_SHOWN}", body.bytes.len()),
+            text,
+        };
     };
     let n = shown.chars().count();
     let mut out = format!("{head}\n{}", escape::cap_chars(&shown, API_MAX_CHARS));
@@ -396,5 +416,5 @@ fn render(body: &http::Body, method: &Method) -> Result<String, ToolError> {
             n - API_MAX_CHARS
         ));
     }
-    Ok(out)
+    Rendered::Shown(out)
 }

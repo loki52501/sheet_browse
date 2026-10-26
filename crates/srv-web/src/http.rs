@@ -1,17 +1,20 @@
-//! HTTP plumbing shared by search, fetch, api and feed (W-1..W-4): the clients, a redirect
-//! follower with a private-address guard, a capped body reader, charset decoding, an HTML
-//! sniffer and error text that names only the host.
+//! HTTP plumbing shared by search, fetch, api and feed (W-1..W-4): the clients, a filtering
+//! DNS resolver and redirect follower (the private-address guard), one deadline per page
+//! request, a capped body reader, charset decoding, a tag scan and error text that names
+//! only the host.
 //!
 //! Error text never comes from `reqwest::Error`'s `Display`: that prints the whole URL
 //! (query included) and the source chain. Every error here is our own sentence naming the
 //! host, so nothing a caller put in a URL or a header can come back in an error.
 
 use crate::config::Config;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{HeaderMap, ACCEPT, LOCATION};
 use reqwest::redirect::Policy;
 use reqwest::{Response, Url};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 /// A normal desktop browser UA string (W-2). No other client hints or spoofing (D-5).
 pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
@@ -25,9 +28,15 @@ const MAX_API_REDIRECTS: usize = 5;
 /// The clients one server process uses.
 #[derive(Clone)]
 pub(crate) struct Clients {
-    /// fetch, feed, search: no automatic redirects; [`get_following`] follows them and
-    /// checks every hop against the private-address guard.
+    /// fetch and feed of a URL that is not written as a private address: no automatic
+    /// redirects ([`get_page`] follows them), and a DNS resolver that drops loopback,
+    /// private and link-local answers ([`PublicOnly`]), so a public name can never connect
+    /// to the user's machine or network, whatever it resolves to and however often.
     pub page: reqwest::Client,
+    /// fetch and feed of a URL written as a private address or `localhost` (the user asked
+    /// for their own machine), and search (the SearXNG URL is operator config, D-31): no
+    /// automatic redirects, the system resolver.
+    pub page_local: reqwest::Client,
     /// api without a vault header, and page.api: redirects only within the same host and
     /// never from https down to http.
     pub api: reqwest::Client,
@@ -38,18 +47,29 @@ pub(crate) struct Clients {
 }
 
 pub(crate) fn build(cfg: &Config) -> Result<Clients, String> {
+    build_with(cfg, PublicOnly::default())
+}
+
+fn build_with(cfg: &Config, resolver: PublicOnly) -> Result<Clients, String> {
     let base = || {
         let mut b = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(cfg.timeout)
             .connect_timeout(cfg.timeout);
+        // Test DNS overrides are answered before any resolver runs, so they count as
+        // public (D-507): they stand in for the public site they name.
         for (host, addr) in &cfg.resolve {
             b = b.resolve(host, *addr);
         }
         b
     };
     let fail = |_| "could not start the HTTP client (TLS backend)".to_string();
-    let page = base().redirect(Policy::none()).build().map_err(fail)?;
+    let page = base()
+        .redirect(Policy::none())
+        .dns_resolver(Arc::new(resolver))
+        .build()
+        .map_err(fail)?;
+    let page_local = base().redirect(Policy::none()).build().map_err(fail)?;
     let api_policy = |strict: bool| {
         Policy::custom(move |attempt| {
             let ok = attempt
@@ -69,6 +89,7 @@ pub(crate) fn build(cfg: &Config) -> Result<Clients, String> {
     let api_vault = base().redirect(api_policy(true)).build().map_err(fail)?;
     Ok(Clients {
         page,
+        page_local,
         api,
         api_vault,
     })
@@ -89,15 +110,81 @@ pub(crate) fn api_redirect_ok(first: &Url, next: &Url, strict: bool) -> bool {
             && first.port_or_known_default() == next.port_or_known_default())
 }
 
+/// The DNS resolver of [`Clients::page`]: resolves a name once and hands the connector only
+/// the public addresses, so there is no check-then-connect window (a TTL-0 rebinding name
+/// cannot answer public to a check and private to the connect) and no extra lookup. A name
+/// whose every answer is loopback, private, link-local or CGNAT fails with
+/// [`PrivateAnswer`].
+#[derive(Default)]
+pub(crate) struct PublicOnly {
+    /// Test seam: fixed answers by name instead of the system resolver.
+    fixed: Vec<(String, Vec<IpAddr>)>,
+}
+
+impl Resolve for PublicOnly {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().trim_end_matches('.').to_ascii_lowercase();
+        let fixed = self
+            .fixed
+            .iter()
+            .find(|(h, _)| *h == host)
+            .map(|(_, ips)| ips.clone());
+        Box::pin(async move {
+            let ips: Vec<IpAddr> = match fixed {
+                Some(ips) => ips,
+                None => tokio::net::lookup_host((host.as_str(), 0))
+                    .await?
+                    .map(|a| a.ip())
+                    .collect(),
+            };
+            let public: Vec<SocketAddr> = ips
+                .iter()
+                .filter(|ip| !private_ip(**ip))
+                .map(|ip| SocketAddr::new(*ip, 0))
+                .collect();
+            if public.is_empty() && !ips.is_empty() {
+                return Err(Box::new(PrivateAnswer) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(public.into_iter()) as Addrs)
+        })
+    }
+}
+
+/// [`PublicOnly`] refused a name that resolves only to private addresses.
+#[derive(Debug)]
+pub(crate) struct PrivateAnswer;
+
+impl fmt::Display for PrivateAnswer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the name resolves only to loopback, private or link-local addresses")
+    }
+}
+
+impl std::error::Error for PrivateAnswer {}
+
+/// Did `e` come from [`PublicOnly`] refusing a private answer?
+fn is_private_answer(e: &reqwest::Error) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        if err.downcast_ref::<PrivateAnswer>().is_some() {
+            return true;
+        }
+        cur = err.source();
+    }
+    false
+}
+
 /// Why a request failed, in words that name only the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HttpError {
     Timeout(String),
     Connect(String),
     Redirect(String),
-    /// A redirect from a public start URL into a loopback, private or link-local address.
+    /// A loopback, private or link-local target from a URL that was not written as one:
+    /// a redirect `from` a public page, a link on a public page, or a name that resolves
+    /// to a private address.
     Private {
-        from: String,
+        from: Option<String>,
         to: String,
     },
     Other(String),
@@ -113,87 +200,124 @@ impl fmt::Display for HttpError {
                 "{h} redirected somewhere this tool does not follow (another origin, a \
                  non-http URL, or too many redirects)"
             ),
-            HttpError::Private { from, to } => write!(
+            HttpError::Private {
+                from: Some(from),
+                to,
+            } => write!(
                 f,
                 "{from} redirected to {to}, a loopback, private or link-local address; \
                  refused because the URL asked for was public"
+            ),
+            HttpError::Private { from: None, to } => write!(
+                f,
+                "{to} is or resolves to a loopback, private or link-local address; refused \
+                 because the URL was not written as one (a private IP address or localhost) \
+                 by the user"
             ),
             HttpError::Other(h) => write!(f, "request to {h} failed"),
         }
     }
 }
 
-/// GET `start` and follow up to [`MAX_REDIRECTS`] redirects by hand (fetch, feed, search).
+/// GET `start` for fetch, feed and search, follow up to [`MAX_REDIRECTS`] redirects by hand,
+/// and read the body up to `cfg.max_bytes`, all within one `cfg.timeout` deadline (W-2:
+/// 15 s for the whole request, redirects and body included).
 ///
-/// Every hop must be http(s) without credentials. A hop into a loopback, private or
-/// link-local address (127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 0/8, ::1, fc00::/7,
-/// fe80::/10, `localhost`) is refused unless the start URL was itself such an address, so
-/// a public page cannot point the reader at the user's own machine or network. The hops
-/// together are bounded by the config timeout.
-pub(crate) async fn get_following(
+/// `allow_private` says whether the request may reach a loopback, private or link-local
+/// address (127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 198.18/15, 0/8,
+/// ::1, fc00::/7, fe80::/10, IPv4-mapped and -compatible forms, `localhost`). Callers pass
+/// [`written_private`] of the URL the user wrote (for `fetch("#id")`: of the page holding
+/// the link). When it is false every hop must be public: a literal private address or a
+/// localhost name is refused before any request, and a name goes through [`PublicOnly`].
+/// Every hop must be http(s) without credentials.
+pub(crate) async fn get_page(
     cfg: &Config,
-    client: &reqwest::Client,
+    clients: &Clients,
     start: &Url,
     accept: &str,
-) -> Result<Response, HttpError> {
-    let follow = async {
-        let mut url = start.clone();
-        let mut start_private: Option<bool> = None;
-        for hop in 0..=MAX_REDIRECTS {
-            let host = host_of(&url);
-            let resp = client
-                .get(url.clone())
-                .header(ACCEPT, accept)
-                .send()
-                .await
-                .map_err(|e| map_err(&e, &host))?;
-            if !matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
-                return Ok(resp);
-            }
-            let Some(loc) = resp.headers().get(LOCATION).and_then(|v| v.to_str().ok()) else {
-                return Ok(resp);
-            };
-            if hop == MAX_REDIRECTS {
-                return Err(HttpError::Redirect(host));
-            }
-            let next = url
-                .join(loc.trim())
-                .ok()
-                .and_then(|u| parse_url(u.as_str()).ok())
-                .ok_or_else(|| HttpError::Redirect(host.clone()))?;
-            if host_is_private(&next, &cfg.resolve).await {
-                let public_start = match start_private {
-                    Some(p) => !p,
-                    None => {
-                        let p = host_is_private(start, &cfg.resolve).await;
-                        start_private = Some(p);
-                        !p
-                    }
-                };
-                if public_start {
-                    return Err(HttpError::Private {
-                        from: host,
-                        to: host_of(&next),
-                    });
-                }
-            }
-            url = next;
-        }
-        Err(HttpError::Redirect(host_of(&url)))
+    allow_private: bool,
+) -> Result<Body, HttpError> {
+    let client = if allow_private {
+        &clients.page_local
+    } else {
+        &clients.page
     };
-    tokio::time::timeout(cfg.timeout, follow)
+    let whole = async {
+        let resp = follow(client, start, accept, allow_private).await?;
+        read_capped(resp, cfg.max_bytes).await
+    };
+    tokio::time::timeout(cfg.timeout, whole)
         .await
         .map_err(|_| HttpError::Timeout(host_of(start)))?
 }
 
-/// Loopback, private, link-local or unspecified (the ranges [`get_following`] guards).
+async fn follow(
+    client: &reqwest::Client,
+    start: &Url,
+    accept: &str,
+    allow_private: bool,
+) -> Result<Response, HttpError> {
+    let mut url = start.clone();
+    let mut from: Option<String> = None;
+    for hop in 0..=MAX_REDIRECTS {
+        let host = host_of(&url);
+        if !allow_private && written_private_or_local(&url) {
+            return Err(HttpError::Private { from, to: host });
+        }
+        let resp = client
+            .get(url.clone())
+            .header(ACCEPT, accept)
+            .send()
+            .await
+            .map_err(|e| {
+                if is_private_answer(&e) {
+                    HttpError::Private {
+                        from: from.clone(),
+                        to: host.clone(),
+                    }
+                } else {
+                    map_err(&e, &host)
+                }
+            })?;
+        if !matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(resp);
+        }
+        let Some(loc) = resp.headers().get(LOCATION).and_then(|v| v.to_str().ok()) else {
+            return Ok(resp);
+        };
+        if hop == MAX_REDIRECTS {
+            return Err(HttpError::Redirect(host));
+        }
+        let next = url
+            .join(loc.trim())
+            .ok()
+            .and_then(|u| parse_url(u.as_str()).ok())
+            .ok_or_else(|| HttpError::Redirect(host.clone()))?;
+        from = Some(host);
+        url = next;
+    }
+    Err(HttpError::Redirect(host_of(&url)))
+}
+
+/// Loopback, private, link-local, CGNAT, benchmarking or unspecified (the ranges the page
+/// client never connects to unless the user wrote such an address).
 pub(crate) fn private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.octets()[0] == 0
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || o[0] == 0
+                // 100.64.0.0/10, CGNAT (Tailscale puts the user's own machines here).
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+                // 198.18.0.0/15, benchmarking (some VPNs and fake-IP DNS use it).
+                || (o[0] == 198 && (o[1] & 0xfe) == 18)
         }
         IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
+            // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d, which also
+            // covers :: and ::1).
+            if let Some(v4) = v6.to_ipv4() {
                 return private_ip(IpAddr::V4(v4));
             }
             let seg = v6.segments()[0];
@@ -216,43 +340,34 @@ fn host_kind(url: &Url) -> Option<HostKind> {
     let bare = h.trim_start_matches('[').trim_end_matches(']');
     Some(match bare.parse::<IpAddr>() {
         Ok(ip) => HostKind::Ip(ip),
-        Err(_) => HostKind::Name(h.to_string()),
+        Err(_) => HostKind::Name(h.trim_end_matches('.').to_ascii_lowercase()),
     })
 }
 
-fn is_localhost_name(d: &str) -> bool {
-    let d = d.trim_end_matches('.').to_ascii_lowercase();
-    d == "localhost" || d.ends_with(".localhost")
-}
-
-/// Does `url`'s host point at a loopback, private or link-local address? An IP literal is
-/// checked as written, `localhost` always is one, any other name is resolved and counts
-/// when any of its addresses is one. A name in the config's DNS overrides counts as public:
-/// an override stands in for the public site it names (tests serve `docs.rs` from a local
-/// listener), and production has none. A failed lookup counts as public; the request then
-/// fails to connect.
-pub(crate) async fn host_is_private(url: &Url, overrides: &[(String, SocketAddr)]) -> bool {
+/// Is `url` written as a private address: a private IP literal or exactly `localhost`?
+/// Only such a URL, typed by the user, may reach the user's machine or network
+/// (`fetch("#id")` asks this of the page that holds the link). A name that merely resolves
+/// to a private address does not count: the name's owner chose that answer.
+pub(crate) fn written_private(url: &Url) -> bool {
     match host_kind(url) {
         Some(HostKind::Ip(ip)) => private_ip(ip),
-        Some(HostKind::Name(d)) => {
-            if is_localhost_name(&d) {
-                return true;
-            }
-            let d = d.trim_end_matches('.').to_ascii_lowercase();
-            if overrides.iter().any(|(h, _)| *h == d) {
-                return false;
-            }
-            let port = url.port_or_known_default().unwrap_or(80);
-            let found = tokio::net::lookup_host((d.as_str(), port)).await;
-            found.is_ok_and(|mut addrs| addrs.any(|a| private_ip(a.ip())))
-        }
+        Some(HostKind::Name(d)) => d == "localhost",
         None => false,
     }
 }
 
-/// Does a request to `url` stay on this machine (127/8, ::1, `localhost`)? A name in the
-/// config's DNS overrides counts by its override address, since that is where the bytes go.
-/// Used by api to allow `@vault` headers over plain http only to loopback.
+/// [`written_private`], or a `*.localhost` name: a hop the page client refuses without a
+/// lookup when private addresses are not allowed.
+fn written_private_or_local(url: &Url) -> bool {
+    written_private(url)
+        || matches!(host_kind(url), Some(HostKind::Name(d)) if d.ends_with(".localhost"))
+}
+
+/// Does a request to `url` stay on this machine? Loopback IP literals and exactly
+/// `localhost`; any other name only through a config DNS override whose address is
+/// loopback (tests; that is where the bytes go). `*.localhost` names do not count: some
+/// resolvers send them to DNS. Used by api to allow `@vault` headers over plain http only
+/// to loopback.
 pub(crate) fn is_loopback(url: &Url, overrides: &[(String, SocketAddr)]) -> bool {
     match host_kind(url) {
         Some(HostKind::Ip(IpAddr::V4(ip))) => ip.is_loopback(),
@@ -260,61 +375,37 @@ pub(crate) fn is_loopback(url: &Url, overrides: &[(String, SocketAddr)]) -> bool
             ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
         }
         Some(HostKind::Name(d)) => {
-            if is_localhost_name(&d) {
-                return true;
-            }
-            let d = d.trim_end_matches('.').to_ascii_lowercase();
-            overrides
-                .iter()
-                .any(|(h, a)| *h == d && a.ip().is_loopback())
+            d == "localhost"
+                || overrides
+                    .iter()
+                    .any(|(h, a)| *h == d && a.ip().is_loopback())
         }
         None => false,
     }
 }
 
-/// Tags an HTML document or fragment starts with, for [`looks_like_html`].
-const HTML_START_TAGS: &[&str] = &[
-    "html", "head", "body", "script", "meta", "title", "link", "style", "base", "noscript",
-    "iframe", "frameset", "div", "p", "a", "span", "table", "form", "img", "br", "h1", "h2", "h3",
-    "h4", "h5", "h6", "ul", "ol", "section", "article", "main", "nav", "header", "footer",
-    "template", "center", "font", "b", "i", "button", "input", "svg",
-];
+/// Does `text` hold anything an HTML parser would read as markup: `<` followed by an ASCII
+/// letter, `!`, `/` or `?` (a tag, an end tag, a comment, a doctype, a processing
+/// instruction)? Run on decoded text: a body with none of these has no markup to hide.
+pub(crate) fn has_tag(text: &str) -> bool {
+    text.as_bytes()
+        .windows(2)
+        .any(|w| w[0] == b'<' && (w[1].is_ascii_alphabetic() || matches!(w[1], b'!' | b'/' | b'?')))
+}
 
-/// Does `bytes` start like HTML, whatever the declared content type says (rule 5)? After a
-/// BOM, whitespace, comments and `<?xml ...?>`: `<!doctype html`, or a start tag of a
-/// common HTML element (`<html`, `<head`, `<body`, `<script`, `<div`...), any case.
-pub(crate) fn looks_like_html(bytes: &[u8]) -> bool {
-    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(8192)]).to_ascii_lowercase();
-    let mut s = head.trim_start_matches('\u{feff}');
-    loop {
-        s = s.trim_start();
-        let (open, close) = if s.starts_with("<!--") {
-            ("<!--", "-->")
-        } else if s.starts_with("<?") {
-            ("<?", "?>")
-        } else {
-            break;
-        };
-        match s[open.len()..].find(close) {
-            Some(i) => s = &s[open.len() + i + close.len()..],
-            None => return false,
+/// Is decoded `text` binary data rather than text: more than a tenth replacement
+/// characters or control characters other than tab, newline, carriage return and form
+/// feed?
+pub(crate) fn looks_binary(text: &str) -> bool {
+    let mut n = 0usize;
+    let mut bad = 0usize;
+    for c in text.chars().take(65_536) {
+        n += 1;
+        if c == '\u{FFFD}' || (c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\u{c}')) {
+            bad += 1;
         }
     }
-    if s.starts_with("<!doctype html") {
-        return true;
-    }
-    let Some(rest) = s.strip_prefix('<') else {
-        return false;
-    };
-    let end = rest
-        .find(|c: char| !c.is_ascii_alphanumeric())
-        .unwrap_or(rest.len());
-    let (name, after) = rest.split_at(end);
-    let closed = after
-        .chars()
-        .next()
-        .is_none_or(|c| c == '>' || c == '/' || c.is_whitespace());
-    closed && HTML_START_TAGS.contains(&name)
+    n > 0 && bad * 10 > n
 }
 
 /// Maps a reqwest error to [`HttpError`] without reading its message.
@@ -344,6 +435,14 @@ pub(crate) struct Body {
     pub bytes: Vec<u8>,
     /// The body was longer than the cap; the rest was not read.
     pub truncated: bool,
+}
+
+impl Body {
+    /// The body as text: the header charset, else (for HTML) a `<meta charset>`, else a
+    /// BOM, else UTF-8 ([`decode`]). Every decision about what the body is runs on this.
+    pub fn text(&self, html: bool) -> String {
+        decode(&self.bytes, self.charset.as_deref(), html)
+    }
 }
 
 /// Reads `resp` up to `cap` bytes. Timeouts while reading map like request errors.
@@ -400,8 +499,9 @@ fn content_type(headers: &HeaderMap) -> (String, Option<String>) {
     (mime, charset)
 }
 
-/// Decodes `bytes`: the header charset, else (for HTML) a `<meta charset>` in the first
-/// 2 KiB, else a BOM, else UTF-8. Malformed sequences become U+FFFD.
+/// Decodes `bytes`: a BOM first (UTF-8, UTF-16LE, UTF-16BE), else the header charset, else
+/// (for HTML) a `<meta charset>` in the first 2 KiB, else UTF-8. Malformed sequences
+/// become U+FFFD.
 pub(crate) fn decode(bytes: &[u8], charset: Option<&str>, html: bool) -> String {
     let label = charset
         .map(str::to_string)
@@ -409,6 +509,7 @@ pub(crate) fn decode(bytes: &[u8], charset: Option<&str>, html: bool) -> String 
     let enc = label
         .and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()))
         .unwrap_or(encoding_rs::UTF_8);
+    // `decode` sniffs a BOM and lets it win over the label.
     let (text, _, _) = enc.decode(bytes);
     text.into_owned()
 }
@@ -455,6 +556,8 @@ pub(crate) fn host_of(url: &Url) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn charsets() {
@@ -463,6 +566,9 @@ mod tests {
         let html = b"<html><head><meta charset=\"windows-1252\"></head>caf\xe9";
         assert!(decode(html, None, true).ends_with("café"));
         assert_eq!(decode("ok é".as_bytes(), None, true), "ok é");
+        // A BOM wins over the label.
+        assert_eq!(decode(b"\xff\xfeo\x00k\x00", Some("utf-8"), false), "ok");
+        assert_eq!(decode(b"\xfe\xff\x00o\x00k", None, false), "ok");
     }
 
     #[test]
@@ -475,30 +581,25 @@ mod tests {
     }
 
     #[test]
-    fn html_is_sniffed_whatever_the_content_type() {
+    fn tag_scan_and_binary() {
         for yes in [
-            "<!DOCTYPE html><html><body>x",
-            "\u{feff}  \n<HTML lang=en>",
-            "<!-- c --><?xml version=\"1.0\"?>\n<!doctype HTML>",
-            "<head><title>t</title>",
-            "<body>",
-            "<script>alert(1)</script>",
-            "<div class=x>hi</div>",
             "<p>",
+            "x <!-- c",
+            "a</b",
+            "<?xml",
+            "\u{200b}<!DOCTYPE  html>",
+            "<my-el>",
+            "<LI>",
         ] {
-            assert!(looks_like_html(yes.as_bytes()), "{yes}");
+            assert!(has_tag(yes), "{yes}");
         }
-        for no in [
-            "{\"a\": \"<html>\"}",
-            "plain text <html>",
-            "<?xml version=\"1.0\"?><rss version=\"2.0\">",
-            "<feed xmlns=\"http://www.w3.org/2005/Atom\">",
-            "<pre-x>",
-            "<!-- never closed <html>",
-            "",
-        ] {
-            assert!(!looks_like_html(no.as_bytes()), "{no}");
+        for no in ["a < b", "3<4", "<", "< p>", "plain", "", "<<>>", "<\u{e9}"] {
+            assert!(!has_tag(no), "{no}");
         }
+        assert!(looks_binary("\0\u{1}\u{2}"));
+        assert!(looks_binary("\u{FFFD}\u{FFFD}ab"));
+        assert!(!looks_binary("plain text\twith\ttabs\r\n"));
+        assert!(!looks_binary(""));
     }
 
     #[test]
@@ -535,15 +636,32 @@ mod tests {
             "192.168.1.1",
             "169.254.169.254",
             "0.0.0.0",
+            "100.64.0.1",
+            "100.100.100.100",
+            "100.127.255.255",
+            "198.18.0.1",
+            "198.19.255.255",
             "::1",
+            "::",
             "fc00::1",
             "fd12::1",
             "fe80::1",
             "::ffff:127.0.0.1",
+            "::7f00:1",
+            "::a00:1",
         ] {
             assert!(private_ip(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["8.8.8.8", "172.32.0.1", "2606:4700::1", "::ffff:1.1.1.1"] {
+        for ip in [
+            "8.8.8.8",
+            "172.32.0.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "198.17.255.255",
+            "198.20.0.1",
+            "2606:4700::1",
+            "::ffff:1.1.1.1",
+        ] {
             assert!(!private_ip(ip.parse().unwrap()), "{ip}");
         }
         let u = |s: &str| Url::parse(s).unwrap();
@@ -551,8 +669,104 @@ mod tests {
         assert!(is_loopback(&u("http://127.0.0.2:8/"), &[]));
         assert!(is_loopback(&u("http://[::1]:8/"), &[]));
         assert!(is_loopback(&u("http://localhost/"), &[]));
+        assert!(is_loopback(&u("http://LOCALHOST./"), &[]));
         assert!(is_loopback(&u("http://api.test/"), &ov));
         assert!(!is_loopback(&u("http://api.test/"), &[]));
         assert!(!is_loopback(&u("http://10.0.0.1/"), &[]));
+        assert!(!is_loopback(&u("http://foo.localhost/"), &[]));
+        assert!(!is_loopback(&u("http://localhost.evil.test/"), &[]));
+        assert!(written_private(&u("http://192.168.1.4:8080/")));
+        assert!(written_private(&u("http://localhost:3000/")));
+        assert!(written_private(&u("http://[::1]/")));
+        assert!(!written_private(&u("http://foo.localhost/")));
+        assert!(!written_private(&u("http://docs.rs/")));
+        assert!(written_private_or_local(&u("http://foo.localhost/")));
+    }
+
+    /// A one-route server on 127.0.0.1 that answers 200 and counts requests.
+    async fn counting_server() -> (SocketAddr, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                h.fetch_add(1, Ordering::SeqCst);
+                let mut tmp = [0u8; 1024];
+                let _ = sock.read(&mut tmp).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await;
+            }
+        });
+        (addr, hits)
+    }
+
+    fn cfg_short() -> Config {
+        Config {
+            timeout: std::time::Duration::from_secs(5),
+            ..Config::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_public_name_answering_loopback_never_connects() {
+        let (addr, hits) = counting_server().await;
+        let resolver = PublicOnly {
+            fixed: vec![
+                ("rebind.test".into(), vec!["127.0.0.1".parse().unwrap()]),
+                (
+                    "mixed.test".into(),
+                    vec!["10.0.0.1".parse().unwrap(), "100.64.1.1".parse().unwrap()],
+                ),
+                ("ok.test".into(), vec!["127.0.0.1".parse().unwrap()]),
+            ],
+        };
+        let cfg = cfg_short();
+        let clients = build_with(&cfg, resolver).unwrap();
+        let port = addr.port();
+        for host in ["rebind.test", "mixed.test"] {
+            let url = Url::parse(&format!("http://{host}:{port}/")).unwrap();
+            let err = get_page(&cfg, &clients, &url, "*/*", false)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{host} connected"));
+            assert_eq!(
+                err,
+                HttpError::Private {
+                    from: None,
+                    to: host.into()
+                },
+                "{host}"
+            );
+            assert!(err.to_string().contains("loopback, private or link-local"));
+        }
+        // Literal private addresses and localhost are refused without a lookup.
+        for lit in ["127.0.0.1", "localhost", "a.localhost"] {
+            let url = Url::parse(&format!("http://{lit}:{port}/")).unwrap();
+            let err = get_page(&cfg, &clients, &url, "*/*", false).await.err();
+            assert!(matches!(err, Some(HttpError::Private { .. })), "{lit}");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "a private answer was used");
+        // The same URL written as loopback by the user is allowed.
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let body = get_page(&cfg, &clients, &url, "*/*", true)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(body.bytes, b"ok");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dns_overrides_count_as_public() {
+        let (addr, hits) = counting_server().await;
+        let cfg = cfg_short().with_resolve("docs.test", addr);
+        let clients = build(&cfg).unwrap();
+        let url = Url::parse("http://docs.test/").unwrap();
+        let body = get_page(&cfg, &clients, &url, "*/*", false)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(body.bytes, b"ok");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 }

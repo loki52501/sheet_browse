@@ -12,9 +12,15 @@
 //! `fetch(url="#12")` follows link `#12` of the last fetched page (D-502), resolved once in
 //! classify and pinned for call ([`crate::pin`]), so the gated domain is the fetched one.
 //!
-//! The body is sniffed: HTML under any content type (or none) goes through the HTML walk,
-//! never to the model as text (rule 5). Redirects are followed by [`http::get_following`],
-//! which refuses a hop from a public URL into a private or loopback address.
+//! Rule 5 fails closed by construction (D-508): nothing tries to recognise HTML. A JSON or
+//! feed content type is refused with a pointer to `api` or `feed`, media and binary bodies
+//! are refused, and every other body (HTML, text/plain, no content type, anything else) is
+//! decoded and goes through the HTML walk, which keeps only text nodes. The model only sees
+//! sb-sheet output built from the walk, never the body string.
+//!
+//! Requests go through [`http::get_page`]: one deadline for redirects and body, and the
+//! private-address guard (a URL not written as a private address, or a `#id` link on a page
+//! that was not, never reaches loopback, private or link-local addresses).
 
 use crate::cache::Page;
 use crate::html::Doc;
@@ -97,7 +103,14 @@ pub(crate) fn find_spec(web: Arc<Web>) -> ToolSpec {
 struct Fetch {
     web: Arc<Web>,
     /// `#id` targets resolved by classify, taken by call (rule 4, [`crate::pin`]).
-    pins: Pins<Url>,
+    pins: Pins<Target>,
+}
+
+/// What to fetch, and whether it may reach a private address ([`http::get_page`]).
+#[derive(Clone)]
+struct Target {
+    url: Url,
+    allow_private: bool,
 }
 
 /// `url` is `#id` (a link on the last page), not a URL.
@@ -115,7 +128,9 @@ enum Loaded {
 
 impl Fetch {
     /// The URL to fetch: the argument, or the href of link `#id` on the last page (D-502).
-    fn target(&self, args: &Value) -> Result<Url, ToolError> {
+    /// It may reach a private address when the user wrote one: the argument itself, or for
+    /// `#id` the URL of the page that holds the link.
+    fn target(&self, args: &Value) -> Result<Target, ToolError> {
         let raw = req_str(args, "url")?.trim();
         if raw.starts_with('#') {
             let r: ElemRef = raw
@@ -132,52 +147,79 @@ impl Fetch {
                         "url {raw}: that element on the last page has no link to follow"
                     ))
                 })?;
-            return http::parse_url(href).map_err(|e| ToolError::Args(format!("url {raw}: {e}")));
+            let url =
+                http::parse_url(href).map_err(|e| ToolError::Args(format!("url {raw}: {e}")))?;
+            let allow_private = Url::parse(&page.url)
+                .ok()
+                .is_some_and(|p| http::written_private(&p));
+            return Ok(Target { url, allow_private });
         }
-        http::parse_url(raw).map_err(|e| ToolError::Args(format!("url: {e}")))
+        let url = http::parse_url(raw).map_err(|e| ToolError::Args(format!("url: {e}")))?;
+        let allow_private = http::written_private(&url);
+        Ok(Target { url, allow_private })
     }
 
-    async fn load(&self, ctx: &ToolCtx, url: &Url) -> Result<Loaded, ToolError> {
+    async fn load(&self, ctx: &ToolCtx, target: &Target) -> Result<Loaded, ToolError> {
+        let url = &target.url;
         let clients = self.web.clients()?;
         if let Some(why) = html::challenge_url(url) {
             return Ok(Loaded::Challenge(challenge_output(url, &why)));
         }
-        let resp = http::get_following(&self.web.cfg, &clients.page, url, ACCEPT_PAGE)
-            .await
-            .map_err(|e| ToolError::Failed(format!("fetch: {e}")))?;
-        let body = http::read_capped(resp, self.web.cfg.max_bytes)
-            .await
-            .map_err(|e| ToolError::Failed(format!("fetch: {e}")))?;
+        let body = http::get_page(
+            &self.web.cfg,
+            clients,
+            url,
+            ACCEPT_PAGE,
+            target.allow_private,
+        )
+        .await
+        .map_err(|e| ToolError::Failed(format!("fetch: {e}")))?;
         let final_url = body.url.clone();
         let final_host = host_of(&final_url);
-        let cf_challenge = cf_mitigated(&body);
+        if cf_mitigated(&body) {
+            return Ok(Loaded::Challenge(challenge_output(
+                &final_url,
+                "Cloudflare challenge (cf-mitigated)",
+            )));
+        }
         let mime = body.mime.clone();
-        let doc = if is_html(&mime, &body.bytes) {
-            parse_html(&body, "fetch").await?
-        } else if cf_challenge {
-            Doc::default()
-        } else if mime == "text/plain" {
-            html::plain_text(&http::decode(&body.bytes, body.charset.as_deref(), false))
-        } else if mime.contains("json") {
-            return Err(ToolError::Failed(format!(
-                "fetch: {final_host} answered with JSON ({mime}); use api(url) for JSON"
-            )));
-        } else if mime.contains("xml") || mime.contains("rss") || mime.contains("calendar") {
-            return Err(ToolError::Failed(format!(
-                "fetch: {final_host} answered with {mime}; use feed(url) for feeds and calendars"
-            )));
-        } else {
-            return Err(ToolError::Failed(format!(
-                "fetch: {final_host} answered with {}, which fetch does not read (HTML and plain text only)",
-                if mime.is_empty() { "no content type" } else { mime.as_str() }
-            )));
+        let shown_type = || {
+            if mime.is_empty() {
+                "no content type".to_string()
+            } else {
+                escape::name(&mime, 80)
+            }
         };
-        let challenge = if cf_challenge {
-            Some("Cloudflare challenge (cf-mitigated)".to_string())
-        } else {
-            doc.challenge.clone()
-        };
-        if let Some(why) = challenge {
+        if is_json_type(&mime) {
+            return Err(ToolError::Failed(format!(
+                "fetch: {final_host} answered with JSON ({}); use api(url) for JSON",
+                shown_type()
+            )));
+        }
+        if is_feed_type(&mime) {
+            return Err(ToolError::Failed(format!(
+                "fetch: {final_host} answered with {}; use feed(url) for feeds and calendars",
+                shown_type()
+            )));
+        }
+        if is_media_type(&mime) {
+            return Err(ToolError::Failed(format!(
+                "fetch: {final_host} answered with {}, which fetch does not read (pages and \
+                 text only)",
+                shown_type()
+            )));
+        }
+        // D-508: every other body is decoded (BOM, charset) and walked; nothing is sniffed.
+        let html_type = is_html_type(&mime);
+        let text = body.text(mime != "text/plain");
+        if http::looks_binary(&text) {
+            return Err(ToolError::Failed(format!(
+                "fetch: {final_host} answered with binary data ({}), which fetch does not read",
+                shown_type()
+            )));
+        }
+        let doc = walk(text, final_url.clone(), !html_type, "fetch").await?;
+        if let Some(why) = doc.challenge.clone() {
             return Ok(Loaded::Challenge(challenge_output(&final_url, &why)));
         }
         let (folder, site_tools) = site::register(&self.web, ctx, &final_url).await;
@@ -195,10 +237,38 @@ impl Fetch {
     }
 }
 
-/// `text/html`, XHTML, or a body that starts like HTML whatever its declared type (rule 5:
-/// a server that labels HTML `text/plain`, or sends no type, still gets the HTML walk).
-pub(crate) fn is_html(mime: &str, bytes: &[u8]) -> bool {
-    mime == "text/html" || mime == "application/xhtml+xml" || http::looks_like_html(bytes)
+/// `text/html` or XHTML by declared type (walked as a document; anything else fetch reads is
+/// walked as text with its paragraphs kept, [`html::parse_text`]).
+pub(crate) fn is_html_type(mime: &str) -> bool {
+    mime == "text/html" || mime == "application/xhtml+xml"
+}
+
+/// A JSON content type: `application/json`, `text/json` or any `+json` type.
+pub(crate) fn is_json_type(mime: &str) -> bool {
+    mime == "application/json" || mime == "text/json" || mime.ends_with("+json")
+}
+
+/// A feed or calendar content type (`feed` reads these), XHTML and SVG excluded.
+pub(crate) fn is_feed_type(mime: &str) -> bool {
+    !is_html_type(mime)
+        && !is_media_type(mime)
+        && (mime.contains("xml") || mime.contains("rss") || mime.contains("calendar"))
+}
+
+/// Images, audio, video, fonts and archives: never text.
+fn is_media_type(mime: &str) -> bool {
+    ["image/", "audio/", "video/", "font/"]
+        .iter()
+        .any(|p| mime.starts_with(p))
+        || matches!(
+            mime,
+            "application/pdf"
+                | "application/zip"
+                | "application/gzip"
+                | "application/x-gzip"
+                | "application/x-tar"
+                | "application/wasm"
+        )
 }
 
 /// The response carries `cf-mitigated: challenge` (Cloudflare's challenge marker).
@@ -209,32 +279,49 @@ pub(crate) fn cf_mitigated(body: &http::Body) -> bool {
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("challenge"))
 }
 
-/// The W-2 HTML walk of `body`, off the async threads.
-pub(crate) async fn parse_html(body: &http::Body, tool: &str) -> Result<Doc, ToolError> {
-    let text = http::decode(&body.bytes, body.charset.as_deref(), true);
-    let base = body.url.clone();
-    tokio::task::spawn_blocking(move || html::parse(&text, &base))
-        .await
-        .map_err(|_| ToolError::Failed(format!("{tool}: the HTML walk failed")))
+/// The W-2 walk of decoded `text`, off the async threads: as a document, or (`plain`) as
+/// text whose blank lines separate paragraphs ([`html::parse_text`]).
+pub(crate) async fn walk(
+    text: String,
+    base: Url,
+    plain: bool,
+    tool: &str,
+) -> Result<Doc, ToolError> {
+    tokio::task::spawn_blocking(move || {
+        if plain {
+            html::parse_text(&text, &base)
+        } else {
+            html::parse(&text, &base)
+        }
+    })
+    .await
+    .map_err(|_| ToolError::Failed(format!("{tool}: the HTML walk failed")))
 }
 
-/// D-5 for api and feed, with fetch's detector: the `cf-mitigated: challenge` header, a
-/// challenge URL (after redirects), or an HTML body the walk finds a challenge in. The
-/// output stops the call with class Challenge; `None` when the response is no challenge.
-pub(crate) async fn challenge_stop(
-    body: &http::Body,
-    tool: &str,
-) -> Result<Option<ToolOutput>, ToolError> {
+/// D-5 by the response alone, for api and feed: the `cf-mitigated: challenge` header or a
+/// challenge URL (after redirects). Costs no body work.
+pub(crate) fn challenge_by_response(body: &http::Body) -> Option<ToolOutput> {
     let why = if cf_mitigated(body) {
         Some("Cloudflare challenge (cf-mitigated)".to_string())
-    } else if let Some(why) = html::challenge_url(&body.url) {
-        Some(why)
-    } else if is_html(&body.mime, &body.bytes) {
-        parse_html(body, tool).await?.challenge
     } else {
-        None
+        html::challenge_url(&body.url)
     };
-    Ok(why.map(|w| challenge_output(&body.url, &w)))
+    why.map(|w| challenge_output(&body.url, &w))
+}
+
+/// D-5 by the body, for api and feed bodies that are not shown: decoded `text` with markup
+/// in it goes through fetch's walk, and a challenge it finds stops the call. `None` when
+/// the body holds no challenge.
+pub(crate) async fn challenge_in_text(
+    body: &http::Body,
+    text: &str,
+    tool: &str,
+) -> Result<Option<ToolOutput>, ToolError> {
+    if !http::has_tag(text) {
+        return Ok(None);
+    }
+    let doc = walk(text.to_string(), body.url.clone(), false, tool).await?;
+    Ok(doc.challenge.map(|w| challenge_output(&body.url, &w)))
 }
 
 /// D-5: a challenge stops the call; nothing of the page is read.
@@ -261,10 +348,11 @@ pub(crate) fn challenge_output(url: &Url, why: &str) -> ToolOutput {
 #[async_trait]
 impl ToolHandler for Fetch {
     async fn classify(&self, ctx: &ToolCtx, args: &Value) -> Result<Classified, ToolError> {
-        let url = self.target(args)?;
+        let target = self.target(args)?;
+        let url = target.url.clone();
         if is_ref(args) {
             // The last page can change before call runs; call fetches exactly this URL.
-            self.pins.put(ctx, args, url.clone());
+            self.pins.put(ctx, args, target);
         }
         let host = host_of(&url);
         Ok(Classified {
@@ -276,11 +364,12 @@ impl ToolHandler for Fetch {
     }
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput, ToolError> {
-        let url = if is_ref(&args) {
+        let target = if is_ref(&args) {
             self.pins.take(ctx, &args)?
         } else {
             self.target(&args)?
         };
+        let url = target.url.clone();
         let mode = opt_str(&args, "mode")?
             .map(|m| m.trim().to_ascii_lowercase())
             .unwrap_or_else(|| "read".into());
@@ -314,7 +403,7 @@ impl ToolHandler for Fetch {
         };
         let page = match cached {
             Some(p) => p,
-            None => match self.load(ctx, &url).await? {
+            None => match self.load(ctx, &target).await? {
                 Loaded::Page(p) => p,
                 Loaded::Challenge(out) => return Ok(out),
             },

@@ -134,19 +134,21 @@ async fn html_under_a_wrong_or_missing_content_type_never_reaches_the_model() {
             "a paragraph passed for a heading:\n{}",
             out.text
         );
+        // D-508: api shows only JSON or tag-free plain text; this is one line.
         let api = call(&e, "api", json!({ "url": url }))
             .await
-            .expect_err("api must refuse HTML");
+            .expect("api answers with the not-shown line");
         assert!(
-            api.to_string().contains("answered with HTML"),
-            "api {path}: {api}"
+            api.text.contains("not shown (not JSON or plain text") && !api.text.contains('<'),
+            "api {path}: {}",
+            api.text
         );
         let feed = call(&e, "feed", json!({ "url": url }))
             .await
             .expect_err("feed must refuse HTML");
         let msg = feed.to_string();
         assert!(
-            msg.contains("HTML page") && !msg.contains('<'),
+            msg.contains("did not answer with RSS") && !msg.contains('<'),
             "feed {path}: {msg}"
         );
     }
