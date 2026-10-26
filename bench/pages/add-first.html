@@ -5,7 +5,7 @@
 <title>Add-first rebuilds</title>
 </head>
 <body>
-<!-- D-438 (1), (2), (3): show-password rebuilds driven by injected/test/jsdom.test.js. Ids,
+<!-- D-438 (1), (2), (3), D-439: show-password rebuilds driven by injected/test/jsdom.test.js. Ids,
      names and labels are neutral (no "pw", "password", "token"), so only inheritance can mark
      a rebuilt field. -->
 <form id="f">
@@ -16,6 +16,8 @@
   <div id="w4"><span>Key four</span><input id="k4" type="password"><input type="hidden" name="enc" value="1"></div>
   <div id="w5"></div>
   <div id="b5"></div>
+  <!-- D-439 control: a login wrapper that loses two fields does not arm the same-parent rule -->
+  <div id="w6"><input id="u6" aria-label="User six"><input id="k6" type="password" aria-label="Key six"></div>
 </form>
 </body>
 </html>

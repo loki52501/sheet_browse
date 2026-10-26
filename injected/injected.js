@@ -179,7 +179,7 @@
     respBox: new WeakSet(), // parents of captcha response fields (D-405 (4))
     chCtx: false, // the document holds a challenge widget, response field or frame (D-429 (2))
     lastFill: new WeakMap(), // sensitive element -> last empty|filled evidence (D-426)
-    gone: [], // [{ t, keys }] removed sensitive field signatures, oldest first (D-435 (2)); keys null: match all
+    gone: [], // [{ t, keys, parent }] removed sensitive field signatures, oldest first (D-435 (2)); keys null: match all; parent: WeakRef, D-439
     born: [], // [{ t, ref, parent }] recently added non-sensitive value fields, WeakRefs only (D-438 (1))
     ids: new WeakMap(), // Element -> id
     refs: new Map(), // id -> WeakRef<Element>
@@ -1864,7 +1864,10 @@
   // once against the sensitive fields already in its parent (the overlap read), and every added
   // value field that stays non-sensitive is remembered (WeakRef and add time) for the same
   // window, so a later removal of a sensitive field marks the ones that match its keys, or the
-  // single one added to the same parent.
+  // single one added to the same parent. Remove-first across batches (D-439, Vue out-in, a
+  // re-render split by an await): a parent that lost exactly one value field, a sensitive one,
+  // and gained none is remembered (WeakRef) with the removal; the first later batch within the
+  // window that adds value fields to it marks its field when it adds exactly one.
   const SENS_KEEP_MS = 2000;
   const SENS_KEEP_MAX = 32;
   const BORN_MAX = 64;
@@ -1944,23 +1947,31 @@
     const live = (x) => t - x.t <= SENS_KEEP_MS;
     if (S.gone.length && !live(S.gone[0])) S.gone = S.gone.filter(live);
     if (S.born.length && !live(S.born[0])) S.born = S.born.filter(live);
-    let swap = null; // parent -> { out: removed fields, sens: sensitive among them, add: added fields }
+    // parent -> { out: removed fields, sens: sensitive among them, add: added fields, gone: the
+    // S.gone entry of its sensitive field }
+    let swap = null;
     const lost = []; // [{ keys, parent }] sensitive fields this batch removed
+    const gone = []; // S.gone entries of this batch
     for (const m of recs) {
       if (m.type !== "childList" || !m.removedNodes.length) continue;
       const roots = Array.from(m.removedNodes);
       for (const r of roots) {
         for (const f of fieldsIn(r)) {
-          const e = (swap || (swap = new Map())).get(m.target) || { out: 0, sens: 0, add: null };
+          const e = (swap || (swap = new Map())).get(m.target) || { out: 0, sens: 0, add: null, gone: null };
           swap.set(m.target, e);
           e.out++;
-          if (!sensitive(f)) continue;
+          let s = true; // sensitivity unreadable (a throwing getter): sensitive, fail closed
+          try {
+            s = sensitive(f);
+          } catch (err) { /* s stays true */ }
+          if (!s) continue;
           e.sens++;
           let keys = null; // identity unreadable: remember a match-all entry (D-438 (3), fail closed)
           try {
             keys = Array.from(fieldKeys(f, roots));
           } catch (err) { /* keys stays null */ }
-          if (keys === null || keys.length) S.gone.push({ t, keys });
+          e.gone = { t, keys, parent: null };
+          gone.push(e.gone);
           lost.push({ keys, parent: m.target });
         }
       }
@@ -1971,8 +1982,15 @@
         if (!e) continue;
         for (const a of m.addedNodes) for (const f of fieldsIn(a)) (e.add || (e.add = [])).push(f);
       }
-      for (const e of swap.values()) if (e.out === 1 && e.sens === 1 && e.add && e.add.length === 1) S.sens.add(e.add[0]);
+      for (const [p, e] of swap) {
+        if (e.out !== 1 || e.sens !== 1) continue;
+        // one out, one in within this batch (D-437); one out and nothing in: a later batch that
+        // adds exactly one value field to this parent within the window inherits (D-439)
+        if (!e.add) e.gone.parent = new WeakRef(p);
+        else if (e.add.length === 1) S.sens.add(e.add[0]);
+      }
     }
+    for (const g of gone) if (g.keys === null || g.keys.length || g.parent) S.gone.push(g);
     if (S.gone.length > SENS_KEEP_MAX) S.gone.splice(0, S.gone.length - SENS_KEEP_MAX);
     // Add-first: fields added by earlier batches, still in the page, matched against the
     // sensitive fields this batch removed.
@@ -2011,6 +2029,18 @@
       for (const a of m.addedNodes) for (const f of fieldsIn(a)) added.push([f, m.target]);
     }
     if (!added.length) return;
+    // Remove-first (D-439): parents an earlier batch left with no value field after removing
+    // their only one, a sensitive one. The first later batch that adds value fields to such a
+    // parent consumes the entry; its field inherits when it is the only one.
+    const count = new Map(); // parent -> value fields this batch added to it
+    for (const [, p] of added) count.set(p, (count.get(p) || 0) + 1);
+    let heir = null; // parents whose single added field inherits
+    for (const g of S.gone) {
+      const gp = g.parent ? g.parent.deref() : null;
+      if (!gp || !count.has(gp)) continue;
+      g.parent = null;
+      if (count.get(gp) === 1) (heir || (heir = new Set())).add(gp);
+    }
     const fresh = new Set(added.map((x) => x[0]));
     const near = new Map(); // parent -> [{ s, keys }] sensitive fields already in it
     const nearOf = (p) => {
@@ -2028,11 +2058,14 @@
       return v;
     };
     for (const [f, p] of added) {
-      if (S.sens.has(f) || sensitive(f)) continue;
       let hit = false;
+      // every read of the added field and its neighbours runs inside the try: a getter that
+      // throws marks the field sensitive and leaves the rest of the batch to run (D-439)
       try {
-        const sib = nearOf(p);
-        if (S.gone.length || sib.length) {
+        if (S.sens.has(f) || sensitive(f)) continue;
+        hit = !!heir && heir.has(p);
+        const sib = hit ? [] : nearOf(p);
+        if (!hit && (S.gone.length || sib.length)) {
           const keys = fieldKeys(f, null);
           hit = S.gone.some((g) => keysHit(g.keys, keys));
           for (const x of sib) {
@@ -2042,7 +2075,7 @@
           }
         }
       } catch (e) {
-        hit = true; // a field whose keys cannot be read next to a sensitive one: sensitive
+        hit = true; // a field whose sensitivity or keys cannot be read: sensitive (fail closed)
       }
       if (hit) S.sens.add(f);
       else S.born.push({ t, ref: new WeakRef(f), parent: new WeakRef(p) });

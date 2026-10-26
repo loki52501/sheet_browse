@@ -587,6 +587,22 @@ test("an add-first show toggle that removes the old field on transitionend never
   assert.deepEqual(byName(rows, "User").state.value, { kind: "text", text: "ada" });
 });
 
+test("a remove-first show toggle that appends an unrelated field in a later task never reads the value (D-439)", async () => {
+  const o = await open("remove-first.html");
+  await o.page.fill("#key", "rf-canary-439");
+  await o.page.fill("#user", "ada");
+  await o.ev(() => globalThis.__sb.index());
+  await o.page.click("#show");
+  await o.page.waitForFunction(() => !!document.getElementById("shown"));
+  assert.equal(await o.page.evaluate(() => document.getElementById("shown").value), "rf-canary-439");
+  const r = await readCounting(o, ["shown"]);
+  assert.deepEqual(r.reads, {}, "the new field's value getter was called");
+  assert.ok(!r.blob.includes("rf-canary"), r.blob);
+  const rows = fill(r.index);
+  assert.deepEqual(byName(rows, "Visible text").state.value, { kind: "filled" });
+  assert.deepEqual(byName(rows, "User").state.value, { kind: "text", text: "ada" });
+});
+
 test("passive reCAPTCHA v3 markers are not challenge context in Chromium; a visible v2 checkbox is (D-436, D-435 (3))", async () => {
   const v3 = await open("quiz-v3.html");
   const r3 = fill(await v3.ev(() => globalThis.__sb.index()));

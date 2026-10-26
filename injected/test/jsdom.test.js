@@ -1086,3 +1086,165 @@ test("an hCaptcha challenge frame is never passive by URL; size=invisible counts
   same(chRows(rc("&amp;size=invisible", "")), [], "query");
   assert.equal(chRows(rc("", "#hl=en&amp;size=invisible")).length, 3, "a hash is not the query");
 });
+
+// ------------------------------------------------------------------ D-439
+test("a remove-first rebuild into the same parent inherits across batches within 2 s (D-439)", async () => {
+  const CANARY = "removefirst-canary-439";
+  // the new field shares no key with k2 (id, aria-label, type all differ)
+  const plain = (j) => j.spy(j.mk('<input id="k2-plain" type="text" aria-label="Visible key">'));
+  const cases = {
+    "remove; await null; append": async (j) => {
+      const n = plain(j);
+      const b = await batches(j.win, j.doc, async () => {
+        j.$("k2").remove();
+        await null;
+        j.$("w2").appendChild(n);
+      });
+      assert.equal(b, 2, "the microtask split delivered two batches");
+      return [n];
+    },
+    "remove; later task at 2000 ms; append": async (j) => {
+      const n = plain(j);
+      j.$("k2").remove();
+      await tick();
+      j.advance(2000);
+      j.$("w2").appendChild(n);
+      return [n];
+    },
+    // the wrapper leaves the form and a new one enters it: the form lost one value field
+    "wrapper out; later task; wrapper in": async (j) => {
+      const w = j.mk('<div id="w2b"><input id="k2-plain" type="text" aria-label="Visible key"></div>');
+      j.spy(w.firstElementChild);
+      const next = j.$("w2").nextSibling;
+      j.$("w2").remove();
+      await tick();
+      j.$("f").insertBefore(w, next);
+      return [w.firstElementChild];
+    },
+    // a password with no id, name or label has no keys: only the parent rule can match it
+    "keyless field; later task; append": async (j) => {
+      j.$("w5").innerHTML = '<input type="password">';
+      const old = j.spy(j.$("w5").firstElementChild);
+      await tick();
+      old.remove();
+      await tick();
+      const n = plain(j);
+      j.$("w5").appendChild(n);
+      return [n];
+    },
+  };
+  for (const [k, step] of Object.entries(cases)) {
+    const r = await addFirst(CANARY, step);
+    assert.equal(r.c.reads, 0, k + ": a value getter was called");
+    assert.ok(!r.blob.includes(CANARY), k + ": " + r.blob);
+    same(r.states, [{ kind: "filled" }], k);
+  }
+  const controls = {
+    "2001 ms": async (j) => {
+      j.$("k2").remove();
+      await tick();
+      j.advance(2001);
+      const n = j.mk('<input aria-label="Visible key" value="plain two">');
+      j.$("w2").appendChild(n);
+      return [n];
+    },
+    "a later batch adds two fields": async (j) => {
+      j.$("k2").remove();
+      await tick();
+      const a = j.mk('<input aria-label="Street" value="Elm St">');
+      const b = j.mk('<input aria-label="Town" value="Leeds">');
+      j.$("w2").append(a, b);
+      return [a, b];
+    },
+    // the first later batch that adds to the parent uses the entry up
+    "a second later field": async (j) => {
+      j.$("k2").remove();
+      await tick();
+      j.$("w2").appendChild(plain(j));
+      await tick();
+      const n = j.mk('<input aria-label="Note" value="hello">');
+      j.$("w2").appendChild(n);
+      return [n];
+    },
+    // user + password removed from one parent: lost two, the rule is not armed
+    "a login parent that lost two fields": async (j) => {
+      j.$("w6").replaceChildren();
+      await tick();
+      const n = j.mk('<input aria-label="Search" value="cats">');
+      j.$("w6").appendChild(n);
+      return [n];
+    },
+  };
+  const want = {
+    "2001 ms": [{ kind: "text", text: "plain two" }],
+    "a later batch adds two fields": [{ kind: "text", text: "Elm St" }, { kind: "text", text: "Leeds" }],
+    "a second later field": [{ kind: "text", text: "hello" }],
+    "a login parent that lost two fields": [{ kind: "text", text: "cats" }],
+  };
+  for (const [k, step] of Object.entries(controls)) {
+    const r = await addFirst(CANARY, step);
+    same(r.states, want[k], k);
+    if (k === "a second later field") assert.equal(r.c.reads, 0, k + ": the first field's value getter was called");
+  }
+});
+
+test("a getter that throws while a field is checked marks it sensitive and the batch goes on (D-439)", async () => {
+  const CANARY = "throw-canary-439";
+  // an own id getter that returns "" for the first `ok` reads, then throws (same JS world only;
+  // a page cannot reach the isolated world's view of an element in Chromium)
+  const boom = (el, ok) => {
+    let n = 0;
+    Object.defineProperty(el, "id", { configurable: true, get() { if (n++ >= ok) throw new Error("id"); return ""; } });
+    return el;
+  };
+  const cases = {
+    // sensitive() reads id: the added field's first check throws
+    "added, sensitivity unreadable": async (j) => {
+      const n = boom(j.spy(j.mk('<input aria-label="Nickname">')), 0);
+      j.$("b5").appendChild(n);
+      await tick();
+      delete n.id;
+      return [n];
+    },
+    // sensitive() reads id once, then fieldKeys reads it next to the sensitive k1 and throws
+    "added, keys unreadable next to a sensitive field": async (j) => {
+      const n = boom(j.spy(j.mk('<input aria-label="Nickname">')), 1);
+      j.$("k1").after(n);
+      await tick();
+      delete n.id;
+      return [n];
+    },
+    // a removed field whose sensitivity cannot be read counts as a sensitive one with unreadable
+    // keys: the field added after it, elsewhere and with nothing in common, is sensitive
+    "removed, sensitivity unreadable": async (j) => {
+      const u = boom(j.$("u6"), 0);
+      u.remove();
+      await tick();
+      delete u.id;
+      const n = j.spy(j.mk('<input aria-label="Nickname">'));
+      j.$("b5").appendChild(n);
+      return [n];
+    },
+  };
+  for (const [k, step] of Object.entries(cases)) {
+    const r = await addFirst(CANARY, step);
+    assert.equal(r.c.reads, 0, k);
+    assert.ok(!r.blob.includes(CANARY), k + ": " + r.blob);
+    same(r.states, [{ kind: "filled" }], k);
+  }
+  // the rest of the batch still runs: a rebuild of k1 added after the throwing field in the
+  // same batch still matches k1's keys
+  const r = await addFirst(CANARY, async (j) => {
+    const bad = boom(j.mk('<input aria-label="Nickname">'), 0);
+    const n = j.spy(j.mk('<input id="k1-copy" type="text" aria-label="Key one">'));
+    j.$("b5").append(bad);
+    j.$("k1").remove();
+    j.$("b1").append(n);
+    await tick();
+    delete bad.id;
+    return [bad, n];
+  });
+  assert.equal(r.c.reads, 0);
+  // the throwing field holds no value: empty (sensitive), not { kind: "text", text: "" }
+  same(r.states, [{ kind: "empty" }, { kind: "filled" }]);
+});
