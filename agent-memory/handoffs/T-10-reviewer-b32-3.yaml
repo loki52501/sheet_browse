@@ -1,0 +1,16 @@
+from: reviewer
+to: next
+task: T-10
+date: "2026-10-25"
+state: "Round 6 review of d2cf21b (D-227/D-228), 185ad00 and 8ca6ec8 (test only), bb2ab68 (merge, no crates/sb-sheet change): verdict approve, Blocking none. Round-5 Blocking fixed per D-228: reader.rs:1063 word_cap = cap under max_tokens; long_first_word_is_cut_by_characters_under_max_tokens goes red when word_cap is put back to chunk_cap (so do tiny_remainder and acceptance d226_2_a_read). Outline cap done: 20 entries + one '+N more sections, W words' (index-rendered, page labels always start with # so not spoofable), labels <= 80 chars cut after scrub on char boundaries. Gates green: fmt, clippy -D warnings, cargo test -p sb-sheet (lib 83, acceptance_t10 20, b32 16, d226 9 in 6.3 s, contract_paths 1, find_register 8, read_article 11, skeleton_sheet 8; 0 ignored). 400-page fuzz (4803 reads): no overshoot, no repeated cursor, no panic, outline bounded. I-5/I-6 untouched and pinned by contract_paths.rs."
+not_done: "Should-fix for T-10b follow-ups: (1) a capped label ending in '...' used as region is not found (heading_section prefix match, reader.rs:437-441); strip a trailing '...' from region. (2) an indented over-long code line yields an empty fenced chunk ('```\\n\\n```') because cut_point takes a word break inside the leading indent (reader.rs:1287, 1322); pre-existing without max_tokens, now also under max_tokens instead of the old empty stop. (3) no acceptance-binary test for the D-227 outline cap. B-202 (wide table separator) still deferred. Tester should restamp bench/results/accept-T-10.md (coder amended two tests in acceptance_t10_d226.rs)."
+gotchas:
+  - "Probes ran in a throwaway crate copy in the session scratchpad: copy src, tests, data and examples (include_str!/include_bytes! need data/ and examples/), add a [workspace] table and concrete deps. Not in the repo."
+  - "A probe body parser that splits on '\\n\\nremaining:' misreads an empty-body read, whose markdown starts with 'remaining:' directly; check for that prefix first or you get fake overshoots."
+  - "Cursor-following fuzz at chunk_tokens 1-5 with no max_tokens on large pages is slow and legitimately produces thousands of reads; keep tiny chunks for max_tokens runs only."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-10.md
+  - agent-memory/handoffs/T-10-reviewer-b32-3.yaml
+verify: "python scripts/swarm/merge_gate.py (reads bench/results/review-T-10.md); cargo test -p sb-sheet"
