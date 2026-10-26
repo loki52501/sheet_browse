@@ -20,6 +20,8 @@ async-trait.workspace = true
 chrono.workspace = true
 croner.workspace = true
 dirs.workspace = true
+# D-126: rule_domain maps with UTS-46 (already in Cargo.lock through url).
+idna = "1"
 keyring.workspace = true
 notify.workspace = true
 percent-encoding.workspace = true

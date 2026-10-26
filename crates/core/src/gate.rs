@@ -129,175 +129,51 @@ pub const ANY_DOMAIN: &str = "*";
 const MAX_LABEL: usize = 63;
 const MAX_HOST: usize = 253;
 
-/// D-110 (1), D-120: the canonical `gate.rules.domain`, in the ASCII (A-label) form URL
-/// hosts arrive in. Trimmed; the ideographic and full-width full stops (U+3002, U+FF0E,
-/// U+FF61) become `.` and full-width ASCII becomes ASCII (as UTS-46 maps them); lowercased;
-/// one trailing dot removed; each label with non-ASCII letters is Punycode-encoded as
-/// `xn--...` (RFC 3492). `'*'` (after trimming) stays `'*'`.
-/// Rejects (`MemoryError::Invalid`) an empty value and anything that is not a bare host
-/// name: a character other than ASCII letters, digits, `-`, `_` and non-ASCII letters or
-/// digits (so whitespace, control characters, `* / : @ ? # \ %`, invisible and
-/// default-ignorable characters, combining marks and compatibility forms are all refused),
-/// an empty label (`..`, a leading dot), a label over 63 or a name over 253 characters.
+/// D-110 (1), D-120, D-126: the canonical `gate.rules.domain`, the ASCII (A-label) form a
+/// browser's URL host carries. The trimmed value goes through UTS-46 ToASCII (the `idna`
+/// crate, nontransitional processing, as the WHATWG URL parser runs it: mapping, NFC,
+/// lowercasing, the alternative full stops U+3002, U+FF0E, U+FF61 as `.`, Punycode `xn--`
+/// labels); one trailing dot is then removed. `'*'` stays `'*'`.
+/// Rejects (`MemoryError::Invalid`) what UTS-46 refuses (disallowed code points, bidi and
+/// joiner rule failures, a bad `xn--` label, the forbidden host code points
+/// `% # / : < > ? @ [ \ ] ^ |`, space and controls) and anything that is not a bare host
+/// name after mapping: a character other than ASCII letters, digits, `-` and `_` in a label
+/// (so `*` inside a name, `!`, `,` ...), an empty label (`..`, a leading dot, an empty
+/// value), a label over 63 or a name over 253 characters.
 /// `rule_domain(" Bank.COM. ") == Ok("bank.com")`,
-/// `rule_domain("BÜCHER.DE") == Ok("xn--bcher-kva.de")`.
+/// `rule_domain("BÜCHER.DE") == Ok("xn--bcher-kva.de")`,
+/// `rule_domain("straẞe.de") == Ok("xn--strae-oqa.de")`.
 pub fn rule_domain(domain: &str) -> Result<String, MemoryError> {
+    use idna::uts46::{AsciiDenyList, DnsLength, Hyphens, Uts46};
     let invalid = || {
         MemoryError::Invalid(format!(
             "gate rule domain {domain:?} is not a host name or '*'"
         ))
     };
-    let mapped = domain
-        .trim()
-        .chars()
-        .map(map_host_char)
-        .collect::<String>()
-        .to_lowercase();
+    // Lengths are checked below on the result (after the trailing dot is removed), so idna
+    // checks only what it alone knows: mapping, validity, bidi, joiners.
+    let mapped = Uts46::new()
+        .to_ascii(
+            domain.trim().as_bytes(),
+            AsciiDenyList::URL,
+            Hyphens::Allow,
+            DnsLength::Ignore,
+        )
+        .map_err(|_| invalid())?;
     if mapped == ANY_DOMAIN {
-        return Ok(mapped);
+        return Ok(mapped.into_owned());
     }
-    let d = mapped.strip_suffix('.').unwrap_or(&mapped);
-    if d.is_empty() {
+    let host = mapped.strip_suffix('.').unwrap_or(&mapped);
+    let label_ok = |l: &str| {
+        !l.is_empty()
+            && l.len() <= MAX_LABEL
+            && l.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    };
+    if host.len() > MAX_HOST || !host.split('.').all(label_ok) {
         return Err(invalid());
     }
-    let mut labels = Vec::new();
-    for label in d.split('.') {
-        if label.is_empty() || !label.chars().all(host_char) {
-            return Err(invalid());
-        }
-        let ascii = if label.is_ascii() {
-            label.to_string()
-        } else {
-            let chars: Vec<char> = label.chars().collect();
-            format!("xn--{}", punycode(&chars).ok_or_else(invalid)?)
-        };
-        if ascii.len() > MAX_LABEL {
-            return Err(invalid());
-        }
-        labels.push(ascii);
-    }
-    let host = labels.join(".");
-    if host.len() > MAX_HOST {
-        return Err(invalid());
-    }
-    Ok(host)
-}
-
-/// The UTS-46 mappings [`rule_domain`] applies: alternative full stops to `.`, full-width
-/// ASCII (U+FF01..U+FF5E) to ASCII.
-fn map_host_char(c: char) -> char {
-    match c {
-        '\u{3002}' | '\u{ff0e}' | '\u{ff61}' => '.',
-        '\u{ff01}'..='\u{ff5e}' => char::from_u32(c as u32 - 0xfee0).unwrap_or(c),
-        _ => c,
-    }
-}
-
-/// A character a (lowercased) host label may hold.
-fn host_char(c: char) -> bool {
-    c.is_ascii_lowercase()
-        || c.is_ascii_digit()
-        || c == '-'
-        || c == '_'
-        || (!c.is_ascii() && c.is_alphanumeric() && !invisible(c) && !compatibility_form(c))
-}
-
-/// Letters and digits that UTS-46 (NFKC) maps to other characters: a rule written with one
-/// would be stored as a Punycode label no URL host ever has. Refused rather than mapped.
-fn compatibility_form(c: char) -> bool {
-    matches!(
-        c,
-        '\u{00aa}'
-            | '\u{00b2}'
-            | '\u{00b3}'
-            | '\u{00b5}'
-            | '\u{00b9}'
-            | '\u{00ba}'
-            | '\u{00bc}'..='\u{00be}'
-            | '\u{2070}'..='\u{209f}'
-            | '\u{2100}'..='\u{214f}'
-            | '\u{2150}'..='\u{218f}'
-            | '\u{2460}'..='\u{24ff}'
-            | '\u{2c7c}'..='\u{2c7d}'
-            | '\u{3200}'..='\u{33ff}'
-            | '\u{fb00}'..='\u{fdff}'
-            | '\u{fe70}'..='\u{feff}'
-            | '\u{ff00}'..='\u{ffef}'
-            | '\u{1d400}'..='\u{1d7ff}'
-            | '\u{1f100}'..='\u{1f1ff}'
-    )
-}
-
-/// RFC 3492 Punycode of one label (without the `xn--` prefix). `None` on overflow.
-fn punycode(input: &[char]) -> Option<String> {
-    const BASE: u32 = 36;
-    const TMIN: u32 = 1;
-    const TMAX: u32 = 26;
-    const SKEW: u32 = 38;
-    const DAMP: u32 = 700;
-    fn digit(d: u32) -> char {
-        // d < 36: a..z then 0..9.
-        let b = if d < 26 {
-            b'a' + d as u8
-        } else {
-            b'0' + (d - 26) as u8
-        };
-        b as char
-    }
-    fn adapt(delta: u32, points: u32, first: bool) -> u32 {
-        let mut delta = if first { delta / DAMP } else { delta / 2 };
-        delta += delta / points;
-        let mut k = 0;
-        while delta > ((BASE - TMIN) * TMAX) / 2 {
-            delta /= BASE - TMIN;
-            k += BASE;
-        }
-        k + (BASE - TMIN + 1) * delta / (delta + SKEW)
-    }
-    let mut out: String = input.iter().filter(|c| c.is_ascii()).collect();
-    let basic = u32::try_from(out.len()).ok()?;
-    let total = u32::try_from(input.len()).ok()?;
-    if basic > 0 {
-        out.push('-');
-    }
-    let (mut n, mut delta, mut bias, mut h) = (128u32, 0u32, 72u32, basic);
-    while h < total {
-        let m = input.iter().map(|&c| c as u32).filter(|&c| c >= n).min()?;
-        delta = delta.checked_add((m - n).checked_mul(h + 1)?)?;
-        n = m;
-        for &c in input {
-            let c = c as u32;
-            if c < n {
-                delta = delta.checked_add(1)?;
-            }
-            if c == n {
-                let mut q = delta;
-                let mut k = BASE;
-                loop {
-                    let t = if k <= bias {
-                        TMIN
-                    } else if k >= bias + TMAX {
-                        TMAX
-                    } else {
-                        k - bias
-                    };
-                    if q < t {
-                        break;
-                    }
-                    out.push(digit(t + (q - t) % (BASE - t)));
-                    q = (q - t) / (BASE - t);
-                    k += BASE;
-                }
-                out.push(digit(q));
-                bias = adapt(delta, h + 1, h == basic);
-                delta = 0;
-                h += 1;
-            }
-        }
-        delta = delta.checked_add(1)?;
-        n = n.checked_add(1)?;
-    }
-    Some(out)
+    Ok(host.to_string())
 }
 
 /// D-110 (1), D-120: the canonical form of a classifier hint inside a rule key: trimmed and
@@ -1741,25 +1617,30 @@ mod tests {
             }
         }
         assert_eq!(rule_domain("BÜCHER.DE").unwrap(), "xn--bcher-kva.de");
-        for bad in [
-            "bank\u{200b}.com",
-            "\u{feff}bank.com",
-            "bank.com\u{2060}",
-            "ba\u{00ad}nk.com",
-            "bank\u{202e}.com",
-            "bank\u{e0041}.com",
-            "ban\u{034f}k.com",
-            "bank\u{fe0f}.com",
-            "bank\u{3164}.com",
-            "bank\u{2800}.com",
-            "bank\u{115f}.com",
-            "bank%2e.com",
-        ] {
+        for bad in ["bank\u{202e}.com", "bank\u{e0041}.com", "bank%2e.com"] {
             assert!(
                 matches!(rule_domain(bad), Err(MemoryError::Invalid(_))),
                 "{bad:?}"
             );
         }
+        // D-126: UTS-46 ignores these, so the browser's host (and the stored key) has none.
+        for ignored in [
+            "bank\u{200b}.com",
+            "\u{feff}bank.com",
+            "bank.com\u{2060}",
+            "ba\u{00ad}nk.com",
+            "ban\u{034f}k.com",
+            "bank\u{fe0f}.com",
+            "bank\u{3164}.com",
+            "bank\u{115f}.com",
+        ] {
+            assert_eq!(rule_domain(ignored).unwrap(), "bank.com", "{ignored:?}");
+        }
+        // U+2800 is a valid (if blank) symbol in UTS-46: its host is its own A-label.
+        assert_eq!(
+            rule_domain("bank\u{2800}.com").unwrap(),
+            "xn--bank-yj5b.com"
+        );
         for bad in [
             "job\u{200b}_application",
             "job_application\u{feff}",
@@ -1782,8 +1663,48 @@ mod tests {
         assert_eq!(pc.what, "pay 1 0 0 0 EUR");
     }
 
+    #[tokio::test]
+    async fn d126_stored_key_is_the_idna_a_label() {
+        // review-T-04 round 3 cases and B-190's, with the A-label a browser's URL host
+        // carries for each (UTS-46 nontransitional), cross-checked against idna's own
+        // WHATWG entry point.
+        for (rule, host) in [
+            ("\u{392}\u{391}\u{3a3}.gr", "xn--mxab6c.gr"), // ΒΑΣ: capital sigma -> σ, not ς
+            ("example.\u{391}\u{3a3}", "example.xn--mxa0b"),
+            ("stra\u{1e9e}e.de", "xn--strae-oqa.de"), // U+1E9E -> ß, kept (nontransitional)
+            ("\u{f900}.kr", "xn--oh3a.kr"),           // CJK compatibility ideograph -> U+8C48
+            ("\u{3131}.kr", "xn--ypd.kr"),            // Hangul compatibility jamo -> U+1100
+            ("\u{17f}hop.example", "shop.example"),   // long s
+            ("\u{133}ssel.nl", "ijssel.nl"),          // ligature ij
+            ("b\u{1d2c}nk.example", "bank.example"),  // modifier capital A
+            ("bu\u{308}cher.de", "xn--bcher-kva.de"), // decomposed: NFC first
+        ] {
+            let stored = rule_domain(rule).unwrap_or_else(|e| panic!("{rule:?}: {e}"));
+            assert_eq!(stored, host, "{rule:?}");
+            assert_eq!(idna::domain_to_ascii(rule).unwrap(), host, "{rule:?}");
+            assert_eq!(rule_domain(&stored).unwrap(), stored, "idempotent");
+            // A rule written either way stops the call whose host is the A-label.
+            let (s, g) = gate(MemStore::empty());
+            s.add_rule(rule, "Submit", Mode::Stop, false).unwrap();
+            let c = call(Class::Submit, Some(host));
+            assert_eq!(mode_of(&g.check(&c).await.unwrap()), Mode::Stop, "{rule:?}");
+        }
+        // What UTS-46 refuses is refused, never stored.
+        for bad in [
+            "ban\u{200d}k.com", // ZWJ outside a virama context (CheckJoiners)
+            "bank\u{202e}.com", // bidi override: disallowed
+            "xn--zz.com",       // not valid Punycode
+            "bank\u{e0041}.com",
+        ] {
+            assert!(
+                matches!(rule_domain(bad), Err(MemoryError::Invalid(_))),
+                "{bad:?}"
+            );
+        }
+    }
+
     #[test]
-    fn punycode_matches_rfc_3492() {
+    fn rule_domain_punycode_matches_rfc_3492() {
         for (u, a) in [
             ("bücher", "bcher-kva"),
             ("münchen", "mnchen-3ya"),
@@ -1791,23 +1712,24 @@ mod tests {
             ("例え", "r8jz45g"),
             ("テスト", "zckzah"),
         ] {
-            let chars: Vec<char> = u.chars().collect();
-            assert_eq!(punycode(&chars).as_deref(), Some(a), "{u}");
+            assert_eq!(rule_domain(u).unwrap(), format!("xn--{a}"), "{u}");
         }
-        // UTS-46 full-width forms map; compatibility letters and oversize names refuse.
+        // UTS-46 full-width and compatibility forms map (D-126); a forbidden host code point
+        // and oversize names refuse.
         assert_eq!(rule_domain("Ｂａｎｋ．com").unwrap(), "bank.com");
         assert_eq!(
             rule_domain("例え.テスト").unwrap(),
             "xn--r8jz45g.xn--zckzah"
         );
-        let long_name = "a.".repeat(128);
-        for bad in [
-            "ｂａｎｋ／x.com",
-            "\u{1d41b}ank.com",
-            "\u{fb01}le.com",
-            "\u{2460}.com",
-            long_name.as_str(),
+        for (compat, host) in [
+            ("\u{1d41b}ank.com", "bank.com"),
+            ("\u{fb01}le.com", "file.com"),
+            ("\u{2460}.com", "1.com"),
         ] {
+            assert_eq!(rule_domain(compat).unwrap(), host, "{compat:?}");
+        }
+        let long_name = "a.".repeat(128);
+        for bad in ["ｂａｎｋ／x.com", long_name.as_str()] {
             assert!(rule_domain(bad).is_err(), "{bad:?}");
         }
         assert!(rule_domain(&format!("{}.com", "a".repeat(64))).is_err());

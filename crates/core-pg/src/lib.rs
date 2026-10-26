@@ -1136,7 +1136,7 @@ mod tests {
             "bank.com#x",
             "bank\\com",
             "bank\u{7}.com",
-            "bank\u{200b}.com",
+            "bank\u{202e}.com",
         ] {
             assert!(
                 matches!(check_rule(bad, "Pay", ask), Err(MemoryError::Invalid(_))),

@@ -584,10 +584,10 @@ async fn r3_d113_d120_pg_gate_rule_set_stores_rule_key() {
     );
     // What the canonicaliser refuses is refused and not written.
     for (d, c) in [
-        ("bu\u{0308}cher.de", "Send"),
-        ("ban\u{200b}k.com", "Send"),
-        ("\u{fb01}le.com", "Send"),
-        ("\u{1d41b}ank.com", "Send"),
+        // D-126: decomposed, zero-width space, ligature and math-bold domains now map
+        // (UTS-46); these two UTS-46 refuses.
+        ("ban\u{202e}k.com", "Send"),
+        ("ban\u{200d}k.com", "Send"),
         ("bank.com:443", "Send"),
         ("bank.com", "Submit:\u{212a}elvin"),
         ("bank.com", "Submit:\u{ff4a}ob"),

@@ -175,18 +175,10 @@ fn r3_rule_domain_refuses_what_it_cannot_map_safely() {
         "bank com",
         "user@bank.com",
         "bank.com/x",
-        "bu\u{0308}cher.de",   // decomposed (combining diaeresis), no NFC
-        "ban\u{200b}k.com",    // zero-width space
-        "ban\u{00ad}k.com",    // soft hyphen (default-ignorable)
-        "ban\u{200d}k.com",    // zero-width joiner
-        "ban\u{2060}k.com",    // word joiner
-        "bank\u{2800}.com",    // braille blank
-        "\u{fb01}le.com",      // ligature fi (compatibility)
-        "x\u{00b2}.com",       // superscript two
-        "\u{1d41b}ank.com",    // mathematical bold b
-        "\u{24d1}ank.com",     // circled b
-        "\u{ff8a}\u{ff9f}.jp", // half-width katakana
-        "bank\u{202e}.com",    // bidi override
+        // D-126: decomposed, zero-width space, soft hyphen, word joiner, braille blank, fi,
+        // superscript two, math bold, circled and half-width forms now map (UTS-46).
+        "ban\u{200d}k.com", // zero-width joiner
+        "bank\u{202e}.com", // bidi override
     ];
     for d in refused {
         match rule_domain(d) {
@@ -220,7 +212,6 @@ fn r3_rule_domain_refuses_what_it_cannot_map_safely() {
 /// subset accepts must already be the A-label UTS-46 (non-transitional, what URL hosts
 /// carry) gives for it.
 #[test]
-#[ignore = "red-first T-04 round 4: rule_domain accepts U+017F, U+0133, U+1D2C and a label-final capital sigma and stores keys no URL host carries (B-190)"]
 fn r3_b190_an_accepted_domain_is_its_uts46_a_label() {
     let mut wrong = Vec::new();
     // (input, what UTS-46 maps it to before Punycode)
@@ -301,8 +292,9 @@ async fn r3_gate_rule_set_stores_rule_key_and_gate_matches_idn_hosts() {
         assert_eq!(s.gate_rule("bank.com", "Submit").await.unwrap(), Some(STOP));
         // Refused rules are not stored.
         for (d, c) in [
-            ("bu\u{0308}cher.de", "Send"),
-            ("\u{fb01}le.com", "Send"),
+            // D-126: decomposed and ligature domains now map (UTS-46); these two it refuses.
+            ("bank\u{202e}.com", "Send"),
+            ("ban\u{200d}k.com", "Send"),
             ("bank.com", "Submit:\u{212a}elvin"),
             ("bank.com", "Submit:\u{ff4a}ob"),
         ] {
@@ -768,7 +760,6 @@ async fn r3_memstore_search_follows_d115() {
 /// must still hit". pg_trgm's word_similarity('Vasnth', 'Vasanth Raghavan') is 0.5, under
 /// the default 0.6 threshold both stores use, so neither finds it.
 #[tokio::test]
-#[ignore = "red-first T-04 round 4: MemStore search misses Vasnth in Vasanth Raghavan, word_similarity 0.5 under the 0.6 threshold (D-115)"]
 async fn r3_d115_vasnth_typo_inside_longer_subject_hits() {
     let s = MemStore::empty();
     s.remember(Fact::new(

@@ -1652,6 +1652,7 @@ dependencies = [
  "croner",
  "dirs 7.0.0",
  "harness-core",
+ "idna",
  "keyring",
  "notify",
  "percent-encoding",

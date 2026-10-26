@@ -258,8 +258,9 @@ fn normalised(s: &str) -> String {
     out
 }
 
-/// pg_trgm's default `pg_trgm.word_similarity_threshold`, the cut-off of `<%`.
-const WORD_SIMILARITY_THRESHOLD: f32 = 0.6;
+/// The cut-off of `<%`: `pg_trgm.word_similarity_threshold` as PgStore sets it on every
+/// session (D-125), not pg_trgm's default 0.6.
+const WORD_SIMILARITY_THRESHOLD: f32 = 0.5;
 
 /// pg_trgm's trigrams of `s` in order (`generate_trgm_only`): each word (a run of
 /// alphanumeric characters), lowercased and padded with two spaces before and one after,
@@ -1410,6 +1411,11 @@ mod tests {
             "{}",
             hits[0].score
         );
+        // D-125: D-115's own example scores exactly the 0.5 cut-off and hits.
+        let hits = s.search("Vasnth", 5).await.unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!((hits[0].id, hits[0].why), (person, Why::Trigram));
+        assert!((hits[0].score - 0.5).abs() < 1e-6, "{}", hits[0].score);
         assert!(s.search("Zebra", 5).await.unwrap().is_empty());
 
         // Ordered by score; tier only on ties; newest seen_at breaks the remaining ties.
