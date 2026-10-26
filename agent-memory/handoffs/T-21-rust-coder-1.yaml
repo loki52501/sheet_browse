@@ -1,0 +1,35 @@
+from: rust-coder (driver area, T-21 round 1)
+to: driver/suborch, then reviewer and tester
+task: T-21
+date: "2026-10-26"
+state: "Commit 8deaa56 on swarm/driver-T21. B-4 #7 input synthesis, the per-step gate (rule 4, H-1.4), B-4 #9 consequence capture with Driver::dialog and Driver::download, and the B-8 diff are in sb-driver (new modules act.rs, input.rs, consequence.rs, diff.rs). (1) Input: click and check pipeline mouseMoved/Pressed/Released on the tab session; t# focuses in the act call itself (ACT_FN op {focus}), then Ctrl+A (Cmd+A on macOS, commands [selectAll]) and Input.insertText (empty value: Delete); @vault(k) is resolved once inside ToolCtx::resolve_into and the select-all events and the insertText message are queued inside the sink, the message built by the new sb_cdp start_raw from a pre-sized Zeroizing buffer (the pipe zeroes its framing copy). s# runs in the act call (label, value, case-folded label; input and change). k# uses a chord table and refuses unknown keys. u# accepts only files inside ctx.run_dir/files (a leading files/ names that folder) and sends DOM.setFileInputFiles by reference, without actionability. sc(down|up) scrolls in the page (85 %), sc(#N) scrolls the element into the centre. Points from frames > 0 get the frame offset in the page (frameElement chain). (2) Gate: before each targeted step the live index of its frame (read once per program, then the previous step's post-step index) is classified with sb_act::classify_step; a CHALLENGE (row or page) or a class above ctx.class stops before any focus, scroll or input, with ActResult.stopped. No index: Submit (D-402). (3) Consequences: the observer logs navigations, dialogs and downloads; the window awaits the input replies or a dialog, then one in-page settle (150/500 ms) that also returns the index (the next step's live index and the diff's after side), waits up to 3 s for a pending main-frame navigation and for opened tabs' first document (title from document.title). Navigated, OpenedTab (via the T-18 opener mapping), Download (denied at launch with Browser.setDownloadBehavior deny; download(allow) fetches again with Network.loadNetworkResource into runs/<id>/files, create_new names), Dialog (paused; the program stops; Driver::dialog answers), NoVisibleChange. Page strings escaped and capped; the result is scrubbed against typed vault values. (4) Two T-18/T-20 fixes found on the way: popups never loaded (paused until an install reply that cannot come before they run; D-612 runs them when their navigation starts) and open now reuses the browser's startup tab once so the first opened tab is tab 1 (D-610, needed for acceptance 3's 'tab 2'). Gates: cargo fmt --all -- --check clean; cargo clippy -j 2 -p sb-driver -p sb-cdp --all-targets -D warnings clean; cargo test -j 2 -p sb-driver -p sb-cdp -- --test-threads=1 all green: sb-cdp 29 (lib 19, accept_t18 5, chromium_pipe 1, chromium_websocket 1, contract_paths 3), sb-driver 96 (lib 76, accept_t18 1, accept_t20 12, accept_t21 4, chromium_driver 1, contract_paths 2), real chromium-1248. Mutations seen red (then restored): gate off, vault value typed as the literal, scrub off, dialog race off, popup run off, downloads allowed into the test home, NoVisibleChange push removed, frame offset removed."
+not_done: "1. The workspace run is still owed: cargo test -j 2 --workspace --no-fail-fast was stopped by the host for low memory while it was still compiling (no workspace test ran) and was not restarted, per the host's instruction. 2. Reviewer and tester (acceptance 3 rows a to e are in crates/sb-driver/tests/accept_t21.rs, acceptance_3_consequences). 3. T-22: network in-flight tracking in settle (B-4 #8): the consequence window's settle is DOM-only, so a navigation slower than the window is caught only by the 3 s pending-navigation wait; settle(), tabs() titles (B-601), close(), scheduling (B-4 #10, B-606 for me), and index()/text() merging frames (the gate reads one frame's index at a time). 4. Open defaults: B-608 (blob:/POST downloads cannot be fetched again), B-610 (upload path root), B-611 (WebSocket copies messages unzeroed), B-612 (stop, not ask, on a live class above ctx.class). B-609 asks supreme to add sb_cdp start_raw to I-8."
+gotchas:
+  - "A target=_blank or window.open popup is attached paused with its navigation already started, and its renderer answers nothing (Runtime.evaluate timed out after 10 s) until Runtime.runIfWaitingForDebugger: D-604's run-after-install-reply order deadlocks it. D-612 runs it on Page.frameStartedNavigating; its first document still gets the sb world."
+  - "An alert() from a click handler holds the Input.dispatchMouseEvent(mouseReleased) reply until the dialog is answered, and in-page calls hang while it is open: race every wait after input against the dialog (or_dialog) and never call into the page while one is open."
+  - "With Browser.setDownloadBehavior allowAndName the file lands about a second after the click, so a disk check right after act passes even when the download landed. accept_t21 waits for Browser.downloadProgress (canceled or completed) first; deny reports canceled."
+  - "__sb.index() hit-tests rows in the sb world, so a probe that wraps document.elementFromPoint (accept_t20, chromium_t20) also counts the gate's index read; the probes now count only hits inside an attempt."
+  - "T-20 timing rows measure the whole act: since T-21 it starts with one index round trip for the gate, hence GATE_READ (60 ms) on act-level 5 s caps only."
+  - "Bash heredocs with long Python bodies failed in this shell (unexpected EOF while looking for a matching quote); writing the script to target/ with the Write tool and running it works."
+decisions_made: [D-608, D-609, D-610, D-611, D-612, D-613, D-614]
+blockers_opened: [B-608, B-609, B-610, B-611, B-612]
+files_touched:
+  - crates/sb-cdp/src/client.rs
+  - crates/sb-cdp/src/pipe.rs
+  - crates/sb-cdp/Cargo.toml
+  - crates/sb-cdp/tests/contract_paths.rs
+  - crates/sb-driver/src/act.rs
+  - crates/sb-driver/src/input.rs
+  - crates/sb-driver/src/consequence.rs
+  - crates/sb-driver/src/diff.rs
+  - crates/sb-driver/src/actionable.rs
+  - crates/sb-driver/src/lib.rs
+  - crates/sb-driver/src/registry.rs
+  - crates/sb-driver/src/runtime.rs
+  - crates/sb-driver/src/chromium_t20.rs
+  - crates/sb-driver/Cargo.toml
+  - crates/sb-driver/tests/accept_t20.rs
+  - crates/sb-driver/tests/accept_t21.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+verify: "cargo test -j 2 -p sb-driver -p sb-cdp -- --test-threads=1"
