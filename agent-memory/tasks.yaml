@@ -154,7 +154,11 @@ tasks:
   - id: T-21
     step: 6
     title: "input synthesis + consequence capture; acceptance 3"
-    status: todo
+    status: doing
+    owner: driver/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/driver-T21
+    note: "branch = main + swarm/driver-T20 (with T-18) + swarm/page (0a87891) merged locally (D-88)"
     blocked_by: [T-20]
   - id: T-22
     step: 6
