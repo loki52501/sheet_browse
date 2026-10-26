@@ -1828,6 +1828,124 @@ mod tests {
         assert!(s.quiet());
     }
 
+    /// The step of the two tests below: `c#5` on a one-button page, its input replied, after
+    /// its handler's request `R1` (never finished) when `request`. Returns the input's time.
+    async fn click_save(s: &mut Script, request: bool) -> Instant {
+        let rows = json!([{"id": 5, "frame": 0, "role": "button", "name": "Save"}]);
+        s.walked().await;
+        let ix = s.call(INDEX, 2).await;
+        s.value(&ix, rows).await;
+        let act = s.call(ACT, 2).await;
+        s.value(&act, json!({"x": 10, "y": 20})).await;
+        let mut input = Vec::new();
+        for _ in 0..3 {
+            input.push(s.expect("Input.dispatchMouseEvent").await);
+        }
+        if request {
+            s.request("R1").await;
+        }
+        let t_input = Instant::now();
+        for m in &input {
+            s.reply(m, json!({})).await;
+        }
+        t_input
+    }
+
+    /// Whether the driver sent nothing since the last message read: a marker command is
+    /// queued now, and the writer keeps the queue's order, so it is the next message unless
+    /// something was queued before it (no wait for a quiet period).
+    async fn nothing_queued(d: &Driver, s: &mut Script) -> bool {
+        let _flush = d.cdp.start(None, "Test.flush", json!({}));
+        s.next().await["method"] == "Test.flush"
+    }
+
+    /// B-4 #8 (accept-T-22 row 13b-2): the diff's read of a document the window left no
+    /// index for ends by the window's deadline (input + 3 s, minus the reply margin), not
+    /// 3 s after it starts. A busy page misses the window's call and fails its re-run; the
+    /// diff's index read is then made with time left and never answered: act() returns
+    /// by input + 3 s, with no NoVisibleChange (the after-state is unknown) and no diff.
+    #[tokio::test]
+    async fn the_diff_read_after_a_window_with_no_index_ends_by_the_window_deadline() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        let home = tempfile::tempdir().unwrap();
+        let ctx = vault_ctx(home.path(), harness_core::Class::Submit, &canary());
+        let (r, (t_input, read_at)) = tokio::join!(d.act(tab, "c#5", &ctx), async {
+            let t_input = click_save(&mut s, false).await;
+            // The window's call: never answered, so it misses its cap (500 ms + 300 ms
+            // grace); the re-run fails at once.
+            s.call(POST, 2).await;
+            let again = s.call(POST, 2).await;
+            s.fail(&again, "busy").await;
+            // The diff's read: never answered.
+            s.call(INDEX, 2).await;
+            (t_input, t_input.elapsed())
+        });
+        let total = t_input.elapsed();
+        assert!(
+            read_at < Duration::from_millis(2500),
+            "the diff's read was made with time left: {read_at:?}"
+        );
+        assert!(
+            total <= Duration::from_millis(3040),
+            "act() returns by input + 3 s: {total:?}"
+        );
+        let r = r.expect("act");
+        assert_eq!(r.steps.len(), 1);
+        assert_eq!(r.steps[0].outcome, StepOutcome::Ok);
+        assert!(
+            !r.steps[0]
+                .consequences
+                .contains(&Consequence::NoVisibleChange),
+            "an unknown after-state is not no change: {:?}",
+            r.steps[0]
+        );
+        assert_eq!(r.steps[0].settled, Some(false));
+        assert_eq!(r.diff, None, "no after side for the document: no diff");
+        assert!(
+            nothing_queued(&d, &mut s).await,
+            "nothing after the diff's read"
+        );
+    }
+
+    /// The same step when the window uses its whole deadline: its request never finishes,
+    /// so the window waits for it and then makes its index-only call, which never answers.
+    /// The window ends at input + 3 s with no time left, so neither the re-run nor the
+    /// diff's read is sent; act() returns by input + 3 s and does not claim no change.
+    #[tokio::test]
+    async fn no_read_is_made_after_a_window_that_used_its_whole_deadline() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        let home = tempfile::tempdir().unwrap();
+        let ctx = vault_ctx(home.path(), harness_core::Class::Submit, &canary());
+        let (r, t_input) = tokio::join!(d.act(tab, "c#5", &ctx), async {
+            let t_input = click_save(&mut s, true).await;
+            // The window's index-only call: never answered.
+            s.call(POST, 2).await;
+            t_input
+        });
+        let total = t_input.elapsed();
+        assert!(
+            total <= Duration::from_millis(3040),
+            "act() returns by input + 3 s: {total:?}"
+        );
+        let r = r.expect("act");
+        assert_eq!(r.steps[0].outcome, StepOutcome::Ok);
+        assert!(
+            !r.steps[0]
+                .consequences
+                .contains(&Consequence::NoVisibleChange),
+            "{:?}",
+            r.steps[0]
+        );
+        assert_eq!(r.steps[0].settled, Some(false));
+        assert_eq!(r.diff, None);
+        assert!(
+            nothing_queued(&d, &mut s).await,
+            "no call after the window's deadline"
+        );
+    }
+
     /// B-4 #8: `settle` is capped as a hard deadline. The page's DOM settles, but a request
     /// that started meanwhile never finishes: `{settled: false}` at the cap, with the
     /// mutations the page counted, and the in-page call got the cap minus the reply margin.

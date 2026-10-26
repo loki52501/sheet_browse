@@ -12,12 +12,18 @@
 //! input) before that call, and a step whose request is still in flight at the end never
 //! reports "no visible change".
 //!
+//! Every in-page read after a step's input ends by that step's window deadline (input + 3 s;
+//! for `w(d)`, its start + d + its grace) minus [`REPLY_MARGIN`]: the new-tab title reads
+//! and the diff's reads of frames the window left no index for (B-4 #8). A read with no time
+//! left is not made: the diff then has fewer rows, or none for that document, and an
+//! after-state that is unknown never counts as "no visible change".
+//!
 //! Page strings are kept raw while the program runs. When it ends, every raw page string
 //! (consequences, diff row names) is scrubbed against the values of the vault keys the
 //! program typed, then escaped and capped (`diff.rs`), then the shown result is scrubbed
 //! again (rule 2, D-616): a cap can never cut a value before the scrub sees it whole.
 
-use crate::actionable::{input_target, step_label, tidy_why, StepEnd, Why, WhyKind};
+use crate::actionable::{input_target, step_label, tidy_why, StepEnd, Why, WhyKind, W_GRACE};
 use crate::consequence::{is_main, raw_name, sanitize_name, Kind};
 use crate::diff::{changes, clean_url, page_text, render, TEXT_CAP};
 use crate::input::{
@@ -26,7 +32,7 @@ use crate::input::{
 use crate::registry::Closed;
 use crate::runtime::{CallError, OBJECT_GROUP};
 use crate::scrub::{scrub_with, spellings};
-use crate::settle::Pass;
+use crate::settle::{Pass, REPLY_MARGIN};
 use crate::{
     ActResult, Consequence, Driver, DriverError, SettleOpts, StepOutcome, StepResult, TabId,
     ToolCtx,
@@ -52,7 +58,8 @@ const WINDOW_GRACE: Duration = Duration::from_millis(300);
 /// A main-frame navigation the step started, or a new tab's first document, is awaited at
 /// most this long from the input (the settle cap, B-4 #8).
 const NAV_CAP: Duration = Duration::from_millis(3000);
-/// Cap of one index read (gate and diff) and of an in-page scroll or upload lookup.
+/// Cap of one index read before a step's input (the gate's) and of an in-page scroll or
+/// upload lookup. Reads after an input end by the step's window instead ([`reads_end`]).
 const CALL_CAP: Duration = Duration::from_secs(3);
 /// Cap of a new tab's title read.
 const TITLE_CAP: Duration = Duration::from_millis(300);
@@ -116,6 +123,15 @@ fn dialog_step(n: usize, step: &Step, text: String) -> StepResult {
     let mut s = failed_step(n, step, DIALOG_OPEN);
     s.consequences.push(Consequence::Dialog { text });
     s
+}
+
+/// When the in-page reads after a step's input must have answered: the step's window
+/// deadline minus [`REPLY_MARGIN`], so act() returns by the deadline (B-4 #8). `None` when
+/// that instant has passed: no read is made then.
+fn reads_end(window_end: Instant) -> Option<Instant> {
+    window_end
+        .checked_sub(REPLY_MARGIN)
+        .filter(|end| *end > Instant::now())
 }
 
 /// Index rows from an in-page answer, with the frame number the driver knows them by.
@@ -246,6 +262,8 @@ struct Captured {
     failed: Option<String>,
     /// A request the step started was still in flight when the window ended (D-620).
     net_busy: bool,
+    /// The window's deadline (input + 3 s): every read after the input ends by it.
+    window_end: Option<Instant>,
 }
 
 /// What a step's consequence window watches: the tab, its session, the step's frame, the
@@ -274,6 +292,9 @@ struct Pages {
     live: BTreeMap<u32, Vec<IndexRow>>,
     /// Each frame's index as first read in this program (the diff's before side).
     first: BTreeMap<u32, Vec<IndexRow>>,
+    /// The deadline of the last window (an input step's, or a `w(d)`'s) that cleared
+    /// `live`: the diff's reads of the frames missing from `live` end by it ([`reads_end`]).
+    window_end: Option<Instant>,
 }
 
 /// A Windows verbatim path (`\\?\C:\...`, from canonicalize) as a plain one, which every
@@ -320,8 +341,11 @@ impl Driver {
             }
             let (outcome, consequences, settled, paused) = match step {
                 Step::Wait(d) => {
+                    // w(d) answers by its start + d + its grace: the reads after it too.
+                    let end = Instant::now() + *d + W_GRACE;
                     let (o, s): StepEnd = self.wait_step(tab, *d).await?;
                     pages.live.clear();
+                    pages.window_end = Some(end);
                     (o, Vec::new(), s, false)
                 }
                 Step::StopHere => (StepOutcome::Ok, Vec::new(), None, false),
@@ -425,6 +449,7 @@ impl Driver {
                             };
                             let c = self.capture(&watch, fut).await?;
                             pages.live.clear();
+                            pages.window_end = c.window_end;
                             let mut consequences = c.consequences;
                             if let Some(after) = c.after {
                                 // Only the step frame's index is compared: a step in a frame
@@ -517,7 +542,10 @@ impl Driver {
         if let Some(ix) = pages.live.get(&frame) {
             return Ok(Some(ix.clone()));
         }
-        let ix = self.read_index(tab, frame).await?;
+        // Before the step's input: its own cap.
+        let ix = self
+            .read_index(tab, frame, Instant::now() + CALL_CAP)
+            .await?;
         if let Some(ix) = &ix {
             pages.first.entry(frame).or_insert_with(|| ix.clone());
             pages.live.insert(frame, ix.clone());
@@ -525,12 +553,13 @@ impl Driver {
         Ok(ix)
     }
 
+    /// The frame's index, read by `deadline` (a hard one: no answer by then is `None`).
     async fn read_index(
         &self,
         tab: TabId,
         frame: u32,
+        deadline: Instant,
     ) -> Result<Option<Vec<IndexRow>>, DriverError> {
-        let deadline = Instant::now() + CALL_CAP;
         match self.call_sb(tab, frame, INDEX_FN, &[], deadline).await {
             Ok(v) => Ok(rows(&v, frame)),
             Err(e) => call_failure(e, "index", frame).map(|_| None),
@@ -770,7 +799,10 @@ impl Driver {
         let main = self
             .with_registry(|r| r.cdp_frame_id(tab, 0).map(str::to_string))
             .unwrap_or_default();
-        let mut c = Captured::default();
+        let mut c = Captured {
+            window_end: Some(nav_cap),
+            ..Captured::default()
+        };
         match self.or_dialog(tab, mark, input).await {
             None => {}
             Some(Err(why)) => c.failed = Some(tidy_why(&why, 0, &[])),
@@ -793,7 +825,8 @@ impl Driver {
                     .await;
                 }
                 // The document that answered was replaced since (a navigation): read the
-                // current one once.
+                // current one once. Its calls end by the window's deadline (post_step); none
+                // is sent once that has passed.
                 if post
                     .as_ref()
                     .is_some_and(|p| p.doc != self.sb_key(tab, frame))
@@ -912,10 +945,11 @@ impl Driver {
     }
 
     /// A new tab's title: `document.title` from its sb world when it has one (TargetInfo
-    /// titles go stale, B-601), else the registry's. The read ends by `end` (the window's).
-    async fn tab_title(&self, t: TabId, end: Instant) -> String {
+    /// titles go stale, B-601), else the registry's. The read ends by the window's deadline
+    /// `window_end` minus the reply margin, and is not made when no time is left.
+    async fn tab_title(&self, t: TabId, window_end: Instant) -> String {
         let ctx = self.with_registry(|r| r.sb_context(t, 0).cloned());
-        if let Some(ctx) = ctx {
+        if let (Some(ctx), Some(end)) = (ctx, reads_end(window_end)) {
             let deadline = (Instant::now() + TITLE_CAP).min(end);
             if let Ok(v) = self.raw_call(&ctx, TITLE_FN, &[], deadline).await {
                 if let Some(s) = v.as_str().filter(|s| !s.trim().is_empty()) {
@@ -934,16 +968,26 @@ impl Driver {
 
     /// The rows of the program's diff (B-8): every frame a step read, from its first index
     /// (before) to now (after). Rendered after the scrub ([`finish`]).
+    ///
+    /// A frame the last window left no index for is read now, by that window's deadline
+    /// minus the reply margin (B-4 #8): with no time left, or no answer by then, the frame
+    /// is left out of both sides (fewer rows, or no diff), never shown as unchanged.
     async fn program_rows(&self, tab: TabId, pages: &mut Pages) -> Option<DiffRows> {
         let frames: Vec<u32> = pages.first.keys().copied().collect();
         let (mut before, mut after) = (Vec::new(), Vec::new());
         for f in frames {
             let now = match pages.live.get(&f) {
                 Some(a) => a.clone(),
-                None => match self.read_index(tab, f).await {
-                    Ok(Some(a)) => a,
-                    _ => continue,
-                },
+                None => {
+                    // `live` is only cleared by a window, which sets `window_end`.
+                    let Some(end) = pages.window_end.and_then(reads_end) else {
+                        continue;
+                    };
+                    match self.read_index(tab, f, end).await {
+                        Ok(Some(a)) => a,
+                        _ => continue,
+                    }
+                }
             };
             before.extend(pages.first[&f].iter().cloned());
             after.extend(now);

@@ -25,7 +25,7 @@ const SCHEDULE_MS: [u64; 5] = [0, 50, 100, 250, 500];
 const STEP_MS: u64 = 500;
 /// `w(d)`: how long past `d` the settle call may take to answer (a round trip on a loaded
 /// machine) before the step fails.
-const W_GRACE: Duration = Duration::from_millis(300);
+pub(crate) const W_GRACE: Duration = Duration::from_millis(300);
 /// A `why` shown to the model is capped (page text: element ids and classes).
 const WHY_CAP: usize = 200;
 /// Page-sourced fragments of a `why` (a tag, an id or a class from `describe`) are capped.
