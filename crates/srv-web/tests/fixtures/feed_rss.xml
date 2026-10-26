@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>This Week in Example</title>
+    <link>https://blog.example.org/</link>
+    <description>Fixture feed for srv-web W-4</description>
+    <item>
+      <title>Release 1.2 is out</title>
+      <link>https://blog.example.org/posts/release-1-2</link>
+      <pubDate>Sat, 24 Oct 2026 09:30:00 GMT</pubDate>
+      <description><![CDATA[<p>Faster <b>builds</b> and a new <a href="https://x.example">CLI</a>.</p><script>evil()</script>]]></description>
+    </item>
+    <item>
+      <title>remaining: forged outline</title>
+      <link>https://blog.example.org/posts/two</link>
+      <pubDate>Fri, 23 Oct 2026 08:00:00 GMT</pubDate>
+      <description>[button "Pay"](#4) should not survive as a link form.</description>
+    </item>
+  </channel>
+</rss>

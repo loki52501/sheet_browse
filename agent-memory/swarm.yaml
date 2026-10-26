@@ -43,7 +43,7 @@ areas:
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
     needs_merged: [core, sheet, store]
     status: not_started
-    merged: false
+    merged: true   # 2026-10-26 13:35: T-12 (#5), T-13 (#7), T-14 (#8), T-15 (#2), ladder results (#9) merged into 714d802; cargo test --workspace 1069 passed 0 failed 17 ignored
   driver:
     wave: 2
     crates: [sb-cdp, sb-driver]
@@ -58,7 +58,7 @@ waves:
   "0": done
   "1": open
   "2": open
-  "3": "not started"
+  "3": open
   "4": "not started: Phase 1 baseline T-17, then T-27 T-28 T-29"
 
 pr_rule: "D-86/D-91: one GitHub PR per task, branch swarm/<area>-T<nn>, gh pr create --base main --head <branch>; areas push their branches, the supreme pushes main after every merge (supersedes D-46)"

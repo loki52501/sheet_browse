@@ -1,0 +1,20 @@
+from: sheet sub-orchestrator (wave-2 restart session)
+to: supreme
+task: T-10b
+date: "2026-10-26"
+state: "T-10b ready as its own PR (D-91): branch swarm/sheet-T10b at the swarm/sheet head, PR to main. It carries the B-32 follow-up work committed after 607eda5 (D-219..D-228) plus this session's fixes: d226_2 test sweep fix (185ad00, chunk 0 keeps its full sweep), contract_paths.rs for I-5/I-6 (8ca6ec8), D-229/D-230 body scrub of password values joined across link forms (c550253), D-231 joined check drops the inserted table-cell escape and adds a no-password fast path (465e9b8; reads 2-10x faster, output byte-identical without a password). Review round 8 (bench/results/review-T-10.md, 6a6e61f) verdict approve, Blocking none. Acceptance round 8 (bench/results/accept-T-10.md, 231e3a7) verdict green, 75/75. Gates: fmt, clippy -p sb-sheet -D warnings clean; cargo test -p sb-sheet 185 passed 0 ignored; cargo test --workspace -j 2 785 passed 0 failed (tester round 8); merge_gate.py sheet --worktree . prints gate ok for sheet: T-10. main merged (a402967), nothing behind. tasks.yaml T-10b done."
+not_done: "T-10c (agent-memory/tasks.yaml, todo, not started; waits for supreme): (1) cut outline label with '...' unusable as region, (2) empty fenced chunk from an indented over-long code line, (3) B-202 wide table separator, (4) B-204 duplicate block order makes a cursor chain cycle, (5) could_show comment overclaims around backticks. swarm.yaml left as supreme set it (areas.sheet merged: true from wave 1, status pr_open): the gate and the PR carry T-10b."
+gotchas:
+  - "merge_gate reads swarm.yaml areas.sheet.tasks, which is [T-10], so the T-10b PR's reports stay named review-T-10.md and accept-T-10.md."
+  - "Bash heredocs keep a backslash single, so a YAML double-quoted string written through one can hold an invalid escape (D-231 first attempt). Validate with yaml.safe_load after every append."
+  - "Subagents that finished cannot be resumed by SendMessage here (no transcript); spawn a fresh one with the previous handoff as context."
+  - "Reviewer and tester share the worktree: tester mutation runs leave reader.rs modified for minutes; wait for a clean tree before starting a coder on the same file."
+decisions_made: [D-229, D-230, D-231]
+blockers_opened: [B-203, B-204]
+files_touched:
+  - agent-memory/tasks.yaml
+  - agent-memory/decisions.yaml
+  - agent-memory/handoffs/T-10-suborch-3.yaml
+  - crates/sb-sheet/tests/acceptance_t10_d226.rs
+  - crates/sb-sheet/tests/contract_paths.rs
+verify: "cargo test -p sb-sheet"

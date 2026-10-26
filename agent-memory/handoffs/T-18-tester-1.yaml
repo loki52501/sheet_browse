@@ -1,0 +1,19 @@
+from: tester
+to: next
+task: T-18
+date: "2026-10-26"
+state: "Acceptance round 1 green (bench/results/accept-T-18.md, 10 rows, all pass). cargo test -j 2 -p sb-cdp -p sb-driver passes on the D-34 build (chromium-1248, 156.0.8078.4) with no skipped real-browser test; fmt and clippy --tests -D warnings clean. 15 single-line mutations across client.rs, registry.rs, lib.rs, launch.rs (rows 2 to 7) each turned the tests red; every file was restored with git checkout and git status showed no implementation change. Added crates/sb-cdp/tests/accept_t18.rs (5 mock-transport tests via the public API) and crates/sb-driver/tests/accept_t18.rs (1 real-Chromium test: pinned version, per-session routing, closeTarget closes the session channel, drop leaves no pid and no profiles/bench-*)."
+not_done: "Nothing for T-18 acceptance. Optional: cap s1.recv() in client::tests::events_route_to_their_session_and_to_all so a routing regression fails rather than hangs."
+gotchas:
+  - "Uncapped broadcast recv().await in a test hangs the whole test binary when routing breaks; the mutated test process had to be killed by PID. Cap every event wait in tests."
+  - "cargo test stops at the first failing test binary; use --no-fail-fast when running mutations across --lib and --test targets."
+  - "merge_gate.py check_accept treats every line starting with | as one table; a second markdown table in accept-*.md breaks the gate. Put extra detail in lists."
+  - "Another agent ran cargo test --workspace in this tree during the mutation window; results it recorded then may reflect mutated sources."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-cdp/tests/accept_t18.rs
+  - crates/sb-driver/tests/accept_t18.rs
+  - bench/results/accept-T-18.md
+  - agent-memory/handoffs/T-18-tester-1.yaml
+verify: "cargo test -j 2 -p sb-cdp -p sb-driver"

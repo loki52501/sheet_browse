@@ -1,0 +1,22 @@
+from: rust-coder-b32-2
+to: next
+task: T-10
+date: "2026-10-25"
+state: "B-32 round 2 done in crates/sb-sheet per D-223..D-225, one commit on swarm/sheet. D-223: code blocks keep `[` `]`; consecutive plain spans are joined (a span that renders to nothing does not split the run), scrubbed, then `](` becomes `)(` (reader::break_link_shape); real link forms in code are kept; the longer-fence rule is unchanged; read_article.rs expects `#[tokio::main]` verbatim again; reader::escaped_spellings gains the code spelling (32 combinations). D-224: test region_switch_keeps_the_max_tokens_budget asserts a region switch keeps the cursor's used (body <= max_tokens - used, truncated, no cursor). D-225: a body piece outside code whose line starts with a reader line (`remaining:`, `truncated:`, `note:`, `chunk <digit>`, `cursor not understood`, `page changed since the cursor`, `region \"`, `(no readable text)`, `(nothing left to read)`; ASCII case-insensitive) gets a leading backslash, at unit starts and at continuation pieces; the backslash counts in the split budget. Headings, list items, quotes and table rows start with their own prefix and are untouched. link_text moved to text.rs (pub(crate)); sheet::clean_name = link_text + clean is used for the skeleton title, form headings, submit names, warning names (CHALLENGE/OVERLAY/dialog rows), the meta dialog text, the rows' heading fallback (replacing its manual swap, no double pass), sheet-line names, text values and options, and the unknown-region heading list. Gates: cargo fmt --all -- --check, cargo clippy -p sb-sheet --all-targets -D warnings, cargo test -p sb-sheet (lib 73, acceptance_t10 20, find_register 8, read_article 11, skeleton_sheet 8), cargo test --workspace (36 binaries ok). 12 mutations each turned a new test red, then restored."
+not_done: "Tester reruns the T-10 acceptance ladder and refreshes bench/results/accept-T-10.md; reviewer re-checks against B-32 and D-223..D-225. Open edge from round 1 (P4, D-222): with an empty chunk the reader always makes progress, so when max_tokens leaves fewer chars than a unit's fixed overhead (code fence lines) or a table header's separator suffix, the piece can exceed the remainder by that overhead; fix would return an empty truncated body instead. Supreme to rule on the proposal below."
+gotchas:
+  - "Python heredocs through Git Bash mangle `\\n` and `\\|` inside replacement strings; use the Edit tool for Rust literals (round 1 said the same)."
+  - "A sealed frame with no host outside it (host row with child_frame == its own frame, flagged opaque) is the simple way to get a span that renders to nothing (Linked::Sealed(None)) in a test."
+  - "The skeleton URL line still uses plain clean (D-225 does not list it); URLs can carry `[` `]` legitimately (IPv6 hosts), see proposal P5."
+decisions_made: []
+proposed_decisions:
+  - "P5 (extends D-225): the skeleton URL line can carry a `[a](#3)` look-alike (WHATWG keeps `[` `]` literal in paths); apply break_link_shape (`](` -> `)(`) to it, which keeps IPv6 hosts readable. Also a page title starting with `! ` or `landmarks:` can pose as a skeleton line; a leading backslash like D-225 would close it."
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/src/reader.rs
+  - crates/sb-sheet/src/sheet.rs
+  - crates/sb-sheet/src/skeleton.rs
+  - crates/sb-sheet/src/text.rs
+  - crates/sb-sheet/tests/read_article.rs
+  - agent-memory/handoffs/T-10-rust-coder-b32-2.yaml
+verify: "cargo test -p sb-sheet"

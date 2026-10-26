@@ -1,0 +1,22 @@
+from: servers/suborch
+to: supreme
+task: T-15
+date: "2026-10-26"
+state: "srv-cli C-1..C-4 done on swarm/servers-T15. review-T-15 round 2 approve (Blocking none); its two should-fix items (gh -R/--repo hosts, api.github.com gate domain) fixed by the sub-orchestrator in ce4a763. accept-T-15 green, 14 rows. cargo test -p srv-cli 51+ pass; cargo test --workspace -j 2: 755 passed 0 failed (before ce4a763, which touches srv-cli only)."
+not_done: "T-15b: Phase 1 ladder rungs 3, 5, 9 over MCP (they need srv-files T-14); loopback http honours system proxy; gh alias set mapping to auth (asks twice, not refused); strict letter matching false positives; HTML labelled text/plain still shown by http sinks."
+gotchas:
+  - "Per-task worktrees live under wt/servers/.wt/T<nn>, not wt/servers-T<nn> (B-559): guard_write.py refuses writes outside the session's own worktree."
+  - "Shared CARGO_TARGET_DIR=F:/sb-swarm/target-servers; use -j 2 or rustc/link run out of memory (os error 1455, LNK1102)."
+  - "SB_VAULT_CANARY without the substring sbcanary fails core-pg accept_t03_r3 r3_rule2_constraint_errors_carry_no_bound_canary (a format assertion, not a leak); core area."
+decisions_made: [D-540, D-541, D-542]
+blockers_opened: [B-540, B-559]
+files_touched:
+  - crates/srv-cli/
+  - config/cli-allow.toml
+  - config/flags.toml
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/tasks.yaml
+  - bench/results/review-T-15.md
+  - bench/results/accept-T-15.md
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-cli"
