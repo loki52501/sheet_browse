@@ -1,72 +1,123 @@
-# Review T-12 round 2 (srv-web, docs/04 W-1..W-7)
+# Review T-12 closing round (srv-web, docs/04 W-1..W-7)
 
-Round 1 (579f466, on dbacdbb): request changes. There was 1 Blocking item (rule 5: HTML under a non-HTML or missing content type) and 6 should-fix items.
+## History
 
-Round 2 covers b9ccca5 (fixes, D-505..D-507) and 5781f0d (handoff). Checks run:
+- **Round 1** (579f466, on dbacdbb): request changes. There was 1 Blocking item (rule 5: HTML under a non-HTML or missing content type reached the model) and 6 should-fix items.
+- **Round 2** (99ed4ea, on b9ccca5): request changes. Rule 5 was still open: the sniffer missed UTF-16 documents, unclosed leading comments, text before the doctype, odd doctype spacing and unlisted fragment tags.
+  - The round-2 should-fix items were:
+    - the private-address guard covered redirects only and had a check-then-connect race;
+    - `*.localhost` counted as loopback;
+    - D-506 left stale registrations;
+    - iCal HTML was not stripped;
+    - `SITE_OUTPUT_MAX_CHARS` had no test;
+    - redirects and the body each got their own 15 s.
+
+## Closing round: b2d08fb (D-508)
+
+Checks run:
 - `cargo fmt --check -p srv-web`: clean.
-- `cargo clippy -p srv-web --all-targets -D warnings`: clean.
-- `cargo test -p srv-web`: lib 15, accept_t12 5 (+1 ignored), accept_w 6 (+1), contract_paths 1, round2_t12 7, web_tools 13. All green.
-- `git stash list`: empty, so no T-12 entry is left.
-- Probes ran in a scratch copy of 5781f0d (a `git archive` export with one extra test file), never in this worktree. A second scratch probe copied `looks_like_html` verbatim.
+- `cargo clippy -p srv-web --all-targets -- -D warnings`: clean.
+- `cargo test -p srv-web`: all green. lib 17, accept_t12 5 (+1 ignored), accept_w 6 (+1), contract_paths 1, live 0 (+3), round2_t12 7, round3_t12 10, web_tools 13.
+
+Where the probes ran:
+- In a `git archive b2d08fb` export at `runs/review-t12-r3/` under the servers root. That folder is git-ignored and outside this worktree; the write hook refuses paths outside the project root.
+- One extra file there: `crates/srv-web/tests/probe_r3.rs`.
+- Output: `runs/review-t12-r3/probe_out*.txt`.
+
+The round-2 bypass list is closed end to end. Every case returns no markup through fetch (html, plain, none) and api (plain, none, xml): UTF-16 LE/BE, unclosed and empty comments, text/XSSI/JSON/ZWSP/NUL prefixes, doctype spacing, and li/tr/em/pre/custom fragments. The fix is the right shape: walk everything, sniff nothing. Two new paths still carry raw markup, listed below.
 
 ## Blocking
 
-- **Rule 5 is still open: the sniffer misses full HTML documents (round-1 item only partly closed).** End to end, both `fetch` (text/plain) and `api` (text/plain, no content type, application/xml) returned `<!DOCTYPE html>...<script>stealCookies()</script>` verbatim in these cases:
-  - **UTF-16 HTML.** The sniff reads the raw bytes, which start `FF FE 3C 00` (`http.rs:287`). The text the model gets comes from `http::decode` (`http.rs:412`), which honours the BOM, so the decoded text is plain HTML. The sinks are `fetch.rs:159-160` and `api.rs:375-382`.
-  - **A leading comment that does not close inside the 8 KiB window**, or the empty comment `<!-->`. Both make the sniffer return `false` (`http.rs:287`, `http.rs:300`), so it fails open.
-  - **Any non-tag prefix before `<!doctype html>`** (`http.rs:306`). Examples: a line of text, the XSSI guard `)]}'`, `{"ok":1}`, a Jinja `{% %}` line, U+200B, NUL. The same happens with `<!DOCTYPE  html>` (two spaces) and with `<!doctype\nhtml>`.
-  - **Fragments whose first tag is not in `HTML_START_TAGS`** (`http.rs:276`), such as `<li>`, `<tr>`, `<td>`, `<em>`, `<pre>` or a custom element.
-
-  The round-2 tests (`round2_t12.rs:84`) only cover documents that start with a doctype or a listed tag.
-
-  Fix:
-  - Sniff the decoded text, not the raw bytes.
-  - Treat an unclosed leading comment as HTML.
-  - In the two text sinks (fetch's `text/plain` branch and api's text fallback), look for `<!doctype html`, `<html`, `<head`, `<body`, `<script` or `<iframe` anywhere in the decoded window, not only at the start.
-  - Add a test for each of the bypasses above.
+- **Rule 5: `<select>` option labels emit raw-text element content, markup included** (`crates/srv-web/src/html.rs:818`).
+  - `o.text()` collects every descendant text node. In select parsing, `<script>` and `<template>` are kept inside `<option>`, and `<style>` is too (probe).
+  - So script, style and template source reaches the sheet, together with literal markup. Probe, `fetch(mode=sheet)` on text/html (also text/plain and no content type):
+    `<option>A<script><!DOCTYPE html><html><body><iframe src=x></script></option><option><style><head><meta></style>B</option>`
+    gives
+    `#1 select "Pick" "A<!DOCTYPE html><html><body><iframe s..." [A<!DOCTYPE html><html><body..., <head><meta>B]`
+  - With `{S}` = `<script>stealCookies()</script>`, `<option>A{S}</option>` gives `[AstealCookies(), ...]`.
+  - This is the same class as the round-2 item: raw-text content the parser does not read as markup, which D-508 says is skipped. It is bounded only by `OPTION_MAX` (80) × `OPTIONS_MAX` (25).
+  - Fix:
+    - Build the label with `collect_text`, which honours `SKIP_TAGS`; `inner_text(o, false)` does this.
+    - Add a `raw_text_elements_never_carry_markup_to_the_model` case for script, style and template inside `<option>`.
+- **Rule 5: the iCal `URL` property reaches the model verbatim and uncapped** (`crates/srv-web/src/feed.rs:278`, `feed.rs:314`).
+  - `parse_url(&self.url).is_ok()` only validates the value; the original string is returned. Probe: `URL:https://f.test/d/<script>stealCookies()</script><!DOCTYPE html><html>` gives `"url": "https://f.test/d/<script>stealCookies()</script><!DOCTYPE html><html>"` in the feed output.
+  - A `.ics` can therefore carry a whole document, minus newlines, in one item's `url`. No parser touches it and there is no cap.
+  - Fix:
+    - Emit the parsed `Url`'s `to_string()`, which percent-encodes `<` and `>`.
+    - Cap it, or drop URLs longer than about 2,048 chars.
+    - Apply the same cap to RSS/Atom/JSON Feed links (`feed.rs:211`). feed-rs already percent-encodes those, but one probe item's `url` was over 9,000 chars.
+    - Add a test.
 
 ## Should fix
 
-- **The private-address guard covers redirects only, and it has a check-then-connect race.**
-  - `host_is_private` resolves the name with `lookup_host` (`http.rs:246`), then reqwest resolves it again when it connects. A TTL-0 rebinding name passes the check and then connects to 127.0.0.1.
-  - Two cases are not covered at all, because neither involves a redirect:
-    - a public name whose A record is 127.0.0.1;
-    - `fetch(url="#id")` on a link to `http://127.0.0.1:5433/`.
-  - The guard also adds one DNS lookup per hop.
-  - Better: give the page client a `ClientBuilder::dns_resolver` that drops loopback, private and link-local answers unless the URL as written is such a literal or `localhost`. That closes the race and needs no extra round trip.
-  - `private_ip` (`http.rs:190-193`) does not cover:
-    - 100.64.0.0/10 (CGNAT; Tailscale uses it for the user's own machines);
-    - 198.18.0.0/15;
-    - the IPv4-compatible form `::7f00:1`.
-  - IPv4-mapped addresses, and decimal, octal and hex spellings (`url` turns them into `127.0.0.1`), plus `0.0.0.0` and `0/8`, are handled correctly. I checked these.
-- **`is_loopback` accepts any `*.localhost` name** (`http.rs:263`, used at `api.rs:184`) for sending `@vault` headers over plain http. On this Windows host, getaddrinfo does not map `foo.localhost` to loopback: it goes to DNS, and NXDOMAIN-hijacking or search-suffix resolvers can answer with a public address. Accept only loopback IP literals and exact `localhost`, or resolve the name and require every address to be loopback.
-- **D-506's fail-closed path leaves stale registrations.** When the health read fails, `site.rs:89` returns before line 100, so tools registered by an earlier fetch stay in the registry and stay runnable. The fail-closed path also has no test.
-- **iCal `DESCRIPTION` does not go through `html_to_text`** (`feed.rs:331-348`). Google and Outlook `.ics` descriptions carry `<br>`, `<a href>` and `<b>`, and these reach the model in item summaries (capped at `SUMMARY_MAX`). RSS and Atom summaries are stripped.
-- **`SITE_OUTPUT_MAX_CHARS` (`site.rs:41`) still has no test** (carried over from round 1). The 5 MB cap and the 15 s timeout are now covered by `accept_t12.rs:91` and `accept_t12.rs:190`. The stalled-body case maps to "did not answer in time" and passes.
-- **The redirect chain plus the body can exceed W-2's 15 s.** `get_following`'s timeout (`http.rs:184`) bounds only the hops up to the response headers. The final body read then gets reqwest's own fresh 15 s. Bound the hops and the body read with one deadline.
+- **api text/plain checks for tags before it decodes JSON** (`crates/srv-web/src/api.rs:394-401`).
+  - A tag-free text/plain body that is a JSON string with `<` escapes is shown as `"<!DOCTYPE html><script>stealCookies()</script>"` (probe). The has_tag check passes because there is no literal `<` until the JSON is decoded.
+  - Fix: run `has_tag` on what will be shown, or show text/plain only as text.
+  - Related: a body whose top-level JSON value is a string holding markup (application/json, or no content type) is a document, not structured data. Treat it as not shown.
+  - HTML inside object fields (`body_html`) stays accepted as data, pending supreme on B-500. I agree with that carve-out.
+- **search passes title and snippet through `escape::name` only, and `url` verbatim** (`crates/srv-web/src/search.rs:71-73`).
+  - `<span class="highlight">` or any other markup in SearXNG's `title`/`content` reaches the model (`parse_answer` probe).
+  - I could not check whether current SearXNG JSON carries highlight spans, because no instance was running here.
+  - Fix:
+    - Run `html::fragment_text` on title and content.
+    - Emit the normalized, capped `Url`.
+- **text/plain loses content in the walk** (`crates/srv-web/src/html.rs:209`).
+  - `Vec<String>` becomes `Vec`, `#include <stdio.h>` becomes `#include`, `a<b && c>d` becomes `ad`, and `AT&amp;T` becomes `AT&T` (probe, `fetch` on text/plain).
+  - raw.githubusercontent.com serves source as text/plain, so the model silently gets wrong code. Efficiency outranks tokens.
+  - At minimum, add a line saying tag-like runs were removed from a text/plain body. Then the model knows to use api or a raw view instead of trusting the text.
+- **Textarea text bypasses `no_markup` outside the value path.**
+  - The value goes through `no_markup` (`html.rs:800`). The same text reaches names unfiltered:
+    - through `aria-labelledby` pointing at a textarea (`html.rs:938-946` via `collect_text`);
+    - through a link that contains a textarea (`html.rs:900`).
+  - Probes:
+    - `#2 input "<!DOCTYPE html><script>stealCookies()</script>"`
+    - `#1 link "Go <!DOCTYPE html><script>stealCookies()</script>"`
+  - This is text a browser displays, so I do not count it as a rule-5 break. It does contradict D-508's own textarea rule. Fix: apply `no_markup` to textarea text in `collect_text`.
+- **The page client honours the system proxy** (`crates/srv-web/src/http.rs:61-70`). There is no `.no_proxy()`, and reqwest reads `HTTP(S)_PROXY`. Behind a proxy, DNS happens at the proxy, so `PublicOnly` never runs and the private-address guard is void. Either set `.no_proxy()` on `page`, or document that the guard does not apply when a proxy is set.
+- **The Content-Type header is echoed in fetch, api and feed lines** (`escape::name(mime, 80)`). Probe: `HTTP 200 text/<script>stealcookies()</script>, 8 bytes, not shown`. It is small and header-only. Replace a type with `has_tag` by "unusual content type".
 
 ## Notes
 
-- Round-1 should-fix items that are closed:
-  - **Vault cleartext and redirect origin.** `api_vault` keeps scheme, host and port; the non-vault client never downgrades https to http; `@vault` is refused on plain http to non-loopback hosts. Tested at `round2_t12.rs:158`.
-  - **Challenge stops in feed and api.** `fetch::challenge_stop` runs before status and content checks. Tested at `round2_t12.rs:516`.
-  - **Tool health honoured on registration**, and a miss disables the tool for the process (D-506). Tested at `round2_t12.rs:584`.
-  - **D-505** (a partial fingerprint runs with a note) is recorded.
-  - **Prose cannot forge `# ` or `- ` line starts.**
-  - **JSON strings cannot spell `[x](#n)`.**
-- **Pinning (D-507) is sound under `core::mcp::dispatch`.**
-  - `ctx` is a local of the pinned dispatch future, so its address is stable from classify to call (`mcp.rs:1039`, `1056`, `1155`). `classify` always runs before `call`, and no other caller of `handler.call` exists in the workspace.
-  - A pin left by a gate Stop, a skip or an Ask timeout cannot be taken by a later call that reuses the address. That call's own classify replaces the slot by key (`pin.rs:47`): fetch does so whenever `#id` resolves, and site tools always do.
-  - Pins are bounded at 256 per handler (`pin.rs:21`). Eviction only causes a fail-closed "call again".
-  - One residual: a stale site-tool pin holds an `Arc<Page>` until it is evicted, and a parsed page can be up to 5 MB. This is a memory concern only.
-  - Concurrency is safe because every access goes through one mutex. Both tests (`round2_t12.rs:264`, `:360`) really interleave a second fetch while the first card is held.
-- Rule 2 still holds: vault values are resolved only into a sensitive `HeaderValue`, and errors name only the host. Rule 3: no solving. Rule 4: every side effect goes through `dispatch`. Rule 6: no sleeps in `src/`. Rule 1: no keys and no new fixtures. Every `unwrap` in `src/` is in `#[cfg(test)]`. The sniffer's slicing stays on ASCII boundaries.
-- Spec ids: the commit cites W-2..W-7, D-505 and D-506, and its body cites D-507. Every listed behaviour is in the diff. `interfaces.yaml` is untouched.
-- api and page.api JSON can still carry HTML inside string values (e.g. GitHub `body_html`). This is data, not a page. Leave it for supreme together with B-500.
-- B-500 and B-501 remain supreme's questions and do not block this review.
+- **Judged not rule 5.** These are what a browser renders as text, or exposes as an accessible name (injected.js returns the same). They are capped, and they are not unparsed markup:
+  - entity-encoded tags (`&lt;script&gt;` shown as `<script>` text);
+  - HTML-body CDATA (a bogus comment, so it shows as `stealCookies()]]>`);
+  - `<\0script>` in fetch (the parser drops the NUL; a browser shows `<script>...` as text);
+  - double-encoded feed titles;
+  - attribute values containing `<` (aria-label, title, alt, placeholder, value).
+- **api text/plain probes behave correctly.**
+  - These are not markup to any HTML tokenizer and are shown as text, which is correct: `<\0script>`, full-width `＜script＞`, `< script>`, `<\tscript>`, UTF-7 `+ADw-script+AD4-`. `has_tag` matches the tokenizer's tag-open rule exactly: `<` followed by an ASCII letter, `!`, `/` or `?`.
+  - `</\0script>` trips `</`, so it is not shown (fails closed).
+  - UTF-16 declared only by a charset label (no BOM) is decoded first and then not shown.
+- **Hostile documents leak nothing in read or sheet mode** (html, plain, none): `<plaintext>`, `<xmp>`, `<noscript>`, `<template>`, `<svg><script>`, `<foreignObject>`, `<math><mtext><script>`, `<style>` in the body, an unclosed `<script>`, a bare `<script`, `<noframes>`, `iframe srcdoc`.
+- **Feeds are clean apart from the URL items above.**
+  - Item fields are stripped:
+    - RSS CDATA HTML in title and description;
+    - Atom `type="html"` and `type="xhtml"` title and content;
+    - JSON Feed `content_html`.
+  - A non-feed body under `application/rss+xml` is refused and not echoed.
+  - Error messages quote only the host, the status and the escaped type, never the body.
+- **Question 2: b2d08fb introduces no hard-rule problem.**
+  - **Vault:** `PublicOnly` sees only host names, and its error maps to fixed sentences. `api_vault` is unchanged (same-origin redirects only). Cleartext `@vault` goes only to a loopback literal or exact `localhost` (`is_loopback`).
+  - **Rule 4:** search on `page_local` with `allow_private=true` is acceptable.
+    - The base URL is operator config (`SB_SEARXNG_URL`, D-31), and the model controls only `q`.
+    - The call still goes through `dispatch` as `Class::Read`.
+  - **DNS overrides:** `cfg.resolve` overrides skip `PublicOnly`, but `Config::from_env` never sets them, so they exist only in tests.
+- **Round-2 should-fix items that are closed:**
+  - `PublicOnly` filters at connect, so there is no rebinding window. A name with mixed public and private answers keeps only the public ones.
+  - `fetch("#id")` inherits private access only from a page whose URL was written as private. Tested at `round3_t12.rs:449`.
+  - CGNAT, 198.18/15 and IPv4-compatible forms are private.
+  - `is_loopback` accepts exact `localhost` only.
+  - D-506 health-read failure removes earlier registrations.
+  - One deadline covers the redirects and the body (`round3_t12.rs:581`).
+  - The site output cap is tested.
+  - iCal text fields are stripped.
+- NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) addresses that embed private IPv4 are not in `private_ip`. This is minor.
+- **Spec ids:** the title cites W-2..W-4 and D-508. The body also covers W-1 (search client) and W-7/D-506 (site) without naming them. `interfaces.yaml` is untouched. Rules 1, 3 and 6 still hold: no keys or fixtures, no solving, no sleeps in `src/`.
 
 ## Verdict
 
-Most of the round-1 fixes are good. The rule-5 Blocking item is not closed: deterministic inputs, including UTF-16 and comment-prefixed full documents, still get raw HTML and `<script>` to the model through `fetch` and `api`, and there is no test for them.
+The round-2 bypasses are closed. The two new Blocking items both break rule 5 and are small to fix:
+- `<option>` labels emit script, style and template source, markup included;
+- the iCal `URL` property is echoed verbatim and uncapped.
 
 Verdict: request changes
