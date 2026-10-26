@@ -1,0 +1,14 @@
+from: rust-coder
+to: tester
+task: T-05c
+date: "2026-10-25"
+state: "Round 2 (review-T-05c should-fix 1-3) in b17bb9d. 1: VaultEditor::save checks existence and decrypts under <vault file>.lock; a file deleted while save waits for the lock is Io(NotFound) when the editor holds entries (an empty editor on a missing file still returns Ok before the lock, creating no lock file). Test editor_save_reports_a_file_deleted_while_it_waits_for_the_lock uses a cfg(test) thread-local hook (tests::before_save_lock) that save runs just before lock_exclusive; the hook deletes the file, so the race is deterministic. Proven red by restoring the round-1 shape (try_exists before the lock, read_entries under it). 2: editor_remove_fails_closed_on_a_file_it_cannot_read: garbage bytes and a file encrypted to another key give Decrypt, a missing identity file gives Key; each leaves the vault file byte for byte, no key is generated, editor names unchanged. Proven red twice: decrypt failure falling back to the editor's entries (fails at the Decrypt assertion), and generating an identity when missing (fails at the Key assertion). 3: contract_paths.rs pins Vault::open, Vault::scrub, Vault::install_global as typed fn pointers and resolve_into through a never-called fn taking &Resolved; header comment now says it covers the rust paths and the methods I-4's name leads with. Passing with a random SB_VAULT_CANARY: --lib vault:: 33/33, --test contract_paths 4/4, --test vault_accept_t05c 7/7; clippy -p harness-core --all-targets -D warnings clean; fmt --check clean."
+not_done: "Round-1 not_done items still stand: full harness-core + harness run (memory), tester acceptance, supreme folding B-196 into I-4 notes."
+gotchas:
+  - "The save race hook is #[cfg(test)] only and thread-local, so parallel tests do not see each other's hooks."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/src/vault.rs
+  - crates/core/tests/contract_paths.rs
+verify: "SB_VAULT_CANARY=<random> cargo test -j 1 -p harness-core --lib vault::"
