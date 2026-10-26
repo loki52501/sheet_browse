@@ -929,9 +929,10 @@ async fn reforge_keeps_the_archive_when_the_rollback_fails() {
     drop(dir);
 }
 
-/// D-312: a re-forge whose new @name is not the name it was called with is refused and
-/// writes nothing, even when the old file (hand-edited) already carries that other @name,
-/// so check_repair's old-vs-new rename check cannot catch it.
+/// D-312: a re-forge whose new @name is not the name it was called with is refused, even
+/// when the old file (hand-edited) already carries that other @name, so check_repair's
+/// old-vs-new rename check cannot catch it. No file or ledger write; the reason is logged to
+/// `tools.health.why` like every check_repair refusal (T-9).
 #[tokio::test]
 async fn reforge_refuses_a_new_name_that_is_not_the_called_name() {
     let (dir, ts) = luma();
@@ -950,9 +951,228 @@ async fn reforge_refuses_a_new_name_that_is_not_the_called_name() {
     );
     assert_eq!(fs::read_to_string(&path).unwrap(), other);
     assert!(!dir.path().join("_archive").exists());
+    let logged = store.row("luma.com", "register").unwrap();
+    let why = logged.why.clone().unwrap_or_default();
+    assert!(
+        why.starts_with("rejected: ") && why.contains("signup") && why.contains("D-312"),
+        "{why}"
+    );
     assert_eq!(
-        store.row("luma.com", "register").unwrap(),
-        row(ToolStatus::NeedsRepair, 1)
+        ToolHealth {
+            why: None,
+            ..logged
+        },
+        row(ToolStatus::NeedsRepair, 1),
+        "status and counters untouched"
     );
     assert_eq!(store.ledger_len(), 0);
+}
+
+// ---------------------------------------------------------------- D-78 batch review
+
+/// A stale ephemeral row (unused 20 days) for `name` in `domain`, with its tool file.
+fn stale(root: &Path, domain: &str, name: &str, now: Ts) -> ToolHealth {
+    put(
+        root,
+        &format!("{domain}/{name}.js"),
+        &REGISTER.replace("@name register", &format!("@name {name}")),
+    );
+    ToolHealth {
+        domain: domain.into(),
+        name: name.into(),
+        last_ok: Some(now - Duration::days(20)),
+        ..row(ToolStatus::Ephemeral, 1)
+    }
+}
+
+fn set_readonly(p: &Path, ro: bool) {
+    let mut perm = fs::metadata(p).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perm.set_readonly(ro);
+    fs::set_permissions(p, perm).unwrap();
+}
+
+/// Review should-fix 1 (b): an archive that fails for one tool is a ledger failure, not the
+/// end of the sweep. Later tools in the same domain, later domains and the 90-day deletes are
+/// still swept, and the next sweep archives the tools that failed.
+#[tokio::test]
+async fn sweep_records_a_failed_archive_and_goes_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let ts = ToolStore::new(root);
+    let store = Store::default();
+    let now = Utc::now();
+    // Rows in this order: the failing ones come first in their domain.
+    store.put(stale(root, "luma.com", "aaa", now));
+    put(root, "luma.com/bbb.js", REGISTER);
+    store.put(ToolHealth {
+        name: "bbb".into(),
+        ..row(ToolStatus::Retired, 2)
+    });
+    store.put(stale(root, "luma.com", "register", now));
+    store.put(stale(root, "zeta.com", "list", now));
+    put(root, "_archive/luma.com/gone.1.js", "old");
+    let gone = root.join("_archive/luma.com/gone.1.js");
+    fs::File::options()
+        .write(true)
+        .open(&gone)
+        .unwrap()
+        .set_modified((now - Duration::days(100)).into())
+        .unwrap();
+
+    let fails = |p: &Path| {
+        let f = p.file_name().unwrap().to_string_lossy();
+        if f == "aaa.js" || f == "bbb.js" {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "set mtime refused (test)",
+            ))
+        } else {
+            crate::archive::touch(p)
+        }
+    };
+    let done = ts.sweep_with(&store, now, &|_| 0, &fails).await;
+    let done = done.unwrap_or_else(|e| panic!("one failed archive stopped the sweep: {e}"));
+    let retired: Vec<_> = done
+        .iter()
+        .filter_map(|a| match a {
+            SweepAction::Retired { domain, name, .. } => Some(format!("{domain}/{name}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retired, ["luma.com/register", "zeta.com/list"], "{done:?}");
+    assert!(
+        done.iter()
+            .any(|a| matches!(a, SweepAction::Deleted { path, .. } if *path == gone)),
+        "{done:?}"
+    );
+    assert!(!gone.exists());
+    assert_eq!(done.len(), 3, "{done:?}");
+
+    // The failures: one ok:false event each, files untouched in place, aaa's row retired.
+    let failed: Vec<(String, String)> = store
+        .ledger
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| !e.ok)
+        .map(|e| (e.tool.clone(), e.result_summary.clone()))
+        .collect();
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    assert_eq!(failed[0].0, "tools.retire");
+    assert!(failed[0].1.contains("luma.com/aaa.js"), "{failed:?}");
+    assert!(failed[0].1.contains("set mtime refused"), "{failed:?}");
+    assert_eq!(failed[1].0, "tools.archive");
+    assert!(failed[1].1.contains("luma.com/bbb.js"), "{failed:?}");
+    assert!(root.join("luma.com/aaa.js").is_file());
+    assert!(root.join("luma.com/bbb.js").is_file());
+    assert_eq!(
+        store.row("luma.com", "aaa").unwrap().status,
+        ToolStatus::Retired
+    );
+
+    // Next sweep, the step works: both are archived.
+    let done = ts.sweep(&store, now, &|_| 0).await.unwrap();
+    let mut archived: Vec<_> = done
+        .iter()
+        .filter_map(|a| match a {
+            SweepAction::Archived { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    archived.sort();
+    assert_eq!(archived, ["aaa", "bbb"], "{done:?}");
+    assert!(root.join("_archive/luma.com/aaa.1.js").is_file());
+    assert!(root.join("_archive/luma.com/bbb.2.js").is_file());
+}
+
+/// Review should-fix 1 (a): a read-only tool file is retired and archived by sweep, and the
+/// archived copy carries the archive time (so it is not deleted early).
+#[tokio::test]
+async fn sweep_archives_a_read_only_tool_with_its_mtime_set() {
+    let (dir, ts) = luma();
+    let store = Store::default();
+    let now = Utc::now();
+    let tool = ts.try_tool_path("luma.com", "register").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&tool)
+        .unwrap()
+        .set_modified((now - Duration::days(200)).into())
+        .unwrap();
+    store.put(ToolHealth {
+        last_ok: Some(now - Duration::days(20)),
+        ..row(ToolStatus::Ephemeral, 1)
+    });
+    set_readonly(&tool, true);
+    let before = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+    let done = ts.sweep(&store, now, &|_| 0).await;
+    let to = ts.try_archive_path("luma.com", "register", 1).unwrap();
+    for p in [&tool, &to] {
+        if p.exists() {
+            set_readonly(p, false);
+        }
+    }
+    let done = done.unwrap();
+    assert!(
+        matches!(&done[..], [SweepAction::Retired { archived: Some(a), .. }] if *a == to),
+        "{done:?}"
+    );
+    assert!(!tool.exists());
+    assert!(fs::metadata(&to).unwrap().modified().unwrap() >= before);
+    assert!(store.ledger.lock().unwrap().iter().all(|e| e.ok));
+    // 89 days on, the archived file is still there.
+    let done = ts
+        .sweep(&store, now + Duration::days(89), &|_| 0)
+        .await
+        .unwrap();
+    assert!(done.is_empty(), "{done:?}");
+    assert!(to.is_file());
+    drop(dir);
+}
+
+/// A 90-day delete that fails (the archived file is held open without share-delete, which
+/// Windows refuses to delete) is an `ok: false` ledger event; the next file is still deleted.
+#[cfg(windows)]
+#[tokio::test]
+async fn sweep_records_a_failed_delete_and_goes_on() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let ts = ToolStore::new(root);
+    let store = Store::default();
+    let now = Utc::now();
+    let old = (now - Duration::days(100)).into();
+    for n in ["a", "b"] {
+        let p = root.join(format!("_archive/luma.com/{n}.1.js"));
+        put(root, &format!("_archive/luma.com/{n}.1.js"), "old");
+        fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+    let a = root.join("_archive/luma.com/a.1.js");
+    let b = root.join("_archive/luma.com/b.1.js");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&a)
+        .unwrap();
+    let done = ts.sweep(&store, now, &|_| 0).await;
+    drop(lock);
+    let done = done.unwrap_or_else(|e| panic!("one failed delete stopped the sweep: {e}"));
+    assert!(
+        matches!(&done[..], [SweepAction::Deleted { path, .. }] if *path == b),
+        "{done:?}"
+    );
+    assert!(a.is_file() && !b.exists());
+    let l = store.ledger.lock().unwrap();
+    let failed: Vec<_> = l.iter().filter(|e| !e.ok).collect();
+    assert_eq!(failed.len(), 1, "{l:?}");
+    assert_eq!(failed[0].tool, "tools.delete");
+    assert!(failed[0]
+        .result_summary
+        .contains("_archive/luma.com/a.1.js"));
 }

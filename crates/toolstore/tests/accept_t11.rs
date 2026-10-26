@@ -2213,7 +2213,7 @@ async fn d312_upper_case_name_refused() {
 /// D-312: a re-forge whose new @name is not the name it was called with is refused and writes
 /// no file, no archive and no ledger event: (a) a plain rename, caught by check_repair and
 /// logged; (b) a hand-edited old file that already carries the other @name, so the old/new
-/// rename check cannot see it; (c) the upper-case spelling of the same name.
+/// rename check cannot see it, also logged; (c) the upper-case spelling of the same name.
 #[tokio::test]
 async fn d312_reforge_with_a_different_name_refused() {
     let (dir, ts) = sandbox();
@@ -2267,7 +2267,22 @@ async fn d312_reforge_with_a_different_name_refused() {
         "{e}"
     );
     assert_eq!(read(&path), hand);
-    assert_eq!(store.row("luma.com", "register").unwrap(), seeded);
+    // Logged like the check_repair refusals: only `why` changes (T-9 "rejected and logged").
+    let logged = store.row("luma.com", "register").unwrap();
+    assert!(
+        logged
+            .why
+            .as_deref()
+            .is_some_and(|w| w.starts_with("rejected:") && w.contains("D-312")),
+        "{logged:?}"
+    );
+    assert_eq!(
+        ToolHealth {
+            why: seeded.why.clone(),
+            ..logged
+        },
+        seeded
+    );
 
     assert!(!dir.path().join("tools/_archive").exists(), "archived");
     assert!(store.events().is_empty(), "ledger written");
@@ -2437,11 +2452,13 @@ async fn g4_canary_fed_new_vault_key_refused_and_absent() {
     assert_eq!(read(&path), login);
 }
 
-/// D-314: when the archived file's mtime cannot be set, archive() moves the tool back and
-/// returns the error, so no archived file carries the tool's old mtime. The failure is real:
-/// the tool file is read-only, which a rename allows and an open-for-write refuses.
+/// D-314: archive() sets the tool's mtime to now before the move, so the archived file
+/// carries its archive time, never the tool's old mtime, and a read-only tool file (which a
+/// rename allows and an open-for-write refuses on Windows) archives like any other. The
+/// fail-closed path (set-mtime refused: nothing moves) is covered through the private seam in
+/// the lib tests (archive::tests::archive_fails_closed_when_mtime_cannot_be_set).
 #[test]
-fn d314_archive_fails_closed_when_mtime_cannot_be_set() {
+fn d314_read_only_tool_archives_with_its_mtime_set() {
     let (dir, ts) = sandbox();
     let tool_file = ts.try_tool_path("luma.com", "register").unwrap();
     let archived = ts.try_archive_path("luma.com", "register", 1).unwrap();
@@ -2458,26 +2475,24 @@ fn d314_archive_fails_closed_when_mtime_cannot_be_set() {
     ro.set_readonly(true);
     fs::set_permissions(&tool_file, ro).unwrap();
 
+    let before = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
     let r = ts.archive("luma.com", "register", 1);
-    let back = tool_file.is_file();
-    let leaked = archived.exists();
+    let moved = !tool_file.exists();
     // Undo the read-only bit wherever the file is, so the tempdir can be removed.
     for p in [&tool_file, &archived] {
         if p.exists() {
             fs::set_permissions(p, writable.clone()).unwrap();
         }
     }
-    assert!(matches!(&r, Err(StoreError::Io(_))), "{r:?}");
-    assert!(back, "the tool was not moved back");
-    assert!(!leaked, "an archived copy was left with the old mtime");
-    assert_eq!(read(&tool_file), content);
-
-    // Writable again: archive succeeds and the archived file carries the archive time, not
-    // the tool's 200-day-old mtime.
-    let before = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
-    let to = ts.archive("luma.com", "register", 1).unwrap().unwrap();
+    let to = r
+        .unwrap_or_else(|e| panic!("a read-only tool file could not be archived: {e}"))
+        .unwrap();
     assert_eq!(to, archived);
-    assert!(!tool_file.exists());
-    assert!(fs::metadata(&to).unwrap().modified().unwrap() >= before);
+    assert!(moved, "the tool is still in place");
+    assert_eq!(read(&to), content);
+    assert!(
+        fs::metadata(&to).unwrap().modified().unwrap() >= before,
+        "the archived file kept the tool's old mtime"
+    );
     drop(dir);
 }

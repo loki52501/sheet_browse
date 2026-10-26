@@ -9,6 +9,7 @@
 //! Nothing here commits: callers stage `tools/<domain>` and `tools/_archive/<domain>` with
 //! [`ToolStore::git_commit`] and their task id.
 
+use crate::archive::{touch, SetMtime};
 use crate::domain::{check_tool_id, valid_domain, valid_name, SiteConfig, ARCHIVE};
 use crate::header::{parse_header, patch_fingerprint, render_fingerprint};
 use crate::invariants::{check_repair, RepairKind};
@@ -73,6 +74,31 @@ fn forged_at(p: &Path) -> Option<Ts> {
     }
     let d = chrono::NaiveDate::parse_from_str(tok, "%Y-%m-%d").ok()?;
     Some(d.and_hms_opt(0, 0, 0)?.and_utc())
+}
+
+/// A `core` ledger event for a file action on one tool (`tools.<action>`), `ok: true`.
+fn event(
+    action: &str,
+    h: &ToolHealth,
+    at: Ts,
+    summary: String,
+    consequences: serde_json::Value,
+    why: Option<String>,
+) -> LedgerEvent {
+    LedgerEvent {
+        run_id: None,
+        ts: micros(at),
+        server: "core".into(),
+        tool: format!("tools.{action}"),
+        class: None,
+        mode: None,
+        args: json!({"domain": h.domain, "name": h.name, "version": h.version}),
+        result_summary: summary,
+        consequences,
+        duration_ms: 0,
+        ok: true,
+        why,
+    }
 }
 
 fn mtime(p: &Path) -> Option<Ts> {
@@ -164,21 +190,27 @@ impl ToolStore {
         why: Option<String>,
     ) -> Result<(), StoreError> {
         store
-            .append(LedgerEvent {
-                run_id: None,
-                ts: micros(at),
-                server: "core".into(),
-                tool: format!("tools.{action}"),
-                class: None,
-                mode: None,
-                args: json!({"domain": h.domain, "name": h.name, "version": h.version}),
-                result_summary: summary,
-                consequences,
-                duration_ms: 0,
-                ok: true,
-                why,
-            })
+            .append(event(action, h, at, summary, consequences, why))
             .await?;
+        Ok(())
+    }
+
+    /// A sweep step that failed for one tool or file: an `ok: false` ledger event naming the
+    /// error, so the sweep can go on with the rest (the step is retried at the next sweep).
+    async fn ledger_failed(
+        &self,
+        store: &dyn MemoryStore,
+        action: &str,
+        h: &ToolHealth,
+        at: Ts,
+        target: &Path,
+        err: &StoreError,
+    ) -> Result<(), StoreError> {
+        let target = self.rel(target);
+        let summary = format!("{action} {target} failed: {err}; retried at the next sweep");
+        let cons = json!({ "failed": target });
+        let e = event(action, h, at, summary, cons, Some(err.to_string()));
+        store.append(LedgerEvent { ok: false, ..e }).await?;
         Ok(())
     }
 
@@ -237,12 +269,13 @@ impl ToolStore {
         h: &mut ToolHealth,
         why: String,
         at: Ts,
+        set_mtime: SetMtime<'_>,
     ) -> Result<Option<PathBuf>, StoreError> {
         check_tool_id(&h.domain, &h.name)?;
         h.status = ToolStatus::Retired;
         h.why = Some(why.clone());
         store.tool_health_set(h.clone()).await?;
-        let archived = self.archive(&h.domain, &h.name, h.version)?;
+        let archived = self.archive_with(&h.domain, &h.name, h.version, set_mtime)?;
         let summary = match &archived {
             Some(p) => format!(
                 "retired {}/{}, archived to {}",
@@ -350,7 +383,7 @@ impl ToolStore {
         if h.status == ToolStatus::NeedsRepair && h.fails >= MISSES_TO_RETIRE && !pinned {
             let last = h.why.clone().unwrap_or_default();
             let why = format!("retired after {} misses; last {last}", h.fails);
-            self.retire(store, &mut h, why, at).await?;
+            self.retire(store, &mut h, why, at, &touch).await?;
         }
         store.tool_health_set(h.clone()).await?;
         Ok(h)
@@ -383,13 +416,16 @@ impl ToolStore {
         }
         // D-312: the new file is `<name>.js`, so its @name must be `name`. check_repair only
         // compares with the old file's @name, which a hand edit may have left different from
-        // the file name. Refused before anything is written (no file, row or ledger).
+        // the file name. Refused before any file is touched; like the check_repair refusals
+        // above, the reason goes to `tools.health.why` (T-9 "rejected and logged").
         match parse_header(new_src) {
             Ok(h) if h.name != name => {
-                return Err(StoreError::Invariant(format!(
+                let e = StoreError::Invariant(format!(
                     "re-forge of {domain}/{name} names the tool {} (D-312)",
                     h.name
-                )))
+                ));
+                self.log_invariant(store, domain, name, &e).await?;
+                return Err(e);
             }
             _ => {}
         }
@@ -514,11 +550,27 @@ impl ToolStore {
     /// `visits(row) >= 10` site visits without use, counted by the caller from the ledger) are
     /// retired and archived; retired tools still in place are archived; archived files older
     /// than 90 days are deleted. Pinned tools are never touched. One ledger event per action.
+    ///
+    /// A file step that fails for one tool or file (archive, delete) does not stop the sweep:
+    /// it is written to the ledger as an `ok: false` event and retried at the next sweep, and
+    /// the other tools and domains are still swept. A failed retire leaves the row retired
+    /// with its file in place, which the next sweep archives. Memory errors still return.
     pub async fn sweep(
         &self,
         store: &dyn MemoryStore,
         now: Ts,
         visits: &(dyn Fn(&ToolHealth) -> u32 + Sync),
+    ) -> Result<Vec<SweepAction>, StoreError> {
+        self.sweep_with(store, now, visits, &touch).await
+    }
+
+    /// [`ToolStore::sweep`] with the archive's set-mtime step as a seam (tests).
+    pub(crate) async fn sweep_with(
+        &self,
+        store: &dyn MemoryStore,
+        now: Ts,
+        visits: &(dyn Fn(&ToolHealth) -> u32 + Sync),
+        set_mtime: SetMtime<'_>,
     ) -> Result<Vec<SweepAction>, StoreError> {
         let mut done = Vec::new();
         for domain in self.swept_domains() {
@@ -552,7 +604,18 @@ impl ToolStore {
                         } else {
                             continue;
                         };
-                        let archived = self.retire(store, &mut h, why.clone(), now).await?;
+                        let archived = match self
+                            .retire(store, &mut h, why.clone(), now, set_mtime)
+                            .await
+                        {
+                            Ok(a) => a,
+                            Err(e @ StoreError::Memory(_)) => return Err(e),
+                            Err(e) => {
+                                self.ledger_failed(store, "retire", &h, now, &path, &e)
+                                    .await?;
+                                continue;
+                            }
+                        };
                         store.tool_health_set(h.clone()).await?;
                         done.push(SweepAction::Retired {
                             domain: domain.clone(),
@@ -563,7 +626,15 @@ impl ToolStore {
                         });
                     }
                     ToolStatus::Retired if path.is_file() => {
-                        if let Some(to) = self.archive(&domain, &h.name, h.version)? {
+                        let to = match self.archive_with(&domain, &h.name, h.version, set_mtime) {
+                            Ok(to) => to,
+                            Err(e) => {
+                                self.ledger_failed(store, "archive", &h, now, &path, &e)
+                                    .await?;
+                                continue;
+                            }
+                        };
+                        if let Some(to) = to {
                             let summary = format!(
                                 "archived retired {domain}/{} to {}",
                                 h.name,
@@ -604,11 +675,15 @@ impl ToolStore {
                 if now - t < Duration::days(ARCHIVE_DELETE_DAYS) {
                     continue;
                 }
-                fs::remove_file(&f)?;
                 let h = row.cloned().unwrap_or_else(|| ToolHealth {
                     version: 0,
                     ..self.new_row(&domain, name)
                 });
+                if let Err(e) = fs::remove_file(&f) {
+                    self.ledger_failed(store, "delete", &h, now, &f, &e.into())
+                        .await?;
+                    continue;
+                }
                 let why = format!("archived over {ARCHIVE_DELETE_DAYS} days");
                 let summary = format!("deleted {}", self.rel(&f));
                 let cons = json!({"deleted": self.rel(&f)});
