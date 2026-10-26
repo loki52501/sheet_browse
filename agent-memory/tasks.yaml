@@ -112,7 +112,9 @@ tasks:
     step: 3
     title: "srv-cli: gh, dns, flags, allowlisted cli; ladder rungs 3, 5, 9"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
-    status: todo
+    status: doing
+    owner: servers/suborch
+    claimed_at: 2026-10-25
   - id: T-16
     step: 4
     title: "reviews SM-2, contacts in gate, baselines, watch diff + single notify, reflect readers-only, proposals"
