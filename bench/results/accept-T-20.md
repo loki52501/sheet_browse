@@ -1,59 +1,58 @@
-# Acceptance T-20, round 1 (tester)
+# Acceptance T-20, round 2 (tester)
 
-Spec: docs/05-BROWSER.md acceptance 2, B-4 #3, #6, #11, decisions D-603, D-604, D-605.
-Tree: swarm/driver-T20 at e846bd3 (implementation as of 8a32525; e846bd3 adds only the review).
+Spec: docs/05-BROWSER.md acceptance 2, B-4 #3, #6, #11, decisions D-603 to D-607.
+Tree: swarm/driver-T20 at ec14c21 (implementation as of 84f8294), plus the tester's test changes.
 Browser: Playwright chromium-1248 (D-34 build), headless, real pages from a 127.0.0.1 server.
-New test file: crates/sb-driver/tests/accept_t20.rs (public API only: `Driver::open`, `Driver::act`,
-registry and raw CDP). Its browser tests hold one lock, so they run one at a time even under
-the default parallel runner.
+Test file: crates/sb-driver/tests/accept_t20.rs. It uses only the public API: `Driver::open`,
+`Driver::act`, the registry and raw CDP. Round 2 adds rows 5b, 5c, 13 and 14, adds the pages
+`/churn-covered`, `/forged` and `/forged2`, and prints per-attempt timings in rows 1 and 1b.
+All the file's browser tests hold one lock, so they run one at a time.
 
-How attempts are counted: a probe installed in the `sb` world (never the page's world) wraps
-`Number.isInteger`, which `__sb.act` calls once on entry (`resolve`), and
-`document.elementFromPoint`, which it calls once per hit test. `__sb` itself is frozen. First
-answer times are upper bounds: the first hit test in page time, mapped to the Rust clock
-through a `performance.now()` mark, plus one round trip.
+Attempts are counted with a probe in the `sb` world. It wraps `Number.isInteger` (called once
+per `__sb.act` entry) and `document.elementFromPoint` (called once per hit test). First-answer
+times are upper bounds: the first hit test, mapped to the Rust clock, plus one round trip.
 
-Base command (C): `cargo test -j 2 -p sb-driver --test accept_t20 <filter> -- --test-threads=1 --nocapture`
+Base command (C): `cargo test -j 2 -p sb-driver --test accept_t20 <filter> -- --test-threads=1 --nocapture`.
+The final full run was C with no filter, with `SB_VAULT_CANARY=sbcanary-t20r2-<unique>`: 12 passed, 0 failed, 0 ignored, 87.75 s.
 
-| row | what | result | evidence |
+| item | command | result | note |
 |---|---|---|---|
-| 1 | Covered button: the first answer is the cover, in under 50 ms | pass | C with `row1_row2`. Asserts the first hit test hits div.cookie and that the median of 5 first answers is under 50 ms. Baseline run: 11.7, 11.7, 11.4, 11.8, 11.8 ms. Row 4 checks the why text: `covered by div.cookie (OVERLAY #2) after 5.0 s`. The coder's in-crate `chromium_t20::acceptance_2_actionability_with_retry_and_runtime_install` also passed in the workspace run. Note: 6 of the 15 first acts on the browser's first tab were 104 to 154 ms. See row 1b. |
-| 1b | Every first answer is under 50 ms, including the first act after launch (max, not median) | fail | C with `row1b -- --ignored`. 2 of 6 runs failed, on the first act of the first tab after launch: 108.9 ms and 120.9 ms. Every other sample was 5.6 to 18.2 ms. The page-side attempt durations (row 4 output: 104, 106, 119 ms for attempt 1) show `__sb.act` itself waiting out `nextFrame`'s 100 ms fallback, so rAF did not fire in the first window. Missing: the first act after launch should not wait on an animation frame the compositor has not produced yet. For example, `open` could await one rendered frame in its settle-and-walk round trip. The test is `#[ignore]`d so the workspace stays stable. |
-| 2 | Cover removed after 300 ms by a page script: the retry succeeds | pass | C with `row1_row2`. In all 5 runs the step ends with `not done: input synthesis is T-21 (target actionable at 160.0, 120.0)` (T-20 success) after 309 to 336 ms. There were 4 or 5 attempts, and the last hit test hits the button. Asserts 250 ms <= took < 1000 ms. |
-| 3 | Disabled button gives `disabled` | pass | C with `row3`: `Failed { why: "disabled after 5.0 s" }` after 5.0275 s with 14 attempts. Answered before the hit test, so `disabled` is retried as D-603 says. |
-| 4 | The 5 s cap holds | pass | C with `row4`: act took 5.0123 s, 5.0229 s, 5.0164 s and 5.0133 s on 4 serial runs. Asserts 5 s <= took <= 5.35 s. The why is `covered by div.cookie (OVERLAY #2) after 5.0 s`. The last attempt started 5007 to 5015 ms after act, because the last wait is capped by what is left of the budget. |
-| 5 | Backoff 0, 50, 100, 250, 500, then 500 ms steps, observed in the page | pass | C with `row4`. Measured waits between attempts (hit test to next entry, two CDP round trips included) were `[2, 55, 118, 256, 514, 505, 510, 512, 516, 510, 511, 511, 415]` ms, and on another run `[2, 53, 104, 258, 533, 512, 509, 517, 512, 508, 510, 505, 408]`. Each run had 14 attempts and the last wait was capped by the budget. Asserts schedule - 2 <= wait <= schedule + 80. Unit tests `backoff_follows_the_schedule_then_500_ms_steps` and `next_wait_is_capped_by_the_budget_and_ends_with_it` also pass. |
-| 6 | gone, stale and challenge fail at once with no retry; a challenge sets `ActResult.stopped` | pass | C with `row6`. gone: `c#2; c#2` gives 1 step `gone` in 1.7 ms, 1 attempt. stale (after `Page.navigate`): `stale` in 6.0 ms, 1 attempt. challenge (title `Just a moment...`): 1 step `challenge` in 12.3 ms, 1 attempt, `stopped = StopReason { class: Challenge, why: "CHALLENGE at #2: stopped, hand back to the user", element: Some("#2") }`. |
-| 7 | After a navigation the runtime is reinstalled and new ids never repeat old ones (D-604) | pass | C with `row7`. doc1 ids are 1..7. After `Page.navigate`, `__sb.act` exists in the new sb world and doc2 ids are 100001..100007. After a page-initiated `location.href` back to the same URL, doc3 ids are 200001..200007. Each set is disjoint and strictly above the one before. A doc3 id is actionable and a doc2 id answers `stale`. |
-| 8 | A context destroyed mid-call is retried exactly once (B-4 #11) | pass | C with `row8`. `w(3s)` on a page that never settles and navigates once: the retry answers `Ok`, settled true on /calm, in 0.53 s. The same with two navigations in a row: `Err(Cdp("w(): the page's context went away"))` in 0.79 s, so the second loss is not retried even though a third document would have settled. |
-| 9 | Step labels, step errors, stop reasons and parse errors carry no `@vault` value and no text after `=` in a `t#` step | pass | `SB_VAULT_CANARY=sbcanary-t20-<unique>` planted as vault entry `canary`, then C with `row9`. Programs: `t#1=@vault(canary); t#2=SECRETCANARY`, the same on the live input, behind `w(50ms)`, on a gone id, a stale id and a challenge page, plus 4 bad programs that fail to parse. Checked `{:?}` of ActResult, serde_json of steps and stopped, every label and why, and the DriverError Display and Debug. Labels are exactly `t#1`, `t#99999` and `w(50ms)`. MemStore ledger: clean. Run folder: 0 files. grep of the canary in every captured stdout (runs, mutation runs, workspace run), in repo `runs/` (absent) and `git grep`: 0 hits. `SECRETCANARY`: 0 hits in output. |
-| 10 | No fixed sleeps in crates/sb-driver/src | pass | `grep -rn -e sleep -e thread::park -e delay_for crates/sb-driver/src` finds only two doc comments (actionable.rs:6, lib.rs:2). The only in-page timer is `CHANGE_FN`'s `setTimeout`, which caps a MutationObserver condition. |
-| 11 | Tests can fail: each covered row goes red under a mutation, and the file is restored | pass | 12 mutations, each applied to one implementation file, run with C, restored with `git checkout -- <file>`, then `git status --short` showed only `?? crates/sb-driver/tests/accept_t20.rs`. All 12 were red. See the list below. |
-| 12a | Workspace run, once | pass | `cargo test -j 2 --workspace --no-fail-fast`: 928 passed, 3 failed, 6 ignored. All 3 failures came from the tester and were re-run green. (1) core-pg `accept_t03_r3::r3_rule2_constraint_errors_carry_no_bound_canary` requires a canary containing `sbcanary`, and my first canary did not. Re-run with `SB_VAULT_CANARY=sbcanary-...`: 11 passed. (2, 3) accept_t20 `row4` (wait 1 was 133 ms) and `row9` (`w(50ms)` gave `Timeout("w()")`) failed with 7 browsers running in parallel in one binary. The file now serializes its browsers. `cargo test -j 2 -p sb-driver --test accept_t20` at default parallelism: 7 passed, 1 ignored. sb-driver lib passed 47 of 47, including chromium_t20. `cargo clippy -j 2 -p sb-driver --tests -- -D warnings` and `cargo fmt --check` are clean. |
-| 12b | Flake check for T-18 `accept_t18.rs:142` (bench profile left after drop) | pass | `cargo test -j 2 -p sb-driver --test accept_t18` alone 5 times: 5 of 5 passed (2.3 to 12.9 s). It also passed in the workspace run. Not reproduced (0 of 6). The coder's single failure looks like a T-18 profile-cleanup race under load, not a T-20 defect. T-20 does not touch launch.rs or ProfileDir. |
+| 1 Covered button: first answer is the cover, every sample under 50 ms | C `row1_row2` | pass | Final full run: `[19.9, 11.6, 8.3, 11.5, 11.6]` ms, first hit `cookie`. The test now asserts the max, not the median. Across 20 runs, 1 sample was over 50 ms (19 runs printed their samples, 95 in all; the workspace run prints none): 72.1 ms on act 2 of the first full run, which made that run red. It did not happen again in the 19 runs after it, including 6 runs that repeated the same test order (row14 then row1). Every other printed sample was 5.3 to 29.9 ms. In the page, attempt 1 starts 0.9 to 3.7 ms after act and takes 2 to 17 ms. |
+| 1b First act on a fresh tab (no warm-up), every sample under 50 ms, no longer #[ignore] | C `row1b`: 5 runs alone, 6 runs with filter `row1`, 2 full runs and the workspace run | pass | 14 of 14 runs green. First acts: 4.7 to 18.3 ms. Second acts: 7.7 to 33.1 ms. The 100 ms `nextFrame` stall from round 1 is gone (D-607 waits for the first paint). The largest in-page attempt took 10.4 ms. |
+| 2 Cover removed after 300 ms by a page script: the retry succeeds | C `row1_row2` | pass | All 5 runs end with `not done: input synthesis is T-21 (target actionable at 160.0, 120.0)` after 455 to 496 ms: 5 attempts, the last hit test hits `b`. |
+| 3 Disabled button gives `disabled` | C `row3` | pass | `Failed { why: "disabled after 5.0 s" }` after 5.0004 s, 13 attempts, no hit test. |
+| 4 The 5 s cap holds, strict (D-606: at most 5 s + 40 ms) | C `row4_row5` | pass | Took 5.0032 s. Why: `covered by div.cookie (OVERLAY #2) after 5.0 s`. Row 5b took 5.0025 s and row 5c took 5.0117 s. `CAP_TOLERANCE` is 40 ms. |
+| 5 Backoff 0, 50, 100, 250, 500 ms, then 500 ms steps, seen in the page (quiet page) | C `row4_row5` | pass | Waits `[2, 62, 111, 265, 506, 516, 511, 508, 506, 516, 508, 508]` ms, 13 attempts. The last attempt started 4604 ms after act. |
+| 5b Same schedule and cap on a page that mutates every 10 ms (settle never goes quiet) | C `row5b` | pass | Waits `[2, 57, 112, 254, 510, 509, 505, 508, 508, 508, 505, 503]` ms, 13 attempts, 5.0025 s. Asserts schedule - 2 <= wait <= schedule + 80 for every wait, the last included. Also asserts 10 to 16 attempts, and that no attempt starts after 5 s. |
+| 5c Same strict check on the quiet page, every wait including the last | C `row5c` | pass | Waits `[2, 53, 114, 259, 508, 506, 515, 511, 505, 516, 506, 518]` ms, 13 attempts, 5.0117 s. Settle ends early on this page, so only the slot wait (`sleep_until`) holds the schedule. |
+| 6 gone, stale and challenge fail at once with no retry; a challenge sets `ActResult.stopped` | C `row6` | pass | gone: 1 step `gone`, 1.9 ms, 1 attempt. stale: `stale`, 35.5 ms, 1 attempt. challenge: `challenge`, 1.6 ms, 1 attempt, `stopped = StopReason { class: Challenge, why: "CHALLENGE at #2: stopped, hand back to the user", element: Some("#2") }`. |
+| 7 After a navigation the runtime is reinstalled and new ids never repeat (D-604) | C `row7` | pass | doc1 ids 1..7, doc2 100001..100007, doc3 (page-initiated navigation) 200001..200007. A doc3 id is actionable. A doc2 id answers `stale`. |
+| 8 A context destroyed mid-call is retried exactly once (B-4 #11) | C `row8` | pass | One loss: `Ok`, settled true on /calm, in 0.53 s. Two losses: `Err(Cdp("w(): the page's context went away"))` in 0.79 s. |
+| 9 Labels, step errors, stop reasons, parse errors, ledger, run folder, stdout and `runs/` carry no vault value and no `t#` text | `SB_VAULT_CANARY=$(cat canary.txt)` then C (full run) and the workspace run; then `grep -F "$SB_VAULT_CANARY"` over every captured stdout, `runs/`, `*.jsonl`, the working tree and `git grep` | pass | row9 printed `canary from SB_VAULT_CANARY: true`. The canary was planted as vault entry `canary`. Labels: `t#1`, `w(50ms)`, `t#99999`. Also checked: 3 parse errors, the MemStore ledger (clean) and the run folder (0 files). Canary hits: 0 in the 33 captured outputs of this round (full runs, row runs, mutation runs, workspace run). `runs/` does not exist. No `*.jsonl` files outside `target/`. `git grep`: 0. Working tree: 0. `SECRETCANARY`: 0 hits in output. |
+| 10 No fixed sleeps in crates/sb-driver/src | `grep -rn -e sleep -e thread::park -e delay_for crates/sb-driver/src` | pass | Only `actionable.rs:522 tokio::time::sleep_until(until)`, which waits for the D-606 slot and carries the rule-6 comment ("the schedule itself is the condition"), and the doc comment at lib.rs:2. |
+| 11 The round-2 tests can fail: each new or tightened row goes red under a mutation, and the file is restored | one edit in `crates/sb-driver/src/actionable.rs`, then C with the filter shown in Mutations, then `git checkout -- <file>` and `git status --short` | pass | 7 mutations, all red. Each time `git status --short` showed only ` M crates/sb-driver/tests/accept_t20.rs`. See Mutations. |
+| 13 A page id that spells a driver ref (`x (OVERLAY #12)`, `x (#12)`) cannot forge an element ref | C `row13` | pass | `/forged`: `covered by div#x__OVERLAY__12_ (OVERLAY #2) after 5.0 s`. `/forged2`: `covered by div#x___12_ (#2) after 5.0 s`. The cover's real id is 2. The why contains no `#12` and no `(OVERLAY #12)`. |
+| 14 A `w(d)` the page does not answer in time is a failed step that keeps earlier results, not `Err` | C `row14` | pass | `w(200ms); w(1s)`, with the page's main thread blocked for 2 s. Result: step 1 `w(200ms)` Ok, step 2 `w(1s)` `Failed { why: "the page did not answer within 1300 ms" }`, `stopped` None, in 1.55 s. |
+| 12a Workspace run, once | `SB_VAULT_CANARY=... cargo test -j 2 --workspace --no-fail-fast` | pass | Exit 0. 88 test binaries: 941 passed, 0 failed, 5 ignored. None of the 5 ignored is T-20's: 3 are red-first T-08 tests and 2 are child-process helpers. accept_t20: 12 passed, 0 ignored. accept_t18: 1 passed. The `vault::tests::global_scrub_before_and_after_install` panic line is that test's own `catch_unwind`, and the test passed. Canary hits in the output: 0. |
+| 12b Formatting and lints | `cargo fmt --all --check`; `cargo clippy -j 2 -p sb-driver --tests -- -D warnings` | pass | Both clean. |
 
 ## Mutations (row 11)
 
-Each is one text replacement in an implementation file, then the named test, then
-`git checkout -- <file>` and `git status --short`, which showed only the untracked test file.
-Output is in the tester's scratchpad, mut_<name>.txt.
+Output files are in the tester's scratchpad, named `mut_<name>.txt`.
 
-- M1 (row 1), actionable.rs `ACT_FN`: `return sb.act(id);` became `return new Promise((r) => setTimeout(() => r(sb.act(id)), 60));`. `row1_row2` red: median first answer `[67.6, 74.2, 76.4, 81.4, 172.2]` ms.
-- M2 (row 2), actionable.rs `classify_why`: `starts_with("covered by ")` became `starts_with("covered by XX")`. `row1_row2` red: the step failed at once with `unknown answer from the page: covered by div.cookie (OVERLAY #2)` and no retry.
-- M3 (row 3), actionable.rs: `| "disabled"` removed from the retryable list. `row3` red: `unknown answer from the page: disabled`.
-- M4 (row 4), actionable.rs: `ACT_CAP` changed from 5 s to 6 s. `row4` red: took 6.019 s, `... after 6.0 s`.
-- M5 (row 5), actionable.rs: `SCHEDULE_MS` changed to `[0, 50, 250, 100, 500]`. `row4` red: `wait 2: 254.2 ms > 100 + 80`.
-- M6a (row 6 gone), actionable.rs: `"gone" => WhyKind::Retry`. `row6` red: `gone after 5.0 s`, 14 attempts.
-- M6b (row 6 challenge), actionable.rs: `if w.kind == WhyKind::Challenge {` became `... && w.attempts == 0 {`. `row6` red: `stopped None`, panic `a challenge stops the program`.
-- M6c (row 6 stale), actionable.rs: `"stale" => WhyKind::Retry`. `row6` red: `stale after 5.0 s`, 14 attempts.
-- M7 (row 7), runtime.rs `Bases::next_base`: `f.docs += 1;` became `f.docs += 0;`. `row7` red: doc2 ids were 1..7 again, `doc2 ids start after doc1's`.
-- M8a (row 8, no retry), runtime.rs `call_sb`: the guard became `if !retried && tab.0 == u32::MAX`. `row8` red: one loss gave `Err(Cdp("w(): the page's context went away"))`.
-- M8b (row 8, unbounded retry), runtime.rs `call_sb`: `retried = true;` became `retried = tab.0 == u32::MAX;`. `row8` red: two losses gave `Ok`, panic `a second loss is not retried`.
-- M9 (row 9), actionable.rs `step_label`: `Step::Type { target, .. } => format!("t{target}")` became `Step::Type { .. } => format!("{step:?}")`. `row9` red: `program 0: @vault text leaked`. The canary got 0 hits in that run's output.
+- zero_waits: `backoff()` returned `Duration::from_millis(0)`. Filter `row4 row5`. All 3 red. row4: `starts.len() == hits.len()` failed at 229 vs 228. row5b: `wait 1: 2.0 ms < 50`, 310 attempts. row5c: 238 attempts.
+- no_slot_wait: `tokio::time::sleep_until(until).await;` removed. Filter `row4 row5`. row4 red (32 attempts). row5c red: `wait 3: 167.4 ms < 250`, 31 attempts. row5b stayed green, as expected: on a page that never goes quiet, settle alone fills the slot.
+- pad_cap_100 and pad_cap_50: `deadline = t0 + cap + 100 ms` and `+ 50 ms`. Filter `row3 row4 row5`. All 4 red: `disabled after 5.1 s`, and `covered by ... after 5.1 s` with 5.05 to 5.11 s.
+- pad_cap_45: `+ 45 ms`. All 3 red. row5b failed only the timing bound: `cap: 5.0486735s` with the why still `after 5.0 s`. This shows the 40 ms tolerance is enforced on its own.
+- row13_both: `neutral_desc` returns the description unchanged, and ACT_FN's `odd` list is turned off. row13 red: `covered by div#x (OVERLAY #12) (OVERLAY #2) after 5.0 s`.
+- row13_odd_only: only ACT_FN's `odd` list turned off. row13 stayed green. On these pages `neutral_desc` alone neutralises the id, so the odd list is a second layer that row 13 does not separate. The coder's unit test `page_ids_cannot_forge_element_refs` covers the case where only the odd list catches it (`covered by div#x (#5)` with no driver ref).
+- row14_err: `wait_step`'s timeout returned `Err(DriverError::Timeout("w()"))`. row14 red: `Err(Timeout("w()"))`.
+
+The round-1 mutations M1 to M9 (rows 1 to 3 and 6 to 9) were not re-run against the round-2 code. Those rows' assertions are unchanged or stricter.
 
 ## Notes (non-blocking)
 
-- Row 1b is the only failing row. Steady-state first answers are about 11 ms. The miss is the first act after launch, where `nextFrame` falls back to its 100 ms timer.
-- Under heavy load (7 browsers in one process), `w(50ms)` can miss its 50 ms + 300 ms call deadline. `Driver::act` then returns `Err(Timeout("w()"))` for the whole program instead of a failed step with the earlier steps' results. This is outside acceptance 2. It is filed in the handoff for T-21/T-22.
+- Row 1 flake, 1 in 20 runs: one sample of 72.1 ms (act 2 of the first full run). It was not reproduced in the 19 runs after it. That run was before the per-attempt diagnostics were added, so where the 72 ms went is not known. Row 14 in that run blocked a renderer for 3 s. It now blocks for 2 s and waits for the page before shutdown, but the same order with the old row 14 did not reproduce the flake either (0 of 3).
+- Row 13 does not exercise ACT_FN's `odd` list on its own (see the mutation `row13_odd_only`). Shadow-DOM ids are still open as B-607 (area page).
 
-Verdict: red
+Verdict: green
