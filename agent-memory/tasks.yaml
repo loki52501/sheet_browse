@@ -117,7 +117,17 @@ tasks:
     step: 3
     title: "srv-files: fs, shell classification, docs wrappers, csv.clean, diff, history.search"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: done
+    owner: servers/suborch
+    claimed_at: 2026-10-25
+    done_at: 2026-10-26
+    notes: "review-T-14 approve (confirm round after rounds 1, 2 and a closing round; D-523 allowlist classifier, D-524, D-525). accept-T-14 re-run all pass incl. ladder rung 9 at the tool level and TEMP under AppData, except pptx.write not-run (python-pptx not installed). Follow-ups in T-14b."
+  - id: T-14b
+    step: 3
+    title: "srv-files follow-ups: pptx.write acceptance needs python-pptx installed (row 6d not-run); docs tests need SB_PYTHON with openpyxl; $HOME/bin missed when the bash PATH probe fails (add <home>/bin for every paths::homes() entry or fail closed); <msys_root>/etc/gitconfig and mingw64/etc not code locations yet; updating an existing repo outside runs/ in place (pull, checkout, stash pop) keeps its D-523 class; git stash -u / commit -a in a planted nested repo; hooks/drivers already present in a repo and an existing global git config still run under Read-class git; TOCTOU between reclassify and the syscall for links/junctions; dotfiles inside runs/ cost an ask (over-match); B-520..B-522 need supreme answers; not run on Linux/macOS"
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
     status: todo
+    owner: servers
   - id: T-15
     step: 3
     title: "srv-cli: gh, dns, flags, allowlisted cli; ladder rungs 3, 5, 9"
