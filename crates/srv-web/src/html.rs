@@ -1026,18 +1026,13 @@ fn collect_text(node: NodeRef<'_, Node>, skip_controls: bool, out: &mut String, 
         }
         Node::Element(el) => {
             let tag = el.name();
-            // A frame's text is a separate document, never read (module doc); a textarea's
-            // raw text may hold markup, so only its tag-free text counts (D-508, rule 5).
+            // A frame's text is a separate document, never read (module doc, rule 5).
             if SKIP_TAGS.contains(&tag) || matches!(tag, "iframe" | "frame" | "frameset") {
                 return;
             }
+            // A textarea adds nothing to a name: its text is the field's value (maybe a
+            // secret, rule 5) and is reported once, as the value, through no_markup.
             if tag == "textarea" {
-                let raw: String = node
-                    .children()
-                    .filter_map(|c| c.value().as_text().map(|t| t.to_string()))
-                    .collect();
-                out.push(' ');
-                out.push_str(&fragment_text(&raw));
                 return;
             }
             if let Some(e) = ElementRef::wrap(node) {
@@ -1467,6 +1462,48 @@ mod tests {
         }
         for name in ["Go", "Do", "Name"] {
             assert!(doc.index.iter().any(|r| r.name == name), "{name} in {all}");
+        }
+    }
+
+    #[test]
+    fn textarea_content_never_reaches_a_name() {
+        // review-T-12 confirm, Blocking 1-2: a label's own textarea (secrets included) and
+        // double-decoded entities reached names through collect_text.
+        let doc = page(
+            r#"<html><body>
+            <label>Pass <textarea autocomplete="current-password">hunter2secret</textarea></label>
+            <label for="p2">Pass2</label><textarea id="p2" autocomplete="current-password">hunter3secret</textarea>
+            <label>Card <textarea autocomplete="cc-number">4111111111111111</textarea></label>
+            <label>Comment <textarea>prefilled body text</textarea></label>
+            <span id="l3">X<textarea>&amp;lt;script&amp;gt;stealCookies()&amp;lt;/script&amp;gt;</textarea></span>
+            <input aria-labelledby="l3">
+            <span id="l4">Secret<textarea autocomplete="new-password">hunter4secret</textarea></span>
+            <input aria-labelledby="l4">
+            </body></html>"#,
+        );
+        let mut all = String::new();
+        for r in &doc.index {
+            all.push_str(&format!("{} {:?}\n", r.name, r.state.value));
+        }
+        for b in &doc.blocks {
+            all.push_str(&format!("{:?}\n", b));
+        }
+        for bad in [
+            "hunter2secret",
+            "hunter3secret",
+            "hunter4secret",
+            "4111111111111111",
+            "<script",
+        ] {
+            assert!(!all.contains(bad), "{bad} in {all}");
+        }
+        // The l3 textarea's value is shown once, as a browser shows it (`&lt;script&gt;`,
+        // decoded once); it never joins the input's name.
+        let x = doc.index.iter().find(|r| r.name.starts_with('X')).unwrap();
+        assert!(x.name == "X", "{all}");
+        let names: Vec<&str> = doc.index.iter().map(|r| r.name.as_str()).collect();
+        for want in ["Pass", "Pass2", "Card", "Comment", "X", "Secret"] {
+            assert!(names.contains(&want), "{want} in {names:?}");
         }
     }
 
