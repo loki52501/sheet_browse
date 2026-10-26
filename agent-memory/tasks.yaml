@@ -129,7 +129,10 @@ tasks:
     step: 6
     title: "sb-cdp Pipe transport, launch, flattened sessions, pipelining; registry skeleton"
     docs: [docs/05-BROWSER.md]
-    status: todo
+    status: doing
+    owner: driver/suborch
+    claimed_at: "2026-10-25"
+    branch: swarm/driver-T18
     note: "gated by swarm.yaml (area driver needs page merged), not by T-17 (D-43)"
   - id: T-19
     step: 6
