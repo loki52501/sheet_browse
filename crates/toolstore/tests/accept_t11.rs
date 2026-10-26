@@ -24,6 +24,8 @@ use toolstore::*;
 struct FakeStore {
     health: Mutex<Vec<ToolHealth>>,
     ledger: Mutex<Vec<LedgerEvent>>,
+    /// When set, `tool_health_set` fails with a backend error (a memory failure hook).
+    fail_health_set: std::sync::atomic::AtomicBool,
 }
 
 impl FakeStore {
@@ -116,6 +118,12 @@ impl MemoryStore for FakeStore {
             .collect())
     }
     async fn tool_health_set(&self, h: ToolHealth) -> Result<()> {
+        if self
+            .fail_health_set
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryError::Invalid("memory down (test hook)".into()));
+        }
         let mut v = self.health.lock().unwrap();
         v.retain(|x| !(x.domain == h.domain && x.name == h.name));
         v.push(h);
@@ -2256,7 +2264,11 @@ async fn d312_reforge_with_a_different_name_refused() {
     // (b) the old file was hand-edited to @name signup; the new one keeps @name signup.
     let hand = renamed.clone();
     fs::write(&path, &hand).unwrap();
-    let seeded = store.row("luma.com", "register").unwrap();
+    // Clear `why` first: case (c) already left a `rejected: ... D-312` there, so without this
+    // the assertion below would pass even if case (b) logged nothing (tester-4).
+    let mut seeded = store.row("luma.com", "register").unwrap();
+    seeded.why = None;
+    store.tool_health_set(seeded.clone()).await.unwrap();
     let new = with_line(&hand, "const btn", "const x = 1;\n  const btn");
     let e = ts
         .reforge(&store, "luma.com", "register", &new, Utc::now())
@@ -2273,7 +2285,9 @@ async fn d312_reforge_with_a_different_name_refused() {
         logged
             .why
             .as_deref()
-            .is_some_and(|w| w.starts_with("rejected:") && w.contains("D-312")),
+            .is_some_and(|w| w.starts_with("rejected:")
+                && w.contains("names the tool signup")
+                && w.contains("D-312")),
         "{logged:?}"
     );
     assert_eq!(
@@ -2494,5 +2508,423 @@ fn d314_read_only_tool_archives_with_its_mtime_set() {
         fs::metadata(&to).unwrap().modified().unwrap() >= before,
         "the archived file kept the tool's old mtime"
     );
+    drop(dir);
+}
+
+// ---------------------------------------------------------------- 66f74a6: D-314 sweep, re-run 4
+
+/// Sets `p`'s mtime to `days` days before now.
+fn backdate(p: &Path, days: u64) {
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+    fs::File::options()
+        .write(true)
+        .open(p)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+}
+
+/// A row in `domain` (`FakeStore::seed` hard-codes luma.com).
+async fn seed_in(store: &FakeStore, domain: &str, name: &str, status: ToolStatus, version: i32) {
+    store
+        .tool_health_set(ToolHealth {
+            domain: domain.into(),
+            name: name.into(),
+            version,
+            status,
+            runs: 0,
+            fails: 0,
+            last_ok: None,
+            last_fail: None,
+            why: None,
+            pinned: false,
+        })
+        .await
+        .unwrap();
+}
+
+/// `tools/zeta.org/probe.js`: a domain that sorts after luma.com, so it is swept later.
+#[cfg(windows)]
+fn add_later_domain(dir: &Path) -> PathBuf {
+    let d = dir.join("tools/zeta.org");
+    fs::create_dir_all(&d).unwrap();
+    let p = d.join("probe.js");
+    fs::copy(dir.join("tools/example.com/probe.js"), &p).unwrap();
+    p
+}
+
+/// Holds `p` open with no sharing, so a rename (which needs DELETE access) fails with a
+/// sharing violation: a real per-tool archive failure.
+#[cfg(windows)]
+fn lock(p: &Path) -> fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(p)
+        .unwrap()
+}
+
+/// D-314 through sweep: a retired tool whose file is read-only and 200 days old is archived
+/// by sweep with an ok ledger event; the archived file carries the archive time, so it is
+/// still there 60 days later and is deleted only after 90 days.
+#[tokio::test]
+async fn d314_sweep_archives_a_read_only_tool_with_its_mtime_set() {
+    let (dir, ts) = sandbox();
+    let store = FakeStore::default();
+    store.seed(ToolStatus::Retired, "register", 2, 0).await;
+    let tool_file = ts.try_tool_path("luma.com", "register").unwrap();
+    let archived = ts.try_archive_path("luma.com", "register", 2).unwrap();
+    let content = read(&tool_file);
+    backdate(&tool_file, 200);
+    let mut ro = fs::metadata(&tool_file).unwrap().permissions();
+    ro.set_readonly(true);
+    fs::set_permissions(&tool_file, ro).unwrap();
+
+    let now = Utc::now();
+    let before = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+    let done = ts.sweep(&store, now, &|_| 0).await.unwrap();
+    assert!(
+        matches!(&done[..], [SweepAction::Archived { name, version: 2, to, .. }]
+            if name == "register" && *to == archived),
+        "{done:?} {:?}",
+        store.events()
+    );
+    assert!(!tool_file.exists(), "the read-only tool is still in place");
+    assert_eq!(read(&archived), content);
+    assert!(
+        fs::metadata(&archived).unwrap().modified().unwrap() >= before,
+        "the archived file kept the tool's 200-day-old mtime"
+    );
+    let ev = store.events();
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].tool, "tools.archive");
+    assert!(ev[0].ok, "{:?}", ev[0]);
+
+    // The 90-day clock runs from the archive time, not the old mtime.
+    let d60 = ts
+        .sweep(&store, now + Duration::days(60), &|_| 0)
+        .await
+        .unwrap();
+    assert!(d60.is_empty(), "{d60:?}");
+    assert!(archived.exists());
+    let d91 = ts
+        .sweep(&store, now + Duration::days(91), &|_| 0)
+        .await
+        .unwrap();
+    let ev = store.events();
+    assert!(
+        matches!(&d91[..], [SweepAction::Deleted { path, .. }] if *path == archived),
+        "{d91:?} {ev:?}"
+    );
+    assert!(!archived.exists());
+    assert_eq!(store.tools_logged(), ["tools.archive", "tools.delete"]);
+    assert!(ev.iter().all(|e| e.ok), "{ev:?}");
+    drop(dir);
+}
+
+/// D-314: a retired tool whose archive really fails (its file held open with no sharing, so
+/// the rename is refused) gets an ok:false `tools.archive` event naming the file and the
+/// error, and the sweep goes on: a later tool in the same domain is retired and archived, an
+/// archived file past 90 days is deleted, and a retired tool in a later domain is archived.
+/// The next sweep, with the file released, archives the failed tool.
+#[cfg(windows)]
+#[tokio::test]
+async fn d314_failed_archive_does_not_stop_sweep_and_next_sweep_retries() {
+    let (dir, ts) = sandbox();
+    let store = FakeStore::default();
+    let now = Utc::now();
+    // Row order is sweep order within a domain: register (fails) comes first.
+    store.seed(ToolStatus::Retired, "register", 3, 0).await;
+    store.seed(ToolStatus::Ephemeral, "list_events", 1, 1).await;
+    let mut le = store.row("luma.com", "list_events").unwrap();
+    le.last_ok = Some(now - Duration::days(15));
+    store.tool_health_set(le).await.unwrap();
+    let old_arch = dir.path().join("tools/_archive/luma.com/gone.1.js");
+    fs::create_dir_all(old_arch.parent().unwrap()).unwrap();
+    fs::write(&old_arch, "// archived long ago\n").unwrap();
+    backdate(&old_arch, 100);
+    let zeta = add_later_domain(dir.path());
+    seed_in(&store, "zeta.org", "probe", ToolStatus::Retired, 1).await;
+
+    let reg = ts.try_tool_path("luma.com", "register").unwrap();
+    let reg_arch = ts.try_archive_path("luma.com", "register", 3).unwrap();
+    let content = read(&reg);
+    let held = lock(&reg);
+    let done = ts.sweep(&store, now, &|_| 0).await;
+    drop(held);
+    let done = done.expect("sweep returned the per-tool archive failure");
+
+    assert!(
+        !done
+            .iter()
+            .any(|a| matches!(a, SweepAction::Archived { name, .. } if name == "register")),
+        "{done:?}"
+    );
+    assert!(
+        done.iter().any(
+            |a| matches!(a, SweepAction::Retired { name, archived: Some(_), .. }
+            if name == "list_events")
+        ),
+        "later tool in the same domain not swept: {done:?}"
+    );
+    assert!(
+        done.iter()
+            .any(|a| matches!(a, SweepAction::Deleted { path, .. } if *path == old_arch)),
+        "90-day delete not done: {done:?}"
+    );
+    assert!(
+        done.iter()
+            .any(|a| matches!(a, SweepAction::Archived { domain, name, .. }
+            if domain == "zeta.org" && name == "probe")),
+        "later domain not swept: {done:?}"
+    );
+    assert!(reg.is_file(), "the failed tool left its place");
+    assert_eq!(read(&reg), content);
+    assert!(!reg_arch.exists());
+    assert!(!zeta.exists());
+    assert!(!old_arch.exists());
+    assert_eq!(
+        store.row("luma.com", "register").unwrap().status,
+        ToolStatus::Retired
+    );
+
+    let ev = store.events();
+    let failed: Vec<_> = ev.iter().filter(|e| !e.ok).collect();
+    assert_eq!(failed.len(), 1, "{ev:?}");
+    let f = failed[0];
+    assert_eq!(
+        (f.server.as_str(), f.tool.as_str()),
+        ("core", "tools.archive")
+    );
+    assert_eq!(f.args["name"], "register");
+    assert_eq!(f.consequences["failed"], "luma.com/register.js", "{f:?}");
+    assert!(f.result_summary.contains("failed"), "{f:?}");
+    assert!(f.why.as_deref().is_some_and(|w| !w.is_empty()), "{f:?}");
+    let mut ok_tools: Vec<_> = ev.iter().filter(|e| e.ok).map(|e| e.tool.clone()).collect();
+    ok_tools.sort();
+    assert_eq!(
+        ok_tools,
+        ["tools.archive", "tools.delete", "tools.retire"],
+        "{ev:?}"
+    );
+
+    // Released: the next sweep retries and archives it.
+    let again = ts.sweep(&store, now, &|_| 0).await.unwrap();
+    assert!(
+        matches!(&again[..], [SweepAction::Archived { name, version: 3, to, .. }]
+            if name == "register" && *to == reg_arch),
+        "{again:?}"
+    );
+    assert!(!reg.exists());
+    assert_eq!(read(&reg_arch), content);
+    let last = store.events().pop().unwrap();
+    assert_eq!(last.tool, "tools.archive");
+    assert!(last.ok, "{last:?}");
+    drop(dir);
+}
+
+/// D-314: an idle ephemeral tool whose archive fails during retire gets an ok:false
+/// `tools.retire` event; the row is persisted as retired with its file in place, a later
+/// domain is still swept, and the next sweep archives the file.
+#[cfg(windows)]
+#[tokio::test]
+async fn d314_failed_retire_does_not_stop_sweep_and_next_sweep_archives() {
+    let (dir, ts) = sandbox();
+    let store = FakeStore::default();
+    let now = Utc::now();
+    store.seed(ToolStatus::Ephemeral, "list_events", 1, 1).await;
+    let mut le = store.row("luma.com", "list_events").unwrap();
+    le.last_ok = Some(now - Duration::days(15));
+    store.tool_health_set(le).await.unwrap();
+    let zeta = add_later_domain(dir.path());
+    seed_in(&store, "zeta.org", "probe", ToolStatus::Retired, 1).await;
+
+    let file = ts.try_tool_path("luma.com", "list_events").unwrap();
+    let arch = ts.try_archive_path("luma.com", "list_events", 1).unwrap();
+    let held = lock(&file);
+    let done = ts.sweep(&store, now, &|_| 0).await;
+    drop(held);
+    let done = done.expect("sweep returned the per-tool retire failure");
+    assert!(
+        matches!(&done[..], [SweepAction::Archived { domain, .. }] if domain == "zeta.org"),
+        "{done:?}"
+    );
+    assert!(!zeta.exists());
+    assert!(file.is_file());
+    assert!(!arch.exists());
+    assert_eq!(
+        store.row("luma.com", "list_events").unwrap().status,
+        ToolStatus::Retired
+    );
+    let ev = store.events();
+    assert_eq!(ev.len(), 2, "{ev:?}");
+    assert_eq!(ev[0].tool, "tools.retire");
+    assert!(!ev[0].ok, "{:?}", ev[0]);
+    assert_eq!(ev[0].consequences["failed"], "luma.com/list_events.js");
+    assert_eq!(ev[1].tool, "tools.archive");
+    assert!(ev[1].ok);
+
+    let again = ts.sweep(&store, now, &|_| 0).await.unwrap();
+    assert!(
+        matches!(&again[..], [SweepAction::Archived { name, to, .. }]
+            if name == "list_events" && *to == arch),
+        "{again:?}"
+    );
+    assert!(!file.exists());
+    drop(dir);
+}
+
+/// D-314 fail closed, with a real failure: an ACL deny of write-attributes on the tool file
+/// makes the set-mtime step fail. archive() returns the error, the tool stays in place with
+/// its content and its old mtime, and nothing is created in `_archive`. With the deny removed
+/// the archive succeeds and carries the archive time.
+#[cfg(windows)]
+#[test]
+fn d314_archive_fails_closed_when_write_attributes_is_denied() {
+    use std::process::Command;
+    let (dir, ts) = sandbox();
+    let tool_file = ts.try_tool_path("luma.com", "register").unwrap();
+    let content = read(&tool_file);
+    backdate(&tool_file, 200);
+    let old = fs::metadata(&tool_file).unwrap().modified().unwrap();
+    let who = String::from_utf8(Command::new("whoami").output().unwrap().stdout).unwrap();
+    let who = who.trim().to_string();
+    let deny = Command::new("icacls")
+        .arg(&tool_file)
+        .args(["/deny", &format!("{who}:(WA)")])
+        .output()
+        .unwrap();
+    assert!(deny.status.success(), "icacls /deny: {deny:?}");
+    let r = ts.archive("luma.com", "register", 1);
+    let still = tool_file.is_file();
+    let mtime_after = fs::metadata(&tool_file)
+        .ok()
+        .and_then(|m| m.modified().ok());
+    let made = dir.path().join("tools/_archive").exists();
+    let archived = ts.try_archive_path("luma.com", "register", 1).unwrap();
+    for p in [&tool_file, &archived] {
+        if p.exists() {
+            let _ = Command::new("icacls")
+                .arg(p)
+                .args(["/remove:d", &who])
+                .output();
+        }
+    }
+    assert!(matches!(&r, Err(StoreError::Io(_))), "{r:?}");
+    assert!(still, "the tool moved");
+    assert_eq!(mtime_after, Some(old), "the tool's mtime changed");
+    assert!(!made, "_archive was created");
+    assert_eq!(read(&tool_file), content);
+
+    let before = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+    let to = ts.archive("luma.com", "register", 1).unwrap().unwrap();
+    assert_eq!(to, archived);
+    assert!(fs::metadata(&to).unwrap().modified().unwrap() >= before);
+    assert_eq!(read(&to), content);
+    drop(dir);
+}
+
+/// D-314 with the tool file held open with no sharing (Windows): archive() returns the error,
+/// the tool stays in place with its content, and no archived copy exists. Prints whether the
+/// stamp or the rename was the step refused (the mtime tells: old means the stamp failed).
+#[cfg(windows)]
+#[test]
+fn d314_archive_of_a_tool_held_open_fails_and_moves_nothing() {
+    let (dir, ts) = sandbox();
+    let tool_file = ts.try_tool_path("luma.com", "register").unwrap();
+    let archived = ts.try_archive_path("luma.com", "register", 1).unwrap();
+    let content = read(&tool_file);
+    backdate(&tool_file, 200);
+    let old = fs::metadata(&tool_file).unwrap().modified().unwrap();
+    let held = lock(&tool_file);
+    let r = ts.archive("luma.com", "register", 1);
+    drop(held);
+    let after = fs::metadata(&tool_file).unwrap().modified().unwrap();
+    println!(
+        "held-open archive: {r:?}; tool mtime {}",
+        if after == old {
+            "unchanged (the stamp failed)"
+        } else {
+            "fresh (the stamp succeeded, the rename failed)"
+        }
+    );
+    assert!(matches!(&r, Err(StoreError::Io(_))), "{r:?}");
+    assert!(tool_file.is_file(), "the tool moved");
+    assert_eq!(read(&tool_file), content);
+    assert!(!archived.exists(), "an archived copy exists");
+    drop(dir);
+}
+
+/// D-314 fail closed on Unix: a mode 000 tool file cannot be opened, so the stamp fails;
+/// nothing moves. Skipped as root (root opens any file).
+#[cfg(unix)]
+#[test]
+fn d314_archive_fails_closed_when_the_tool_cannot_be_opened() {
+    use std::os::unix::fs::PermissionsExt;
+    let uid = std::process::Command::new("id").arg("-u").output().unwrap();
+    if String::from_utf8_lossy(&uid.stdout).trim() == "0" {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let (dir, ts) = sandbox();
+    let tool_file = ts.try_tool_path("luma.com", "register").unwrap();
+    backdate(&tool_file, 200);
+    let old = fs::metadata(&tool_file).unwrap().modified().unwrap();
+    fs::set_permissions(&tool_file, fs::Permissions::from_mode(0o000)).unwrap();
+    let r = ts.archive("luma.com", "register", 1);
+    let still = tool_file.exists();
+    let mtime_after = fs::metadata(&tool_file)
+        .ok()
+        .and_then(|m| m.modified().ok());
+    let made = dir.path().join("tools/_archive").exists();
+    let back = if still {
+        &tool_file
+    } else {
+        &ts.try_archive_path("luma.com", "register", 1).unwrap()
+    };
+    let _ = fs::set_permissions(back, fs::Permissions::from_mode(0o644));
+    assert!(matches!(&r, Err(StoreError::Io(_))), "{r:?}");
+    assert!(still, "the tool moved");
+    assert_eq!(mtime_after, Some(old), "the tool's mtime changed");
+    assert!(!made, "_archive was created");
+    drop(dir);
+}
+
+/// D-314 "memory errors still return": when the memory store fails while sweep retires an
+/// idle ephemeral tool, sweep returns Err(Memory) and stops. No ok:false event is written,
+/// the file is not moved, and a later domain is not swept.
+#[tokio::test]
+async fn d314_memory_error_stops_sweep() {
+    let (dir, ts) = sandbox();
+    let store = FakeStore::default();
+    let now = Utc::now();
+    store.seed(ToolStatus::Ephemeral, "list_events", 1, 1).await;
+    let mut le = store.row("luma.com", "list_events").unwrap();
+    le.last_ok = Some(now - Duration::days(15));
+    store.tool_health_set(le.clone()).await.unwrap();
+    let zdir = dir.path().join("tools/zeta.org");
+    fs::create_dir_all(&zdir).unwrap();
+    let zeta = zdir.join("probe.js");
+    fs::copy(dir.path().join("tools/example.com/probe.js"), &zeta).unwrap();
+    seed_in(&store, "zeta.org", "probe", ToolStatus::Retired, 1).await;
+
+    store
+        .fail_health_set
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let r = ts.sweep(&store, now, &|_| 0).await;
+    store
+        .fail_health_set
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(&r, Err(StoreError::Memory(_))), "{r:?}");
+    let ev = store.events();
+    assert!(ev.is_empty(), "ledger written: {ev:?}");
+    assert!(ts
+        .try_tool_path("luma.com", "list_events")
+        .unwrap()
+        .is_file());
+    assert!(!dir.path().join("tools/_archive").exists(), "archived");
+    assert!(zeta.is_file(), "a later domain was swept");
+    assert_eq!(store.row("luma.com", "list_events").unwrap(), le);
     drop(dir);
 }
