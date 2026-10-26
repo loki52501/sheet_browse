@@ -1,58 +1,71 @@
-# Review T-12 final round (srv-web, docs/04 W-1..W-7)
+# Review T-12 confirm round (srv-web, docs/04 W-1..W-7)
 
 ## History
 
 - **Round 1** (579f466, on dbacdbb): request changes. 1 Blocking (rule 5: HTML under a non-HTML or missing content type reached the model), 6 should-fix.
 - **Round 2** (99ed4ea, on b9ccca5): request changes. Rule 5 still open (sniffer missed UTF-16, unclosed comments, prefixes, doctype spacing, fragment tags).
-- **Closing round** (0afe399, on b2d08fb, D-508): request changes. Round-2 bypasses closed ("walk everything, sniff nothing"). 2 new Blocking rule-5 items: `<option>` labels carried script/style/template source (`o.text()`), and the iCal `URL` (plus feed links) reached the model verbatim and uncapped.
-- **Final round** (this file, on 3b750b2).
+- **Closing round** (0afe399, on b2d08fb, D-508): request changes. 2 Blocking rule-5 items: `<option>` labels carried script/template source, and iCal and feed URLs reached the model verbatim.
+- **Final round** (3962045, on 3b750b2): request changes. Both closing-round items were closed. 1 new Blocking item: `collect_text` read raw `<iframe>` text into link, button, label, aria-labelledby and option names.
+- **Confirm round** (this file, on 4913651).
 
-## Final round: 3b750b2
+## Confirm round: 4913651
 
-Checks run (worktree, `CARGO_TARGET_DIR=F:/sb-swarm/target-servers`):
+Checks run in the worktree with `CARGO_TARGET_DIR=F:/sb-swarm/target-servers`:
 - `cargo fmt --check -p srv-web`: clean.
 - `cargo clippy -p srv-web --all-targets -- -D warnings`: clean.
-- `cargo test -p srv-web -j 2`: all green. lib 18 (+1: `option_labels_carry_no_script_source`), accept_t12 5 (+1 ignored), accept_w 6 (+1), contract_paths 1, live 0 (+3), round2_t12 7, round3_t12 10, web_tools 13. Nothing regressed.
+- `cargo test -p srv-web -j 2`: all green.
+  - lib 19 (+1: `iframe_and_textarea_text_never_reach_names`);
+  - accept_t12 5 (+1 ignored), accept_w 6 (+1 ignored), contract_paths 1, live 0 (+3 ignored);
+  - round2_t12 7, round3_t12 10, web_tools 13.
 
-Probes ran in a `git archive 3b750b2` export at `runs/review-t12-final/` under the servers root (git-ignored, deleted afterwards), file `crates/srv-web/tests/probe_final.rs`. Cases ran through `fetch` (read and sheet; text/html, text/plain and no content type), `feed`, and `search::parse_answer`.
+Probes ran in a `git archive 4913651` export at `runs/review-t12-confirm/` under the servers root (git-ignored, deleted afterwards), file `crates/srv-web/tests/probe_confirm.rs`. Each case ran through `html::parse` and through `fetch` in read and sheet mode. `D` = `<!DOCTYPE html><html><body><script>stealCookies()</script>`.
 
-Closing-round Blocking 1 (option labels): **closed for the reported cases.** `<option>` with nested `script`, `style`, `template`, nested `template`, `noscript`, `svg><script`, `plaintext`, `xmp`, an unclosed `script`, `optgroup`, `datalist`, and a `selected` option now give `A` and no markup. However, the new path uses `collect_text`, which does not skip `iframe`, and that leak reaches every accessible name. See Blocking.
+**Final-round Blocking item (iframe text in names): closed.** No `<`, `DOCTYPE` or `stealCookies` reaches the output, in read or sheet mode, for an iframe inside any of these:
+- a link, a button, `label for`, `aria-labelledby`, an option, a label around a select;
+- a link or button whose name falls back to its `title`;
+- an `aria-label` link, a link with an image whose `alt` text is the name;
+- a figcaption, a summary, an `onclick` div, a `contenteditable` div, a link in a table cell;
+- `<iframe role=button title=..>`;
+- `<frame>` and `<frameset>` inside a link.
 
-Closing-round Blocking 2 (URLs): **closed.**
-- iCal `URL` and RSS/Atom/JSON Feed links all go through `http::clean_url`. Markup in the path, query and fragment comes out percent-encoded (`%3Cscript%3E`).
-- Dropped, giving `url: ""`:
-  - markup in the host (`https://f<script>.test/`);
-  - userinfo, with or without markup (`parse_url` refuses credentials);
-  - `javascript:` and `data:` links;
-  - URLs over 2000 chars.
-- Folded iCal lines (`<scr\r\n ipt>`), `\<` escapes and a backslash host all normalise to percent-encoded paths.
-- IDN `bücher.example` comes out as `xn--bcher-kva.example`.
-- JSON Feed `url` and `external_url` and RSS `<link>` with CDATA markup are both cleaned.
-- Atom `xml:base` relative links resolve. Without a base they are dropped (see Should fix).
+Names come out as `Go`, `Do`, `Name`, `Mail`, `A`, `Pick`, `TitleY`, `TitleB`, `AriaZ`, `PicW`, `Sum`, `Ed`, `Tt`, `Cell`, `Fr`. Textarea markup inside an `aria-labelledby` span, an option or a link is gone too.
 
-Search (closing-round should-fix): **closed.** `<span class="highlight">`, `<b>`, `<script>` and whole-document snippets come out as text only. Hit URLs are cleaned like feed URLs.
+**Other text-collection paths checked** (scope item 2):
+- `Walker::walk`/`element` (`html.rs:419-520`): skips `SKIP_TAGS`. `iframe`, `frame` and `textarea` always get a control role (`html.rs:1141-1185`), so their children are never walked. Clean.
+- `table_row` (`html.rs:671`): uses `walk`. Clean.
+- `fragment_text` (`html.rs:248`): skips `SKIP_TAGS`, `textarea` and `iframe`. `frame` cannot occur in a body fragment. Clean.
+- `page_title` (`html.rs:1319`) and the textarea value (`html.rs:800`): go through `no_markup`. Clean.
+- `onclick_button` (`html.rs:1192`) and `densest` (`html.rs:1343`) call `.text()`, but only to measure length. Nothing is emitted.
+- `serialize` (`html.rs:1374`) is `mode="raw"`, which is out of scope. Its text is escaped.
+- `feed.rs` sends every text field through `html_to_text`, which calls `fragment_text`. `search.rs:69` calls `fragment_text`.
+- `site.rs` reads the parsed doc only. `page.api` returns only JSON.
+
+The one new path, the textarea branch that 4913651 added to `collect_text`, fails two ways. See Blocking.
 
 ## Blocking
 
-- **Rule 5: `<iframe>` raw text reaches the model through every accessible name** (`crates/srv-web/src/html.rs:1029`, `collect_text`).
-  - The parser reads iframe content as raw text, and a browser never renders it. `collect_text` skips `SKIP_TAGS` only, and `iframe` is not in that list. `fragment_text` does skip it (`html.rs:259`).
-  - The module doc (`html.rs:15`) says "nothing inside an `<iframe>` is read".
-  - Probe, with `D` = `<!DOCTYPE html><html><body><script>stealCookies()</script>`. Each line is the output for the input after it:
-    - `#1 link "Go <!DOCTYPE html><html><body><script>stealCookies()</script>"` for `<a href=/x>Go<iframe>D</iframe></a>` (sheet);
-    - `[button "Do <!DOCTYPE html>...<script>stealCookies()</script>"](#1)` for `<button>Do<iframe>D</iframe></button>`. This one leaks in **read** mode as well as sheet;
-    - `#2 input "Name <!DOCTYPE html>..."` for `<label for=i>Name<iframe>D</iframe></label>`, and the same for `aria-labelledby`;
-    - `#1 select "A <!DOCTYPE html><html><body><script>..."` for `<option>A<iframe>D</iframe></option>`. This is the path 3b750b2 just moved to `collect_text`.
-  - This is the same class as the closing-round item: raw-text content the parser does not read as markup. It is capped only by `NAME_MAX`/`OPTION_MAX`.
+- **Regression: `collect_text` now reads a field's own textarea content, including secret fields, into its label name** (`crates/srv-web/src/html.rs:1036-1043`). This breaks rule 5 ("passwords are never read from the DOM") and the rule-2 intent of `secret` at `html.rs:773`.
+  - The new `tag == "textarea"` branch runs before the `!top && is_hidden(e)` check and the `skip_controls` check (`html.rs:1044-1050`). At 3b750b2 a label's own textarea was skipped (`skip_controls`), and a hidden one was skipped too. Now neither is.
+  - Probe, output identical in read and sheet mode:
+    - `<label>Pass <textarea autocomplete=current-password>hunter2secret</textarea></label>` gives `#1 input "Pass hunter2secret" filled`. The value is masked as `filled`, and the name holds the secret.
+    - `<label for=p>Pass2 <textarea id=p autocomplete=current-password>hunter3secret</textarea></label>` gives `#1 input "Pass2 hunter3secret" filled`.
+    - `<label>Card <textarea autocomplete=cc-number>4111111111111111</textarea></label>` gives `#1 input "Card 4111111111111111" filled`.
+    - `<label>Comment <textarea>prefilled body text</textarea></label>` gives `#1 input "Comment prefilled body text" "prefilled body text"`. Every labelled textarea's name now repeats its value.
   - Fix:
-    - In `collect_text`, return on `iframe` and `frame` as well as `SKIP_TAGS`, matching `fragment_text`.
-    - Extend `option_labels_carry_no_script_source`, or add a test, to cover an iframe inside a link, a button (read mode), a label and an option.
+    - Put the textarea branch after the hidden check and the `skip_controls` check.
+    - Emit nothing for a secret textarea (`password` or `cc-` autocomplete, the same test as `html.rs:773`) on every path, including `aria-labelledby` with `skip_controls=false`.
+    - Add these four cases to `iframe_and_textarea_text_never_reach_names`.
+- **Rule 5: the textarea branch decodes entities twice, so escaped markup comes out as live markup** (`crates/srv-web/src/html.rs:1042`, `fragment_text(&raw)`).
+  - The parser has already decoded the RCDATA once. `fragment_text` parses it again and decodes a second time. A browser shows `&lt;script&gt;`; the model gets `<script>`.
+  - Probe: `<span id=l3>X<textarea>&amp;lt;script&amp;gt;stealCookies()&amp;lt;/script&amp;gt;</textarea></span><input aria-labelledby=l3>`.
+    - Read mode gives `[input "X <script>stealCookies()</script>"](#2)`.
+    - Sheet mode gives `#2 input "X <script>stealCookies()</script>" empty`.
+    - The textarea's own value is right: `#1 input "&lt;script&gt;stealCookies()&lt;/scri..."`.
+    - A whole `&amp;lt;!DOCTYPE html&amp;gt;...` document comes through the same way.
+  - Fix: use `no_markup(&raw)`, as the value path at `html.rs:800` does. `no_markup` only reparses when real tags are present. Add this case to the test.
 
 ## Should fix
 
-- **Textarea text bypasses `no_markup` in `collect_text`.** This is carried over from the closing round and now also reaches option labels.
-  - The textarea value is filtered (`html.rs:800`). The same text reaches names unfiltered through `aria-labelledby`, a link containing a textarea, and now `<option>A<textarea>...</textarea>` (scraper 0.29 keeps it inside the option). Probe: `#1 select "A <!DOCTYPE html><html><body><script>..."`.
-  - A browser displays this text, so I do not count it as rule 5. It does contradict D-508's own textarea rule.
-  - Fix: apply `no_markup` to textarea text in `collect_text`. That is the same edit as the Blocking fix.
 - **api text/plain checks for tags before it decodes JSON** (`crates/srv-web/src/api.rs:394-401`). Carried over.
   - A tag-free text/plain body that is a JSON string with `<` escapes is shown as markup.
   - Fix: run `has_tag` on what will be shown. Also treat a top-level JSON string that holds markup as a document, not data.
@@ -61,26 +74,29 @@ Search (closing-round should-fix): **closed.** `<span class="highlight">`, `<b>`
   - At minimum, say so in the output, so the model uses api or a raw view instead.
 - **The page client honours the system proxy** (`crates/srv-web/src/http.rs:61-70`). Carried over. Without `.no_proxy()`, `PublicOnly` never runs behind `HTTP(S)_PROXY`.
 - **The Content-Type header is echoed** in fetch, api and feed lines (`escape::name(mime, 80)`). Carried over. Replace a type that has a tag with "unusual content type".
-- **The `parse_url` doc comment is now attached to `URL_MAX`** (`crates/srv-web/src/http.rs:531-534`). The new const was inserted between the doc lines and the fn. Move the const and its doc above that comment.
-- **The URL and snippet fixes have no wiring test.**
-  - `clean_url` is unit-tested (`http.rs:593-600`), but nothing asserts that `feed` (iCal `URL`, feed links) or `search::parse_answer` actually emits cleaned URLs and de-tagged title and snippet.
-  - The closing round asked for a test on the iCal path.
+- **The URL and snippet fixes have no wiring test.** Carried over.
+  - Nothing asserts that `feed::parse` (iCal `URL`, feed links) or `search::parse_answer` emits cleaned URLs and de-tagged title and snippet.
   - Add one `feed::parse` case and one `parse_answer` case.
-- **Relative Atom/RSS/JSON Feed links without `xml:base` are dropped** (`feed.rs:211`). The behaviour is unchanged, but it loses the item link on many real Atom feeds (`<link href="/posts/1"/>`). Resolve them against the feed URL before `clean_url`, which costs nothing.
+- **Relative Atom/RSS/JSON Feed links without `xml:base` are dropped** (`feed.rs:211`). Carried over. Resolve them against the feed URL before `clean_url`.
+
+Closed this round:
+- the textarea `no_markup` item. The markup is gone, but the double decode is now Blocking, above.
+- the `parse_url` doc comment, now back on `parse_url` (`http.rs:543`).
 
 ## Notes
 
-- **Judged not rule 5,** on the same basis as the closing round:
-  - an `<option label="<!DOCTYPE html><script>...">` attribute (attribute text, which a browser shows as the label);
-  - entity-encoded tags in option text and in search titles (`&lt;script&gt;` shown as `<script>`);
-  - CDATA inside an option, which shows as `A stealCookies()))>`;
-  - percent-encoded `stealCookies()` inside cleaned URLs.
-- `fragment_text` on search snippets turns plain-text `Vec<String>` into `Vec`. SearXNG `content` is usually plain text, so this is minor. The same trade-off applies to the text/plain item above.
-- **Spec ids:** the title cites W-1, W-2 and W-4, which matches search, fetch/html and feed. `interfaces.yaml` is untouched.
-- **Rules 1, 2, 3, 6, 7:** nothing new. There are no keys, no vault paths, no solving and no sleeps in the diff.
+- **Spec ids:** the commit cites W-2 and D-508, which matches the html.rs change. `interfaces.yaml` is untouched.
+- **Rules 1, 3, 6, 7:** nothing new in the diff. There are no keys, no solving, no sleeps and no drafts.
+- **Pre-existing, not counted against this commit:** before 4913651, an `aria-labelledby` span holding a secret textarea already leaked its text into the name, because `skip_controls=false` on that path. The first Blocking fix should cover it.
+- **Judged not rule 5,** as in earlier rounds: attribute text (`title`, `aria-label`, `alt`, `option label`), and entity-encoded tags in ordinary text that a browser shows the same way.
+- **Leftover scratch from an earlier round:** `runs/review-t12-r3/` and `runs/probe_r3.rs.bak` are still in the servers root `runs/`. They are not from this round and are git-ignored.
 
 ## Verdict
 
-Both closing-round Blocking items are closed, the search should-fix is closed, and nothing regressed. The probe found one more rule-5 path of the same class: `iframe` raw text reaches link, button, label and option names through `collect_text`, in read mode as well as sheet. The fix is one line plus a test.
+The final-round iframe item is closed on every probe, and no other text-collection function leaks raw-text markup. But the new textarea branch in `collect_text` introduces two problems:
+- it reads a secret textarea's content into its label name, and a hidden textarea's too, which 3b750b2 did not;
+- it double-decodes entities, so escaped markup reaches the model as `<script>`.
+
+Both are small fixes in the same five lines: reorder the branch, skip secret textareas, and use `no_markup`. Each needs a test case.
 
 Verdict: request changes
