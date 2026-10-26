@@ -1,0 +1,41 @@
+from: rust-coder-2
+to: next
+task: T-12
+date: "2026-10-25"
+state: "srv-web implemented (W-1..W-7): search (SearXNG JSON, D-31/D-504), fetch (HTML walk -> IndexRow + TextBlock via scraper, skeleton + read chunk + cursor, mode=sheet, raw refused per B-500, #id follow per D-502, challenge stop per D-5), find (sb_sheet::find over the cached index, k=3), api (method classes D-500, @vault only in header values resolved into a sensitive HeaderValue in the sink, same-host redirects, host-only errors), feed (RSS/Atom/JSON Feed via feed-rs, iCal by hand), site tools (@phase 1 readers registered as <site>.<name> / generic.<name> after try_tool_path, fingerprint first, run_reader in spawn_blocking, page.api same registrable domain only per D-501). Compose service searxng (profile search, digest-pinned, config/searxng/settings.yml, git-ignored secret.env). cargo fmt --check clean, cargo clippy -p srv-web --all-targets -D warnings clean, cargo test -p srv-web: lib 11, accept_w 6 (+1 ignored: base64 echo needs T-05d, D-77), web_tools 13, contract_paths 1, live 3 ignored (all 3 passed when run with --ignored against the network and a local SearXNG). cargo test --workspace -j 2 --no-fail-fast: 735 passed, 0 failed, 9 ignored. Every docs/04 srv-web acceptance test and the main behaviour tests were shown red once under a mutation (11 mutations)."
+not_done: "1) Reviewer and tester pass (T-12 not marked done). 2) Un-ignore api_base64_echoed_vault_value_is_scrubbed once T-05d (base64 scrub, D-77) is on main. 3) Supreme answers B-500 (raw mode vs rule 5) and B-501 (cross-domain fetch redirects keep the first domain's gate lookup). 4) T-13 owns the seeded tools/ashbyhq.com tool and its fetch acceptance; srv-web registers it with no change (phase 1 reader)."
+gotchas:
+  - "Windows paging file: `cargo test --workspace` at default parallelism ran rustc out of memory (os error 1455) while other coders build in the shared target; use -j 2."
+  - "core-pg accept_t03 needs the sheetbrowse Postgres on 127.0.0.1:5433; under memory pressure it dropped connections (UnexpectedEof on create database) and cargo stopped at that binary unless --no-fail-fast."
+  - "reqwest's ClientBuilder::resolve uses the override's port only when the URL has none: tests serve http://docs.rs/tokio from a local listener by mapping docs.rs -> 127.0.0.1:<port>."
+  - "sb_sheet::read carries `used` in the cursor only when max_tokens is passed: a capped read must pass max_tokens again with every cursor, or the continuation reads uncapped."
+  - "BM25 IDF is tiny on tiny pages: a site-tool fixture page needs a dozen rows before page.find('button \"Add to cart\"') is not weak."
+  - "Escaping lives in srv_web::escape (D-503) until sheet's B-32 item 1 lands: [ ] become ( ) in prose spans only; code blocks keep brackets and only lose ``` fences."
+decisions_made: [D-500, D-501, D-502, D-503, D-504]
+blockers_opened: [B-500, B-501]
+files_touched:
+  - crates/srv-web/Cargo.toml
+  - crates/srv-web/src/lib.rs
+  - crates/srv-web/src/config.rs
+  - crates/srv-web/src/http.rs
+  - crates/srv-web/src/html.rs
+  - crates/srv-web/src/escape.rs
+  - crates/srv-web/src/cache.rs
+  - crates/srv-web/src/fetch.rs
+  - crates/srv-web/src/api.rs
+  - crates/srv-web/src/feed.rs
+  - crates/srv-web/src/search.rs
+  - crates/srv-web/src/site.rs
+  - crates/srv-web/tests/common/mod.rs
+  - crates/srv-web/tests/accept_w.rs
+  - crates/srv-web/tests/web_tools.rs
+  - crates/srv-web/tests/contract_paths.rs
+  - crates/srv-web/tests/live.rs
+  - crates/srv-web/tests/fixtures/
+  - docker-compose.yml
+  - config/searxng/settings.yml
+  - .gitignore
+  - Cargo.lock
+  - agent-memory/blockers.yaml
+  - agent-memory/decisions.yaml
+verify: "cargo test -p srv-web --test accept_w --test web_tools --test contract_paths"

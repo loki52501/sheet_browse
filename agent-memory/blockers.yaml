@@ -156,6 +156,16 @@ blockers:
     question: "A scheduled `claude -p` session that is allowed Bash can run `harness ask <run> <n> yes`, `harness gate set` or `harness vault set` and approve its own asks or loosen its own gate (review-T-08 note; comes from the D-105 file-based asker). Rule 4 says everything goes through the gate; should the launcher deny those commands to the session?"
     default_taken: "ClaudeLauncher passes --disallowedTools for Bash(harness ask:*), Bash(harness gate:*) and Bash(harness vault:*) on every session it starts (scheduled and `harness run`), and a T-08 test asserts the argv. Answering asks, changing gate rules and vault entries stay user-only. Supreme may prefer a decision that moves the check into the CLI (e.g. refuse when SB_RUN_ID is set) as well. Implemented as D-124 (5). review-T-08 round 2: the deny rules match command text, so a full path, `cmd /c`, `cargo run` or writing <n>.answer directly bypasses them; the deny list is defence in depth only. A sound fix needs an answer the session cannot forge (e.g. the answer file carries a MAC keyed by a secret held in the OS keychain that sessions are never given, checked by FileAsker). Needs a supreme decision before B-192 closes; core keeps the deny list meanwhile."
     needs_user: false
+  - id: B-500
+    task: T-12
+    question: "docs/04 W-2 says fetch(mode=\"raw\") returns the cleaned HTML of <main> or the densest block (60 k chars) 'for tools that need structure', but CLAUDE.md rule 5 says the model never receives raw HTML except from screenshot and video.*. Which wins for the model-facing fetch tool?"
+    default_taken: "Rule 5 wins. fetch(mode=raw) is refused with ToolError::Args naming B-500 before any request; mode=read (with region) and mode=sheet are the structured views. The W-2 raw renderer exists as srv_web::html::raw_main_html (cleaned: no script/style/comments, attribute allowlist, no password or card values, capped at 60 k chars) for in-process site-tool hosts, and is never returned to the model. If supreme wants raw for the model, that is a CLAUDE.md change, not a srv-web one."
+    needs_user: false
+  - id: B-501
+    task: T-12
+    question: "fetch follows redirects (W-2), but the gate classified the call by the requested URL's domain. A redirect to another registrable domain therefore reads that domain without its own gate.rules lookup (a `stop` rule on the target domain does not fire). Classify again per hop, refuse cross-domain redirects, or accept for Read GETs?"
+    default_taken: "Accepted for Phase 1: fetch is a Read GET, reads only, and the browser path has the same property on navigation. The final URL is in the tool event's consequences.url, so the ledger shows where the read landed. api (W-3) does not follow redirects to another host at all. Revisit if a domain stop rule must also cover reads reached by redirect."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core

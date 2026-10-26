@@ -1,0 +1,21 @@
+# SearXNG for srv-web search() (docs/04 W-1, D-31). Mounted read-only by the `searxng`
+# compose service. Everything not set here comes from SearXNG's defaults.
+# server.secret_key is NOT set here: it comes from SEARXNG_SECRET in the git-ignored
+# config/searxng/secret.env (see docker-compose.yml). Without it SearXNG refuses to start.
+use_default_settings: true
+
+general:
+  instance_name: "sheetbrowse local search"
+
+server:
+  # Local, single user: no rate limiter (it needs Valkey and would throttle the harness).
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+search:
+  safe_search: 0
+  # srv-web asks for format=json; html stays on for a manual look in a browser.
+  formats:
+    - html
+    - json
