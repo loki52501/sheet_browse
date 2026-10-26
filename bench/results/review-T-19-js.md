@@ -361,3 +361,147 @@ Two Should items need one D-429 amendment from supreme:
 - A rebuild split by an `await` still leaks a typed password.
 
 Verdict: approve
+
+# Round 4 (reviewer-9): 343a533 "injected.js D-435 match-based inheritance, D-436 v3 not challenge context"
+
+Scope: 343a533 (injected/injected.js, jsdom/browser/accept-t19 tests, B-414 in blockers.yaml),
+checked against D-429, D-435, D-436, D-437 (B-414 accepted) and I-11. Line numbers are for
+343a533. The worktree also holds a tester's uncommitted `accept-t19.test.js` (A12, A13) and
+three new `bench/pages/accept-*.html` files. I did not review them.
+
+Gates: `node --test injected/test/` 75/75 (run before the tester's edits appeared),
+`cargo test -p sb-act --test wire_from_injected` 3/3. Probes are in runs/reviewer-9/ (not
+committed): probe-jsdom.js, probe-jsdom2.js, probe-chromium.js, probe-v3.js and mutants.js.
+There is also a mutated mirror tree, runs/reviewer-9/mut, for running suites against a
+mutant without touching injected.js.
+
+## Round-3 items
+
+| Round-3 item | Status |
+|---|---|
+| S1: D-429 net too wide (SPA login) | Fixed by D-435 (1) and D-437. jsdom and Chromium SPA tests show the pre-filled fields read their text. |
+| S2: microtask or later-task split leaks | Fixed for remove-first rebuilds that share identity: jsdom and Chromium tests, with the 2000 ms boundary pinned on a frozen clock. Not fixed for add-first rebuilds (Blocking 1) or neutral identity (known, handoff not_done 3). |
+| N: press and hold with challenge context | Done as D-435 (3); A11 and hold.html updated |
+| N: v3 badge counted as context | Done as D-436 |
+| N: otp / ssn over-match | Still open |
+
+## Blocking
+
+1. injected.js:1903-1949 (D-435 (2), hard rule 5): an add-first rebuild split across batches
+   leaks, even when the new field shares name and aria-label with the password. inheritSensitive
+   only checks fields added after a removal has been remembered. A field added before its
+   sensitive twin is removed is never checked again.
+   - Repro, Chromium (probe-chromium.js, fade.html): "Show" inserts
+     `<input type=text name=acct aria-label="Account key">` after the password and copies the
+     value. The old field is removed on transitionend (a 200 ms fade). framer-motion
+     AnimatePresence (sync mode), Vue `<Transition>` (default mode) and Svelte outros swap
+     elements in this order. After the old node is gone, index() and state() carry the canary.
+   - jsdom (probe-jsdom2.js A, B): `o.after(n); await null; o.remove()` and
+     `o.after(n); await tick(); o.remove()` both leak, with identical id and aria-label. The
+     same order inside one batch is caught (A2).
+   - Why Blocking: D-435 (2) says a rebuild split by a microtask or a later task within 2 s
+     inherits by the same match. It does not limit the order, and what leaks is a typed
+     password.
+   - Fix: keep recently added non-sensitive input and textarea fields (WeakRef plus time, same
+     2000 ms window and cap). When a sensitive field is removed, match its keys against them,
+     then mark the matches sensitive and dirty. Add a jsdom test (microtask and later task) and
+     a Chromium test (transitionend), each counting getter calls.
+
+## Should fix
+
+1. injected.js:1828, 1932 (D-437 swap count): fieldsIn counts every input type. A wrapper that
+   also holds a show-password checkbox or a hidden input is therefore not a one-for-one swap
+   (out = 2), and a replacement that shares no key reads.
+   - Repro, Chromium (wrapcb.html):
+     `<div><span>Password</span><input type=password><label><input type=checkbox> Show</label></div>`
+     is replaced by the same markup with `<input type=text>`, and the canary is in index().
+   - jsdom: D (checkbox) and D2 (a hidden sibling) leak too.
+   - Fix: count only value-bearing fields in the swap. Exclude hidden, checkbox, radio,
+     submit, button, reset, image, file, range and color.
+   - Not Blocking: D-437 says "field", the code counts fields, and the case needs a neutral
+     replacement.
+   - Related, fieldLabels (1861-1876): label[for] is searched only in the document and in the
+     removed node that holds the field. Sibling removed nodes of the same record are not
+     searched. A wrapper innerHTML rebuild (label, input, checkbox) with new ids, on a field
+     that was never walked, leaks (jsdom D5). Walked fields are saved by the row-name key (D4
+     ok).
+2. injected.js:1917-1921 fails open, not closed as the commit message says. If fieldKeys
+   throws on the removed sensitive field, nothing is remembered, so a split rebuild in the
+   window reads. The add side (1941) does fail closed.
+   - Fix: push an entry that matches every field added within the window (for example,
+     `keys: null` meaning match-all).
+   - There is no test, and none is possible today (handoff not_done 4), but the fix is cheap.
+3. Test gap, D-437 "lost exactly one field": no committed test catches relaxing
+   `e.out === 1 && e.sens === 1` (1932) to `>= 1`.
+   - Mutant M3 in the mirror: jsdom.test.js and the committed accept-t19 tests all pass.
+   - Under M3, a two-field login replaced by a one-field page reads `empty` (mutants.js
+     twoOutOneIn).
+   - Add that case: user and password out, one pre-filled field in, and the new field reads
+     its text.
+4. injected.js:339 passiveFrame is pre-existing, but challengeContext (409-411) now uses it
+   too. Its `[?&]size=invisible` test matches anywhere in src, including a `#hash`.
+   - A visible hCaptcha challenge frame whose hash carries `&size=invisible` gets no
+     CHALLENGE row and gives no context. probe-v3.js: 0 CHALLENGE rows next to
+     "Are you human?".
+   - I could not confirm offline that real hCaptcha challenge frames carry size in the hash.
+   - Capture one, and limit the test to the query string of reCAPTCHA anchor frames
+     (google.com/recaptcha, recaptcha.net). This is the hard rule 3 direction.
+5. The overlap window of add-first swaps: during the fade both fields exist, and a walk reads
+   the new one (Chromium fade.html: leak during the transition).
+   - settle() normally waits out the transition before a read, so this is narrower than
+     Blocking 1.
+   - Fix it together with Blocking 1: at add time, match an added field's keys against
+     connected sensitive fields in the same parent.
+
+## Notes
+
+- D-436 (challengeContext, 394-414): passive markers are dropped only as context for weak
+  text. Vendor widgets keep their own CHALLENGE rows through challengeBox and the `captcha`
+  name/id rule.
+  - Checked: a v2-invisible widget whose bframe is shown at body level gives CHALLENGE rows
+    (the bframe iframe, the heading and the hold text).
+  - A badge alone gives none.
+- 403: `tag === "script"` cannot trigger, because a script is never displayed. So the "bound
+  script" cases (jsdom, Chromium) cannot fail because of it (mutant M1 survives). Harmless.
+  Mutant M2 (drop the response-field rule) is caught by jsdom.test.js:454.
+- Over-marking, which costs efficiency only:
+  - An OTP field `name=code`, followed by an app page with a "Coupon" field `name=code`,
+    reads `empty` (probe G).
+  - A wrapping label that names two fields gives both the same `t:` key.
+  - D-437's accepted cost: a one-field password step swapped for a one-field page reads
+    `empty` (G2).
+- The S.gone cap of 32 (1934) is untested and can drop the password. One batch removes a
+  password plus 40 hidden `row_token_N` inputs (sensitive by name), then a later rebuild by
+  id leaks (probe F, contrived). Should 1's filter, applied to S.gone too, closes it.
+- A site's own hidden `g-recaptcha-response` field for a v3 token counts as context, because
+  D-436 says response fields count. An "Are you human?" quiz on that page is then CHALLENGE.
+  This is rare and the safe direction.
+- S.gone holds `{t, keys}` only. Keys come from attributes, label text and row names, and
+  textOf skips input, textarea and select, so no value enters a key. S.gone is never returned,
+  logged or exposed, so rule 5 holds for the memory itself.
+- Spec ids: D-435 (1)-(3), D-436 and D-437 are implemented.
+  - Beyond the spec, all raising protection: aria-labelledby text and the walked row name as
+    keys, AC_GENERIC, the cap of 32, and fail-closed on the add side.
+  - I-11 shapes are unchanged. There are no new globals, and `__sb` is still frozen.
+- Rules 1, 2, 6 and 7: no keys, no timers or sleeps added (entries are pruned on use), no
+  drafts.
+- pr-ready section 5:
+  - No untrusted text reaches the model through the new code.
+  - Fail-open: Should 2 and Should 4.
+  - Key folding: whitespace is collapsed, case is folded, and a trailing `:` or `*` is
+    dropped.
+  - No vault paths.
+- Still open from earlier rounds:
+  - a neutral-identity split rebuild (probe C, handoff not_done 3);
+  - a display-toggled twin input;
+  - a sibling-parent move;
+  - a custom-element host swap;
+  - otp and ssn over-match.
+
+## Round 4 verdict
+
+D-435 and D-436 are in. Their tests count getter calls and pin the 2000 ms boundary, and
+round-3 Should 1 is fixed. One hard rule 5 leak is still inside D-435 (2)'s wording: an
+add-first rebuild split across batches.
+
+Verdict: request changes
