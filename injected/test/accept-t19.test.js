@@ -61,10 +61,13 @@ const timedSettle = (o, opts) => o.ev(async (op) => {
 // ordinary field of the same form reads its text swap after that window. Test-only wait: the
 // window is a timestamp in injected.js with no event at its end, so the condition is the page
 // clock itself (2000 ms after the load event, which follows every parser insert, plus 50 ms).
-const pastBornWindow = (o) => o.page.waitForFunction(() => {
+// With since (a page performance.now() taken after a script added fields), 2050 ms after it:
+// D-443 (4) masks a field added next to a live password for 2 s from its add.
+const pastBornWindow = (o, since) => o.page.waitForFunction((s) => {
+  if (typeof s === "number") return performance.now() > s + 2050;
   const n = performance.getEntriesByType("navigation")[0];
   return !!n && n.loadEventEnd > 0 && performance.now() > n.loadEventEnd + 2050;
-}, null, { polling: 50, timeout: 15000 });
+}, typeof since === "number" ? since : null, { polling: 50, timeout: 15000 });
 
 const sig = (r) => `${r.role}|${r.name}|${r.form || ""}`;
 const stats = (xs) => ({
@@ -1340,9 +1343,14 @@ test("A14 D-435 (1)(2), D-437: SPA swap keeps unrelated pre-filled fields readab
   assert.deepEqual(facts.lens, Array(8).fill(secret.length), "the toggled fields carry the value");
   assert.deepEqual(facts.types, ["text", "text", "text"]);
   const r2 = await read("after");
+  // D-443 (4): the profile view and the re-rendered login form went into <main>, which still
+  // holds sensitive fields, so they read empty|filled for 2 s from their add; the D-435 (1)
+  // reads below come from r3, after that window (a field wrongly marked would stay filled)
+  await pastBornWindow(o, await o.page.evaluate(() => performance.now()));
+  const r3 = await read("after window");
   const reads = await o.ev(() => globalThis.__pwReads);
-  const blob = JSON.stringify([r1, r2]);
-  const df = dump("d435-canary", [r1, r2]);
+  const blob = JSON.stringify([r1, r2, r3]);
+  const df = dump("d435-canary", [r1, r2, r3]);
   assert.deepEqual(reads, {}, "world sb called the value getter of a sensitive field: " + JSON.stringify(reads));
   assert.equal(blob.includes(secret), false, "secret found in __sb output");
   for (let i = 0; i + 8 <= secret.length; i += 2) {
@@ -1361,7 +1369,11 @@ test("A14 D-435 (1)(2), D-437: SPA swap keeps unrelated pre-filled fields readab
   // D-435 (1): the swapped-in profile view and fields outside the swap read their values
   const READ = { dn: "Ada Lovelace", city: "London", bio: "Mathematician and writer", phone: "+44 20 7946 0000",
     "l-email": "ada@example.org", q: "pre-filled query", nick: "ada" };
-  for (const [id, text] of Object.entries(READ)) assert.deepEqual(kind(r2, id), { kind: "text", text }, "after " + id);
+  for (const [id, text] of Object.entries(READ)) {
+    const k2 = kind(r2, id);
+    assert.ok(k2 && (k2.kind === "empty" || k2.kind === "filled" || (k2.kind === "text" && k2.text === text)), "after " + id + " " + kindOf(k2));
+    assert.deepEqual(kind(r3, id), { kind: "text", text }, "after window " + id);
+  }
   t.diagnostic(`ACCEPT A14 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""} absent from ${blob.length} bytes ` +
     `(dump ${path.basename(df)}); value-getter reads ${JSON.stringify(reads)}; filled after: t-type ${NEW.join(" ")}; read after: ${Object.keys(READ).join(" ")}`);
 });
@@ -1480,8 +1492,12 @@ test("A16 D-438: add-first rebuilds (later task, microtask, transitionend, overl
   for (const fn of ["addFirstTask", "addFirstMicro", "addFirstFade", "addFirstNeutral", "addFirstFar", "wrapCheckbox", "twoToOne"]) {
     await o.page.evaluate((f) => globalThis[f](), fn);
   }
+  const twoToOneAt = await o.page.evaluate(() => performance.now());
   await o.page.waitForFunction((ids) => ids.every((i) => !document.getElementById(i)), OLD, { timeout: 5000 });
   const after = await probe(NEW.concat(["promo"]));
+  // D-443 (4): #one went into <main>, which still held the rebuilt copies: the promo code reads
+  // empty|filled for 2 s from its add, so its D-437 control reads after that window
+  await pastBornWindow(o, twoToOneAt);
   const reads = await o.ev(() => globalThis.__pwReads);
   const promo = await o.ev(() => globalThis.__sb.state(document.getElementById("promo")).value);
   const leaked = (p, id) => !!(p.per[id] && (p.per[id].value || p.per[id].kind !== "filled"));

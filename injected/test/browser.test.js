@@ -867,3 +867,75 @@ test("cost: a 2 000-row page walks and indexes within budget; index() after a sm
     await big.close();
   }
 });
+
+// D-443 (1) (review-T-19 round 7 O1..O3, runs/reviewer-12/probe-r12-chromium.js): a neutral
+// add-first copy is never read while the password is still in the page, also after settle()
+// resolved first. The world-sb counter on the password and the copy stays installed for every
+// read: one right after the click, one in the same evaluate right after settle() (nothing
+// awaited in between), and one once the old field is gone.
+function overlapRead(o, n, settle) {
+  return o.ev(async (a) => {
+    const sb = globalThis.__sb;
+    const s = a.settle ? await sb.settle() : null;
+    const pw = !!document.getElementById("acct" + a.n);
+    sb.walk({ dirty: true });
+    const out = [sb.index(), sb.text(), sb.fingerprint('textbox "User" textbox "Account key one"')];
+    for (const el of document.querySelectorAll("input")) out.push(sb.state(el), sb.name(el));
+    const copy = document.getElementById("q" + a.n);
+    const r = { settled: s ? s.settled : null, pw, copy: copy ? sb.state(copy).value : null };
+    r.user = sb.state(document.getElementById("user")).value;
+    sb.walk({});
+    out.push(sb.index(), sb.text());
+    r.blob = JSON.stringify(out);
+    return r;
+  }, { n, settle });
+}
+async function overlapCase(t, n, label) {
+  const CAN = "d443-canary-o" + n;
+  const o = await open("d443-overlap.html");
+  await o.page.fill("#acct" + n, CAN);
+  await o.page.fill("#user", "ada");
+  await o.ev(() => globalThis.__sb.index());
+  await o.ev((ids) => {
+    const proto = HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    globalThis.__d443 = {};
+    Object.defineProperty(proto, "value", {
+      configurable: true,
+      get() {
+        if (ids.includes(this.id)) globalThis.__d443[this.id] = (globalThis.__d443[this.id] || 0) + 1;
+        return desc.get.call(this);
+      },
+      set: desc.set,
+    });
+  }, ["acct" + n, "q" + n]);
+  await o.page.click("#b" + n, { noWaitAfter: true });
+  const mid = await overlapRead(o, n, false);
+  assert.ok(mid.pw, label + ": the first read ran while the password was in the page");
+  const same = await overlapRead(o, n, true);
+  await o.page.waitForFunction((id) => !document.getElementById(id), "acct" + n);
+  const after = await overlapRead(o, n, false);
+  const reads = await o.ev(() => globalThis.__d443);
+  t.diagnostic(`${label}: settle() settled ${same.settled}, password in the page at the same-evaluate read ${same.pw}; ` +
+    `copy kinds mid ${mid.copy && mid.copy.kind}, same ${same.copy && same.copy.kind}, after ${after.copy && after.copy.kind}; reads ${JSON.stringify(reads)}`);
+  assert.deepEqual(reads, {}, label + ": a value getter was called");
+  for (const [k, r] of Object.entries({ mid, same, after })) {
+    assert.ok(!r.blob.includes(CAN), label + " " + k + ": the value is in __sb output");
+    assert.ok(r.copy && (r.copy.kind === "empty" || r.copy.kind === "filled"), label + " " + k + ": copy " + (r.copy && r.copy.kind));
+    assert.deepEqual(r.user, { kind: "text", text: "ada" }, label + " " + k + ": User");
+  }
+  // gone: the parent lost its only value field, a sensitive one, so the copy inherits (D-442)
+  assert.deepEqual(after.copy, { kind: "filled" }, label + ": copy after the removal");
+}
+
+test("O1 D-443: a CSS-faded add-first show toggle, read in the same evaluate right after settle(), never reads the value", async (t) => {
+  await overlapCase(t, 1, "O1 CSS fade");
+});
+
+test("O2 D-443: a JS-timed exit with no animation never reads the value, mid-exit or after", async (t) => {
+  await overlapCase(t, 2, "O2 timer exit");
+});
+
+test("O3 D-443: an exit class on the wrapper with the transition on the inner input never reads the value", async (t) => {
+  await overlapCase(t, 3, "O3 child transition");
+});

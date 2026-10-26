@@ -964,7 +964,19 @@ test("while the old field is still there, an added field matching its keys is se
   });
   assert.equal(r.c.reads, 0);
   assert.ok(!r.blob.includes(CANARY), r.blob);
-  same(r.states, [{ kind: "filled" }, { kind: "filled" }, { kind: "text", text: "hello" }]);
+  // the unrelated note was added next to a live password: masked for the window (D-443 (4))
+  sameMasked(r.states, [{ kind: "filled" }, { kind: "filled" }, { kind: "masked" }]);
+  // past the window, with k1 still there, the note reads its text again
+  const late = await addFirst(CANARY, async (j) => {
+    const note = j.mk('<input aria-label="Note" value="hello">');
+    j.$("k1").after(note);
+    await tick();
+    j.advance(2001);
+    assert.ok(j.$("k1").isConnected);
+    return [note];
+  });
+  assert.equal(late.c.reads, 0);
+  same(late.states, [{ kind: "text", text: "hello" }]);
 });
 
 test("swap counts take value fields only; a label[for] removed beside its field is its label (D-438 (2), (3))", async () => {
@@ -1147,7 +1159,8 @@ test("a remove-first rebuild into the same parent inherits across batches within
       j.$("w2").append(a, b);
       return [a, b];
     },
-    // the first later batch that adds to the parent uses the entry up
+    // the first later batch that adds to the parent uses the entry up; the second field lands
+    // next to the inherited (sensitive) one, so it reads only past the window (D-443 (4))
     "a second later field": async (j) => {
       j.$("k2").remove();
       await tick();
@@ -1155,6 +1168,8 @@ test("a remove-first rebuild into the same parent inherits across batches within
       await tick();
       const n = j.mk('<input aria-label="Note" value="hello">');
       j.$("w2").appendChild(n);
+      await tick();
+      j.advance(2001);
       return [n];
     },
     // user + password removed from one parent: lost two, the rule is not armed
@@ -1321,8 +1336,9 @@ test("a one-field swap within 2 s marks every field added to that parent, while 
       j.$("k2").remove();
       return [a, b];
     },
-    // the removing batch adds two fields (no swap): the earlier field added to the parent
-    // inherits (D-438 (1)); the two new fields read
+    // the removing batch adds two fields: the earlier field added to the parent inherits
+    // (D-438 (1)), and one sensitive field out with two in and no key match marks both new
+    // fields too (D-443 (3), review round 7 N5)
     "add-first, then the removing batch adds two": async (j) => {
       const n = neutral(j);
       j.$("w2").appendChild(n);
@@ -1341,7 +1357,7 @@ test("a one-field swap within 2 s marks every field added to that parent, while 
     "remove + append next to a neighbour added after load": [{ kind: "filled" }, { kind: "filled" }],
     "key copy elsewhere": [{ kind: "masked" }, { kind: "filled" }, { kind: "filled" }],
     "two fields added, then removal": [{ kind: "masked" }, { kind: "masked" }],
-    "add-first, then the removing batch adds two": [{ kind: "filled" }, { kind: "text", text: "Elm St" }, { kind: "text", text: "Leeds" }],
+    "add-first, then the removing batch adds two": [{ kind: "filled" }, { kind: "masked" }, { kind: "masked" }],
   };
   for (const [k, step] of Object.entries(cases)) {
     const r = await addFirst(CANARY, step);
@@ -1382,17 +1398,17 @@ test("a one-field swap within 2 s marks every field added to that parent, while 
 // review-T-19 rounds 5 and 6 leak shapes (runs/reviewer-10/probe-r10-jsdom.js V7, V8;
 // runs/reviewer-11/probe-r11-jsdom.js N1, N3, N3r). The password and every copy hold the canary;
 // reads counts their value getter calls. "loading" steps run synchronously after the base walk.
-async function leakShape(step, postload) {
+async function leakShape(step, postload, body) {
   const CANARY = "shape-canary-442";
   const c = { reads: 0 };
-  const j = jsdom('<form><div id="w"><input id="acct" type="password" aria-label="Account key">' +
+  const j = jsdom(body || '<form><div id="w"><input id="acct" type="password" aria-label="Account key">' +
     '<button type="button">Show</button></div><div id="z"></div></form>');
   j.advance = fakeClock(j.win);
   j.mk = (html) => tmpl(j.doc, html);
   j.spy = (el) => spied(j.win, el, CANARY, c);
   j.$ = (id) => j.doc.getElementById(id);
   j.other = () => j.mk('<input id="hint" type="text" placeholder="Hint">');
-  j.spy(j.$("acct"));
+  for (const el of j.doc.querySelectorAll('input[type="password"]')) j.spy(el);
   j.sb.walk({ base: 1 });
   j.sb.index();
   if (postload) {
@@ -1405,7 +1421,7 @@ async function leakShape(step, postload) {
   const states = fields.map((f) => j.sb.state(f).value);
   const all = Array.from(j.doc.querySelectorAll("input")).map((f) => j.sb.state(f));
   const blob = JSON.stringify([j.sb.index(), j.sb.text(), all]);
-  return { c, states: JSON.parse(JSON.stringify(states)), blob, CANARY };
+  return { c, states: JSON.parse(JSON.stringify(states)), blob, CANARY, j };
 }
 
 test("review leak shapes V7, N1, V8, N3, N3r read no value and emit no canary (D-442)", async () => {
@@ -1509,4 +1525,105 @@ test("an add-first rebuild with no shared key, after load, inherits when the rem
     for (const st of r.states) assert.ok(st.kind === "empty" || st.kind === "filled", k + ": " + JSON.stringify(st));
     same(r.states, [{ kind: "filled" }, { kind: "empty" }], k);
   }
+});
+
+// ------------------------------------------------------------------ D-443
+// review-T-19 round 7: the overlap read (runs/reviewer-10/probe-r10-jsdom.js V3m), a password
+// plus confirm rebuilt by one toggle (runs/reviewer-12/probe-r12b-jsdom.js X7, X7f), and one
+// password out with two fields in, in one batch (runs/reviewer-11/probe-r11-jsdom.js N5).
+// Every password and copy holds the canary; reads counts their value getter calls.
+const PW2 = '<form id="f"><div id="o"><div id="w"><input id="p1" type="password"><input id="p2" type="password">' +
+  '</div></div><input id="user" name="user" value="ada"></form>';
+// every reader, while the page is in its current state (the overlap: both fields present)
+function readNow(j) {
+  j.sb.walk({ dirty: true });
+  const all = Array.from(j.doc.querySelectorAll("input")).map((f) => j.sb.state(f));
+  return JSON.stringify([j.sb.index(), j.sb.text(), all]);
+}
+
+test("a neutral copy added next to a live password is never read while both exist; rebuilt password + confirm and one-out-many-in inherit (D-443)", async () => {
+  const cases = [
+    // V3m: a neutral copy next to the password, read while both exist, then the removal
+    ["V3m overlap read, while loading", false, undefined, async (j) => {
+      const n = j.spy(j.mk('<input id="q9" type="text">'));
+      j.$("acct").after(n);
+      await tick();
+      assert.ok(j.$("acct").isConnected);
+      j.mid = [readNow(j), j.sb.state(n).value];
+      j.$("acct").remove();
+      return [n];
+    }, [{ kind: "filled" }]],
+    ["V3m overlap read, after load, at 1999 ms", true, undefined, async (j) => {
+      const n = j.spy(j.mk('<input id="q9" type="text">'));
+      j.$("acct").after(n);
+      await tick();
+      j.advance(1999);
+      j.mid = [readNow(j), j.sb.state(n).value];
+      j.$("acct").remove();
+      return [n];
+    }, [{ kind: "filled" }]],
+    // X7: [pw, confirm] wrapper rebuilt add-first with neutral copies in a new wrapper
+    ["X7 wrapper [pw, confirm]", true, PW2, async (j) => {
+      const w2 = j.mk('<div id="w2"><input id="c1" type="text"><input id="c2" type="text"></div>');
+      const a = j.spy(w2.querySelector("#c1"));
+      const b = j.spy(w2.querySelector("#c2"));
+      j.$("w").after(w2);
+      await tick();
+      j.mid = [readNow(j), j.sb.state(a).value, j.sb.state(b).value];
+      j.$("w").remove();
+      return [a, b];
+    }, [{ kind: "filled" }, { kind: "filled" }]],
+    // X7f: the same parent, a copy after each, both old fields removed in one batch
+    ["X7f same parent [pw, confirm]", true, PW2, async (j) => {
+      const a = j.spy(j.mk('<input id="c1" type="text">'));
+      const b = j.spy(j.mk('<input id="c2" type="text">'));
+      j.$("p1").after(a);
+      j.$("p2").after(b);
+      await tick();
+      j.$("p1").remove();
+      j.$("p2").remove();
+      return [a, b];
+    }, [{ kind: "filled" }, { kind: "filled" }]],
+    // N5: one batch adds the copy and another field and replaces the password
+    ["N5 one batch, two in, one out", true, undefined, async (j) => {
+      const n = j.spy(j.mk('<input id="q9" type="text">'));
+      const o = j.other();
+      j.$("acct").after(n);
+      j.$("acct").replaceWith(o);
+      return [n, o];
+    }, [{ kind: "filled" }, { kind: "masked" }]],
+  ];
+  for (const [k, postload, body, step, want] of cases) {
+    const r = await leakShape(step, postload, body);
+    assert.equal(r.c.reads, 0, k + ": a value getter was called");
+    assert.ok(!r.blob.includes(r.CANARY), k + ": " + r.blob);
+    sameMasked(r.states, want, k);
+    if (r.j.mid) {
+      assert.ok(!r.j.mid[0].includes(r.CANARY), k + " (overlap): " + r.j.mid[0]);
+      for (const v of r.j.mid.slice(1)) assert.ok(v.kind === "empty" || v.kind === "filled", k + " (overlap): " + JSON.stringify(v));
+    }
+    // the ordinary field outside the rebuilt parent keeps reading
+    if (body === PW2) same(r.j.sb.state(r.j.$("user")).value, { kind: "text", text: "ada" }, k + ": user");
+  }
+});
+
+test("an SPA login swap that removes email and password and adds two fields in one batch still reads them (D-443 (2), (3), D-435 (1))", async () => {
+  const CANARY = "spa-canary-443";
+  const c = { reads: 0 };
+  const { doc, win, sb } = jsdom('<form id="f"><input id="u" aria-label="Email"><input id="p" type="password" aria-label="Key">' +
+    '<input type="hidden" name="csrf" value="t"></form><div id="z"><input id="p9" type="password" aria-label="Other key"></div>');
+  spied(win, doc.getElementById("p"), CANARY, c);
+  sb.walk({ base: 1 });
+  sb.index();
+  await tick();
+  // the same parent loses a value field that is not sensitive too: neither D-443 (2) nor (3) fires
+  doc.getElementById("f").replaceChildren(tmpl(doc, '<input aria-label="Display name" value="Ada Lovelace">'),
+    tmpl(doc, '<input aria-label="City" value="London">'));
+  await tick();
+  sb.walk({ dirty: true });
+  const rows = sb.index();
+  assert.equal(c.reads, 0);
+  assert.ok(!JSON.stringify([rows, sb.text()]).includes(CANARY));
+  same(byName(rows, "Display name").state.value, { kind: "text", text: "Ada Lovelace" });
+  same(byName(rows, "City").state.value, { kind: "text", text: "London" });
 });

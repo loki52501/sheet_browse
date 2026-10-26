@@ -181,6 +181,7 @@
     lastFill: new WeakMap(), // sensitive element -> last empty|filled evidence (D-426)
     gone: [], // [{ t, keys, parent }] removed sensitive field signatures, oldest first (D-435 (2)); keys null: match all; parent: WeakRef, D-439
     born: [], // [{ t, ref, parent }] recently added non-sensitive value fields, WeakRefs only (D-438 (1))
+    nearPw: new WeakMap(), // value field added next to a live sensitive field -> { t, parent: WeakRef } (D-443 (1))
     ids: new WeakMap(), // Element -> id
     refs: new Map(), // id -> WeakRef<Element>
     rec: new WeakMap(), // Element -> walk decision (cached between walks)
@@ -885,18 +886,38 @@
     return "";
   }
 
+  // Overlap mask (D-443 (1)): a value field added, within SENS_KEEP_MS, to a parent that then
+  // held a sensitive field this batch did not add (an add-first show-password copy while the
+  // password is still in the page) is never read while that parent still holds a sensitive
+  // field: it reads empty|filled. When the sensitive field goes, D-442 decides whether it
+  // inherits. The add-time parent is checked wherever the field is now (fail closed).
+  function nearLivePw(el) {
+    const b = S.nearPw.get(el);
+    if (!b) return false;
+    if (now() - b.t > SENS_KEEP_MS) {
+      S.nearPw.delete(el);
+      return false;
+    }
+    const p = b.parent.deref();
+    if (!p || !p.isConnected || typeof p.querySelectorAll !== "function") return false;
+    for (const s of p.querySelectorAll("input,textarea")) if (s !== el && valueField(s) && S.sens.has(s)) return true;
+    return false;
+  }
+
+  // Every read of a field's value goes through here (index, state, text and fingerprint use
+  // index rows; names and keys never read a value).
   function fieldValue(el, role) {
     const tag = el.localName;
     if (tag === "input") {
       const t = String(el.type).toLowerCase();
       if (NOVALUE_INPUT.has(t)) return undefined;
       if (t === "file") return { kind: el.files && el.files.length ? "filled" : "empty" };
-      if (sensitive(el)) return { kind: filledNoRead(el) };
+      if (sensitive(el) || nearLivePw(el)) return { kind: filledNoRead(el) };
       const v = el.value;
       return v ? { kind: "text", text: v.slice(0, VALUE_CAP) } : { kind: "empty" };
     }
     if (tag === "textarea") {
-      if (sensitive(el)) return { kind: filledNoRead(el) };
+      if (sensitive(el) || nearLivePw(el)) return { kind: filledNoRead(el) };
       const v = el.value;
       return v ? { kind: "text", text: v.slice(0, VALUE_CAP) } : { kind: "empty" };
     }
@@ -1864,8 +1885,10 @@
   // once against the sensitive fields already in its parent (the overlap read), and every added
   // value field that stays non-sensitive is remembered (WeakRef and add time) for the same
   // window, so a later removal of a sensitive field marks the ones that match its keys and the
-  // ones added to the same parent: all of them when the parent lost only that field, else a
-  // single one (D-442). Remove-first across batches (D-439, Vue out-in, a
+  // ones added to the same parent: all of them when every field the parent lost was sensitive,
+  // else a single one (D-442, D-443 (2)). One that was added next to a live sensitive field is
+  // never read until that field goes or the window ends (nearLivePw, D-443 (1)).
+  // Remove-first across batches (D-439, Vue out-in, a
   // re-render split by an await): a parent that lost exactly one value field, a sensitive one,
   // and gained none is remembered (WeakRef) with the removal; the first later batch within the
   // window that adds value fields to it marks its field when it adds exactly one.
@@ -1938,6 +1961,15 @@
   }
   // keys: an array, or null for a field whose identity could not be read (matches everything).
   const keysHit = (keys, set) => keys === null || keys.some((k) => set.has(k));
+  // Some field of a same-batch add shares a key with the removed field (false when a key read
+  // throws: the caller then marks every field, fail closed).
+  function addKeyHit(keys, fields) {
+    try {
+      return fields.some((f) => keysHit(keys, fieldKeys(f, null)));
+    } catch (err) {
+      return false;
+    }
+  }
   function markSens(f) {
     S.sens.add(f);
     if (S.walked && !S.full) markDirty(f);
@@ -1986,9 +2018,11 @@
       for (const [p, e] of swap) {
         if (e.out !== 1 || e.sens !== 1) continue;
         // one out, one in within this batch (D-437); one out and nothing in: a later batch that
-        // adds exactly one value field to this parent within the window inherits (D-439)
+        // adds exactly one value field to this parent within the window inherits (D-439); one
+        // out and two or more in with no key match: all of them inherit (D-443 (3), N5). A key
+        // match leaves the rest to the key check below; a key that cannot be read marks all.
         if (!e.add) e.gone.parent = new WeakRef(p);
-        else if (e.add.length === 1) S.sens.add(e.add[0]);
+        else if (e.add.length === 1 || !addKeyHit(e.gone.keys, e.add)) for (const f of e.add) S.sens.add(f);
       }
     }
     for (const g of gone) if (g.keys === null || g.keys.length || g.parent) S.gone.push(g);
@@ -2002,13 +2036,14 @@
         if (f && f.isConnected && !S.sens.has(f)) prior.push({ f, p: b.parent.deref(), keys: undefined });
       }
       for (const g of lost) {
-        // Same-parent rule (D-438 (1), D-442; never skipped, also under a same-batch D-437 swap
-        // and for fields added while the document was loading): when the parent lost exactly one
-        // value field, this sensitive one, every remembered field added to it inherits; a parent
-        // that lost two or more (an SPA login swap, D-435 (1)) marks only a single remembered
-        // field. Key matches and a match-all entry always inherit.
+        // Same-parent rule (D-438 (1), D-442, D-443 (2); never skipped, also under a same-batch
+        // D-437 swap and for fields added while the document was loading): when every value
+        // field the parent lost was sensitive (one password, or a password and its confirm),
+        // every remembered field added to it inherits; a parent that also lost a field that is
+        // not sensitive (an SPA login swap, D-435 (1)) marks only a single remembered field.
+        // Key matches and a match-all entry always inherit.
         const inParent = prior.filter((x) => x.p === g.parent);
-        const all = g.e.out === 1;
+        const all = g.e.out === g.e.sens;
         for (const x of prior) {
           if (S.sens.has(x.f)) continue;
           let hit = g.keys === null || (inParent.includes(x) && (all || inParent.length === 1));
@@ -2066,12 +2101,13 @@
     };
     for (const [f, p] of added) {
       let hit = false;
+      let sib = [];
       // every read of the added field and its neighbours runs inside the try: a getter that
       // throws marks the field sensitive and leaves the rest of the batch to run (D-439)
       try {
         if (S.sens.has(f) || sensitive(f)) continue;
         hit = !!heir && heir.has(p);
-        const sib = hit ? [] : nearOf(p);
+        if (!hit) sib = nearOf(p);
         if (!hit && (S.gone.length || sib.length)) {
           const keys = fieldKeys(f, null);
           hit = S.gone.some((g) => keysHit(g.keys, keys));
@@ -2085,7 +2121,12 @@
         hit = true; // a field whose sensitivity or keys cannot be read: sensitive (fail closed)
       }
       if (hit) S.sens.add(f);
-      else S.born.push({ t, ref: new WeakRef(f), parent: new WeakRef(p) });
+      else {
+        const parent = new WeakRef(p);
+        S.born.push({ t, ref: new WeakRef(f), parent });
+        // added next to a live sensitive field (one this batch did not add): masked (D-443 (1))
+        if (sib.length) S.nearPw.set(f, { t, parent });
+      }
     }
     if (S.born.length > BORN_MAX) S.born.splice(0, S.born.length - BORN_MAX);
   }
