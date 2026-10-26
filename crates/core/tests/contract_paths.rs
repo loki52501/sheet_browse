@@ -1,5 +1,6 @@
 //! Contract paths (pr-ready section 4): every harness-core item `agent-memory/interfaces.yaml`
-//! names must exist at exactly that path, so a wrong path fails compilation here.
+//! names (its `rust` paths and the methods its `name` leads with) must exist at exactly
+//! that path and signature, so a wrong path fails compilation here.
 //! Covers I-4 (vault) so far; other interfaces are added as their tasks touch them.
 
 use std::path::{Path, PathBuf};
@@ -8,6 +9,20 @@ use harness_core::vault::{
     default_key, default_path, scrub, vault_literal, vault_refs, EntryKind, KeySource, Resolved,
     Vault, VaultEditor, VaultError, MIN_VALUE_CHARS,
 };
+
+/// I-4 `name`: `Vault::resolve_into(template, sink)`, the vault's own `scrub` and
+/// `install_global`, and `Vault::open`, the way every consumer gets a vault.
+#[test]
+fn vault_open_resolve_into_scrub_install() {
+    let _open: fn(&Path, &KeySource) -> Result<Vault, VaultError> = Vault::open;
+    let _scrub: fn(&Vault, &str) -> String = Vault::scrub;
+    let _install: fn(&Vault) = Vault::install_global;
+    // Never called: it pins that the sink receives `&Resolved` and `expose` gives `&str`.
+    fn _resolve(v: &Vault) -> Result<usize, VaultError> {
+        v.resolve_into("", |r: &Resolved<'_>| r.expose().len())
+    }
+    let _ = _resolve;
+}
 
 /// I-4, D-84: `Vault::open_for_set(path, key) -> Result<VaultEditor, VaultError>`, and the
 /// editor's whole surface: set, remove, names, save.

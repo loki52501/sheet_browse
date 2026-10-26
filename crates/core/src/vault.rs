@@ -651,22 +651,35 @@ impl VaultEditor {
     /// so `save` writes nothing: it takes the lock and checks that the file on disk
     /// decrypts with the key, so a caller that wants confirmation gets an error instead of
     /// a silent bad write. A missing file is fine only when the editor holds no entries
-    /// (nothing was ever written); otherwise it is `Io(NotFound)`. The values held in
-    /// memory are zeroed on drop.
+    /// (nothing was ever written); otherwise it is `Io(NotFound)`. The existence check and
+    /// the decrypt both happen under the lock, so a file deleted while `save` waits for
+    /// the lock is reported, not passed. The values held in memory are zeroed on drop.
     pub fn save(self) -> Result<(), VaultError> {
-        if !self.backing.path.try_exists()? {
-            if self.entries.is_empty() {
-                return Ok(());
-            }
-            return Err(VaultError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "vault file is missing",
-            )));
+        let path = &self.backing.path;
+        // An empty editor on a missing file is ok whatever happens next, so it returns
+        // without creating the lock file (or the directory) for nothing.
+        if self.entries.is_empty() && !path.try_exists()? {
+            return Ok(());
         }
-        let lock = lock_exclusive(&self.backing.path)?;
-        read_entries(&self.backing.path, &self.backing.key)?;
+        #[cfg(test)]
+        tests::before_save_lock(path);
+        let lock = lock_exclusive(path)?;
+        let result = match std::fs::read(path) {
+            Ok(ciphertext) => load_identity(&self.backing.key)?
+                .ok_or_else(|| {
+                    VaultError::Key("vault file exists but its age identity is missing".into())
+                })
+                .and_then(|identity| decrypt_entries(&identity, &ciphertext))
+                .map(drop),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.entries.is_empty() => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(VaultError::Io(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "vault file is missing"),
+            )),
+            Err(e) => Err(VaultError::Io(e)),
+        };
+        // Closing the handle releases the lock.
         drop(lock);
-        Ok(())
+        result
     }
 }
 
@@ -2297,6 +2310,93 @@ mod tests {
             lost.save(),
             Err(VaultError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound
         ));
+    }
+
+    thread_local! {
+        /// Run by `VaultEditor::save` just before it takes the lock (this thread only).
+        static BEFORE_SAVE_LOCK: std::cell::Cell<Option<fn(&Path)>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    pub(super) fn before_save_lock(path: &Path) {
+        if let Some(hook) = BEFORE_SAVE_LOCK.with(|h| h.get()) {
+            hook(path);
+        }
+    }
+
+    #[test]
+    fn editor_save_reports_a_file_deleted_while_it_waits_for_the_lock() {
+        let c = canary();
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+        let mut ed = Vault::open_for_set(&path, &key).unwrap();
+        ed.set("test", &c, EntryKind::Secret).unwrap();
+        // Another process deletes the file after `save` started and before it holds the
+        // lock: any look at the file taken before the lock is stale by then.
+        let delete: fn(&Path) = |p| std::fs::remove_file(p).unwrap();
+        BEFORE_SAVE_LOCK.with(|h| h.set(Some(delete)));
+        let saved = ed.save();
+        BEFORE_SAVE_LOCK.with(|h| h.set(None));
+        assert!(!path.exists());
+        assert!(
+            matches!(
+                &saved,
+                Err(VaultError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound
+            ),
+            "save passed an editor holding entries whose file is gone"
+        );
+    }
+
+    #[test]
+    fn editor_remove_fails_closed_on_a_file_it_cannot_read() {
+        let c = canary();
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key_file = dir.0.join("vault.key");
+        let key = KeySource::IdentityFile(key_file.clone());
+        Vault::open(&path, &key)
+            .unwrap()
+            .set("test", &c, EntryKind::Secret)
+            .unwrap();
+        let good = std::fs::read(&path).unwrap();
+        let mut ed = Vault::open_for_set(&path, &key).unwrap();
+        // Garbage bytes: Decrypt, and the file is left byte for byte.
+        std::fs::write(&path, b"not an age file").unwrap();
+        assert!(matches!(ed.remove("test"), Err(VaultError::Decrypt)));
+        assert!(
+            std::fs::read(&path).unwrap() == b"not an age file",
+            "remove rewrote a vault file it could not decrypt"
+        );
+        // A file encrypted to another key: Decrypt, and the file is left byte for byte.
+        let other = TempDir::new();
+        let other_key = KeySource::IdentityFile(other.0.join("k"));
+        Vault::open(&other.0.join("v.age"), &other_key)
+            .unwrap()
+            .set("test", &c, EntryKind::Secret)
+            .unwrap();
+        std::fs::copy(other.0.join("v.age"), &path).unwrap();
+        let foreign = std::fs::read(&path).unwrap();
+        assert!(matches!(ed.remove("test"), Err(VaultError::Decrypt)));
+        assert!(
+            std::fs::read(&path).unwrap() == foreign,
+            "remove rewrote a vault file encrypted to another key"
+        );
+        // The file's identity is missing: Key, the file is left byte for byte and no new
+        // key is generated (it would orphan the file).
+        std::fs::write(&path, &good).unwrap();
+        std::fs::remove_file(&key_file).unwrap();
+        assert!(matches!(ed.remove("test"), Err(VaultError::Key(_))));
+        assert!(
+            std::fs::read(&path).unwrap() == good,
+            "remove rewrote a vault file whose key is missing"
+        );
+        assert!(
+            !key_file.exists(),
+            "remove generated a key for an existing file"
+        );
+        // The editor still holds what it held.
+        assert_eq!(ed.names(), vec![("test".to_owned(), EntryKind::Secret)]);
     }
 
     #[test]
