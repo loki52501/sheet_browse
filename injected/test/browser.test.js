@@ -945,6 +945,18 @@ test("O3 D-443: an exit class on the wrapper with the transition on the inner in
 // same evaluate, read again, and read once the page clock is past the click + 2.1 s (past the
 // D-443 overlap mask). The world-sb getter counter on the password and the plain field stays
 // installed for every read.
+//
+// Email and City (and Mail two on d445-twins.html) sit beside a password in form#fc. When the
+// parser inserts them in a later mutation batch than a password in the same parent subtree
+// (it yields under load), D-443 (1) masks them for 2 s from their insert, the cost D-443 (4)
+// accepts, so they are read only past that window. Test-only wait: the window is a timestamp in
+// injected.js with no event at its end, so the condition is the page clock itself (2000 ms after
+// the load event, which follows every parser insert, plus 50 ms), as accept-t19's pastBornWindow.
+const pastLoadWindow = (o) => o.page.waitForFunction(() => {
+  const e = performance.getEntriesByType("navigation")[0];
+  return !!e && e.loadEventEnd > 0 && performance.now() > e.loadEventEnd + 2050;
+}, null, { polling: 50, timeout: 15000 });
+
 function twinRead(o, n, settle) {
   return o.ev(async (a) => {
     const sb = globalThis.__sb;
@@ -985,6 +997,7 @@ async function twinCase(t, n, label, page) {
       set: desc.set,
     });
   }, ["acct" + n, "q" + n]);
+  await pastLoadWindow(o);
   const t0 = await o.ev(() => performance.now());
   await o.page.click("#b" + n, { noWaitAfter: true });
   const same = await twinRead(o, n, true);
@@ -1028,6 +1041,7 @@ test("D-444 control: an ordinary visible form with no hidden sensitive field rea
   await o.page.fill("#city", "London");
   await o.page.fill("#pwc", "d444-control-canary");
   await o.page.fill("#user", "ada");
+  await pastLoadWindow(o);
   const r = await o.ev(() => {
     const sb = globalThis.__sb;
     sb.walk({ dirty: true });
@@ -1077,6 +1091,7 @@ test("D-445 control: an ordinary multi-div form with a visible password reads it
   await o.page.fill("#city", "London");
   await o.page.fill("#pwc", "d445-control-canary");
   await o.page.fill("#user", "ada");
+  await pastLoadWindow(o);
   const r = await o.ev(() => {
     const sb = globalThis.__sb;
     sb.walk({ dirty: true });

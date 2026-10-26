@@ -38,6 +38,10 @@
 </script>
 </head>
 <body>
+<!-- control: User sits in its own container ahead of every password, so it reads as text
+     however the parser splits the page into mutation batches (D-443 (1) masks a field
+     parsed in a later batch than a password in the same parent subtree) -->
+<div id="uc"><input id="user" aria-label="User"></div>
 <form id="f6"><div id="w6"><input id="acct6" type="password" aria-label="Account key six"></div>
   <button id="b6" type="button" onclick="cloneHide()">Show six</button></form>
 <form id="f7"><div id="w7"><input id="acct7" type="password" aria-label="Account key seven" oninput="sync(this, 'q7')"><input id="q7" type="text" style="display:none"></div>
@@ -46,9 +50,9 @@
   <button id="b8" type="button" onclick="flipWrappers()">Show eight</button></form>
 <form id="f9"><div id="g9"><span><input id="acct9" type="password" aria-label="Account key nine" oninput="sync(this, 'q9')"></span><span><input id="q9" type="text" style="display:none"></span></div>
   <button id="b9" type="button" onclick="flipInWrappers()">Show nine</button></form>
-<!-- control: an ordinary visible form, no hidden sensitive field; text fields keep reading -->
+<!-- control: an ordinary visible form, no hidden sensitive field; text fields keep reading.
+     Email and City sit beside a password, so the tests read them past load + 2 s (D-443 (4)) -->
 <form id="fc"><div id="gc"><div><input id="email" type="email" aria-label="Email"></div><div><input id="pwc" type="password" aria-label="Control key"></div></div>
   <div><input id="city" aria-label="City"><input id="note" type="text" aria-label="Note" style="display:none"></div></form>
-<input id="user" aria-label="User">
 </body>
 </html>

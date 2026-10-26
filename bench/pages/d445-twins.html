@@ -76,6 +76,10 @@
 </script>
 </head>
 <body>
+<!-- control: User sits in its own container ahead of every password, so it reads as text
+     however the parser splits the page into mutation batches (D-443 (1) masks a field
+     parsed in a later batch than a password in the same parent subtree) -->
+<div id="uc"><input id="user" aria-label="User"></div>
 <form id="f71"><div id="w71"><x-in><div class="c"><input id="acct71" type="password" aria-label="Account key Z7" oninput="sync(this, 'q71')"></div></x-in><x-in hidden><div class="c"><input id="q71" type="text"></div></x-in></div>
   <button id="b71" type="button" onclick="z7()">Show Z7</button></form>
 <form id="f72"><div id="w72"><div class="base"><label>Secret</label><div class="control"><input id="acct72" type="password" aria-label="Account key Z7v" oninput="sync(this, 'q72')"></div></div><div class="base" style="display:none"><label>Secret</label><div class="control"><input id="q72" type="text"></div></div></div>
@@ -104,12 +108,12 @@
 <form id="f62"><div id="w62"><input id="acct62" type="password" aria-label="Account key Z6s" oninput="sync(this, 'q62')"><input id="q62" type="text" style="display:none"></div>
   <button id="b62" type="button" onclick="z6s()">Show Z6s</button></form>
 <!-- control: an ordinary multi-div form with a visible password (component-shaped fields); the
-     other fields keep reading as text -->
+     other fields keep reading as text. Email, City and Mail two sit beside a password, so the
+     tests read them past load + 2 s (D-443 (4)) -->
 <form id="fc"><div class="base"><label>Email</label><div class="control"><input id="email" type="email" aria-label="Email"></div></div>
   <div class="base"><label>Password</label><div class="control"><input id="pwc" type="password" aria-label="Control key"></div></div>
   <div class="base"><label>City</label><div class="control"><input id="city" aria-label="City"></div></div>
   <div class="base" style="display:none"><div class="control"><input id="note" aria-label="Note"></div></div></form>
-<input id="user" aria-label="User">
 <!-- control: a password below the fold of a scroll pane at the end of the page is shown (it can
      be scrolled to), so the field beside it reads -->
 <form id="fp"><div id="pane" style="height:40px;overflow:auto"><div style="height:300px"></div>
