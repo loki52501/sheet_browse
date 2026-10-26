@@ -6,7 +6,7 @@
 
 use harness_core::gate::StopReason;
 use harness_core::ToolCtx;
-use sb_cdp::{Cdp, CdpError, CdpSender, Event, Pipe, Transport};
+use sb_cdp::{Cdp, CdpError, CdpSender, Event, Observer, Pipe, Transport};
 use sb_sheet::{ElemRef, IndexRow, TextBlock};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -21,7 +21,7 @@ mod registry;
 pub use launch::{
     binary_name, launch_args, platform_dir, resolve_chromium, LaunchEnv, CHROMIUM_VERSION,
 };
-pub use registry::{ExecContext, Registry, SB_WORLD};
+pub use registry::{ExecContext, Registry, Seed, SB_WORLD};
 
 use launch::ProfileDir;
 
@@ -179,30 +179,82 @@ fn lock(m: &Mutex<Registry>) -> MutexGuard<'_, Registry> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// What the client's observer runs for every event, before any subscriber sees it: the
-/// registry update, the change signal, and the attach follow-up.
-fn observe(registry: &Mutex<Registry>, changed: &watch::Sender<u64>, e: &Event, cdp: &CdpSender) {
-    lock(registry).apply(e.session.as_deref(), &e.method, &e.params);
+/// The client observer for a driver: runs for every event, before any subscriber sees it.
+/// It applies the event to the registry, signals the change and sends the attach follow-up.
+fn observer(registry: Arc<Mutex<Registry>>, changed: Arc<watch::Sender<u64>>) -> Observer {
+    Box::new(move |e, cdp| observe(&registry, &changed, e, cdp))
+}
+
+fn bump(changed: &watch::Sender<u64>) {
     changed.send_modify(|v| *v = v.wrapping_add(1));
-    if e.method == "Target.attachedToTarget" {
-        on_attached(&e.params, cdp);
+}
+
+fn observe(
+    registry: &Arc<Mutex<Registry>>,
+    changed: &Arc<watch::Sender<u64>>,
+    e: &Event,
+    cdp: &CdpSender,
+) {
+    let attached = (e.method == "Target.attachedToTarget")
+        .then(|| e.params.get("sessionId").and_then(Value::as_str))
+        .flatten();
+    let (tracked, seeds) = {
+        let mut r = lock(registry);
+        r.apply(e.session.as_deref(), &e.method, &e.params);
+        (attached.is_some_and(|sid| r.tracks(sid)), r.take_seeds())
+    };
+    bump(changed);
+    if let Some(sid) = attached {
+        let seed = seeds.iter().any(|s| s.session == sid && !s.replay_contexts);
+        on_attached(registry, changed, sid, tracked, seed, cdp);
+    }
+    for s in seeds.iter().filter(|s| s.replay_contexts) {
+        // An activated prerender: its Runtime.enable ran while it was not tracked, so read
+        // the frames first, then make Runtime replay its contexts.
+        seed_frames(registry, changed, &s.session, cdp);
+        drop(cdp.start(Some(&s.session), "Runtime.disable", json!({})));
+        drop(cdp.start(Some(&s.session), "Runtime.enable", json!({})));
     }
 }
 
-/// Every auto-attached target is paused (`waitForDebuggerOnStart`). Pages and OOPIFs get
-/// Page and Runtime events and auto-attach for their own children; then they run. All four
-/// commands are queued at once (pipelined); CDP handles a session's commands in order, so the
-/// domains are on before the target runs. Replies are not awaited: their slots are dropped.
-fn on_attached(params: &Value, cdp: &CdpSender) {
-    let Some(sid) = params.get("sessionId").and_then(Value::as_str) else {
-        return;
-    };
-    let kind = params
-        .pointer("/targetInfo/type")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if matches!(kind, "page" | "iframe") {
+/// One `Page.getFrameTree` whose reply is applied in wire order (`start_then`), so frames
+/// that existed before `Page.enable` are registered before any later event about them.
+fn seed_frames(
+    registry: &Arc<Mutex<Registry>>,
+    changed: &Arc<watch::Sender<u64>>,
+    sid: &str,
+    cdp: &CdpSender,
+) {
+    let (registry, changed, session) = (registry.clone(), changed.clone(), sid.to_string());
+    cdp.start_then(Some(sid), "Page.getFrameTree", json!({}), move |reply| {
+        // An error (the target went away) leaves the registry as it is.
+        if let Ok(v) = reply {
+            lock(&registry).seed_frame_tree(&session, &v);
+            bump(&changed);
+        }
+    });
+}
+
+/// Every auto-attached target is paused (`waitForDebuggerOnStart`). Sessions the registry
+/// tracks (tabs, OOPIFs, pending prerenders) get Page and Runtime events and auto-attach for
+/// their own children; then every target runs. A target that was already running when we
+/// attached also gets one `Page.getFrameTree` (its existing frames are not replayed), placed
+/// before `Runtime.enable` so the frames are known when its contexts are replayed. All are
+/// queued at once (pipelined, no round trip waited on); CDP handles a session's commands in
+/// order, so the domains are on before the target runs. Other replies are not awaited.
+fn on_attached(
+    registry: &Arc<Mutex<Registry>>,
+    changed: &Arc<watch::Sender<u64>>,
+    sid: &str,
+    tracked: bool,
+    seed: bool,
+    cdp: &CdpSender,
+) {
+    if tracked {
         drop(cdp.start(Some(sid), "Page.enable", json!({})));
+        if seed {
+            seed_frames(registry, changed, sid, cdp);
+        }
         drop(cdp.start(Some(sid), "Runtime.enable", json!({})));
         drop(cdp.start(
             Some(sid),
@@ -214,7 +266,9 @@ fn on_attached(params: &Value, cdp: &CdpSender) {
 }
 
 /// The driver: one browser, its registry and tabs. Dropping it kills every browser process
-/// (waiting up to [`sb_cdp::DROP_KILL_CAP`]) and then removes a `bench` profile.
+/// (waiting up to [`sb_cdp::DROP_KILL_CAP`], blocking the dropping thread) and then removes a
+/// `bench` profile. Dropping skips `Browser.close`, so a `me` driver should end with
+/// [`Driver::shutdown`] to let Chromium flush cookies and session state.
 pub struct Driver {
     cdp: Cdp,
     registry: Arc<Mutex<Registry>>,
@@ -254,10 +308,9 @@ impl Driver {
         );
         let registry = Arc::new(Mutex::new(Registry::new()));
         let (changed_tx, changed) = watch::channel(0u64);
-        let reg = registry.clone();
         let cdp = Cdp::with_observer(
             pipe.clone() as Arc<dyn Transport>,
-            Box::new(move |e, cdp| observe(&reg, &changed_tx, e, cdp)),
+            observer(registry.clone(), Arc::new(changed_tx)),
         );
         // From here a failure drops the Driver, which kills the browser and the profile.
         let driver = Driver {
@@ -493,5 +546,225 @@ mod tests {
         }
         .into();
         assert!(matches!(p, DriverError::Cdp(ref m) if m.contains("DOM.focus")));
+    }
+
+    use bytes::Bytes;
+    use tokio::sync::mpsc;
+
+    /// In-memory transport: the test reads what the driver's client sent and injects replies
+    /// and events.
+    struct Mock {
+        out: mpsc::UnboundedSender<Bytes>,
+        inbound: Mutex<Option<mpsc::Receiver<Bytes>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for Mock {
+        async fn send(&self, msg: Bytes) -> Result<(), sb_cdp::TransportError> {
+            self.out
+                .send(msg)
+                .map_err(|_| sb_cdp::TransportError::Closed)
+        }
+        fn recv(&self) -> mpsc::Receiver<Bytes> {
+            self.inbound
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .unwrap_or_else(|| mpsc::channel(1).1)
+        }
+    }
+
+    /// A client with the driver's observer over [`Mock`].
+    struct Wired {
+        cdp: Cdp,
+        registry: Arc<Mutex<Registry>>,
+        changed: watch::Receiver<u64>,
+        sent: mpsc::UnboundedReceiver<Bytes>,
+        inject: mpsc::Sender<Bytes>,
+    }
+
+    fn wired() -> Wired {
+        let (out, sent) = mpsc::unbounded_channel();
+        let (inject, inbound) = mpsc::channel(64);
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let (tx, changed) = watch::channel(0u64);
+        let mock = Arc::new(Mock {
+            out,
+            inbound: Mutex::new(Some(inbound)),
+        });
+        let cdp = Cdp::with_observer(mock, observer(registry.clone(), Arc::new(tx)));
+        Wired {
+            cdp,
+            registry,
+            changed,
+            sent,
+            inject,
+        }
+    }
+
+    impl Wired {
+        async fn inject(&self, v: Value) {
+            self.inject
+                .send(Bytes::from(v.to_string()))
+                .await
+                .expect("reader alive");
+        }
+
+        /// The next `n` messages the client wrote, as (session, method, id).
+        async fn sent(&mut self, n: usize) -> Vec<(Option<String>, String, Value)> {
+            let mut v = Vec::new();
+            for _ in 0..n {
+                let raw = tokio::time::timeout(Duration::from_secs(5), self.sent.recv())
+                    .await
+                    .expect("a message within 5 s")
+                    .expect("transport open");
+                let m: Value = serde_json::from_slice(&raw).expect("json");
+                v.push((
+                    m["sessionId"].as_str().map(str::to_string),
+                    m["method"].as_str().unwrap_or_default().to_string(),
+                    m["id"].clone(),
+                ));
+            }
+            v
+        }
+
+        fn nothing_more_sent(&mut self) -> bool {
+            self.sent.try_recv().is_err()
+        }
+
+        /// Wait (capped at 5 s) until the registry satisfies `f`.
+        async fn until(&mut self, what: &str, f: impl Fn(&Registry) -> bool) {
+            let wait = async {
+                loop {
+                    self.changed.borrow_and_update();
+                    if f(&lock(&self.registry)) {
+                        return;
+                    }
+                    self.changed.changed().await.expect("observer alive");
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(5), wait)
+                .await
+                .unwrap_or_else(|_| panic!("{what} within 5 s"));
+        }
+    }
+
+    fn methods(v: &[(Option<String>, String, Value)]) -> Vec<&str> {
+        v.iter().map(|(_, m, _)| m.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn running_tab_is_seeded_in_wire_order_with_pipelined_setup() {
+        let mut w = wired();
+        w.inject(json!({"method": "Target.attachedToTarget", "params": {
+            "sessionId": "S1", "waitingForDebugger": false,
+            "targetInfo": {"targetId": "T1", "type": "page", "url": "https://a.test/"}}}))
+            .await;
+        // Everything is on the wire before any reply: no serial round trip. The frame tree is
+        // read before Runtime.enable, so replayed contexts find their frames.
+        let sent = w.sent(5).await;
+        assert_eq!(
+            methods(&sent),
+            [
+                "Page.enable",
+                "Page.getFrameTree",
+                "Runtime.enable",
+                "Target.setAutoAttach",
+                "Runtime.runIfWaitingForDebugger"
+            ]
+        );
+        assert!(sent.iter().all(|(s, _, _)| s.as_deref() == Some("S1")));
+        let tree_id = sent[1].2.clone();
+        w.inject(json!({"id": tree_id, "result": {"frameTree": {
+            "frame": {"id": "T1", "url": "https://a.test/"},
+            "childFrames": [{"frame": {"id": "F1", "parentId": "T1", "url": "https://a.test/in"}}]}}}))
+            .await;
+        // Runtime.enable's replay, right after the reply on the wire.
+        w.inject(
+            json!({"sessionId": "S1", "method": "Runtime.executionContextCreated", "params": {
+            "context": {"id": 5, "origin": "https://a.test", "name": "", "uniqueId": "u5",
+                "auxData": {"isDefault": true, "type": "default", "frameId": "F1"}}}}),
+        )
+        .await;
+        w.until("child frame with its context", |r| {
+            r.tab_by_target("T1")
+                .and_then(|t| r.default_context(t, 1))
+                .is_some_and(|c| c.id == 5)
+        })
+        .await;
+        assert_eq!(
+            w.cdp.pending(),
+            0,
+            "the seed's slot is gone after its reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn paused_tab_gets_no_seed_and_a_second_session_only_runs() {
+        let mut w = wired();
+        w.inject(json!({"method": "Target.attachedToTarget", "params": {
+            "sessionId": "S1", "waitingForDebugger": true,
+            "targetInfo": {"targetId": "T1", "type": "page", "url": "about:blank"}}}))
+            .await;
+        let sent = w.sent(4).await;
+        assert_eq!(
+            methods(&sent),
+            [
+                "Page.enable",
+                "Runtime.enable",
+                "Target.setAutoAttach",
+                "Runtime.runIfWaitingForDebugger"
+            ]
+        );
+        // A second session on the same page (explicit attach): not tracked, nothing enabled.
+        w.inject(json!({"method": "Target.attachedToTarget", "params": {
+            "sessionId": "S2", "waitingForDebugger": false,
+            "targetInfo": {"targetId": "T1", "type": "page", "url": "about:blank"}}}))
+            .await;
+        let sent = w.sent(1).await;
+        assert_eq!(methods(&sent), ["Runtime.runIfWaitingForDebugger"]);
+        assert_eq!(sent[0].0.as_deref(), Some("S2"));
+        assert!(w.nothing_more_sent());
+        let t = lock(&w.registry).tab_by_target("T1").unwrap();
+        assert_eq!(lock(&w.registry).session(t), Some("S1"));
+    }
+
+    #[tokio::test]
+    async fn activated_prerender_is_seeded_then_contexts_replayed() {
+        let mut w = wired();
+        w.inject(json!({"method": "Target.attachedToTarget", "params": {
+            "sessionId": "S1", "waitingForDebugger": true,
+            "targetInfo": {"targetId": "T1", "type": "page", "url": "about:blank"}}}))
+            .await;
+        w.sent(4).await;
+        w.inject(json!({"sessionId": "S1", "method": "Target.attachedToTarget", "params": {
+            "sessionId": "P1", "waitingForDebugger": true,
+            "targetInfo": {"targetId": "TP", "type": "page", "subtype": "prerender", "url": "https://r.test/"}}}))
+            .await;
+        // Tracked (so it has events once it activates), but not a tab.
+        assert_eq!(
+            methods(&w.sent(4).await),
+            [
+                "Page.enable",
+                "Runtime.enable",
+                "Target.setAutoAttach",
+                "Runtime.runIfWaitingForDebugger"
+            ]
+        );
+        assert_eq!(lock(&w.registry).tabs().len(), 1);
+        w.inject(json!({"method": "Target.targetInfoChanged", "params": {
+            "targetInfo": {"targetId": "TP", "type": "page", "url": "https://r.test/", "title": "R"}}}))
+            .await;
+        let sent = w.sent(3).await;
+        assert_eq!(
+            methods(&sent),
+            ["Page.getFrameTree", "Runtime.disable", "Runtime.enable"]
+        );
+        assert!(sent.iter().all(|(s, _, _)| s.as_deref() == Some("P1")));
+        let t = lock(&w.registry)
+            .tab_by_target("TP")
+            .expect("tab follows the prerender");
+        assert_eq!(t, TabId(1));
+        assert_eq!(lock(&w.registry).session(t), Some("P1"));
     }
 }

@@ -61,6 +61,22 @@ pub(crate) fn spawn(
     })
 }
 
+impl Drop for Proc {
+    /// A `Proc` dropped while its child is unreaped (for example `Pipe::launch` failing to
+    /// start a bridge thread after the spawn) still owns a running browser: kill its group so
+    /// nothing is orphaned. After `kill` the child is taken and this does nothing.
+    fn drop(&mut self) {
+        let unreaped = self
+            .child
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        if unreaped {
+            self.kill(super::DROP_KILL_CAP);
+        }
+    }
+}
+
 fn group_alive(pgid: u32) -> bool {
     let Ok(pgid) = i32::try_from(pgid) else {
         return false;

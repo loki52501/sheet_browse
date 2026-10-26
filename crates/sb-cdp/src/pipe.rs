@@ -38,12 +38,16 @@ pub struct Pipe {
 
 impl Pipe {
     /// Spawn `program` with `args` (which must include `--remote-debugging-pipe`), fd 3 and
-    /// fd 4 wired to this transport, stdin/stdout/stderr on the null device.
+    /// fd 4 wired to this transport, stdin/stdout/stderr on the null device. Launches are
+    /// serialized. On Windows a `std::process::Command` spawned on another thread at the same
+    /// moment can inherit the pipe ends and delay end-of-file until it exits (D-602).
     pub fn launch(program: &Path, args: &[OsString]) -> Result<Pipe, TransportError> {
         // Chromium reads `child_in` (fd 3) and writes `child_out` (fd 4).
         let (child_in, ours_out) = std::io::pipe()?;
         let (ours_in, child_out) = std::io::pipe()?;
         // Takes the child ends and closes the parent's copies, so EOF follows the browser.
+        // From here an early return drops `proc`, which kills the browser (the Windows
+        // kill-on-close job, the Unix `Proc` drop), so a failed thread start orphans nothing.
         let proc = sys::spawn(program, args, child_in, child_out)?;
         let (tx, out_rx) = mpsc::channel::<Bytes>(OUTBOUND_QUEUE);
         let (in_tx, in_rx) = mpsc::channel::<Bytes>(INBOUND_QUEUE);
@@ -66,6 +70,7 @@ impl Pipe {
     }
 
     /// Every live process of the browser (the Job's list on Windows; the leader on Unix).
+    /// When the Job cannot be queried this is the leader, never an empty list.
     pub fn pids(&self) -> Vec<u32> {
         self.proc.pids()
     }

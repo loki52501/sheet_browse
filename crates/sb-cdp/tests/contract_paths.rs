@@ -18,3 +18,23 @@ fn i8_paths_resolve() {
     let io: TransportError = std::io::Error::other("x").into();
     assert!(matches!(io, TransportError::Io(_)));
 }
+
+/// B-604 (additive, pending in interface_changes): the paths it names resolve.
+#[test]
+fn b604_additive_paths_resolve() {
+    let _ = sb_cdp::Cdp::new;
+    let _ = sb_cdp::Cdp::with_observer;
+    let _ = |s: &sb_cdp::CdpSender| {
+        s.start_then(None, "Page.getFrameTree", serde_json::json!({}), |_| {})
+    };
+    let _ = sb_cdp::CdpSender::pending;
+    let _ = sb_cdp::Pipe::launch;
+    let _ = sb_cdp::Pipe::pids;
+    let _ = sb_cdp::Pipe::kill;
+    let _ = sb_cdp::process_running;
+    let _ = sb_cdp::parse_devtools_active_port;
+    let _: Option<sb_cdp::Observer> = None;
+    let _: Option<sb_cdp::Event> = None;
+    assert_eq!(sb_cdp::COMMAND_TIMEOUT.as_secs(), 10);
+    assert!(sb_cdp::DROP_KILL_CAP.as_secs() > 0);
+}

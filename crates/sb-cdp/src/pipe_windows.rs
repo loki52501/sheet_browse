@@ -4,16 +4,20 @@
 //! `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. The process starts suspended, joins a kill-on-close
 //! Job object (so every renderer, GPU and crashpad child dies with it), then resumes.
 
+use std::collections::HashSet;
 use std::ffi::{c_void, OsStr, OsString};
 use std::io;
 use std::io::{PipeReader, PipeWriter};
+use std::marker::PhantomData;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::ptr;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, STILL_ACTIVE, WAIT_OBJECT_0,
+    CloseHandle, GetLastError, SetHandleInformation, ERROR_INVALID_PARAMETER, HANDLE,
+    HANDLE_FLAG_INHERIT, STILL_ACTIVE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
@@ -122,24 +126,27 @@ fn crt_block(handles: &[(u8, HANDLE)]) -> Vec<u8> {
     block
 }
 
-/// A Win32 attribute list holding one `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
-struct AttrList {
+/// A Win32 attribute list holding one `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. The list stores a
+/// pointer into `handles`, so it borrows them for its lifetime.
+struct AttrList<'a> {
     buf: Vec<usize>,
+    _handles: PhantomData<&'a [HANDLE]>,
 }
 
-impl AttrList {
-    fn new(handles: &[HANDLE]) -> io::Result<AttrList> {
+impl<'a> AttrList<'a> {
+    fn new(handles: &'a [HANDLE]) -> io::Result<AttrList<'a>> {
         let mut size = 0usize;
         // SAFETY: a null list with a size pointer is the documented size query; it returns
         // FALSE with ERROR_INSUFFICIENT_BUFFER, which is expected.
         unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut size) };
         let mut list = AttrList {
             buf: vec![0usize; size.div_ceil(std::mem::size_of::<usize>())],
+            _handles: PhantomData,
         };
         // SAFETY: the buffer is at least `size` bytes and usize-aligned.
         check(unsafe { InitializeProcThreadAttributeList(list.ptr(), 1, 0, &mut size) })?;
-        // SAFETY: `handles` outlives CreateProcessW (the caller keeps it alive); the list
-        // stores only the pointer.
+        // SAFETY: `handles` outlives the list (the lifetime says so); the list stores only
+        // the pointer.
         let ok = unsafe {
             UpdateProcThreadAttribute(
                 list.ptr(),
@@ -165,7 +172,7 @@ impl AttrList {
     }
 }
 
-impl Drop for AttrList {
+impl Drop for AttrList<'_> {
     fn drop(&mut self) {
         if !self.buf.is_empty() {
             // SAFETY: initialized in `new`, deleted once.
@@ -173,6 +180,10 @@ impl Drop for AttrList {
         }
     }
 }
+
+/// Serializes [`spawn`]: from the moment the pipe ends are made inheritable until our copies
+/// are closed, no other `Pipe` launch runs. D-602 records what this does not cover.
+static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) fn spawn(
     program: &Path,
@@ -188,11 +199,6 @@ pub(crate) fn spawn(
     let h_in = child_in.as_raw_handle() as HANDLE;
     let h_out = child_out.as_raw_handle() as HANDLE;
     let inherit = [h_nul, h_in, h_out];
-    for h in inherit {
-        // SAFETY: valid handles owned by the locals above. The handle list below keeps any
-        // other concurrently spawned child from inheriting them through this process's spawn.
-        check(unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) })?;
-    }
     let mut block = crt_block(&[
         (CRT_DEV, h_nul),
         (CRT_DEV, h_nul),
@@ -200,6 +206,8 @@ pub(crate) fn spawn(
         (CRT_PIPE, h_in),
         (CRT_PIPE, h_out),
     ]);
+    // Everything that can be prepared while the handles are still private is prepared here,
+    // so the inheritable window below holds only CreateProcessW.
     let mut attrs = AttrList::new(&inherit)?;
     let mut si = STARTUPINFOEXW::default();
     si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
@@ -214,26 +222,41 @@ pub(crate) fn spawn(
     let app = wide(program.as_os_str());
     let mut cmd = command_line(program, args);
     let mut pi = PROCESS_INFORMATION::default();
-    // SAFETY: every pointer refers to a live local; `inherit`, `block` and `attrs` outlive
-    // the call; `cmd` is mutable and NUL-terminated as CreateProcessW requires.
-    let created = unsafe {
-        CreateProcessW(
-            app.as_ptr(),
-            cmd.as_mut_ptr(),
-            ptr::null(),
-            ptr::null(),
-            1,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
-            ptr::null(),
-            ptr::null(),
-            &si as *const STARTUPINFOEXW as *const STARTUPINFOW,
-            &mut pi,
-        )
+    let created = {
+        let _serial = LAUNCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The handle list limits what *this* CreateProcessW passes on. It does not stop a
+        // CreateProcess on another thread (std::process::Command passes bInheritHandles=TRUE
+        // with no list) from inheriting these while they are inheritable. So they are
+        // inheritable only from here until our copies close a few lines down, and Pipe
+        // launches are serialized by LAUNCH_LOCK. A concurrent Command spawn elsewhere in the
+        // process can still inherit them in that window (D-602).
+        for h in inherit {
+            // SAFETY: valid handles owned by the locals above.
+            check(unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) })?;
+        }
+        // SAFETY: every pointer refers to a live local; `inherit`, `block` and `attrs` outlive
+        // the call; `cmd` is mutable and NUL-terminated as CreateProcessW requires.
+        let created = unsafe {
+            CreateProcessW(
+                app.as_ptr(),
+                cmd.as_mut_ptr(),
+                ptr::null(),
+                ptr::null(),
+                1,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
+                ptr::null(),
+                ptr::null(),
+                &si as *const STARTUPINFOEXW as *const STARTUPINFOW,
+                &mut pi,
+            )
+        };
+        // The child holds its own copies now (or never got any). Ours close here, which ends
+        // the inheritable window and lets end-of-file on our side track the browser.
+        drop((nul, child_in, child_out));
+        created
     };
-    check(created)?;
-    // The child holds its own copies now; ours close here so EOF tracks the browser.
     drop(attrs);
-    drop((nul, child_in, child_out));
+    check(created)?;
     match into_job(&pi) {
         Ok(job) => {
             // SAFETY: the thread handle is ours to close.
@@ -295,7 +318,13 @@ impl Proc {
         self.pid
     }
 
+    /// Every process in the job. When the job cannot be queried the leader is reported, so
+    /// a caller asking "is anything left" never reads an empty list nobody observed.
     pub(crate) fn pids(&self) -> Vec<u32> {
+        self.try_pids().unwrap_or_else(|_| vec![self.pid])
+    }
+
+    fn try_pids(&self) -> io::Result<Vec<u32>> {
         // Header (two u32) plus the id array, as usize slots so the struct is aligned.
         let mut buf = vec![0usize; 2 + MAX_JOB_PIDS];
         let len = std::mem::size_of_val(buf.as_slice()) as u32;
@@ -310,17 +339,19 @@ impl Proc {
                 len,
                 ptr::null_mut(),
             );
-            if ok == 0 {
-                return Vec::new();
-            }
+            // ERROR_MORE_DATA (more than MAX_JOB_PIDS) is an error too: a partial list must
+            // not let `kill` report success.
+            check(ok)?;
             let n = ((*list).NumberOfProcessIdsInList as usize).min(MAX_JOB_PIDS);
             let ids = ptr::addr_of!((*list).ProcessIdList) as *const usize;
-            (0..n).map(|i| *ids.add(i) as u32).collect()
+            Ok((0..n).map(|i| *ids.add(i) as u32).collect())
         }
     }
 
     /// Terminate the job and wait, condition by condition (each process handle signalled),
-    /// at most `cap` in total.
+    /// at most `cap` in total. True only when every process the job listed was observed
+    /// gone. A failed job query, a process that cannot be opened for a reason other than
+    /// "no such process", and the cap all return false (fail closed).
     pub(crate) fn kill(&self, cap: Duration) -> bool {
         let deadline = Instant::now() + cap;
         // SAFETY: the job handle is valid for our lifetime.
@@ -328,31 +359,41 @@ impl Proc {
         if !wait_handle(self.process, deadline) {
             return false;
         }
+        // Pids whose exit we saw (handle signalled, or no such process any more). The job may
+        // still list a process for a moment after it exited; those are not waited on again.
+        let mut gone: HashSet<u32> = HashSet::from([self.pid]);
         loop {
-            let pids = self.pids();
-            if pids.is_empty() {
+            let Ok(pids) = self.try_pids() else {
+                return false;
+            };
+            let left: Vec<u32> = pids.into_iter().filter(|p| !gone.contains(p)).collect();
+            if left.is_empty() {
                 return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
             }
             // SAFETY: as above; covers a child assigned while we were terminating.
             unsafe { TerminateJobObject(self.job, 1) };
-            let mut opened = 0;
-            for pid in pids {
-                // SAFETY: OpenProcess returns null for a pid that is already gone.
+            for pid in left {
+                // SAFETY: OpenProcess returns null on failure, checked below.
                 let h = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
                 if h.is_null() {
-                    continue;
+                    // SAFETY: reads this thread's last error, set by the failed OpenProcess.
+                    if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER {
+                        // No process with this id: it exited and was released.
+                        gone.insert(pid);
+                        continue;
+                    }
+                    return false;
                 }
-                opened += 1;
                 let exited = wait_handle(h, deadline);
                 // SAFETY: opened above, closed once.
                 unsafe { CloseHandle(h) };
                 if !exited {
                     return false;
                 }
-            }
-            if opened == 0 {
-                // Listed but not openable: gone by now, or nothing we can wait on.
-                return self.pids().is_empty();
+                gone.insert(pid);
             }
         }
     }

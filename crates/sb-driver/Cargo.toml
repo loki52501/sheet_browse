@@ -18,4 +18,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
+bytes.workspace = true
 tokio = { workspace = true, features = ["net", "test-util"] }

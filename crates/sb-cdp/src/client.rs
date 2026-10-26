@@ -5,6 +5,8 @@
 //! caller can put several commands on the wire before awaiting any of them. Every inbound
 //! event goes first to the synchronous observer (the driver's registry, so it never lags),
 //! then to the all-events broadcast and to the broadcast of its session.
+//! [`CdpSender::start_then`] runs a callback on the reply inside the reader, in wire order
+//! with the events, for state that must be applied exactly where the browser produced it.
 
 use crate::Transport;
 use bytes::Bytes;
@@ -51,10 +53,19 @@ pub struct Event {
 /// Called synchronously by the reader task for every event, before any broadcast.
 pub type Observer = Box<dyn Fn(&Event, &CdpSender) + Send + Sync>;
 
+/// Called by the reader task with a command's reply, see [`CdpSender::start_then`].
+type ReplyHook = Box<dyn FnOnce(Result<Value, CdpError>) + Send>;
+
 type Reply = Result<Value, (i64, String)>;
 
+/// Where a reply goes: a waiting caller, or a hook run in the reader.
+enum Slot {
+    Caller(oneshot::Sender<Reply>),
+    Hook { method: String, hook: ReplyHook },
+}
+
 /// `None` marks the client closed: sends after close fail at once.
-type ReplyMap = Option<HashMap<u64, oneshot::Sender<Reply>>>;
+type ReplyMap = Option<HashMap<u64, Slot>>;
 
 struct Shared {
     replies: Mutex<ReplyMap>,
@@ -116,7 +127,16 @@ impl CdpSender {
     ) -> impl Future<Output = Result<Value, CdpError>> + Send + 'static {
         let deadline = tokio::time::Instant::now() + COMMAND_TIMEOUT;
         let method = method.to_string();
-        let queued = self.queue(session, &method, params);
+        let (tx, rx) = oneshot::channel();
+        let queued = self
+            .queue(session, &method, params, Slot::Caller(tx))
+            .map(|id| {
+                let guard = SlotGuard {
+                    shared: self.shared.clone(),
+                    id,
+                };
+                (rx, guard)
+            });
         async move {
             let (rx, guard) = match queued {
                 Some(q) => q,
@@ -140,6 +160,26 @@ impl CdpSender {
         }
     }
 
+    /// Queue `method` now; when its reply arrives the reader task calls `then` with it,
+    /// synchronously, before it handles the next inbound message. So `then` sees the reply at
+    /// its place in the event stream: the observer has applied every event before it and none
+    /// after it. Keep `then` short (it blocks the reader). If the connection closes first,
+    /// `then` is dropped uncalled. No 10 s timeout applies: nobody waits on it. False when the
+    /// client is already closed.
+    pub fn start_then(
+        &self,
+        session: Option<&str>,
+        method: &str,
+        params: Value,
+        then: impl FnOnce(Result<Value, CdpError>) + Send + 'static,
+    ) -> bool {
+        let slot = Slot::Hook {
+            method: method.to_string(),
+            hook: Box::new(then),
+        };
+        self.queue(session, method, params, slot).is_some()
+    }
+
     /// Start and await one command.
     pub async fn call(
         &self,
@@ -150,12 +190,7 @@ impl CdpSender {
         self.start(session, method, params).await
     }
 
-    fn queue(
-        &self,
-        session: Option<&str>,
-        method: &str,
-        params: Value,
-    ) -> Option<(oneshot::Receiver<Reply>, SlotGuard)> {
+    fn queue(&self, session: Option<&str>, method: &str, params: Value, slot: Slot) -> Option<u64> {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let mut msg = serde_json::Map::new();
         msg.insert("id".into(), Value::from(id));
@@ -165,18 +200,18 @@ impl CdpSender {
             msg.insert("sessionId".into(), Value::from(s));
         }
         let bytes = Bytes::from(serde_json::to_vec(&Value::Object(msg)).ok()?);
-        let (tx, rx) = oneshot::channel();
         {
             let mut replies = lock(&self.shared.replies);
-            replies.as_mut()?.insert(id, tx);
+            replies.as_mut()?.insert(id, slot);
         }
-        let guard = SlotGuard {
-            shared: self.shared.clone(),
-            id,
-        };
-        // The writer is gone only after close; the guard removes the slot.
-        self.tx.send(bytes).ok()?;
-        Some((rx, guard))
+        // The writer is gone only after close; then the slot goes too.
+        if self.tx.send(bytes).is_err() {
+            if let Some(map) = lock(&self.shared.replies).as_mut() {
+                map.remove(&id);
+            }
+            return None;
+        }
+        Some(id)
     }
 
     /// Callers waiting for a reply right now (diagnostic; the cancellation tests read it).
@@ -346,13 +381,24 @@ async fn read_loop(mut inbound: mpsc::Receiver<Bytes>, sender: CdpSender, observ
             let slot = lock(&sender.shared.replies)
                 .as_mut()
                 .and_then(|m| m.remove(&id));
-            if let Some(slot) = slot {
-                let reply = match msg.error {
-                    Some(e) => Err((e.code, e.message)),
-                    None => Ok(msg.result.unwrap_or(Value::Null)),
-                };
+            let reply = match msg.error {
+                Some(e) => Err((e.code, e.message)),
+                None => Ok(msg.result.unwrap_or(Value::Null)),
+            };
+            match slot {
                 // The caller may have just been dropped; nothing to do then.
-                let _ = slot.send(reply);
+                Some(Slot::Caller(tx)) => {
+                    let _ = tx.send(reply);
+                }
+                // Run here, before the next message: wire order.
+                Some(Slot::Hook { method, hook }) => {
+                    hook(reply.map_err(|(code, message)| CdpError::Protocol {
+                        method,
+                        code,
+                        message,
+                    }))
+                }
+                None => {}
             }
             continue;
         }
@@ -436,6 +482,13 @@ mod tests {
         harness_with(Box::new(|_, _| {}))
     }
 
+    /// Every wait in these tests is capped, so a routing break fails in 5 s instead of hanging.
+    async fn within<F: Future>(what: &str, f: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(5), f)
+            .await
+            .unwrap_or_else(|_| panic!("{what} within 5 s"))
+    }
+
     impl Harness {
         async fn next_sent(&mut self) -> Value {
             let raw = tokio::time::timeout(Duration::from_secs(5), self.sent.recv())
@@ -489,13 +542,13 @@ mod tests {
             .await;
         h.inject(json!({"method": "Target.targetCreated", "params": {"y": 2}}))
             .await;
-        let e = s1.recv().await.unwrap();
+        let e = within("S1 event", s1.recv()).await.unwrap();
         assert_eq!(e.method, "Page.frameNavigated");
         assert_eq!(e.session.as_deref(), Some("S1"));
         assert_eq!(e.params, json!({"x": 1}));
-        let first = all.recv().await.unwrap();
+        let first = within("first event", all.recv()).await.unwrap();
         assert_eq!(first.session.as_deref(), Some("S1"));
-        let second = all.recv().await.unwrap();
+        let second = within("second event", all.recv()).await.unwrap();
         assert_eq!(second.method, "Target.targetCreated");
         assert_eq!(second.session, None);
         assert!(matches!(
@@ -510,26 +563,110 @@ mod tests {
         h.inject(json!({"method": "Target.detachedFromTarget", "params": {"sessionId": "S1"}}))
             .await;
         assert!(matches!(
-            s1.recv().await,
+            within("S1 closed", s1.recv()).await,
             Err(broadcast::error::RecvError::Closed)
         ));
     }
 
     #[tokio::test]
     async fn observer_sees_each_event_before_subscribers() {
+        // The observer itself looks at a subscriber of the all-events stream and of the
+        // event's session: neither may hold the event yet. Broadcasting first turns this red.
+        type Peek = Arc<
+            Mutex<
+                Option<(
+                    broadcast::Receiver<Arc<Event>>,
+                    broadcast::Receiver<Arc<Event>>,
+                )>,
+            >,
+        >;
+        let peek: Peek = Arc::new(Mutex::new(None));
         let seen = Arc::new(AtomicUsize::new(0));
-        let s = seen.clone();
+        let early = Arc::new(AtomicUsize::new(0));
+        let (p, s, x) = (peek.clone(), seen.clone(), early.clone());
         let h = harness_with(Box::new(move |e, _| {
-            if e.method == "Page.loadEventFired" {
-                s.fetch_add(1, Ordering::SeqCst);
+            if e.method != "Page.loadEventFired" {
+                return;
+            }
+            s.fetch_add(1, Ordering::SeqCst);
+            if let Some((all, session)) = lock(&p).as_mut() {
+                for rx in [all, session] {
+                    if !matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)) {
+                        x.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
             }
         }));
         let mut all = h.cdp.events();
-        h.inject(json!({"method": "Page.loadEventFired", "params": {}}))
+        let mut session = h.cdp.session_events("S1");
+        *lock(&peek) = Some((h.cdp.events(), h.cdp.session_events("S1")));
+        for _ in 0..2 {
+            h.inject(json!({"method": "Page.loadEventFired", "params": {}, "sessionId": "S1"}))
+                .await;
+            let e = within("event", all.recv()).await.unwrap();
+            assert_eq!(e.method, "Page.loadEventFired");
+            let e = within("session event", session.recv()).await.unwrap();
+            assert_eq!(e.method, "Page.loadEventFired");
+            // Drain the observer's own receivers so the next round starts empty.
+            if let Some((a, b)) = lock(&peek).as_mut() {
+                let _ = (a.try_recv(), b.try_recv());
+            }
+        }
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            early.load(Ordering::SeqCst),
+            0,
+            "a subscriber had the event before the observer ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn reply_hook_runs_in_wire_order_with_events() {
+        // The hook must see the observer's state exactly as of its reply: events before the
+        // reply applied, events after it not yet.
+        let applied = Arc::new(AtomicUsize::new(0));
+        let a = applied.clone();
+        let mut h = harness_with(Box::new(move |e, _| {
+            if e.method == "Test.tick" {
+                a.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let (tx, rx) = oneshot::channel();
+        let a = applied.clone();
+        assert!(h
+            .cdp
+            .sender()
+            .start_then(Some("S1"), "Page.getFrameTree", json!({}), move |r| {
+                let _ = tx.send((r, a.load(Ordering::SeqCst)));
+            }));
+        let m = within("sent", h.next_sent()).await;
+        assert_eq!(m["method"], "Page.getFrameTree");
+        assert_eq!(m["sessionId"], "S1");
+        assert_eq!(h.cdp.pending(), 1);
+        h.inject(json!({"method": "Test.tick", "params": {}})).await;
+        h.inject(json!({"id": m["id"], "result": {"frameTree": {}}}))
             .await;
-        let e = all.recv().await.unwrap();
-        assert_eq!(e.method, "Page.loadEventFired");
-        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        h.inject(json!({"method": "Test.tick", "params": {}})).await;
+        let (r, ticks) = within("hook", rx).await.expect("hook ran");
+        assert_eq!(r.unwrap(), json!({"frameTree": {}}));
+        assert_eq!(ticks, 1, "hook ran between the two events");
+        assert_eq!(h.cdp.pending(), 0);
+        // An error reply reaches the hook as a protocol error naming the method.
+        let (tx, rx) = oneshot::channel();
+        h.cdp
+            .sender()
+            .start_then(None, "Page.getFrameTree", json!({}), move |r| {
+                let _ = tx.send(r);
+            });
+        let m = within("sent", h.next_sent()).await;
+        h.inject(json!({"id": m["id"], "error": {"code": -32000, "message": "gone"}}))
+            .await;
+        let err = within("hook", rx).await.expect("hook ran").unwrap_err();
+        assert!(err.to_string().contains("Page.getFrameTree"), "{err}");
+        // After close a hook is refused at once.
+        drop(h.inject);
+        within("closed", h.cdp.closed()).await;
+        assert!(!h.cdp.sender().start_then(None, "X.y", json!({}), |_| {}));
     }
 
     #[tokio::test(start_paused = true)]
@@ -574,7 +711,7 @@ mod tests {
                 method: "B.two".into()
             }
         );
-        h.cdp.closed().await;
+        within("closed", h.cdp.closed()).await;
         assert!(h.cdp.is_closed());
         // A send after close fails at once rather than waiting out the timeout.
         let late = tokio::time::timeout(

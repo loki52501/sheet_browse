@@ -6,6 +6,17 @@
 //! frame 0 is the main frame, matching `sb_sheet::FrameId` and element refs `#f2.15`.
 //! Each frame carries a generation, bumped on every cross-document navigation, so an id
 //! taken from an older document can be rejected as stale.
+//!
+//! Only the session that created a tab owns it: a second session attached to the same page
+//! (an explicit `Target.attachToTarget`) is not tracked, and its detach changes nothing.
+//! Page targets with a subtype (`prerender`) are not tabs; a prerender that activates takes
+//! over the tab whose session it was attached under.
+//!
+//! `Page.enable` does not replay frames that already exist, so a target attached running
+//! (the initial tab, tabs a `me` profile restores, iframes already out of process, an
+//! activated prerender) is queued as a [`Seed`]: the driver sends one `Page.getFrameTree`
+//! for it, pipelined with its setup commands, and feeds the reply to
+//! [`Registry::seed_frame_tree`] in wire order.
 
 use crate::{FrameInfo, TabId};
 use serde_json::Value;
@@ -22,6 +33,9 @@ pub struct ExecContext {
 
 /// The isolated world `injected.js` runs in (B-4 #3, B-5).
 pub const SB_WORLD: &str = "sb";
+
+/// Frames read from one `Page.getFrameTree` at most (a page with more is not real).
+const MAX_SEED_FRAMES: usize = 4096;
 
 #[derive(Debug, Clone)]
 struct Frame {
@@ -116,6 +130,23 @@ impl Tab {
     }
 }
 
+/// A session whose existing frames must be read once with `Page.getFrameTree` (see the
+/// module docs). `replay_contexts`: its `Runtime.enable` already ran while it was untracked
+/// (an activated prerender), so contexts must be replayed after the seed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seed {
+    pub session: String,
+    pub replay_contexts: bool,
+}
+
+/// A page target with a subtype, by its session: not a tab until it activates.
+#[derive(Debug, Clone)]
+struct Pending {
+    target: String,
+    /// The tab whose page session it was attached under.
+    parent: Option<TabId>,
+}
+
 /// Who a flattened session belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Owner {
@@ -129,6 +160,9 @@ pub struct Registry {
     tabs: BTreeMap<TabId, Tab>,
     by_target: HashMap<String, TabId>,
     sessions: HashMap<String, Owner>,
+    /// Prerendered (subtyped) page targets, by session.
+    pending: HashMap<String, Pending>,
+    seeds: Vec<Seed>,
     next_tab: u32,
 }
 
@@ -190,6 +224,11 @@ impl Registry {
                 }
             }
             "Target.targetInfoChanged" => self.info_changed(params),
+            "Target.targetDestroyed" => {
+                if let Some(target) = s(params, "targetId") {
+                    self.target_gone(target);
+                }
+            }
             "Page.frameAttached" => {
                 if let (Some(tab), Some(id), Some(parent)) = (
                     self.page_session(session),
@@ -269,63 +308,112 @@ impl Registry {
         let Some(target) = s(info, "targetId") else {
             return;
         };
+        // A target that was already running when we attached: its frames are not replayed.
+        let running = params.get("waitingForDebugger").and_then(Value::as_bool) != Some(true);
         match s(info, "type") {
             Some("page") => {
-                if let Some(&tab) = self.by_target.get(target) {
-                    if let Some(t) = self.tabs.get_mut(&tab) {
-                        self.sessions.remove(&t.session);
-                        t.session = sid.to_string();
-                    }
-                    self.sessions.insert(sid.to_string(), Owner::Tab(tab));
+                if s(info, "subtype").is_some_and(|st| !st.is_empty()) {
+                    // A prerender (or any other non-tab page): kept aside until it activates.
+                    let parent = self.page_session(session);
+                    self.pending.insert(
+                        sid.to_string(),
+                        Pending {
+                            target: target.to_string(),
+                            parent,
+                        },
+                    );
                     return;
                 }
-                self.next_tab += 1;
-                let tab = TabId(self.next_tab);
+                if self.by_target.contains_key(target) {
+                    // A second session on a known tab: the tab keeps its own session, and
+                    // this one is not tracked (its events would duplicate the owner's).
+                    return;
+                }
                 let opener = s(info, "openerId").and_then(|o| self.by_target.get(o).copied());
-                let mut frames = BTreeMap::new();
-                frames.insert(0, Frame::new(target, None, s(info, "url").unwrap_or("")));
-                self.tabs.insert(
-                    tab,
-                    Tab {
-                        target_id: target.to_string(),
+                self.new_tab(sid, target, info, opener);
+                if running {
+                    self.seeds.push(Seed {
                         session: sid.to_string(),
-                        title: s(info, "title").unwrap_or("").to_string(),
-                        opener,
-                        frames,
-                        by_cdp: HashMap::from([(target.to_string(), 0)]),
-                        oopif: HashMap::new(),
-                        next_frame: 1,
-                    },
-                );
-                self.by_target.insert(target.to_string(), tab);
-                self.sessions.insert(sid.to_string(), Owner::Tab(tab));
+                        replay_contexts: false,
+                    });
+                }
             }
             Some("iframe") => {
                 // Auto-attached under the session of the page (or OOPIF) that embeds it.
                 let Some((tab, _)) = self.owner(session) else {
                     return;
                 };
-                if let Some(t) = self.tabs.get_mut(&tab) {
-                    t.oopif.insert(target.to_string(), sid.to_string());
+                let Some(t) = self.tabs.get_mut(&tab) else {
+                    return;
+                };
+                if t.oopif
+                    .get(target)
+                    .is_some_and(|o| self.sessions.contains_key(o))
+                {
+                    // A second session on a tracked OOPIF: the first one keeps it.
+                    return;
                 }
+                t.oopif.insert(target.to_string(), sid.to_string());
                 self.sessions
                     .insert(sid.to_string(), Owner::Oopif(tab, target.to_string()));
+                if running {
+                    self.seeds.push(Seed {
+                        session: sid.to_string(),
+                        replay_contexts: false,
+                    });
+                }
             }
             _ => {}
         }
     }
 
+    fn new_tab(&mut self, sid: &str, target: &str, info: &Value, opener: Option<TabId>) -> TabId {
+        self.next_tab += 1;
+        let tab = TabId(self.next_tab);
+        let mut frames = BTreeMap::new();
+        frames.insert(0, Frame::new(target, None, s(info, "url").unwrap_or("")));
+        self.tabs.insert(
+            tab,
+            Tab {
+                target_id: target.to_string(),
+                session: sid.to_string(),
+                title: s(info, "title").unwrap_or("").to_string(),
+                opener,
+                frames,
+                by_cdp: HashMap::from([(target.to_string(), 0)]),
+                oopif: HashMap::new(),
+                next_frame: 1,
+            },
+        );
+        self.by_target.insert(target.to_string(), tab);
+        self.sessions.insert(sid.to_string(), Owner::Tab(tab));
+        tab
+    }
+
+    /// Remove a tab with every session that belongs to it.
+    fn remove_tab(&mut self, tab: TabId) {
+        if let Some(t) = self.tabs.remove(&tab) {
+            if self.by_target.get(&t.target_id) == Some(&tab) {
+                self.by_target.remove(&t.target_id);
+            }
+        }
+        self.sessions.retain(|_, o| match o {
+            Owner::Tab(t) | Owner::Oopif(t, _) => *t != tab,
+        });
+    }
+
     fn detached(&mut self, sid: &str) {
-        match self.sessions.remove(sid) {
+        self.pending.remove(sid);
+        match self.sessions.get(sid).cloned() {
             Some(Owner::Tab(tab)) => {
-                if let Some(t) = self.tabs.remove(&tab) {
-                    self.by_target.remove(&t.target_id);
+                if self.tabs.get(&tab).is_some_and(|t| t.session == sid) {
+                    self.remove_tab(tab);
+                } else {
+                    self.sessions.remove(sid);
                 }
-                self.sessions.retain(|_, o| *o != Owner::Tab(tab));
-                self.sessions
-                    .retain(|_, o| !matches!(o, Owner::Oopif(t, _) if *t == tab));
             }
             Some(Owner::Oopif(tab, frame)) => {
+                self.sessions.remove(sid);
                 if let Some(t) = self.tabs.get_mut(&tab) {
                     if t.oopif.get(&frame).is_some_and(|s| s == sid) {
                         t.oopif.remove(&frame);
@@ -337,10 +425,171 @@ impl Registry {
         }
     }
 
+    /// `Target.targetDestroyed`: the tab goes, whatever session it had.
+    fn target_gone(&mut self, target: &str) {
+        self.pending.retain(|_, p| p.target != target);
+        if let Some(&tab) = self.by_target.get(target) {
+            self.remove_tab(tab);
+        }
+    }
+
+    /// A pending (prerender) page lost its subtype: it is the page now. It takes over the tab
+    /// it was attached under, or becomes a new tab when that one is gone.
+    fn activate(&mut self, sid: String, p: Pending, info: &Value) {
+        let url = s(info, "url").unwrap_or("");
+        match p.parent.filter(|t| self.tabs.contains_key(t)) {
+            Some(tab) => {
+                // The old page's sessions (and its OOPIFs) no longer speak for this tab.
+                self.sessions.retain(|_, o| match o {
+                    Owner::Tab(t) | Owner::Oopif(t, _) => *t != tab,
+                });
+                let Some(t) = self.tabs.get_mut(&tab) else {
+                    return;
+                };
+                if self.by_target.get(&t.target_id) == Some(&tab) {
+                    self.by_target.remove(&t.target_id);
+                }
+                let generation = t.frames.get(&0).map_or(0, |f| f.generation.wrapping_add(1));
+                let mut main = Frame::new(&p.target, None, url);
+                main.generation = generation;
+                t.target_id = p.target.clone();
+                t.session = sid.clone();
+                if let Some(title) = s(info, "title") {
+                    t.title = title.to_string();
+                }
+                // Every old frame went with the old document; numbers are not reused.
+                t.frames = BTreeMap::from([(0, main)]);
+                t.by_cdp = HashMap::from([(p.target.clone(), 0)]);
+                t.oopif.clear();
+                self.by_target.insert(p.target, tab);
+                self.sessions.insert(sid.clone(), Owner::Tab(tab));
+            }
+            None => {
+                if self.by_target.contains_key(&p.target) {
+                    return;
+                }
+                self.new_tab(&sid, &p.target, info, None);
+            }
+        }
+        self.seeds.push(Seed {
+            session: sid,
+            replay_contexts: true,
+        });
+    }
+
+    /// Sessions whose existing frames must be read once (see [`Seed`]); drained.
+    pub fn take_seeds(&mut self) -> Vec<Seed> {
+        std::mem::take(&mut self.seeds)
+    }
+
+    /// True for a session the registry follows: a tab's, an OOPIF's or a pending
+    /// prerender's. Only those need Page and Runtime events.
+    pub fn tracks(&self, session: &str) -> bool {
+        self.sessions.contains_key(session) || self.pending.contains_key(session)
+    }
+
+    /// Apply a `Page.getFrameTree` reply for `session` (a [`Seed`]). Run it in wire order (the
+    /// driver uses `CdpSender::start_then`): the tree is then the truth at that point, so
+    /// unknown frames are added under their parents and every listed frame's URL is set.
+    /// Generations are not bumped (no navigation happened). For an OOPIF session only its
+    /// root frame is used, attached under its parent in the embedding page.
+    pub fn seed_frame_tree(&mut self, session: &str, reply: &Value) {
+        let Some((tab, scope)) = self.owner(Some(session)) else {
+            return;
+        };
+        let Some(tree) = reply.get("frameTree") else {
+            return;
+        };
+        let Some(t) = self.tabs.get_mut(&tab) else {
+            return;
+        };
+        let url_of = |f: &Value| {
+            format!(
+                "{}{}",
+                s(f, "url").unwrap_or(""),
+                s(f, "urlFragment").unwrap_or("")
+            )
+        };
+        if let Some(root) = scope {
+            let Some(f) = tree.get("frame") else {
+                return;
+            };
+            if s(f, "id") != Some(root.as_str()) {
+                return;
+            }
+            if !t.by_cdp.contains_key(&root) {
+                let Some(parent) = s(f, "parentId") else {
+                    return;
+                };
+                if t.attach_frame(&root, parent).is_none() {
+                    return;
+                }
+            }
+            if let Some(fr) = t.frame_mut(&root) {
+                fr.url = url_of(f);
+            }
+            return;
+        }
+        // Depth-first with an explicit stack; a parent is always handled before its children.
+        let mut stack: Vec<(&Value, Option<&str>)> = vec![(tree, None)];
+        let mut budget = MAX_SEED_FRAMES;
+        while let Some((node, parent)) = stack.pop() {
+            if budget == 0 {
+                return;
+            }
+            budget -= 1;
+            let Some(f) = node.get("frame") else {
+                continue;
+            };
+            let Some(id) = s(f, "id") else {
+                continue;
+            };
+            let known = match parent {
+                None => {
+                    if !t.by_cdp.contains_key(id) {
+                        // The main frame under a new CDP id: frame 0 follows it.
+                        if let Some(main) = t.frames.get_mut(&0) {
+                            t.by_cdp.remove(&main.cdp_id);
+                            main.cdp_id = id.to_string();
+                            t.by_cdp.insert(id.to_string(), 0);
+                        }
+                    }
+                    true
+                }
+                Some(p) => t.attach_frame(id, p).is_some(),
+            };
+            if !known {
+                continue;
+            }
+            if let Some(fr) = t.frame_mut(id) {
+                fr.url = url_of(f);
+            }
+            if let Some(children) = node.get("childFrames").and_then(Value::as_array) {
+                stack.extend(children.iter().rev().map(|c| (c, Some(id))));
+            }
+        }
+    }
     fn info_changed(&mut self, params: &Value) {
         let Some(info) = params.get("targetInfo") else {
             return;
         };
+        let activated =
+            s(info, "type") == Some("page") && s(info, "subtype").is_none_or(str::is_empty);
+        if activated {
+            if let Some(target) = s(info, "targetId") {
+                let sid = self
+                    .pending
+                    .iter()
+                    .find(|(_, p)| p.target == target)
+                    .map(|(sid, _)| sid.clone());
+                if let Some(sid) = sid {
+                    if let Some(p) = self.pending.remove(&sid) {
+                        self.activate(sid, p, info);
+                    }
+                    return;
+                }
+            }
+        }
         let Some(tab) = s(info, "targetId")
             .and_then(|t| self.by_target.get(t))
             .copied()
@@ -885,6 +1134,256 @@ mod tests {
         assert_eq!(
             origin("blob:https://a.test/uuid"),
             Origin::Tuple("https://a.test".into())
+        );
+    }
+
+    fn attach(r: &mut Registry, parent: Option<&str>, sid: &str, info: Value, waiting: bool) {
+        r.apply(
+            parent,
+            "Target.attachedToTarget",
+            &json!({"sessionId": sid, "targetInfo": info, "waitingForDebugger": waiting}),
+        );
+    }
+
+    #[test]
+    fn second_session_on_a_tab_does_not_take_it_over() {
+        let mut r = Registry::new();
+        let t = attach_page(&mut r, "S1", "T1", None);
+        // An explicit Target.attachToTarget{flatten} on the same page.
+        attach(
+            &mut r,
+            None,
+            "S2",
+            json!({"targetId": "T1", "type": "page", "url": "about:blank"}),
+            false,
+        );
+        assert_eq!(r.session(t), Some("S1"));
+        assert_eq!(r.tab_by_session("S2"), None);
+        assert!(!r.tracks("S2"));
+        assert!(
+            r.take_seeds().is_empty(),
+            "no seed for an untracked session"
+        );
+        // Events on the second session do not touch the tab.
+        let g = r.generation(t, 0).unwrap();
+        navigate(&mut r, "S2", "T1", None, "https://x.test/");
+        assert!(r.is_current(t, 0, g));
+        r.apply(
+            None,
+            "Target.detachedFromTarget",
+            &json!({"sessionId": "S2", "targetId": "T1"}),
+        );
+        assert!(r.has_tab(t), "the second session's detach keeps the tab");
+        assert_eq!(r.session(t), Some("S1"));
+        assert_eq!(r.tab_by_session("S1"), Some(t));
+        r.apply(
+            None,
+            "Target.detachedFromTarget",
+            &json!({"sessionId": "S1", "targetId": "T1"}),
+        );
+        assert!(!r.has_tab(t), "the owner's detach removes it");
+    }
+
+    #[test]
+    fn second_session_on_an_oopif_does_not_take_it_over() {
+        let mut r = Registry::new();
+        let t = attach_page(&mut r, "S1", "T1", None);
+        attach_frame(&mut r, "S1", "F1", "T1");
+        let iframe = json!({"targetId": "F1", "type": "iframe", "url": "https://b.test/"});
+        attach(&mut r, Some("S1"), "O1", iframe.clone(), true);
+        attach(&mut r, Some("S1"), "O2", iframe, false);
+        assert_eq!(r.frame_session(t, 1), Some("O1"));
+        r.apply(
+            Some("S1"),
+            "Target.detachedFromTarget",
+            &json!({"sessionId": "O2"}),
+        );
+        assert_eq!(r.frame_session(t, 1), Some("O1"));
+    }
+
+    #[test]
+    fn target_destroyed_removes_the_tab() {
+        let mut r = Registry::new();
+        let t = attach_page(&mut r, "S1", "T1", None);
+        r.apply(None, "Target.targetDestroyed", &json!({"targetId": "T1"}));
+        assert!(!r.has_tab(t));
+        assert_eq!(r.tab_by_session("S1"), None);
+        assert!(r.tabs().is_empty());
+    }
+
+    #[test]
+    fn prerender_is_not_a_tab_until_it_activates() {
+        let mut r = Registry::new();
+        let t = attach_page(&mut r, "S1", "T1", None);
+        navigate(&mut r, "S1", "T1", None, "https://search.test/?q=x");
+        attach_frame(&mut r, "S1", "F1", "T1");
+        let g = r.generation(t, 0).unwrap();
+        // Page-level auto-attach delivers the prerender under the tab's session.
+        attach(
+            &mut r,
+            Some("S1"),
+            "P1",
+            json!({"targetId": "TP", "type": "page", "subtype": "prerender", "url": "https://result.test/"}),
+            true,
+        );
+        assert_eq!(r.tabs().len(), 1, "a prerender is not a tab");
+        assert_eq!(r.tab_by_target("TP"), None);
+        assert_eq!(r.tab_by_session("P1"), None);
+        assert!(r.tracks("P1"), "its events are wanted once it activates");
+        // Its frame events do not leak into the tab before activation.
+        navigate(&mut r, "P1", "TP", None, "https://result.test/");
+        assert_eq!(r.tabs()[0].1, "https://search.test/?q=x");
+        // Any other subtype is not a tab either.
+        attach(
+            &mut r,
+            None,
+            "Q1",
+            json!({"targetId": "TQ", "type": "page", "subtype": "something-new"}),
+            true,
+        );
+        assert_eq!(r.tabs().len(), 1);
+        assert!(r.take_seeds().is_empty());
+
+        // Activation: the target loses its subtype and becomes the tab's page.
+        r.apply(
+            None,
+            "Target.targetInfoChanged",
+            &json!({"targetInfo": {"targetId": "TP", "type": "page", "url": "https://result.test/", "title": "Result"}}),
+        );
+        assert_eq!(
+            r.tabs(),
+            vec![(t, "https://result.test/".into(), "Result".into())]
+        );
+        assert_eq!(r.session(t), Some("P1"));
+        assert_eq!(r.tab_by_target("TP"), Some(t));
+        assert_eq!(r.tab_by_target("T1"), None);
+        assert_eq!(r.tab_by_session("S1"), None);
+        assert!(
+            !r.is_current(t, 0, g),
+            "ids from the old document are stale"
+        );
+        assert_eq!(r.frame_by_cdp_id(t, "F1"), None, "old frames went with it");
+        assert_eq!(
+            r.take_seeds(),
+            vec![Seed {
+                session: "P1".into(),
+                replay_contexts: true
+            }]
+        );
+        // The old page going away does not remove the tab.
+        r.apply(
+            Some("S1"),
+            "Target.detachedFromTarget",
+            &json!({"sessionId": "S1", "targetId": "T1"}),
+        );
+        r.apply(None, "Target.targetDestroyed", &json!({"targetId": "T1"}));
+        assert!(r.has_tab(t));
+        // New frames get fresh numbers.
+        attach_frame(&mut r, "P1", "F9", "TP");
+        assert_eq!(r.frame_by_cdp_id(t, "F9"), Some(2));
+    }
+
+    #[test]
+    fn running_attach_is_seeded_from_the_frame_tree() {
+        let mut r = Registry::new();
+        // The initial tab (or one `me` restored): attached running, frames already loaded.
+        attach(
+            &mut r,
+            None,
+            "S1",
+            json!({"targetId": "T1", "type": "page", "url": "https://a.test/"}),
+            false,
+        );
+        let t = r.tab_by_target("T1").unwrap();
+        assert_eq!(
+            r.take_seeds(),
+            vec![Seed {
+                session: "S1".into(),
+                replay_contexts: false
+            }]
+        );
+        // A paused (new) target needs no seed.
+        attach_page(&mut r, "S2", "T2", None);
+        assert!(r.take_seeds().is_empty());
+
+        r.seed_frame_tree(
+            "S1",
+            &json!({"frameTree": {
+            "frame": {"id": "T1", "url": "https://a.test/", "urlFragment": "#top"},
+            "childFrames": [
+                {"frame": {"id": "F1", "parentId": "T1", "url": "https://a.test/in"},
+                 "childFrames": [{"frame": {"id": "F2", "parentId": "F1", "url": "about:srcdoc"}}]},
+                {"frame": {"id": "F3", "parentId": "T1", "url": "https://ads.test/"}}
+            ]}}),
+        );
+        let frames = r.frames(t).unwrap();
+        let by: HashMap<u32, &FrameInfo> = frames.iter().map(|f| (f.frame, f)).collect();
+        assert_eq!(frames.len(), 4);
+        assert_eq!(by[&0].url, "https://a.test/#top");
+        assert_eq!(r.frame_by_cdp_id(t, "F1"), Some(1));
+        assert_eq!(r.frame_by_cdp_id(t, "F2"), Some(2));
+        assert_eq!(r.frame_by_cdp_id(t, "F3"), Some(3));
+        assert_eq!(by[&2].parent, Some(1));
+        assert!(!by[&1].opaque && !by[&2].opaque);
+        assert!(by[&3].opaque, "cross-origin child");
+        assert_eq!(r.generation(t, 1), Some(0), "seeding is not a navigation");
+        // Contexts Runtime.enable replays after the seed now find their frames.
+        context(&mut r, "S1", 7, "F2", "", true);
+        assert_eq!(r.default_context(t, 2).map(|c| c.id), Some(7));
+        // Seeding again changes nothing that is already known.
+        r.seed_frame_tree(
+            "S1",
+            &json!({"frameTree": {"frame": {"id": "T1", "url": "https://a.test/"},
+                "childFrames": [{"frame": {"id": "F1", "parentId": "T1", "url": "https://a.test/in"}}]}}),
+        );
+        assert_eq!(r.frame_by_cdp_id(t, "F1"), Some(1));
+        // An unknown session or a malformed reply is ignored.
+        r.seed_frame_tree("S?", &json!({"frameTree": {}}));
+        r.seed_frame_tree("S1", &json!({"nope": 1}));
+        assert_eq!(r.frames(t).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn running_oopif_is_seeded_under_its_parent() {
+        let mut r = Registry::new();
+        let t = attach_page(&mut r, "S1", "T1", None);
+        r.take_seeds();
+        navigate(&mut r, "S1", "T1", None, "https://a.test/");
+        // An iframe that was already out of process: the page never reported it.
+        attach(
+            &mut r,
+            Some("S1"),
+            "O1",
+            json!({"targetId": "F1", "type": "iframe", "url": "https://b.test/"}),
+            false,
+        );
+        assert_eq!(
+            r.take_seeds(),
+            vec![Seed {
+                session: "O1".into(),
+                replay_contexts: false
+            }]
+        );
+        r.seed_frame_tree(
+            "O1",
+            &json!({"frameTree": {"frame": {"id": "F1", "parentId": "T1", "url": "https://b.test/x"},
+                "childFrames": [{"frame": {"id": "G1", "parentId": "F1", "url": "https://b.test/inner"}}]}}),
+        );
+        let n = r.frame_by_cdp_id(t, "F1").expect("OOPIF frame registered");
+        assert_eq!(r.frame_session(t, n), Some("O1"));
+        let f = r
+            .frames(t)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.frame == n)
+            .unwrap();
+        assert_eq!(f.parent, Some(0));
+        assert_eq!(f.url, "https://b.test/x");
+        assert!(f.opaque);
+        assert_eq!(
+            r.frame_by_cdp_id(t, "G1"),
+            None,
+            "never read inside an OOPIF"
         );
     }
 }

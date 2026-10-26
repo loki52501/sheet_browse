@@ -3,11 +3,23 @@
 
 mod common;
 
-use sb_cdp::{devtools_active_port, Cdp, Transport, WebSocket};
+use sb_cdp::{devtools_active_port, process_running, Cdp, Transport, WebSocket};
 use serde_json::json;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Kills and reaps the browser when dropped, so a failed assertion or a timeout panic
+/// anywhere in the test leaves no Chromium running against the temp profile.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        // Already exited (the happy path): kill fails harmlessly and wait reaps at once.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 
 #[tokio::test]
 async fn websocket_attaches_to_a_running_chrome() {
@@ -18,7 +30,7 @@ async fn websocket_attaches_to_a_running_chrome() {
         .prefix("sb-cdp-ws-")
         .tempdir()
         .unwrap();
-    let mut child = Command::new(&chrome)
+    let child = Command::new(&chrome)
         .arg("--remote-debugging-port=0")
         .arg(format!("--user-data-dir={}", profile.path().display()))
         .args([
@@ -32,6 +44,9 @@ async fn websocket_attaches_to_a_running_chrome() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn chrome");
+    // Declared after `profile`, so it drops first: the browser is gone before the directory.
+    let chrome = KillOnDrop(child);
+    let pid = chrome.0.id();
 
     let url = devtools_active_port(profile.path(), Duration::from_secs(30))
         .await
@@ -84,23 +99,13 @@ async fn websocket_attaches_to_a_running_chrome() {
         .unwrap();
     assert_eq!(r["result"]["value"], 42);
 
-    // Close the browser and wait for it to exit (a condition with a cap), so the profile
-    // directory is free to delete.
-    // Queued synchronously by `start`; the reply may never arrive as the browser exits.
+    // Close the browser gracefully: Chrome closes the socket as it exits (a condition with a
+    // cap). Queued synchronously by `start`; the reply may never arrive as the browser exits.
     drop(cdp.start(None, "Browser.close", json!({})));
-    let exited = tokio::time::timeout(
-        Duration::from_secs(30),
-        tokio::task::spawn_blocking(move || {
-            let status = child.wait();
-            (child, status)
-        }),
-    )
-    .await;
-    match exited {
-        Ok(Ok((_, status))) => assert!(status.is_ok()),
-        _ => panic!("chrome did not exit within 30 s of Browser.close"),
-    }
-    tokio::time::timeout(Duration::from_secs(10), cdp.closed())
+    tokio::time::timeout(Duration::from_secs(30), cdp.closed())
         .await
-        .expect("socket closed after Browser.close");
+        .expect("socket closed within 30 s of Browser.close");
+    // Reap it (kill is a no-op for an exited process) before the profile is removed.
+    drop(chrome);
+    assert!(!process_running(pid), "chrome {pid} still running");
 }

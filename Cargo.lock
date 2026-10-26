@@ -3545,6 +3545,8 @@ dependencies = [
 name = "sb-driver"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "harness-core",
  "sb-act",
  "sb-cdp",
