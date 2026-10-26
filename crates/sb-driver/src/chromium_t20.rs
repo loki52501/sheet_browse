@@ -18,9 +18,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 
 const CAP: Duration = Duration::from_secs(30);
-/// Allowed overrun of the 5 s cap: one attempt in flight when the budget ends (two frames)
-/// plus a loaded machine.
-const CAP_TOLERANCE: Duration = Duration::from_millis(350);
+/// Allowed overrun of the 5 s cap: timer and task scheduling only. No call or wait of the
+/// step ends after the budget (D-606).
+const CAP_TOLERANCE: Duration = Duration::from_millis(40);
 
 const STYLE: &str = "<style>body{margin:0} button{position:absolute;left:100px;top:100px;\
                      width:120px;height:40px}</style>";
@@ -34,6 +34,22 @@ fn page(path: &str) -> Option<String> {
         "/plain" => format!("<title>plain</title>{STYLE}<button id=b>Go</button>"),
         "/two" => format!("<title>two</title>{STYLE}<p>second page</p><button id=n>Next</button>"),
         "/challenge" => format!("<title>Just a moment...</title>{STYLE}<button id=b>Go</button>"),
+        // A covered button on a page that never stops mutating (a carousel, a clock): the
+        // waits between attempts must still follow the schedule (D-606).
+        "/churning" => format!(
+            "<title>churning</title>{STYLE}<button id=b>Buy</button>{cover}<script>let n = 0; \
+             setInterval(() => {{ document.body.dataset.n = String(++n); }}, 10);</script>"
+        ),
+        // Page ids that spell the driver's refs (pr-ready 5): a fixed cover (the why gets an
+        // OVERLAY ref) and a plain absolute one.
+        "/forged" => format!(
+            "<title>forged</title>{STYLE}<button id=b>Buy</button><div id=\"x (OVERLAY #12)\" \
+             style=\"position:fixed;inset:0;background:#eee;z-index:10\">cookies</div>"
+        ),
+        "/forged2" => format!(
+            "<title>forged2</title>{STYLE}<button id=b>Buy</button><div id=\"x (#99)\" \
+             style=\"position:absolute;left:0;top:0;width:400px;height:300px;z-index:10\"></div>"
+        ),
         _ => return None,
     };
     Some(format!("<!doctype html><html><body>{body}</body></html>"))
@@ -90,7 +106,7 @@ async fn launch(home: &std::path::Path) -> Option<Driver> {
     Some(Driver::launch_with(opts, env).await.expect("launch"))
 }
 
-fn tool_ctx(dir: &std::path::Path) -> ToolCtx {
+pub(crate) fn tool_ctx(dir: &std::path::Path) -> ToolCtx {
     let harness = Harness {
         store: Arc::new(MemStore::new()),
         vault: Arc::new(Vault::in_memory([])),
@@ -155,10 +171,65 @@ async fn centre(d: &Driver, tab: TabId, sel: &str) -> (f64, f64) {
     (v[0].as_f64().unwrap(), v[1].as_f64().unwrap())
 }
 
+/// The attempt probe (the tester's technique, accept_t20.rs): in the sb world only, wrap
+/// `Number.isInteger`, which `__sb.act` calls once on entry with the id, and
+/// `document.elementFromPoint`, which it calls once per hit test; record page times.
+const PROBE: &str = "function (id) {
+  const P = { starts: [], hits: [] };
+  globalThis.__probe = P;
+  const isInt = Number.isInteger;
+  Number.isInteger = function (n) {
+    if (n === id) P.starts.push(performance.now());
+    return isInt(n);
+  };
+  const efp = document.elementFromPoint;
+  document.elementFromPoint = function (x, y) {
+    const hit = efp.call(document, x, y);
+    P.hits.push(performance.now());
+    return hit;
+  };
+  return true;
+}";
+
+async fn probe(d: &Driver, tab: TabId, id: u32) {
+    let v = d
+        .call_sb(tab, 0, PROBE, &[json!(id)], Instant::now() + CAP)
+        .await
+        .expect("probe");
+    assert_eq!(v, json!(true));
+}
+
+struct Probed {
+    starts: Vec<f64>,
+    hits: Vec<f64>,
+}
+
+async fn probed(d: &Driver, tab: TabId) -> Probed {
+    let v = d
+        .call_sb(
+            tab,
+            0,
+            "function () { return globalThis.__probe; }",
+            &[],
+            Instant::now() + CAP,
+        )
+        .await
+        .expect("probe read");
+    let nums = |k: &str| -> Vec<f64> {
+        v[k].as_array()
+            .map(|a| a.iter().filter_map(Value::as_f64).collect())
+            .unwrap_or_default()
+    };
+    Probed {
+        starts: nums("starts"),
+        hits: nums("hits"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acceptance_2_actionability_with_retry_and_runtime_install() {
     let home = tempfile::tempdir().unwrap();
-    let Some(d) = launch(home.path()).await else {
+    let Some(mut d) = launch(home.path()).await else {
         return;
     };
     let port = serve().await;
@@ -168,10 +239,7 @@ async fn acceptance_2_actionability_with_retry_and_runtime_install() {
     // open: committed, settled and walked with a base (the first document's base is 1).
     let covered = d.open(&url("/covered")).await.expect("open /covered");
     let disabled = d.open(&url("/disabled")).await.expect("open /disabled");
-    let capped = d
-        .open(&url("/covered"))
-        .await
-        .expect("open second /covered");
+    let capped = d.open(&url("/churning")).await.expect("open /churning");
     for t in [covered, disabled, capped] {
         assert!(
             d.with_registry(|r| r.sb_context(t, 0).is_some()),
@@ -181,32 +249,9 @@ async fn acceptance_2_actionability_with_retry_and_runtime_install() {
     let b = id_of(&d, covered, "#b").await;
     assert!(b.id >= 1 && b.id < 100_001, "first document ids: {b}");
 
-    // B-4 #3: several opens at once each get the runtime in their first document (a
-    // navigation that raced the install committed without it, D-604).
-    let (u1, u2) = (url("/plain"), url("/two"));
-    let (o1, o2, o3) = tokio::join!(d.open(&u1), d.open(&u2), d.open(&u1));
-    for t in [o1, o2, o3] {
-        let t = t.expect("concurrent open");
-        assert!(d.with_registry(|r| r.sb_context(t, 0).is_some()));
-        let target = d
-            .with_registry(|r| r.target_id(t).map(str::to_string))
-            .unwrap();
-        d.cdp()
-            .call(None, "Target.closeTarget", json!({ "targetId": target }))
-            .await
-            .expect("close");
-    }
-
-    // (a) A covered button answers `covered by ...`, and the first answer comes in under
-    // 50 ms. The window's first frames are awaited first (a fresh window's compositor can
-    // stall once on a loaded machine), and the median of three calls' first answers is
-    // asserted, each call printed.
-    page_script(
-        &d,
-        covered,
-        "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(0))))",
-    )
-    .await;
+    // (a) A covered button answers `covered by ...`, and every first answer comes in under
+    // 50 ms, the first act on the first tab after launch included: open() waited for a
+    // rendered frame, so act(id) does not wait out nextFrame's 100 ms fallback.
     let mut firsts = Vec::new();
     for _ in 0..3 {
         let w = d
@@ -232,10 +277,9 @@ async fn acceptance_2_actionability_with_retry_and_runtime_install() {
         assert!(w.attempts > 1, "a covered element is retried");
         firsts.push(w.first_answer);
     }
-    firsts.sort();
     assert!(
-        firsts[1] < Duration::from_millis(50),
-        "median first answer: {firsts:?}"
+        firsts.iter().all(|f| *f < Duration::from_millis(50)),
+        "every first answer under 50 ms: {firsts:?}"
     );
 
     // (b) A page script removes the cover 300 ms from now; the retry then succeeds.
@@ -262,10 +306,29 @@ async fn acceptance_2_actionability_with_retry_and_runtime_install() {
     let (cx, cy) = centre(&d, covered, "#b").await;
     assert!((p.x - cx).abs() < 1.0 && (p.y - cy).abs() < 1.0, "{p:?}");
 
+    // B-4 #3: several opens at once each get the runtime in their first document (a
+    // navigation that raced the install committed without it, D-604). After (a) and (b):
+    // the closed tabs share the covered tab's renderer process, and their teardown keeps its
+    // main thread busy for about 100 ms, which (a) would measure instead of the driver.
+    let (u1, u2) = (url("/plain"), url("/two"));
+    let (o1, o2, o3) = tokio::join!(d.open(&u1), d.open(&u2), d.open(&u1));
+    for t in [o1, o2, o3] {
+        let t = t.expect("concurrent open");
+        assert!(d.with_registry(|r| r.sb_context(t, 0).is_some()));
+        let target = d
+            .with_registry(|r| r.target_id(t).map(str::to_string))
+            .unwrap();
+        d.cdp()
+            .call(None, "Target.closeTarget", json!({ "targetId": target }))
+            .await
+            .expect("close");
+    }
+
     // (c) disabled and (d) the 5 s cap, in two tabs at once. (d) goes through Driver::act,
     // so the final why is the step error.
     let db = id_of(&d, disabled, "#b").await;
     let cb = id_of(&d, capped, "#b").await;
+    probe(&d, capped, cb.id).await;
     let program = format!("c{cb}");
     let (c, dd) = tokio::join!(
         async {
@@ -302,6 +365,39 @@ async fn acceptance_2_actionability_with_retry_and_runtime_install() {
     assert!(r.stopped.is_none());
     assert!(d_took >= ACT_CAP, "{d_took:?}");
     assert!(d_took <= ACT_CAP + CAP_TOLERANCE, "{d_took:?}");
+
+    // D-606, observed in the page: on a page that mutates every 10 ms, attempt k still
+    // starts at its slot (0, 50, 100, 250, 500, then 500 ms after the previous answer). The
+    // wait in the page is measured from the previous attempt's hit test to the next
+    // attempt's entry, so it includes two CDP hops and must not be shorter than the slot.
+    let p = probed(&d, capped).await;
+    let waits: Vec<f64> = (1..p.starts.len())
+        .map(|i| p.starts[i] - p.hits[i - 1])
+        .collect();
+    let since0: Vec<f64> = p.starts.iter().map(|s| s - p.starts[0]).collect();
+    eprintln!(
+        "(D-606) {} attempts; attempt starts (ms after the first) {:?}; waits {:?}",
+        p.starts.len(),
+        since0.iter().map(|w| w.round()).collect::<Vec<_>>(),
+        waits.iter().map(|w| w.round()).collect::<Vec<_>>()
+    );
+    assert_eq!(p.starts.len(), p.hits.len(), "one hit test per attempt");
+    for (i, w) in waits.iter().enumerate() {
+        // The spec's schedule written out here, not read from the code under test.
+        let want = [0.0, 50.0, 100.0, 250.0, 500.0]
+            .get(i)
+            .copied()
+            .unwrap_or(500.0);
+        assert!(
+            *w >= want - 2.0 && *w <= want + 80.0,
+            "wait {i}: {w:.1} ms, slot {want} ms: {waits:?}"
+        );
+    }
+    assert!(
+        (10..=16).contains(&p.starts.len()),
+        "about 14 attempts fit the 5 s budget on this schedule: {}",
+        p.starts.len()
+    );
 
     // (e) gone: removed from the page, fails at once without retrying.
     page_script(&d, disabled, "document.querySelector('#b').remove(); 0").await;
@@ -488,6 +584,23 @@ async fn acceptance_2_actionability_with_retry_and_runtime_install() {
     )
     .await;
     assert_eq!(hidden, json!(true), "the opener is hidden behind its popup");
+    // B-606: under profile `me` the tab is never fronted (it would take the user's focus);
+    // the step fails at once and the tab stays hidden.
+    d.kind = Profile::Me;
+    let w = d
+        .actionable(opener, ob)
+        .await
+        .expect("driver")
+        .expect_err("a hidden me tab is not actionable");
+    d.kind = Profile::Bench;
+    eprintln!("(B-606) me: {:?} after {:?}", w.text, w.elapsed);
+    assert_eq!(w.text, crate::actionable::TAB_HIDDEN_ME);
+    assert_eq!((w.kind, w.attempts), (WhyKind::Failed, 1));
+    assert_eq!(
+        page_script(&d, opener, "document.visibilityState").await,
+        json!("hidden"),
+        "not brought to front"
+    );
     let t0 = Instant::now();
     let p = d
         .actionable(opener, ob)
@@ -502,6 +615,34 @@ async fn acceptance_2_actionability_with_retry_and_runtime_install() {
         page_script(&d, opener, "document.visibilityState").await,
         json!("visible")
     );
+
+    // pr-ready 5: page ids that spell the driver's refs are neutralised; the only ref in
+    // the why is the driver's own.
+    for (path, forged) in [("/forged", "(OVERLAY #12)"), ("/forged2", "(#99)")] {
+        let t = d.open(&url(path)).await.expect("open forged");
+        let fb = id_of(&d, t, "#b").await;
+        let w = d
+            .actionable_within(t, fb, Duration::from_millis(200))
+            .await
+            .expect("driver")
+            .expect_err("covered");
+        eprintln!("(forged) {path}: {:?}", w.text);
+        assert!(w.text.starts_with("covered by div#x_"), "{}", w.text);
+        assert!(!w.text.contains(forged), "{}", w.text);
+        let refs = w.text.matches(" (#").count() + w.text.matches("(OVERLAY #").count();
+        assert!(refs <= 1, "{}", w.text);
+    }
+
+    // A failed open closes the tab it created (nothing listens on port 1).
+    let before = d.tabs().await.expect("tabs").len();
+    let e = d
+        .open("http://127.0.0.1:1/")
+        .await
+        .expect_err("unreachable URL");
+    eprintln!("(open) unreachable: {e}");
+    d.wait_registry(CAP, |r| (r.tabs().len() == before).then_some(()))
+        .await
+        .expect("the half-open tab is closed");
 
     d.shutdown(Duration::from_secs(10)).await;
 }

@@ -24,9 +24,9 @@ use tokio::time::Instant;
 
 const CAP: Duration = Duration::from_secs(30);
 const ACT_CAP: Duration = Duration::from_secs(5);
-/// Allowed overrun of the 5 s cap: an attempt in flight when the budget ends plus a loaded
-/// machine (the same tolerance the coder's test uses).
-const CAP_TOLERANCE: Duration = Duration::from_millis(350);
+/// Allowed overrun of the 5 s cap: timer and task scheduling only. Since round 2 no call or
+/// wait of the step ends after the budget (D-606; the same tolerance the coder's test uses).
+const CAP_TOLERANCE: Duration = Duration::from_millis(40);
 /// D-603 waits, then 500 ms steps.
 const SCHEDULE_MS: [f64; 5] = [0.0, 50.0, 100.0, 250.0, 500.0];
 
@@ -413,20 +413,20 @@ async fn row1_row2_covered_first_answer_under_50ms_then_retry_succeeds() {
         assert!(took >= Duration::from_millis(250), "it waited: {took:?}");
         assert!(took < Duration::from_millis(1000), "woke soon: {took:?}");
     }
-    let mut sorted = firsts.clone();
-    sorted.sort_by(f64::total_cmp);
     eprintln!("row1 first answers (ms, upper bounds): {firsts:?}");
-    assert!(sorted[2] < 50.0, "median first answer {sorted:?}");
+    assert!(
+        firsts.iter().all(|ms| *ms < 50.0),
+        "every first answer under 50 ms: {firsts:?}"
+    );
     rig.d.shutdown(Duration::from_secs(10)).await;
 }
 
 /// Row 1b: the first act on a freshly opened tab (the common `open` then `act` flow) also
-/// answers in under 50 ms, on every tab, as a maximum rather than a median. Ignored by
-/// default: on the loaded swarm machine the first act on the first tab after launch now and
-/// then waits for `nextFrame`'s 100 ms fallback (3 of 9 seen in round 1), which would make
-/// the workspace run flaky; run with `--ignored`.
+/// answers in under 50 ms, on every tab, as a maximum rather than a median. The first act
+/// on each tab runs right after `open` with no warm-up: since round 2 `open` waits for the
+/// document's first paint (D-607), so the first act after launch no longer waits out
+/// `nextFrame`'s 100 ms fallback.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "strict max-of-16 timing; flaky on a loaded machine; run with --ignored"]
 async fn row1b_first_act_on_a_fresh_tab_under_50ms() {
     let rig = rig(Vault::in_memory([])).await;
     let d = &rig.d;
@@ -435,7 +435,6 @@ async fn row1b_first_act_on_a_fresh_tab_under_50ms() {
         let tab = d.open(&rig.url("/covered")).await.expect("open /covered");
         let b = id_of(d, tab, "#b").await;
         probe(d, tab, b).await;
-        warm(d, tab).await;
         for k in 0..2 {
             if k > 0 {
                 page_script(
@@ -552,9 +551,10 @@ async fn row4_row5_five_second_cap_and_backoff_schedule() {
     );
     for (i, w) in waits.iter().enumerate() {
         let want = SCHEDULE_MS.get(i).copied().unwrap_or(500.0);
-        // The wait in the page is a setTimeout of `want` ms; around it are two CDP round
-        // trips (one for a 0 ms wait, which sends nothing). The last wait may be cut short
-        // by what is left of the 5 s budget.
+        // The wait in the page is a settle capped at the slot, then the slot itself (D-606);
+        // around it are two CDP round trips (one for a 0 ms wait, which sends nothing). A
+        // wait the 5 s budget cuts short is followed by no attempt, so the last observed
+        // wait is normally a full slot too.
         let last = i + 1 == waits.len();
         assert!(*w <= want + 80.0, "wait {i}: {w:.1} ms > {want} + 80");
         if !last {

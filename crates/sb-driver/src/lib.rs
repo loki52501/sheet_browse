@@ -1,5 +1,6 @@
 //! sb-driver (B-4). DRAFT signatures for I-9, owned by area driver (T-18, T-20..T-22).
-//! No fixed sleeps (rule 6, D-26): every wait is a condition with a cap.
+//! No fixed sleeps (rule 6, D-26): every wait is a condition with a cap. The one timer is
+//! the act(id) retry slot (D-606), where the schedule itself is the condition.
 //!
 //! T-18: launch (B-2, D-601) over the pipe transport (B-3, D-600) and the target and frame
 //! registry (B-4 #2). `tabs` and `frames` are answered from the registry.
@@ -306,6 +307,24 @@ fn on_attached(
     drop(cdp.start(Some(sid), "Runtime.runIfWaitingForDebugger", json!({})));
 }
 
+/// Closes a target `open` created unless disarmed (`target = None`): sent on drop, not
+/// awaited.
+struct CloseOnDrop<'a> {
+    cdp: &'a Cdp,
+    target: Option<String>,
+}
+
+impl Drop for CloseOnDrop<'_> {
+    fn drop(&mut self) {
+        if let Some(t) = self.target.take() {
+            drop(
+                self.cdp
+                    .start(None, "Target.closeTarget", json!({ "targetId": t })),
+            );
+        }
+    }
+}
+
 /// The driver: one browser, its registry and tabs. Dropping it kills every browser process
 /// (waiting up to [`sb_cdp::DROP_KILL_CAP`], blocking the dropping thread) and then removes a
 /// `bench` profile. Dropping skips `Browser.close`, so a `me` driver should end with
@@ -316,14 +335,19 @@ pub struct Driver {
     changed: watch::Receiver<u64>,
     /// Element id bases per tab frame (D-604).
     bases: Mutex<runtime::Bases>,
-    pipe: Arc<Pipe>,
+    /// The launch profile: `me` never brings a tab to front (B-606).
+    kind: Profile,
+    /// `None` only for the in-crate mock transport tests.
+    pipe: Option<Arc<Pipe>>,
     // Last: removed only after the browser is gone.
     profile: ProfileDir,
 }
 
 impl Drop for Driver {
     fn drop(&mut self) {
-        self.pipe.kill(sb_cdp::DROP_KILL_CAP);
+        if let Some(pipe) = &self.pipe {
+            pipe.kill(sb_cdp::DROP_KILL_CAP);
+        }
     }
 }
 
@@ -361,7 +385,8 @@ impl Driver {
             registry,
             changed,
             bases: Mutex::new(runtime::Bases::default()),
-            pipe,
+            kind: opts.profile,
+            pipe: Some(pipe),
             profile,
         };
         let discover =
@@ -412,12 +437,12 @@ impl Driver {
 
     /// The browser process id.
     pub fn pid(&self) -> u32 {
-        self.pipe.pid()
+        self.pipe.as_ref().map_or(0, |p| p.pid())
     }
 
     /// Every live process of the browser.
     pub fn pids(&self) -> Vec<u32> {
-        self.pipe.pids()
+        self.pipe.as_ref().map_or_else(Vec::new, |p| p.pids())
     }
 
     /// The profile directory in use (`profiles/me` or `profiles/bench-*`).
@@ -434,8 +459,10 @@ impl Driver {
     }
 
     /// I-9 `open`: a new tab at `url`. Returns once its document has committed, settled in
-    /// the page (B-4 #8 DOM part, capped at 3 s) and been walked with a fresh base (D-73), in
-    /// one round trip after the commit. Scheduling (max 6 live tabs, B-4 #10) is T-22.
+    /// the page (B-4 #8 DOM part, capped at 3 s), had its first paint (D-607, capped at 3 s)
+    /// and been walked with a fresh base (D-73), in one round trip after the commit. A failed
+    /// or dropped `open` closes the tab it created. Scheduling (max 6 live tabs, B-4 #10) is
+    /// T-22.
     pub async fn open(&self, url: &str) -> Result<TabId, DriverError> {
         // Its own window, so the tab stays visible: a background tab is hidden, and rAF
         // (which act(id) awaits) never fires there (D-605).
@@ -458,15 +485,14 @@ impl Driver {
             .and_then(Value::as_str)
             .ok_or_else(|| DriverError::Cdp("Target.createTarget: no targetId".into()))?
             .to_string();
-        let opened = self.open_target(&target, url).await;
-        if opened.is_err() {
-            // No half-open tab is left behind.
-            drop(
-                self.cdp
-                    .start(None, "Target.closeTarget", json!({ "targetId": target })),
-            );
-        }
-        opened
+        // No half-open tab is left behind: on an error, and when this future is dropped.
+        let mut guard = CloseOnDrop {
+            cdp: &self.cdp,
+            target: Some(target.clone()),
+        };
+        let tab = self.open_target(&target, url).await?;
+        guard.target = None;
+        Ok(tab)
     }
 
     async fn open_target(&self, target: &str, url: &str) -> Result<TabId, DriverError> {
@@ -959,5 +985,275 @@ mod tests {
             .expect("tab follows the prerender");
         assert_eq!(t, TabId(1));
         assert_eq!(lock(&w.registry).session(t), Some("P1"));
+    }
+
+    // ---- a Driver over the mock transport (no browser) ----
+
+    fn mock_driver(kind: Profile) -> (Driver, Script) {
+        let (out, sent) = mpsc::unbounded_channel();
+        let (inject, inbound) = mpsc::channel(64);
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let (tx, changed) = watch::channel(0u64);
+        let mock = Arc::new(Mock {
+            out,
+            inbound: Mutex::new(Some(inbound)),
+        });
+        let cdp = Cdp::with_observer(mock, observer(registry.clone(), Arc::new(tx)));
+        let d = Driver {
+            cdp,
+            registry,
+            changed,
+            bases: Mutex::new(runtime::Bases::default()),
+            kind,
+            pipe: None,
+            profile: ProfileDir::Bench(tempfile::tempdir().expect("tempdir")),
+        };
+        (d, Script { sent, inject })
+    }
+
+    /// The browser's side of the mock: reads what the driver sent, answers it.
+    struct Script {
+        sent: mpsc::UnboundedReceiver<Bytes>,
+        inject: mpsc::Sender<Bytes>,
+    }
+
+    impl Script {
+        async fn send(&self, v: Value) {
+            self.inject
+                .send(Bytes::from(v.to_string()))
+                .await
+                .expect("reader alive");
+        }
+
+        async fn next(&mut self) -> Value {
+            let raw = tokio::time::timeout(Duration::from_secs(5), self.sent.recv())
+                .await
+                .expect("a message within 5 s")
+                .expect("transport open");
+            serde_json::from_slice(&raw).expect("json")
+        }
+
+        /// The next message, which must be `method`.
+        async fn expect(&mut self, method: &str) -> Value {
+            let m = self.next().await;
+            assert_eq!(m["method"], method, "{m}");
+            m
+        }
+
+        async fn reply(&self, m: &Value, result: Value) {
+            self.send(json!({"id": m["id"].clone(), "sessionId": m["sessionId"].clone(), "result": result}))
+                .await;
+        }
+
+        async fn fail(&self, m: &Value, message: &str) {
+            self.send(
+                json!({"id": m["id"].clone(), "sessionId": m["sessionId"].clone(),
+                "error": {"code": -32000, "message": message}}),
+            )
+            .await;
+        }
+
+        async fn sb_context(&self, id: i64) {
+            self.send(json!({"sessionId": "S1", "method": "Runtime.executionContextCreated", "params": {
+                "context": {"id": id, "origin": "https://a.test", "name": SB_WORLD, "uniqueId": format!("u{id}"),
+                    "auxData": {"isDefault": false, "type": "isolated", "frameId": "T1"}}}}))
+                .await;
+        }
+
+        /// A paused page target T1 on session S1, its install acknowledged, resumed.
+        async fn attach_paused(&mut self) {
+            self.send(json!({"method": "Target.attachedToTarget", "params": {
+                "sessionId": "S1", "waitingForDebugger": true,
+                "targetInfo": {"targetId": "T1", "type": "page", "url": "about:blank"}}}))
+                .await;
+            for _ in 0..3 {
+                self.next().await;
+            }
+            let install = self.expect("Page.addScriptToEvaluateOnNewDocument").await;
+            self.reply(&install, json!({"identifier": "1"})).await;
+            self.expect("Runtime.runIfWaitingForDebugger").await;
+        }
+
+        /// A `Runtime.callFunctionOn` whose declaration contains `marker`, in context `ctx`.
+        async fn call(&mut self, marker: &str, ctx: i64) -> Value {
+            let m = self.expect("Runtime.callFunctionOn").await;
+            let decl = m["params"]["functionDeclaration"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(decl.contains(marker), "{marker} expected, got {decl}");
+            assert_eq!(m["params"]["executionContextId"], ctx, "{m}");
+            m
+        }
+
+        async fn value(&self, m: &Value, v: Value) {
+            self.reply(m, json!({"result": {"type": "object", "value": v}}))
+                .await;
+        }
+
+        fn quiet(&mut self) -> bool {
+            self.sent.try_recv().is_err()
+        }
+    }
+
+    const WALK: &str = "sb.walk(";
+    const ACT: &str = "sb.act(id)";
+    const SETTLE: &str = "sb.settle(opts)";
+    const LOST: &str = "Execution context was destroyed.";
+
+    /// A tab with frame 0's sb context 2 in the registry.
+    async fn mock_tab(d: &Driver, s: &mut Script) -> TabId {
+        s.attach_paused().await;
+        s.sb_context(2).await;
+        d.wait_registry(Duration::from_secs(5), |r| {
+            let t = r.tab_by_target("T1")?;
+            r.sb_context(t, 0).map(|_| t)
+        })
+        .await
+        .expect("tab with an sb context")
+    }
+
+    /// B-4 #11: one lost context is retried in the next one; a second loss is the answer,
+    /// with no third call.
+    #[tokio::test]
+    async fn a_context_lost_twice_is_not_retried_a_third_time() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (r, ()) = tokio::join!(
+            d.call_sb(tab, 0, "function () { return 1; }", &[], deadline),
+            async {
+                let walk = s.call(WALK, 2).await;
+                s.fail(&walk, LOST).await;
+                s.sb_context(3).await;
+                let walk = s.call(WALK, 3).await;
+                s.fail(&walk, LOST).await;
+            }
+        );
+        assert!(matches!(r, Err(runtime::CallError::Lost)), "{r:?}");
+        assert!(s.quiet(), "no third call after a second loss");
+    }
+
+    /// The same rule in `open`, and a failed `open` closes the tab it created.
+    #[tokio::test]
+    async fn a_failed_open_is_retried_once_and_closes_its_half_open_tab() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let (r, ()) = tokio::join!(d.open("https://a.test/"), async {
+            let create = s.expect("Target.createTarget").await;
+            s.reply(&create, json!({"targetId": "T1"})).await;
+            s.attach_paused().await;
+            let nav = s.expect("Page.navigate").await;
+            assert_eq!(nav["sessionId"], "S1");
+            s.reply(&nav, json!({"frameId": "T1", "loaderId": "L2"}))
+                .await;
+            s.send(json!({"sessionId": "S1", "method": "Page.frameNavigated", "params": {
+                "frame": {"id": "T1", "url": "https://a.test/", "loaderId": "L2"}, "type": "Navigation"}}))
+                .await;
+            s.sb_context(2).await;
+            let walk = s.call(WALK, 2).await;
+            assert!(
+                walk["params"]["arguments"][1]["value"].is_object(),
+                "open settles"
+            );
+            s.fail(&walk, LOST).await;
+            s.sb_context(3).await;
+            let walk = s.call(WALK, 3).await;
+            s.fail(&walk, LOST).await;
+            let close = s.expect("Target.closeTarget").await;
+            assert_eq!(close["params"]["targetId"], "T1");
+        });
+        let e = r.expect_err("lost twice");
+        assert!(e.to_string().contains("context went away"), "{e}");
+        assert!(s.quiet(), "no third walk");
+    }
+
+    /// D-605 and B-606: a hidden `bench` tab is fronted once; a hidden `me` tab never is
+    /// (it would take the user's focus) and fails the step.
+    #[tokio::test]
+    async fn bring_to_front_is_never_sent_for_profile_me() {
+        for kind in [Profile::Me, Profile::Bench] {
+            let (d, mut s) = mock_driver(kind);
+            let tab = mock_tab(&d, &mut s).await;
+            let (r, ()) = tokio::join!(d.actionable(tab, ElemRef::main(5)), async {
+                let walk = s.call(WALK, 2).await;
+                s.value(&walk, json!({"count": 9, "settled": null})).await;
+                let act = s.call(ACT, 2).await;
+                s.value(&act, json!({"why": "hidden tab"})).await;
+                if kind == Profile::Bench {
+                    let front = s.expect("Page.bringToFront").await;
+                    assert_eq!(front["sessionId"], "S1");
+                    s.reply(&front, json!({})).await;
+                    let act = s.call(ACT, 2).await;
+                    s.value(&act, json!({"x": 10, "y": 20})).await;
+                }
+            });
+            let r = r.expect("no driver error");
+            match kind {
+                Profile::Me => {
+                    let w = r.expect_err("a hidden me tab fails the step");
+                    assert_eq!(w.text, actionable::TAB_HIDDEN_ME);
+                    assert_eq!((w.kind, w.attempts), (actionable::WhyKind::Failed, 1));
+                    assert!(s.quiet(), "no Page.bringToFront for me");
+                }
+                Profile::Bench => assert!(r.is_ok(), "{r:?}"),
+            }
+        }
+    }
+
+    /// accept-T-20 note: a `w(d)` whose settle does not answer in time fails its step; the
+    /// program's result keeps its steps instead of becoming an error.
+    #[tokio::test]
+    async fn a_w_step_that_times_out_is_a_failed_step() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        let home = tempfile::tempdir().unwrap();
+        let ctx = chromium_t20::tool_ctx(home.path());
+        let (r, ()) = tokio::join!(d.act(tab, "w(50ms); c#5", &ctx), async {
+            let walk = s.call(WALK, 2).await;
+            s.value(&walk, json!({"count": 9, "settled": null})).await;
+            // The settle never answers (a busy page under load).
+            s.call(SETTLE, 2).await;
+        });
+        let r = r.expect("a failed step, not an Err for the program");
+        assert_eq!(r.steps.len(), 1, "{:?}", r.steps);
+        assert_eq!(r.steps[0].step, "w(50ms)");
+        assert_eq!(
+            r.steps[0].outcome,
+            StepOutcome::Failed {
+                why: "the page did not answer within 350 ms".into()
+            }
+        );
+        assert!(s.quiet(), "c#5 did not run");
+    }
+
+    /// D-606: a CDP failure during the wait between attempts ends the step with its reason;
+    /// it is not an instant retry.
+    #[tokio::test]
+    async fn a_cdp_error_during_the_wait_fails_the_step() {
+        let (d, mut s) = mock_driver(Profile::Bench);
+        let tab = mock_tab(&d, &mut s).await;
+        let (r, ()) = tokio::join!(d.actionable(tab, ElemRef::main(5)), async {
+            let walk = s.call(WALK, 2).await;
+            s.value(&walk, json!({"count": 9, "settled": null})).await;
+            for _ in 0..2 {
+                // Attempt 1, then attempt 2 at once (the first slot is 0 ms).
+                let act = s.call(ACT, 2).await;
+                s.value(&act, json!({"why": "disabled"})).await;
+            }
+            let wait = s.call(SETTLE, 2).await;
+            let cap = wait["params"]["arguments"][0]["value"]["cap"]
+                .as_u64()
+                .unwrap_or(0);
+            assert!((40..=50).contains(&cap), "the 50 ms slot: {wait}");
+            s.fail(&wait, "Object reference chain is too long").await;
+        });
+        let w = r.expect("driver").expect_err("failed step");
+        assert_eq!(w.kind, actionable::WhyKind::Failed);
+        assert!(
+            w.text.contains("Object reference chain is too long"),
+            "{}",
+            w.text
+        );
+        assert_eq!(w.attempts, 2);
+        assert!(s.quiet(), "no attempt after the failed wait");
     }
 }
