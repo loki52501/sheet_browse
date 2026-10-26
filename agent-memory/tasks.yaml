@@ -96,7 +96,9 @@ tasks:
     step: 2
     title: "srv-web: fetch→index (scraper), read/sheet/raw modes, api with vault headers, feed, search backend (decide D-31)"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
-    status: todo
+    status: doing
+    owner: servers/suborch
+    claimed_at: 2026-10-25
     blocked_by: [T-10, T-11]
   - id: T-13
     step: 2
