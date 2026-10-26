@@ -135,6 +135,8 @@ pub fn classify_with(argv: &[String], ghe_hosts: &[String]) -> Result<GhCall, To
         if let Some(host) = api_host(rest, ghe_hosts)? {
             domain = host;
         }
+    } else if let Some(host) = repo_host(rest, ghe_hosts)? {
+        domain = host;
     }
     let class = match (group.as_str(), sub) {
         (_, Some("delete")) => Class::Delete,
@@ -330,10 +332,88 @@ fn api_host(rest: &[String], ghe_hosts: &[String]) -> Result<Option<String>, Too
                 .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
                 .filter(|h| h == GITHUB_API || ghe(h))
                 .ok_or_else(|| refuse(t))?;
+            // api.github.com is github.com's API: one gate domain per host, so a user rule
+            // on github.com also covers the full-URL form (the gate matches domains exactly).
+            let h = if h == GITHUB_API {
+                GITHUB.to_string()
+            } else {
+                h
+            };
             url_host.get_or_insert(h);
         }
     }
     Ok(url_host.or(host))
+}
+
+/// The host a non-`api` command names through `-R/--repo [HOST/]OWNER/REPO` or a repo URL
+/// argument (`repo view https://host/o/r`). gh sends such a call (and, with
+/// `GH_ENTERPRISE_TOKEN` set, a credential) to that host, so it must be github.com or a
+/// configured GHE host, and it becomes the gate domain; any other host is refused.
+///
+/// Fails closed: every token is checked, so a `HOST/OWNER/REPO`-shaped search query or a
+/// URL in a free-text argument is refused too.
+fn repo_host(rest: &[String], ghe_hosts: &[String]) -> Result<Option<String>, ToolError> {
+    let refuse = |what: &str| {
+        ToolError::Args(format!(
+            "gh {:?}: gh only reaches github.com{}; use OWNER/REPO, or the web tools for other \
+             sites",
+            text::line(what, 200),
+            if ghe_hosts.is_empty() {
+                String::new()
+            } else {
+                format!(" or {}", ghe_hosts.join(", "))
+            }
+        ))
+    };
+    let allowed = |h: &str| -> Option<String> {
+        let h = h.trim().trim_end_matches('.').to_ascii_lowercase();
+        if h == GITHUB || h == "www.github.com" {
+            Some(GITHUB.to_string())
+        } else if ghe_hosts.iter().any(|g| g.eq_ignore_ascii_case(&h)) {
+            Some(h)
+        } else {
+            None
+        }
+    };
+    let mut found: Option<String> = None;
+    for t in rest {
+        let v = if let Some(v) = t.strip_prefix("--repo=") {
+            v
+        } else if let Some(v) = t.strip_prefix("-R").filter(|v| !v.is_empty()) {
+            v.trim_start_matches('=')
+        } else {
+            t.as_str()
+        };
+        let host = if v.contains("://") || v.starts_with("//") {
+            let h = url::Url::parse(v)
+                .ok()
+                .filter(|u| u.username().is_empty())
+                .and_then(|u| u.host_str().map(str::to_string))
+                .and_then(|h| allowed(&h))
+                .ok_or_else(|| refuse(t))?;
+            Some(h)
+        } else {
+            // HOST/OWNER/REPO: a first segment with a dot or a port names a host.
+            let segs: Vec<&str> = v.split('/').collect();
+            match segs.first() {
+                Some(first)
+                    if segs.len() >= 3
+                        && !first.starts_with('-')
+                        && (first.contains('.') || first.contains(':')) =>
+                {
+                    Some(allowed(first).ok_or_else(|| refuse(t))?)
+                }
+                _ => None,
+            }
+        };
+        if let Some(h) = host {
+            if found.as_ref().is_some_and(|f| f != &h) {
+                return Err(refuse(t));
+            }
+            found = Some(h);
+        }
+    }
+    Ok(found)
 }
 
 /// GET and HEAD read, DELETE deletes, anything else (POST, PUT, PATCH, unknown) is Account.
@@ -588,6 +668,36 @@ mod tests {
     }
 
     #[test]
+    fn repo_hosts_are_github_hosts_only() {
+        let w = |s: &str, hosts: &[&str]| {
+            let hosts: Vec<String> = hosts.iter().map(|h| h.to_string()).collect();
+            classify_with(&argv::split(s).unwrap(), &hosts)
+        };
+        for bad in [
+            "pr view -R any.host/o/r 5",
+            "pr view -Rany.host/o/r 5",
+            "issue list --repo any.host/o/r",
+            "issue list --repo=any.host/o/r",
+            "repo view https://any.host/o/r",
+            "repo view //any.host/o/r",
+            "repo view https://user@github.com/o/r",
+            "run list -R 127.0.0.1:9/o/r",
+            "pr view -R github.com.evil.example/o/r 5",
+            "pr view -R github.com/o/r --repo ghe.corp/o/r 5",
+        ] {
+            assert!(matches!(w(bad, &[]), Err(ToolError::Args(_))), "gh {bad}");
+        }
+        let ok = |s: &str, hosts: &[&str], domain: &str| {
+            assert_eq!(w(s, hosts).unwrap().domain, domain, "gh {s}");
+        };
+        ok("pr view -R o/r 5", &[], "github.com");
+        ok("pr view -R github.com/o/r 5", &[], "github.com");
+        ok("repo view https://github.com/o/r", &[], "github.com");
+        ok("issue list --repo ghe.corp/o/r", &["ghe.corp"], "ghe.corp");
+        ok("run view 123 --log", &[], "github.com");
+    }
+
+    #[test]
     fn api_hosts_are_github_api_hosts_only() {
         let w = |s: &str, hosts: &[&str]| {
             let hosts: Vec<String> = hosts.iter().map(|h| h.to_string()).collect();
@@ -632,7 +742,14 @@ mod tests {
             "api https://api.github.com/repos/o/r",
             &[],
             Class::Read,
-            "api.github.com",
+            "github.com",
+        );
+        // One gate domain per host: the full-URL and path forms of a write gate the same.
+        ok(
+            "api https://api.github.com/repos/o/r/issues -X POST",
+            &[],
+            Class::Account,
+            "github.com",
         );
         ok(
             "api -X POST repos/o/r/issues -f body=see-https://any.host/x",
