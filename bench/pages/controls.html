@@ -1,0 +1,63 @@
+<!doctype html>
+<!--
+  bench/pages/controls.html: name ladder, roles, collapse and text fixture for docs/05 B-5.
+  Each control's expected name is in its data-expect attribute (tests read it; injected.js
+  never does). The shadow host is filled by the inline script in a browser and by the test
+  in jsdom (jsdom runs no page scripts here).
+
+    rung 1 aria-labelledby   rung 2 aria-label        rung 3 label[for]     rung 4 wrapping label
+    rung 5 placeholder/title rung 6 own text (aria-hidden skipped)           rung 7 words to the right
+    rung 8 nearby text       last: the name attribute
+    roles: ARIA, tag, behaviour (onclick / cursor:pointer div -> button), clickable table row
+    collapse: a link owns its subtree; a container emits only its own text; a table row folds
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Controls · fixture</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 0; padding: 24px; }
+  .row { margin: 10px 0; }
+  .fancy { cursor: pointer; display: inline-block; padding: 6px 10px; background: #eef; }
+  tr.click { cursor: pointer; }
+  .far { margin-top: 600px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Controls</h1>
+  <div class="row"><span id="lbl-city">City</span> <input name="city" aria-labelledby="lbl-city" data-expect="City"></div>
+  <div class="row"><input type="search" aria-label="Search the site" data-expect="Search the site"></div>
+  <div class="row"><label for="phone">Phone</label> <input id="phone" type="tel" data-expect="Phone"></div>
+  <div class="row"><label>Company <input name="company" data-expect="Company"></label></div>
+  <div class="row"><input name="coupon" placeholder="Coupon code" data-expect="Coupon code"></div>
+  <div class="row"><input type="number" title="Age in years" data-expect="Age in years"></div>
+  <div class="row"><button type="button" data-expect="Save draft"><span aria-hidden="true">*</span> Save draft</button></div>
+  <div class="row"><input type="checkbox" name="news" data-expect="Send me news"> Send me news</div>
+  <div class="row"><div>Nickname</div><input name="nick_field" data-expect="Nickname"></div>
+  <div class="row"><input type="password" name="pw" aria-label="Account password" data-expect="Account password"></div>
+  <div class="row"><div class="fancy" onclick="void 0" data-expect="Fancy clickable">Fancy clickable</div></div>
+  <div class="row"><div role="button" tabindex="0" data-expect="ARIA button">ARIA button</div></div>
+  <div class="row"><select multiple aria-label="Tags" data-expect="Tags"><option>red</option><option>blue</option></select></div>
+  <div class="row"><div contenteditable="true" aria-label="Notes" data-expect="Notes"></div></div>
+  <div class="row"><a id="card" href="#card" data-expect="Card title with a nested paragraph"><span>Card title</span><p>with a nested paragraph</p></a></div>
+  <h2 id="news-h"><a href="#news" data-expect="Latest news">Latest news</a></h2>
+  <div id="container">Own text <p>Child paragraph</p> tail text</div>
+  <table id="people">
+    <thead><tr><th>Name</th><th>Plan</th><th>Seats</th></tr></thead>
+    <tbody>
+      <tr><td>Ada</td><td>Pro</td><td>3</td></tr>
+      <tr class="click" onclick="void 0" data-expect="Bob | Basic | 1"><td>Bob</td><td>Basic</td><td>1</td></tr>
+    </tbody>
+  </table>
+  <div id="host"></div>
+  <ul><li>First point</li><li>Second point<ul><li>Nested point</li></ul></li></ul>
+  <p class="far"><input name="zip_code" data-expect="zip_code"></p>
+</main>
+<script>
+  const sr = document.getElementById("host").attachShadow({ mode: "open" });
+  sr.innerHTML = '<button type="button" data-expect="Shadow button">Shadow button</button>' +
+    '<input aria-label="Shadow field" data-expect="Shadow field">';
+</script>
+</body>
+</html>

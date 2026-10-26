@@ -138,7 +138,9 @@ tasks:
     step: 6
     title: "injected.js: identity, walk, names, roles, states, flags, collapse, dirty re-walk; acceptance 1"
     docs: [docs/05-BROWSER.md]
-    status: todo
+    status: doing
+    owner: page/suborch
+    claimed_at: "2026-10-23"
     note: "area page, wave 1; includes the sb-act half of B-7 (I-10). Not gated by T-17 (D-43)"
   - id: T-20
     step: 6

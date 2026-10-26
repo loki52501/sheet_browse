@@ -1,0 +1,126 @@
+<!doctype html>
+<!--
+  bench/pages/accept-d438.html: D-438 (1)(2) and the D-437 "lost exactly one field" rule for the
+  T-19 acceptance (tester-8). The test types one canary into every password field, then drives
+  the site's own handlers:
+    #af-task  add-first rebuild: a type=text copy sharing name and aria-label is inserted after
+              the password, the value copied, and the old field removed in a later task (200 ms)
+    #af-mic   add-first rebuild split by a microtask: o.after(n); await null; o.remove()
+    #af-fade  add-first rebuild in transition order (Vue <Transition>, AnimatePresence sync,
+              Svelte outros): the copy goes in, the old field fades out and is removed on
+              transitionend
+    #af-ov    D-438 (1) overlap: the copy is inserted and the old field stays for 1500 ms; a read
+              while both exist must already treat the copy as sensitive
+    #af-neu   add-first with a neutral identity into the same parent, old field removed 200 ms
+              later: only the same-parent rule of D-438 (1) can mark it
+    #af-far   add-first with shared name and aria-label into a different parent (#h-far2), old
+              field removed 200 ms later: only the D-438 (1) key match on removal can mark it
+    #wc-pw    D-438 (2): its wrapper also holds a show-password checkbox; the wrapper is replaced
+              by one with a neutral type=text input and the checkbox (one value-bearing field out,
+              one in: a one-for-one swap)
+  D-437 negative: #two holds an email and a password field; it is replaced by a one-field page
+  whose pre-filled "Promo code" matches nothing removed. Two fields were lost, so it is not a
+  one-for-one swap and the promo code must keep reading its value.
+  Replacement ids and names avoid the sensitive-name pattern.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Add-first rebuilds · acceptance fixture</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; }
+  div { margin-top: 4px; }
+  .fade { transition: opacity 150ms linear; }
+</style>
+<script>
+  const $ = (id) => document.getElementById(id);
+  function copyOf(o, id) {
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = id;
+    n.name = o.name;
+    n.setAttribute("aria-label", o.getAttribute("aria-label"));
+    n.value = o.value;
+    return n;
+  }
+  function addFirstTask() {
+    const o = $("af-task");
+    o.after(copyOf(o, "af-task-new"));
+    setTimeout(() => o.remove(), 200);
+  }
+  async function addFirstMicro() {
+    const o = $("af-mic");
+    o.after(copyOf(o, "af-mic-new"));
+    await null;
+    o.remove();
+  }
+  function addFirstFade() {
+    const o = $("af-fade");
+    o.after(copyOf(o, "af-fade-new"));
+    o.addEventListener("transitionend", () => o.remove(), { once: true });
+    void o.offsetWidth; // style flush so the opacity change below runs as a transition
+    o.style.opacity = "0";
+  }
+  function addFirstOverlap() {
+    const o = $("af-ov");
+    o.after(copyOf(o, "af-ov-new"));
+    setTimeout(() => o.remove(), 1500);
+  }
+  function addFirstNeutral() {
+    const o = $("af-neu");
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = "af-neu-new";
+    n.name = "visible_e";
+    n.setAttribute("aria-label", "Visible e");
+    n.value = o.value;
+    o.after(n);
+    setTimeout(() => o.remove(), 200);
+  }
+  function addFirstFar() {
+    const o = $("af-far");
+    $("h-far2").appendChild(copyOf(o, "af-far-new"));
+    setTimeout(() => o.remove(), 200);
+  }
+  function wrapCheckbox() {
+    const w = $("wc");
+    const d = document.createElement("div");
+    d.id = "wc2";
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = "wc-new";
+    n.name = "shown_w";
+    n.setAttribute("aria-label", "Visible w");
+    n.value = $("wc-pw").value;
+    const l = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.id = "wc-cb2";
+    cb.checked = true;
+    l.append(cb, " Show");
+    d.append(n, l);
+    w.replaceWith(d);
+  }
+  function twoToOne() {
+    const d = document.createElement("div");
+    d.id = "one";
+    d.innerHTML = '<label>Promo code <input id="promo" name="promo" value="SPRING"></label>';
+    $("two").replaceWith(d);
+  }
+</script>
+</head>
+<body>
+<main>
+  <h1>Add-first rebuilds</h1>
+  <form id="f">
+    <div id="h-task"><input id="af-task" name="acct_a" type="password" aria-label="Account key a"></div>
+    <div id="h-mic"><input id="af-mic" name="acct_b" type="password" aria-label="Account key b"></div>
+    <div id="h-fade"><input id="af-fade" class="fade" name="acct_c" type="password" aria-label="Account key c"></div>
+    <div id="h-ov"><input id="af-ov" name="acct_d" type="password" aria-label="Account key d"></div>
+    <div id="h-neu"><input id="af-neu" type="password" aria-label="Account key e"></div>
+    <div id="h-far"><input id="af-far" name="acct_f" type="password" aria-label="Account key f"></div>
+    <div id="h-far2"></div>
+    <div id="wc"><input id="wc-pw" type="password" aria-label="Hidden w"><label><input id="wc-cb" type="checkbox"> Show</label></div>
+  </form>
+  <div id="two"><input id="two-email" type="email" aria-label="Your email"><input id="two-pw" type="password" aria-label="Your key"></div>
+</main>
+</body>
+</html>

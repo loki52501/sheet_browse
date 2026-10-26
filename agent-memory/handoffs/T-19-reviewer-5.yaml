@@ -1,0 +1,16 @@
+from: page/reviewer
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Round 2 review of the T-19 JS half at 4d1c76d (D-405 (1)-(10), D-422..D-428, B-412 accepted as D-73). node --test injected/test/ 56/56 green (135.6 s); cargo test -p sb-act --test wire_from_injected 3/3 green; clippy and rustfmt clean on the new test. Both round-1 Blocking items (password value after a type swap; ids depending on call order) are fixed and tested with the original repros, every round-1 Should item is fixed and tested or closed by B-402..B-404, and the code matches I-11 / D-73. Report bench/results/review-T-19-js.md (Round 2 section), Blocking: none, Verdict: approve."
+not_done: "Should items for js-coder: (1) a show-password that replaces the input element (replaceWith a new type=text input carrying the value) still leaks the value; mark inputs added in the same childList record that removed a sensitive input as sensitive, and add pw_ / pw- to SENSITIVE_NAME_RE. (2) CHALLENGE_TEXT_RE over-flags ordinary text: 'Press and hold Shift ...', 'Press and hold the mic button ...' and a quiz heading 'Are you human?' become CHALLENGE rows; require a human/robot/bot word for press and hold. Notes: type swaps in an open shadow root before the first walk and detached-built inputs are unobserved (rare, tell sb-driver); see the Notes list in the report."
+gotchas:
+  - "Bash heredocs that contain apostrophes fail in this environment even with a quoted delimiter; write report files with the Write tool."
+  - "Probes ran from the session scratchpad by requiring injected/test/helpers.js by absolute path; run node from injected/test so jsdom resolves from its node_modules."
+  - "crates/sb-act/tests/common/mod.rs was modified uncommitted by another agent during this review; left alone."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19-js.md
+  - agent-memory/handoffs/T-19-reviewer-5.yaml
+verify: "node --test injected/test/ && cargo test -p sb-act --test wire_from_injected"

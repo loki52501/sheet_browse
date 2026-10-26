@@ -1,0 +1,16 @@
+from: page/reviewer-10
+to: page/suborch
+task: T-19
+date: "2026-10-25"
+state: "Round 5 (D-89 final) leak check at 5fed11f in bench/results/review-T-19.md: Verdict request changes, one Blocking item. Round 4's Blocking (add-first rebuild split across batches, shared keys) is closed: reviewer-9's probe-jsdom2 A, A2, B, B3 and the Chromium fade.html, wrapcb.html and modal.html all read 0 times, and committed tests pin them (jsdom.test.js:886, :960, browser.test.js:560, accept-t19 A16). node --test injected/test/ 93/93 on a git-archive snapshot. sb-act unchanged since 71aa8c0."
+not_done: "1) Blocking, needs supreme to amend D-440: 1fe3caf reintroduced a hard rule 5 leak. When an add-first neutral copy n sits next to the password and the batch that removes the password also adds one other value field to that parent, the D-437 swap marks the other field and e.swap empties inParent, so n reads (Chromium probe-r10-chromium.js mode d440: canary in index()/state(), 3 getter calls; jsdom V7: 4 reads; both ok at 1fe3caf^). Proposed fix: under a swap, skip the same-parent rule only for S.born entries recorded while document.readyState === 'loading'. The 3-line version in runs/reviewer-10/fix passes 93/93 and closes d440 and V7. 2) Should: the neutral-identity overlap read (both fields present) still leaks (Chromium neutral and wrap mid, getter 3). Neutral V5 (3-batch cross-parent) and V8 (two adds to the parent) leak at and before D-440. The S.born cap of 64 evicts a key-matched copy (V9). The caps are untested. 3) Over-marking notes (otp/ssn names) are still open."
+gotchas:
+  - "jsdom's readyState is 'loading' until the first tick after construction, so any probe or test of a readyState-based rule must await a tick before mutating, or every add looks parser-time."
+  - "Chromium getter counts: redefine HTMLInputElement.prototype.value inside world sb with o.ev and count only reads that return the canary; page-world spies are invisible to the isolated world."
+  - "Run probes against git-archive snapshots (runs/reviewer-10/snap, pre440, fix) with NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules; helpers.js resolves injected.js and bench/pages relative to its own directory."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19.md
+  - agent-memory/handoffs/T-19-reviewer-10.yaml
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules node runs/reviewer-10/probe-r10-chromium.js (d440 after: leak=true at 5fed11f) and node --test injected/test/ in a 5fed11f snapshot (93/93)"

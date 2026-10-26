@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Show toggle while the page is still loading</title>
+<style>
+  input { transition: opacity .3s; }
+  .out { opacity: 0; }
+</style>
+<script>
+  // D-442 (review-T-19 round 6 M1, M4): the d441.html shape on a page a parser-blocking
+  // <script src="/slow.js"> at the end of body keeps "loading" (the test server holds that
+  // script until the test releases it). show() mounts a field that shares no key with the
+  // password, after it in the same parent, holding its value. swap() replaceWith's the password
+  // by a different, empty field, so the removing batch is a one-for-one swap (D-437). fade()
+  // runs swap() when the password's fade ends (transitionend).
+  function show() {
+    const o = document.getElementById("acct");
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = "q9";
+    n.value = o.value;
+    o.after(n);
+  }
+  function swap() {
+    const h = document.createElement("input");
+    h.type = "text";
+    h.id = "hint";
+    h.placeholder = "Hint";
+    document.getElementById("acct").replaceWith(h);
+  }
+  function fade() {
+    const o = document.getElementById("acct");
+    o.addEventListener("transitionend", swap, { once: true });
+    o.classList.add("out");
+  }
+</script>
+</head>
+<body>
+<form>
+  <div id="w"><input id="acct" name="acct" type="password" aria-label="Account key"></div>
+  <button id="toggle" type="button" onclick="show()">Show</button>
+  <input id="user" aria-label="User">
+</form>
+<script src="/slow.js"></script>
+<p>tail</p>
+</body>
+</html>

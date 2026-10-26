@@ -33,7 +33,7 @@ areas:
     crates: [injected, sb-act]
     tasks: [T-19]
     docs: [docs/05-BROWSER.md#B-5, docs/05-BROWSER.md#B-7]
-    status: not_started
+    status: in_progress
     merged: false
     note: "Phase 2 code started early because nothing blocks it; not part of the Phase 1 baseline"
   servers:

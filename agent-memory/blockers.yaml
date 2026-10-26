@@ -14,6 +14,35 @@
 # proposals item:         reflect writes forge proposals, _generic merges, pinned-tool retirements
 
 blockers:
+  - id: B-405
+    task: T-19
+    question: "Drive C: has 0.29 GB free on 2026-10-23 13:35; cargo test and pipes fail with 'No space left on device'. C:/Users/Admin/AppData/Local/Temp/claude holds 73 GB, 44.8 GB of it under F--sb-swarm-wt-core (area core's session temp) and 25.5 GB under f--aside-mcp-for-claude. Page did not delete another session's files. Supreme or the user should clear them."
+    default_taken: "Area page runs every build and test with TMP/TEMP/TMPDIR=F:/sb-swarm/tmp-page (outside the repo); all page agents are told to do the same."
+    needs_user: true
+  - id: B-402
+    task: T-19
+    question: "Is an invisible reCAPTCHA v3 badge a challenge (D-5 stop) or not? Flagging it CHALLENGE makes every v3-protected login a stop although there is nothing for the user to solve."
+    default_taken: "Not CHALLENGE (D-405 (5)); a visible challenge frame (bframe) or v2 checkbox is. If v3 blocks a submit server-side the site shows a visible challenge, which is flagged."
+    needs_user: false
+  - id: B-403
+    task: T-19
+    question: "B-5's name ladder puts placeholder/title/alt/name before own text. D-412 gives buttons and links their visible text before title, and the name attribute last for all elements. Amend B-5 so srv-web (area servers) builds the same names from fetched HTML?"
+    default_taken: "D-412 order in injected.js; proposal for supreme to amend docs/05 B-5 and tell area servers."
+    needs_user: false
+  - id: B-404
+    task: T-19
+    question: "data/roles.txt (D-49, area sheet) does not exist yet; injected.js fingerprint() carries its own copy of the role aliases. Who syncs it?"
+    default_taken: "Keep the in-page copy, marked as mirroring data/roles.txt; page re-syncs it when sheet merges the file. A drift test in injected/test reads data/roles.txt when present."
+    needs_user: false
+  - id: B-430
+    task: T-19
+    question: "D-402 takes Pay only from card/IBAN fields in the form. A checkout with a saved card (button 'Place order', 'Pay now', 'Confirm order', 'Buy now', no card field) classifies as Submit and runs under the lenient gate without an ask. Should button text raise to Pay as H-1's table ('checkout, confirm order') suggests?"
+    default_taken: "No (D-402 followed exactly). Proposal: raise to Pay when the submit button name says pay/place order/confirm order/buy now/complete purchase/checkout; it only raises, never lowers."
+    needs_user: false
+  - id: B-431
+    task: T-19
+    question: "A SUBMIT/submitish row with no form id (SPA forms built without <form>) gets no form context, so card, password and heading evidence elsewhere on the page is not used. Should injected.js assign a pseudo form id to such groups, or should sb-act use the same frame's formless rows as context?"
+    default_taken: "Button-only context (D-433). Preferred fix is in injected.js: give formless field groups a synthetic form id so sheets, fingerprints and sb-act agree."
   - id: B-33
     task: T-11
     question: "Supreme second-opinion review of the store D-78 follow-up (merged 83bfdb5; 0 blocking) left items for toolstore. (1) sweep logs a failed archive as an ok:false tools.retire event while retire() has already saved the row Retired, so the ledger never gets an ok:true retire for that tool and its only retire event contradicts the row (lifecycle.rs 210, 277, 614). (2) tests/contract_paths.rs does not name ToolStore::tool_path or archive_path from outside the crate (only an in-crate test does), so they could become pub(crate) unnoticed, and it does not pin ApiFetch::api(&self, &str, Duration) or the root fn fingerprint. (3) note, safety-relevant: a retire whose archive step fails leaves the retired tool's file in tools/<domain>/, where the loader still finds it. (4) notes: relocate keeps its own name-synonym table beside sb_sheet::data::synonyms (fingerprint.rs 26); tools with upper-case names written before D-312 become orphans nothing retires or reports; a file step that keeps failing appends an ok:false event every sweep with no dedup."
@@ -135,6 +164,16 @@ blockers:
     question: "What if a tool file's @name differs from its file name?"
     default_taken: "The loader skips it with why '@name x does not match file name y.js' (D-306 report). tools.health, the archive and record() all key on the file name, so the two must agree."
     needs_user: false
+  - id: B-414
+    task: T-19
+    question: "D-435 (1) names 'a one-for-one input swap in a single mutation record (replaceWith)'. Does that cover a wrapper replaceWith (div holding the password replaced by a div holding one neutral input) and a remove + append into the same parent in one batch (two records)? Read literally they read the value, and accept-T-19 A10 (accept-pw.html #w-in, #r3) fails on a hard rule 5 leak."
+    default_taken: "Yes: in one observer batch, a parent that lost exactly one field (subtrees counted), a sensitive one, and gained exactly one field hands sensitivity to it. An SPA login swap removes at least two fields (user + password) so its new fields still read (D-435 (1) intent). Only a one-field login step swapped for a one-field page over-marks that one field as empty|filled."
+    needs_user: false
+  - id: B-415
+    task: T-19
+    question: "D-438 (1)'s add-first same-parent rule treats fields the HTML parser inserted at load as 'added in the last 2000 ms'. On accept-pw.html the parser's record (target form#f1, added a label holding #nick) puts #nick in S.born with parent f1; a wrapper swap of #w-in in f1 within 2 s of load (a same-batch one-for-one swap that D-437 already resolves) makes #nick 'the single field added to the same parent', so it reads empty|filled. accept-t19 A10 ('control: the ordinary field is read') and A14 ('after nick', toggleWrap in form#toggles of accept-d435.html) fail whenever the clicks land within 2 s of load: in full-suite runs on HEAD 2ec0d4f and on edd30e4 alike, intermittently when run alone. Should the rule skip such fields?"
+    default_taken: "None (outside D-439; js-coder-6 left D-438 as written). Proposed default: skip the born same-parent rule for a parent that gained a value field in the same batch (its one-for-one swap already handed the value on, D-437); optionally do not remember adds made while document.readyState is 'loading'. Either should fix A10/A14 (not tried); the first drops the same-parent mark when a later batch both removes the old field and adds a different one to that parent."
+    needs_user: false
 
   - id: B-175
     task: T-07
@@ -177,6 +216,31 @@ blockers:
     default_taken: "macOS resolves to chrome-mac-arm64 (or chrome-mac-x64)/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing; Windows and Linux follow D-601 exactly (chrome-win64/chrome.exe, chrome-linux64/chrome). An empty SB_CHROMIUM or SB_HOME counts as unset. A set source that names a missing file is an error naming SB_CHROMIUM, never a fall-through."
     needs_user: false
 interface_changes:
+  - id: B-401
+    from: page/suborch
+    interface: I-10
+    change: "sb_act::PlannerError gains ChallengeTarget { step: usize }: check_planner rejects any step whose target row is CHALLENGE, with or without ?s, before the ?s rule (D-404 (4)). MissingStop { class: Challenge } no longer occurs."
+    why: "D-5: a planner may never target a challenge; consumers matching on PlannerError (toolstore, toolforge G-2) need the new variant."
+  - id: B-400
+    from: page/suborch
+    interface: I-10
+    change: "sb_act adds pub const MAX_WAIT: Duration (30 s): w(n) longer than this is clamped (D-431). No I-10 signature changed."
+    why: "Draft-tier addition recorded so consumers (sb-driver, toolforge) see it; sb-driver's settle cap for w() should read it."
+  - id: B-410
+    from: page/js-coder
+    interface: I-11
+    change: "New in-page API for sb-media (B-9), next to __sb: injected/media.js installs globalThis.__sbMedia {list, cues, frames, frame} in world sb (shapes in its header and D-420). Video ids are __sb ids."
+    why: "B-9's in-page seek + canvas path and video.list facts need a page API that I-11 does not name; sb-media (an I-9 consumer) calls it."
+  - id: B-411
+    from: page/js-coder
+    interface: I-11
+    change: "Additive details, no rename: act(id) returns a Promise; walk also accepts walk(true) and {dirty: [ids]}; frames() entries carry extra fields (challenge, and id/name on child entries with frame:null); text() emits an iframe placeholder block (kind other, elem = iframe row); index() omits State fields equal to State::default() (D-421)."
+    why: "Recorded so sb-driver codes against what the page really returns."
+  - id: B-412
+    from: page/js-coder
+    interface: I-11
+    change: "Return-shape changes (D-405, D-423..D-425): before the first walk({base}) in a document, id(), index(), text(), fingerprint(), state(), name() and frames() return {why: \"no base\"} (array-returning calls return that object instead), walk() without a base returns it too, and resolve() answers stale; sb-driver must walk with a base after every navigation before any read. A challenge page returns index() = [one CHALLENGE row, role document], text() = [one other block linking it], frames() = [self with challenge: true]. __sbMedia (B-410): list() and cues() may return {why}, frames() entries may carry truncated: true and opts gains budgetMs (default 8000)."
+    why: "The un-based first call reused ids across document generations (review Blocking 2) and an empty index for a challenge page was an unreported stop; consumers (sb-driver, sb-media) must handle the new shapes."
   - id: B-194
     from: core
     interface: I-4
@@ -232,6 +296,11 @@ interface_changes:
     interface: I-7
     change: "Completes IC-300..IC-303 (review-T-11 should-fix 5). Further pub items: runner::{ALLOWED_GLOBALS, FIND_ALL_K, table_json}; invariants::{stop_count, vault_keys}; archive::has_task_id; domain::{normalize_host, registrable, SiteConfig}; fingerprint::{fingerprint_items, role_matches, norm, parse_fingerprint, render_fingerprint, patch_fingerprint}; loader::{namespace, glob_match, url_path}; skeleton_line; lifecycle consts CLEAN_RUNS_TO_SAVE, MISSES_TO_RETIRE, EPHEMERAL_IDLE_DAYS, EPHEMERAL_IDLE_VISITS, ARCHIVE_DELETE_DAYS. Behaviour: tool_path/archive_path return an empty PathBuf on bad input (try_* return BadPath); record(Relocated) on a retired row is an error; a reforge of an ask row stays ask (D-310)."
     why: "Consumers (srv-web, sb-mcp, toolforge, harness) should see the whole surface before coding against it; these helpers are what toolforge's G-2 static check reuses."
+  - id: B-413
+    from: page
+    interface: I-11
+    change: "__sbMedia whole-call refusals: frame() returns {t: null, why} and frames(id, times) returns a single {t: null, why} entry (not one per time) when the call is refused as a whole (no base, unknown id, challenge). Proposed note in I-11: a single t:null entry with why means the whole call was refused; per-time failures keep one entry per time."
+    why: "accept-T-19-js round 2 note 2: I-11 promises a bare {why} only for list() and cues(), so sb-media (wave 2) needs the frame()/frames() refusal shape written down before it parses them."
 
   - id: B-177
     from: core

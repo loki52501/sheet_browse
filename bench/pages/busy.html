@@ -1,0 +1,17 @@
+<!doctype html>
+<!--
+  bench/pages/busy.html: a page that never stops mutating (a ticker every 40 ms). settle()
+  must give up at its cap (3 s by default, or opts.cap) with settled:false and never run past it.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Ticker · busy fixture</title></head>
+<body>
+<h1>Live ticker</h1>
+<p>Updates: <span id="n">0</span></p>
+<button type="button">Pause</button>
+<script>
+  let n = 0;
+  setInterval(() => { document.getElementById("n").textContent = String(++n); }, 40);
+</script>
+</body>
+</html>

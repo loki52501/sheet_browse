@@ -1,0 +1,131 @@
+<!doctype html>
+<!--
+  bench/pages/accept-d435.html: D-435 (1)(2) and D-437 for the T-19 acceptance (tester-8).
+  The test types one canary into every password field, then drives the site's own handlers.
+
+  Show-password toggles (each must keep the value out of every __sb output):
+    #t-type   type=password, toggle swaps type to text (same element)
+    #t-same   replaceWith a type=text input with the same id (React-style re-render)
+    #t-neu    replaceWith a neutral type=text input sharing no identity (one-for-one, D-437)
+    #t-wrap   its wrapper div replaced by a new wrapper with a neutral input (D-437)
+    #t-app    removed, then a neutral input appended to the same parent (two records, D-437)
+    #t-mic    removed, a microtask later a copy sharing only aria-label is appended (D-435 (2))
+    #t-to1    removed, 300 ms later a copy sharing only placeholder is appended (D-435 (2))
+    #t-to2    removed, 1500 ms later a copy sharing only the label text is appended (D-435 (2))
+  Replacement ids and names avoid the sensitive-name pattern, so only D-435/D-437 can mark them.
+
+  SPA login swap (D-435 (1)): #app holds an email and a password field. Sign in replaces #app with
+  a profile view whose pre-filled fields (Display name, City, Bio, Phone) match nothing removed;
+  they must keep reading their values. #q (header search, pre-filled) is outside the swap.
+  Validation re-render: #f-login is replaced by a copy with the same email (value kept) and the
+  password re-rendered as type=text with the same id: email reads, the password does not.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Toggles and SPA swaps · acceptance fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } label, div { margin-top: 4px; }</style>
+<script>
+  function mk(attrs) {
+    const n = document.createElement("input");
+    n.type = "text";
+    for (const k of Object.keys(attrs)) {
+      if (k === "value") n.value = attrs[k];
+      else n.setAttribute(k, attrs[k]);
+    }
+    return n;
+  }
+  const $ = (id) => document.getElementById(id);
+  function toggleType() { $("t-type").type = "text"; }
+  function toggleSame() {
+    const o = $("t-same");
+    o.replaceWith(mk({ id: "t-same", "aria-label": "Shown same", value: o.value }));
+  }
+  function toggleNeutral() {
+    const o = $("t-neu");
+    o.replaceWith(mk({ id: "shown-b", name: "shown_b", "aria-label": "Visible field b", value: o.value }));
+  }
+  function toggleWrap() {
+    const w = $("wrap-c");
+    const d = document.createElement("div");
+    d.id = "wrap-c2";
+    const s = document.createElement("span");
+    s.textContent = "Shown";
+    d.append(s, mk({ id: "shown-c", name: "shown_c", "aria-label": "Visible field c", value: w.querySelector("input").value }));
+    w.replaceWith(d);
+  }
+  function toggleAppend() {
+    const o = $("t-app");
+    const p = o.parentNode;
+    const v = o.value;
+    o.remove();
+    p.appendChild(mk({ id: "shown-d", name: "shown_d", "aria-label": "Visible field d", value: v }));
+  }
+  async function toggleMicro() {
+    const o = $("t-mic");
+    const p = o.parentNode;
+    const n = mk({ id: "shown-e", name: "shown_e", "aria-label": "Memorable word", value: o.value });
+    o.remove();
+    await null;
+    p.appendChild(n);
+  }
+  function toggleLater(oldId, attrs, ms) {
+    const o = $(oldId);
+    const p = o.parentNode;
+    attrs.value = o.value;
+    const n = mk(attrs);
+    o.remove();
+    setTimeout(() => p.appendChild(n), ms);
+  }
+  function toggleTo1() { toggleLater("t-to1", { id: "shown-f", name: "shown_f", placeholder: "Enter your memorable phrase" }, 300); }
+  function toggleTo2() { toggleLater("t-to2", { id: "shown-g", name: "shown_g" }, 1500); }
+
+  function signIn() {
+    const app = document.createElement("div");
+    app.id = "app";
+    app.innerHTML = '<h2>Profile</h2>' +
+      '<label>Display name <input id="dn" name="display" value="Ada Lovelace"></label>' +
+      '<input id="city" name="city" placeholder="City" value="London">' +
+      '<label>Bio <textarea id="bio" name="bio">Mathematician and writer</textarea></label>' +
+      '<input id="phone" aria-label="Phone" value="+44 20 7946 0000">' +
+      '<button id="save" type="button">Save profile</button>';
+    $("app").replaceWith(app);
+  }
+  function rerenderLogin() {
+    const o = $("f-login");
+    const em = $("l-email").value;
+    const pv = $("l-word").value;
+    const f = document.createElement("form");
+    f.id = "f-login";
+    f.innerHTML = '<label>Login email <input id="l-email" name="login_email" type="email"></label>' +
+      '<label>Login secret shown <input id="l-word" type="text"></label><p>Wrong password, try again.</p>';
+    f.querySelector("#l-email").value = em;
+    f.querySelector("#l-word").value = pv;
+    o.replaceWith(f);
+  }
+</script>
+</head>
+<body>
+<header><label>Search <input id="q" name="q" value="pre-filled query"></label></header>
+<main>
+  <h1>Toggles</h1>
+  <form id="toggles">
+    <label>Nickname <input id="nick" name="nick"></label>
+    <label>Type toggle <input id="t-type" type="password"></label>
+    <span id="slot-a"><input id="t-same" type="password" aria-label="Hidden same"></span>
+    <span id="slot-b"><input id="t-neu" type="password" aria-label="Hidden b"></span>
+    <div id="wrap-c"><input id="t-wrap" type="password" aria-label="Hidden c"></div>
+    <div id="holder-d"><input id="t-app" type="password" aria-label="Hidden d"></div>
+    <div id="holder-e"><input id="t-mic" type="password" aria-label="Memorable word"></div>
+    <div id="holder-f"><input id="t-to1" type="password" placeholder="Enter your memorable phrase"></div>
+    <label id="lab-g">Recovery phrase <span id="holder-g"><input id="t-to2" type="password"></span></label>
+  </form>
+  <div id="app">
+    <form id="f-app"><label>App email <input id="a-email" name="a_email" type="email"></label>
+      <label>App password <input id="a-pw" name="a_password" type="password" autocomplete="current-password"></label>
+      <button id="sign-in" type="button" onclick="signIn()">Sign in</button></form>
+  </div>
+  <form id="f-login"><label>Login email <input id="l-email" name="login_email" type="email"></label>
+    <label>Login secret <input id="l-word" type="password"></label></form>
+  <button id="rerender" type="button" onclick="rerenderLogin()">Submit login</button>
+</main>
+</body>
+</html>

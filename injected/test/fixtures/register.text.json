@@ -1,0 +1,140 @@
+[
+ {
+  "order": 0,
+  "frame": 0,
+  "kind": "paragraph",
+  "landmark": "nav",
+  "spans": [
+   {
+    "text": "Home",
+    "elem": "#1"
+   },
+   {
+    "text": " "
+   },
+   {
+    "text": "Pricing",
+    "elem": "#2"
+   },
+   {
+    "text": " "
+   },
+   {
+    "text": "Sign in",
+    "elem": "#3"
+   }
+  ]
+ },
+ {
+  "order": 1,
+  "frame": 0,
+  "kind": "heading",
+  "level": 1,
+  "landmark": "main",
+  "spans": [
+   {
+    "text": "Create your account"
+   }
+  ]
+ },
+ {
+  "order": 2,
+  "frame": 0,
+  "kind": "paragraph",
+  "landmark": "main",
+  "heading": "Create your account",
+  "spans": [
+   {
+    "text": "Start your free trial. No card required."
+   }
+  ]
+ },
+ {
+  "order": 3,
+  "frame": 0,
+  "kind": "paragraph",
+  "landmark": "main",
+  "heading": "Create your account",
+  "spans": [
+   {
+    "text": "Register",
+    "elem": "#11"
+   }
+  ]
+ },
+ {
+  "order": 4,
+  "frame": 0,
+  "kind": "heading",
+  "level": 2,
+  "landmark": "footer",
+  "spans": [
+   {
+    "text": "Stay in the loop"
+   }
+  ]
+ },
+ {
+  "order": 5,
+  "frame": 0,
+  "kind": "paragraph",
+  "landmark": "footer",
+  "heading": "Stay in the loop",
+  "spans": [
+   {
+    "text": "Subscribe",
+    "elem": "#14"
+   }
+  ]
+ },
+ {
+  "order": 6,
+  "frame": 0,
+  "kind": "paragraph",
+  "landmark": "footer",
+  "heading": "Stay in the loop",
+  "spans": [
+   {
+    "text": "Privacy",
+    "elem": "#15"
+   },
+   {
+    "text": " · "
+   },
+   {
+    "text": "Terms",
+    "elem": "#16"
+   }
+  ]
+ },
+ {
+  "order": 7,
+  "frame": 0,
+  "kind": "paragraph",
+  "landmark": "region",
+  "spans": [
+   {
+    "text": "We use cookies to run this site."
+   }
+  ]
+ },
+ {
+  "order": 8,
+  "frame": 0,
+  "kind": "paragraph",
+  "landmark": "region",
+  "spans": [
+   {
+    "text": "Accept all",
+    "elem": "#18"
+   },
+   {
+    "text": " "
+   },
+   {
+    "text": "Reject",
+    "elem": "#19"
+   }
+  ]
+ }
+]

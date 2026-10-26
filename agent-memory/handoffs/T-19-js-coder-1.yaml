@@ -1,0 +1,38 @@
+from: page/js-coder
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "injected/injected.js (I-11, B-4 #4 #6 #8, B-5) and injected/media.js (B-9 in-page half, __sbMedia) are implemented and committed (7581bf9), decisions D-410..D-421 and interface notes B-410/B-411 committed (0ffb37a). `node --test injected/test/` passes 32/32 (15 jsdom, 14 Playwright, 3 media), stable over 5 consecutive runs. Covered: docs/05 acceptance 1 (identity over 3 walks with main-world DOM changes, removed -> gone, below base -> stale), the in-page parts of 2 (covered by div.cookie (OVERLAY #n) in ~25 ms in-page, disabled ~25 ms, moving, retry succeeds after the overlay is removed by real input), 5 (SPA rendering 400 ms after load is non-empty after settle; default cap measured 3002-3009 ms, cap 500 honoured) and the index side of 6 on register.html (names, SUBMIT, one CHALLENGE+OPAQUE row for the reCAPTCHA container and iframe, cookie banner OVERLAY, Register covered, hidden promo absent). Cost on a 1601-row page: walk ~150 ms, index ~30 ms, index after a small change ~30 ms, text ~40 ms."
+not_done: "1) B-431 (open): synthetic form ids for formless SPA field groups are not implemented; needs a decision on numbering (a separate prefix such as g1 keeps real f1, f2 in document order). 2) data/roles.txt does not exist yet: injected.js carries an in-page copy of the D-49 aliases for fingerprint() (ALIASES near the top); sync it when area sheet adds roles.txt. 3) Untested in page: DRM videos and media cues() (no fixture), closed shadow roots (unreachable from an isolated world), cross-site OOPIF frames (sb-driver must install the script on every auto-attached target). 4) The Rust halves stay with sb-driver: act retry/backoff and the 5 s cap, settle's network-idle condition, mapping frames() child entries to frame ids (DOM.getFrameOwner), replacing text()'s iframe placeholder blocks with child-frame blocks, and never calling index/text in a frame whose owner row is CHALLENGE (in-page self-detection only sees challenge URLs and a same-origin frameElement, not a sandboxed srcdoc frame)."
+gotchas:
+  - "Chrome's el.labels walks every label in the document per call, so a walk that asked it per control was O(n^2) (1.5 s at 6000 rows). injected.js builds a control -> labels map once per walk from the labels the walk visits (labelsOf/buildLabelMap)."
+  - "Node 22 runs `node --test <directory>` as a module, so injected/test/index.js requires the three suites; `npm test` inside injected/test lists the files explicitly."
+  - "Chrome seeks media only when the server answers Range requests; the test server in helpers.js does. Playwright recordVideo clips vary in length and segment timing under load, so the media test samples densely and checks colours, not fixed times."
+  - "jsdom objects come from another realm: assert.deepStrictEqual fails on equal shapes; the jsdom tests compare through JSON (same())."
+  - "index() omits State fields equal to sb_sheet::State::default() and false flags; tests read rows through helpers.fill(), which applies the same defaults serde does."
+  - "The dotpals Stop/PreToolUse hook refuses a commit when any file in the worktree (including the rust-coder's crates/sb-act) changed after the last test run; rerun the fast jsdom suite right before committing. guard_write blocks writes outside the worktree, including the session scratchpad."
+  - "Bash heredocs containing apostrophes failed in this harness with 'unexpected EOF'; write files with the Write tool instead."
+  - "playwright-core is pinned to 1.59.1 because its browsers.json names chromium-1217, which is installed; a different version looks for a revision that is not on this machine (SB_CHROMIUM overrides the executable)."
+decisions_made: [D-410, D-411, D-412, D-413, D-414, D-415, D-416, D-417, D-418, D-419, D-420, D-421]
+blockers_opened: [B-410, B-411]
+files_touched:
+  - injected/injected.js
+  - injected/media.js
+  - injected/test/package.json
+  - injected/test/package-lock.json
+  - injected/test/helpers.js
+  - injected/test/index.js
+  - injected/test/jsdom.test.js
+  - injected/test/browser.test.js
+  - injected/test/media.test.js
+  - bench/pages/overlay.html
+  - bench/pages/spa.html
+  - bench/pages/busy.html
+  - bench/pages/popup.html
+  - bench/pages/dialog.html
+  - bench/pages/frames.html
+  - bench/pages/frame-child.html
+  - bench/pages/controls.html
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+verify: "cd injected/test && npm ci && cd ../.. && node --test injected/test/"

@@ -3521,6 +3521,7 @@ version = "0.1.0"
 dependencies = [
  "harness-core",
  "sb-sheet",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
