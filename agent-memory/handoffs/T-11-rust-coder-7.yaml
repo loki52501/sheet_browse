@@ -1,0 +1,20 @@
+from: rust-coder-7 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-25"
+state: "The three should-fix items from review-T-11.md round 'D-78 batch (93a2e4d)' are fixed in one commit on swarm/store. Each has a test that was seen failing with the fix mutated out and passing with it restored. (1a) archive::touch sets the mtime through a handle a read-only file grants: on Windows OpenOptions::access_mode(FILE_WRITE_ATTRIBUTES = 0x100), elsewhere File::open (futimens checks the owner, not the open mode; the brief said 'as now', but write(true) would refuse a read-only file on Unix as well). Tests: archive::tests::archive_sets_the_mtime_of_a_read_only_tool, tests_review::sweep_archives_a_read_only_tool_with_its_mtime_set, and accept_t11 d314_read_only_tool_archives_with_its_mtime_set (renamed from d314_archive_fails_closed_when_mtime_cannot_be_set and rewritten for the new behaviour). (1b) sweep is now sweep_with(.., set_mtime) (pub(crate)); a failed retire, archive or 90-day delete of one tool or file writes an ok:false ledger event (tools.retire / tools.archive / tools.delete, summary names the file and the error, why = the error) and the sweep goes on. Memory errors still return. Tests: tests_review::sweep_records_a_failed_archive_and_goes_on (seam fails two tools; a later tool in the same domain, a later domain and a 90-day delete still happen; the next sweep archives both), and tests_review::sweep_records_a_failed_delete_and_goes_on (cfg(windows), file held open with share_mode(0)). (2) archive_with calls set_mtime on the source before create_dir_all and the rename, so a failure moves nothing; the rename-back path is gone. archive::tests::archive_fails_closed_when_mtime_cannot_be_set asserts that the seam sees the tool path, the tool keeps its old mtime and nothing is created in _archive, plus the .<n> suffix case (reviewer nit). D-314 text and why in decisions.yaml updated under the same id. (3) The D-312 name refusal in reforge calls log_invariant before returning. tests_review reforge_refuses_a_new_name_that_is_not_the_called_name and accept_t11 d312_reforge_with_a_different_name_refused now assert that why says 'rejected: ... D-312' and that nothing else in the row changes. No pub API added: archive_with, sweep_with, touch and SetMtime are pub(crate) or private. cargo test -p toolstore: 116 lib + 35 accept_t11 + 1 contract_paths pass."
+not_done: "Nothing from the brief. For the area: (a) tester and reviewer passes on this commit. accept_t11 now has two changed tester-owned tests (d314 rewritten, d312 asserts the log). (b) When set_mtime succeeds but the rename then fails, the tool stays in place with a fresh mtime. For a never-run ephemeral tool that only matters if the row is not already retired, and retire persists the row first, so the next sweep archives it whatever its mtime. (c) Pre-existing nits left alone: the space run in the lifecycle.rs reforge double-failure message, and the invariants.rs:215 / fingerprint.rs:93 redundancies."
+gotchas:
+  - "Long Bash heredocs written to the scratchpad came out truncated (about 196 lines), and Edit/Write to the scratchpad is blocked by guard_write. Keep helper scripts under target/tmp and keep heredocs short."
+  - "The fake Store in tests_review re-pushes a row on every put, so row order changes after a sweep. Sort before comparing names."
+  - "Windows: a read-only file can be renamed and can have its times set through a FILE_WRITE_ATTRIBUTES-only handle, but it cannot be opened with write(true)."
+decisions_made: [D-314]
+blockers_opened: []
+files_touched:
+  - crates/toolstore/src/archive.rs
+  - crates/toolstore/src/lifecycle.rs
+  - crates/toolstore/src/tests_review.rs
+  - crates/toolstore/tests/accept_t11.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/handoffs/T-11-rust-coder-7.yaml
+verify: "cargo test -p toolstore"

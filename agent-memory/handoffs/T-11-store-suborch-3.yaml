@@ -1,0 +1,20 @@
+from: store/sub-orchestrator
+to: supreme
+task: T-11
+date: "2026-10-25"
+state: "D-78 follow-up batch done on swarm/store, ready to merge again (area was merged at f493fd3; areas.store.merged stays true, status pr_open, these are follow-up commits). main merged in (1c42e5d, no code changes). Done: B-31 (1) lower-case tool names: valid_name [a-z0-9_-]+, header refuses upper-case @name, reforge refuses and logs a changed @name (D-312); (2) check_repair refuses an @kind change and an @phase drop 2->1 (D-313); (3) accept g4_no_new_vault_key feeds its canary and fails with the check off; (4) archive stamps the mtime through a write-attributes handle before the rename, so a failure moves nothing and a read-only tool archives fine (D-314, text updated); sweep records a per-tool retire/archive/delete failure as an ok:false ledger event and continues, memory errors still stop it. D-72: tool_path/archive_path #[deprecated], no callers outside toolstore. D-59/B-300: fingerprint ROLE_ALIASES deleted, role_matches uses sb_sheet::data::{aria_roles, alias_for}; two differences follow roles.txt: input no longer matches spinbutton, checkbox no longer matches switch (both fail closed to needs_repair; no seed or fixture uses them). New tests/contract_paths.rs pins every I-7/I-12 path. Reports: bench/results/review-T-11.md (Verdict: approve, Blocking none, rounds 93a2e4d and 66f74a6), bench/results/accept-T-11.md (63/63 pass, Verdict: green). fmt clean, clippy --workspace --all-targets -D warnings clean, cargo test -p toolstore 116 lib + 41 accept + 1 contract, cargo test --workspace 271 passed 0 failed, merge_gate store: gate ok."
+not_done: "1. Vault canary as a real vault value still waits for core T-05 (Vault::in_memory is todo!()); then switch invariants::vault_keys and the D-309 check to harness_core::vault::vault_refs (B-312). 2. After page merges: SbAct live, accept tests use sb_act::parse. 3. G-5 hand-edit reset needs a tools.health content hash (contract change, not proposed). 4. Nits left in review-T-11.md: run of spaces in reforge's double-failure message (lifecycle.rs ~462); a failed archive after retire is logged as tools.retire; a stamp that succeeds before a failed rename restarts an ephemeral tool's 14-day idle clock (next sweep still archives it); a tool that never recovers adds one ok:false event per sweep. 5. The Unix mode-000 fail-closed test has never run (Windows host)."
+gotchas:
+  - "A share_mode(0) lock does not make the mtime stamp fail on Windows: a write-attributes-only open is exempt from share checks, so the rename fails instead (os error 32). Use icacls /deny <user>:(WA) to force a stamp failure."
+  - "Writing YAML from Python on Windows: open(..., newline='') or the file turns CRLF (git normalises it, but the working copy shows a phantom M)."
+  - "Coders and testers share the worktree: stage by explicit path; a tester's temporary mutation can show up as a modified src file mid-run."
+  - "Subagents spawned in an earlier turn may not be resumable by id; re-brief a fresh one."
+decisions_made: [D-312, D-313, D-314]
+blockers_opened: []
+files_touched:
+  - crates/toolstore/src/{domain,header,lifecycle,invariants,archive,fingerprint,lib,tests_review}.rs
+  - crates/toolstore/tests/{accept_t11,contract_paths}.rs
+  - bench/results/review-T-11.md
+  - bench/results/accept-T-11.md
+  - agent-memory/{tasks,decisions}.yaml
+verify: "cargo test -p toolstore && python scripts/swarm/merge_gate.py store --worktree ."

@@ -2,8 +2,8 @@
 //!
 //! Two repair kinds. A relocate may change only `@fingerprint`. A re-forge may change the body
 //! and raise `@gate`, but may not lower `@gate`, reduce the planner's `?s` count, add an
-//! `@vault` key the old file did not use, rename the tool, or put a scheme, host, `//` or
-//! `..` in `@match`. A planner's output class is `max(@gate floor, sb-act class)` and must
+//! `@vault` key the old file did not use, rename the tool, change `@kind`, lower `@phase`
+//! (2 -> 1, D-313), or put a scheme, host, `//` or `..` in `@match`. A planner's output class is `max(@gate floor, sb-act class)` and must
 //! pass sb-act's `?s` rule (D-50), checked through [`PlannerCheck`] (D-301).
 
 use crate::header::{body_start, header_lines, match_violation, parse_header, ToolKind};
@@ -196,6 +196,21 @@ pub fn check_repair(old: &str, new: &str, kind: RepairKind) -> Result<(), StoreE
             o.gate, n.gate
         )));
     }
+    // D-313: a reader turned planner (or back) is a new tool, not a repair.
+    if n.kind != o.kind {
+        return Err(invariant(format!(
+            "repair changed @kind {} -> {} (G-4, D-313)",
+            o.kind.as_str(),
+            n.kind.as_str()
+        )));
+    }
+    // D-313: @phase 1 runs on fetched HTML and gains page.api; 1 -> 2 only narrows.
+    if n.phase < o.phase {
+        return Err(invariant(format!(
+            "@phase lowered {} -> {} (G-4, D-313)",
+            o.phase, n.phase
+        )));
+    }
     let (so, sn) = (stop_count(old), stop_count(new));
     if (o.kind == ToolKind::Planner || n.kind == ToolKind::Planner) && sn < so {
         return Err(invariant(format!(
@@ -362,6 +377,31 @@ mod tests {
         }
         let ok = with(OLD, "@match /events/*", "@match /*");
         check_repair(OLD, &ok, RepairKind::Reforge).unwrap();
+    }
+
+    #[test]
+    fn kind_change_is_rejected_both_ways() {
+        let reader = with(OLD, "@kind planner", "@kind reader");
+        for k in [RepairKind::Relocate, RepairKind::Reforge] {
+            let m = msg(check_repair(OLD, &reader, k));
+            assert!(m.contains("@kind planner -> reader"), "{m}");
+            let m = msg(check_repair(&reader, OLD, k));
+            assert!(m.contains("@kind reader -> planner"), "{m}");
+        }
+    }
+
+    #[test]
+    fn phase_lowered_is_rejected_raised_is_allowed() {
+        // OLD has no @phase line, which means 2.
+        let p1 = with(OLD, "@kind planner", "@kind planner\n// @phase 1");
+        let explicit2 = with(OLD, "@kind planner", "@kind planner\n// @phase 2");
+        for old in [OLD, explicit2.as_str()] {
+            let m = msg(check_repair(old, &p1, RepairKind::Reforge));
+            assert!(m.contains("@phase lowered 2 -> 1"), "{m}");
+        }
+        check_repair(&p1, &explicit2, RepairKind::Reforge).unwrap();
+        check_repair(&p1, OLD, RepairKind::Reforge).unwrap();
+        check_repair(&p1, &p1, RepairKind::Reforge).unwrap();
     }
 
     #[test]
