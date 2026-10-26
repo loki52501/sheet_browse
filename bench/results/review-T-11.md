@@ -176,4 +176,57 @@ Checked and holding:
 
 Whole branch: no Blocking items from this round or earlier ones. Every D-78 item is implemented, each with a test that can fail. No hard rule is broken, no pub API changed except the two `#[deprecated]` markers, and fmt, clippy and the toolstore tests are clean. Fix Should fix 1 before reflect runs sweep on a real Windows tools tree.
 
+(Round verdict at 93a2e4d: approve. The branch verdict is the last line of this file.)
+
+## Round: review fixes (66f74a6)
+
+Scope: 66f74a6 against the three Should fix items of round "D-78 batch (93a2e4d)", D-303, D-312, D-314 (text edited in this commit), T-9 and CLAUDE.md. Reviewer: reviewer-5, 2026-10-25.
+
+Commands, run on a clean `git archive 66f74a6` export (the worktree holds a tester's uncommitted accept_t11.rs edits): `cargo test -p toolstore` exit 0 (116 lib, 35 accept_t11, 1 contract_paths); `cargo clippy --workspace --all-targets -- -D warnings` exit 0; `cargo fmt -p toolstore -- --check` exit 0.
+
+Mutations, run on the export (no repo code edited):
+
+| Mutation | Result |
+|---|---|
+| M1 `touch` opens with `write(true)` instead of `access_mode(0x100)` | `archive_sets_the_mtime_of_a_read_only_tool` and `sweep_archives_a_read_only_tool_with_its_mtime_set` FAIL |
+| M2 sweep retire and archive arms `return Err(e)` | `sweep_records_a_failed_archive_and_goes_on` FAILS |
+| M3 sweep 90-day delete `return Err(e)` | `sweep_records_a_failed_delete_and_goes_on` FAILS (Windows) |
+| M4 drop `log_invariant` from the D-312 refusal | `tests_review::reforge_refuses_a_new_name_that_is_not_the_called_name` FAILS; all 35 accept_t11 PASS (see Should fix 1) |
+| M5 `set_mtime(&to)` after the rename (old order, no rollback) | `archive_fails_closed_when_mtime_cannot_be_set` and `sweep_records_a_failed_archive_and_goes_on` FAIL |
+| M6 drop the `Err(e @ StoreError::Memory(_)) => return Err(e)` guard | every test PASSES (see Should fix 3) |
+
+Checked and holding:
+
+- Fix 1a, read-only file (archive.rs:22-34). Windows: std's `set_modified` calls SetFileTime, which needs only FILE_WRITE_ATTRIBUTES. FILE_ATTRIBUTE_READONLY denies FILE_WRITE_DATA and FILE_APPEND_DATA, not FILE_WRITE_ATTRIBUTES. With `access_mode` set, std ignores read/write and opens OPEN_EXISTING. M1 shows this handle is what makes the read-only case pass. The handle is dropped when `touch` returns, before the rename. Linux: std sets times with futimens. With explicit times (std passes now, not UTIME_NOW), the kernel requires the caller to own the file (or have CAP_FOWNER) and does not check the fd's open mode. So an O_RDONLY fd on a 0444 file the process owns works, and `write(true)` would have been refused (EACCES) there too. macOS behaves the same (ownership is checked, not the fd mode). CI here is Windows only, so the Unix path is checked by reading the code, not by running it.
+- Fix 1b, sweep goes on (lifecycle.rs:607-618, :629-636, :682-686). The retired state cannot be lost: `retire` persists the row as Retired (lifecycle.rs:277) before the archive, so a failed archive leaves a Retired row with its file still in place. The `Retired if path.is_file()` arm retries it at every sweep. A tool that stays stuck is never skipped silently: each sweep writes one `ok: false` event for it. Memory errors still return: the explicit guard at :612, `?` on every `ledger`, `ledger_failed` and `tool_health_set`, and the archive and delete arms cannot produce `StoreError::Memory`. The guard has no test (Should fix 3).
+- Fix 2, mtime before the rename (archive.rs:117, :121). The rename runs only after the stamp succeeds, and a same-volume rename keeps the mtime on NTFS, ext4 and APFS. So no window exists in which an archived file carries the old mtime, and the rename-back path is gone. A failed stamp creates nothing: `create_dir_all` comes after it, which the test asserts (`_archive` does not exist) along with the `.<n>` case.
+- Fix 3, D-312 logged (lifecycle.rs:421-431). The refusal goes through `log_invariant`, the same path as check_repair. No file or ledger write. The row is created if missing, as for every G-4 refusal. This matches D-312 ("no file written") and T-9 ("rejected and logged").
+- D-314 text in decisions.yaml:310-311 matches the code, including the ok:false sweep events and "memory errors still return". The commit claims B-31, D-314 and D-312. Every claimed id is implemented, and nothing ships outside them.
+- Hard rules: no keys or .env. No vault value: the new ledger text holds a relative path and an io/StoreError string, with no tool source. No captcha code, no new side effect, no raw HTML, no sleeps, no em dashes. Every new `unwrap` is in a test.
+- Interfaces: no pub item added or changed. `ToolStore::archive` and `ToolStore::sweep` keep their signatures. `archive_with` (previously private), `sweep_with`, `touch` and `SetMtime` are `pub(crate)`, and `retire`, `event` and `ledger_failed` are private. interfaces.yaml and crates/core are untouched.
+- Tester-owned accept edits. The d312 edit is faithful in intent (T-9 "rejected and logged"), but the new assertion is vacuous (Should fix 1). The d314 rewrite was forced: the old real-failure trigger (a read-only file) now succeeds by design. The read-only success it now asserts is correct, but the acceptance suite lost its real fail-closed case (Should fix 2). The tester should take both tests back.
+
+## Blocking
+
+- none
+
+## Should fix
+
+1. **accept_t11.rs:2271-2285 (`d312_reforge_with_a_different_name_refused`, case b): the new "logged" assertion cannot fail.** Case (c) runs first. Its upper-case `@name` refusal is logged through check_repair as `rejected: ... is not [a-z0-9_]+ (D-312)` (header.rs:192). So `seeded.why` already starts with `rejected:` and contains `D-312`, and the closing comparison copies `seeded.why` into the row before comparing. M4 (no `log_invariant` on the D-312 path) passes all 35 accept tests. Fix: assert `logged.why != seeded.why` and that it contains `names the tool signup`. The lib test (tests_review.rs, `reforge_refuses_a_new_name_that_is_not_the_called_name`) does catch M4.
+2. **accept_t11.rs:2461 (`d314_read_only_tool_archives_with_its_mtime_set`): D-314's fail-closed path no longer has a real-failure acceptance test.** Also, accept-T-11.md still cites `d314_archive_fails_closed_when_mtime_cannot_be_set`, which now matches 0 tests, and cargo exits 0 on an empty filter, so that row would show a false pass. A real failure is still easy to cause. On Windows, hold the tool open with `share_mode(0)`: the CreateFile in `touch` fails with a sharing violation before any rename, so assert `Err(Io)`, the tool still in place with its old mtime, and no `_archive`. On Unix use mode 0o000 and skip when running as root. Until then, the seam test archive.rs:267 covers it (M5 catches it). This is for the tester running in parallel.
+3. **lifecycle.rs:612: "memory errors still return" (D-314) has no test.** M6 (guard removed) passes everything. Without the guard, a failed `tool_health_set` inside `retire` (:277) becomes an ok:false `tools.retire` event and the sweep carries on against a store that is failing. Add a sweep test with `store.fail_set` set: expect `Err(StoreError::Memory(_))`, no ok:false event, and the file not moved.
+
+## Nits
+
+- lifecycle.rs:210: for a failed retire, the summary reads `retire <file> failed: ...; retried at the next sweep`. But the row is already Retired (persisted at :277), and what failed and gets retried is the archive. The next sweep logs it as `tools.archive`, so that tool never gets an ok:true `tools.retire` event. Wording such as `retired <tool>; archiving <file> failed: ...` would match the row.
+- archive.rs:117/:121: when the stamp succeeds and the rename fails, the tool stays in place with a fresh mtime. Through reforge (lifecycle.rs:440) on a never-run ephemeral tool, that resets the 14-day idle clock at lifecycle.rs:593. Harmless; the coder's handoff notes it.
+- archive.rs:32: on Unix, `File::open` needs read permission, so a tool file with mode 0200 or 0000 fails every sweep (logged each time). A root CI runner would also pass the read-only tests with `write(true)`. Both are unlikely.
+- tests_review.rs:1138: the delete-failure test is `cfg(windows)` only. On Unix, a read-only `_archive/<domain>` directory would make `remove_file` fail and give the same coverage.
+- A file that never recovers adds one ok:false event per sweep, indefinitely. That is visible, not silent, so nothing is needed now.
+- lifecycle.rs:462: the run of spaces in the reforge double-failure message carries over (pre-existing).
+
+## Verdict
+
+Whole branch: no Blocking items from this round or earlier ones. The three Should fix items from round 93a2e4d are fixed, and mutation shows each has a lib test that fails without the fix. The read-only path is right on Windows (verified by running it) and on Unix (verified by reading the code against futimens' ownership rule). Sweep keeps the retired state, logs every per-tool failure, and still returns on memory errors. No hard rule is broken, no pub API changed, and fmt, clippy and the toolstore tests are clean. Should fix 1 and 2 are acceptance-suite gaps for the tester. Should fix 3 is a missing lib test.
+
 Verdict: approve
