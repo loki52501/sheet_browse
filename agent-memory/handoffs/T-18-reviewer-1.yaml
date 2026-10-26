@@ -1,0 +1,15 @@
+from: reviewer (driver area, T-18 round 1)
+to: driver/suborch, then rust-coder and tester
+task: T-18
+date: "2026-10-25"
+state: "Reviewed the net diff main...17c40e1 for crates/sb-cdp, crates/sb-driver and Cargo.toml. bench/results/review-T-18.md: Blocking none, 9 should-fix items, Verdict: approve. clippy -D warnings clean on Windows for both crates (all targets); fmt clean; tests not run (low memory)."
+not_done: "Should-fix for round 2 or follow-ups before T-22, in order: 1. the pipe_windows.rs:191-195 comment is wrong, and the inheritable-handle window races with concurrent std::process::Command spawns (serialize the spawns or record the limit as a decision); 2. Unix Proc has no Drop, so a bridge-thread spawn failure orphans Chromium; 3. the Windows kill loop needs its own deadline check, and pids() should not report empty when the query fails; 4. a second session on a known page target takes over the tab and its detach removes the tab; 5. prerender page targets become tabs; 6. pre-existing targets' child frames are never registered (seed with Page.getFrameTree or file a blocker for T-22); 7. observer_sees_each_event_before_subscribers cannot fail; 8. real-browser tests pass silently without Chromium (gate them on an env flag or #[ignore]); 9. the ws test leaks Chrome on panic."
+gotchas:
+  - "The working tree held a tester's untracked crates/*/tests/accept_t18.rs files and a stat-only (line-ending) M on client.rs during review. clippy compiled the accept files too; none of them are part of the reviewed range."
+  - "The coder's pr-ready section 6 mutation run never finished (killed for memory). The tester should break each behaviour once and record the result."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-18.md
+  - agent-memory/handoffs/T-18-reviewer-1.yaml
+verify: "python scripts/swarm/merge_gate.py driver --worktree ."

@@ -1,0 +1,27 @@
+from: rust-coder-1 (servers)
+to: servers sub-orchestrator, then the T-13 tester and reviewer
+task: T-13
+date: "2026-10-26"
+state: "docs/03 step-2 acceptance items 1 and 2 hold through srv-web, offline, driven through harness_core::mcp::dispatch with MemStore (crates/srv-web/tests/accept_t13.rs). Item 1: fetch(http://jobs.ashbyhq.com/acme) on a local board (DNS override seam) registers ashbyhq.list_jobs and prints 'tools for this site: ashbyhq.list_jobs(org?) · generic.read_table(id?,max?)'; calling it runs the seeded tools/ashbyhq.com/list_jobs.js, whose page.api reaches api.ashbyhq.com (same registrable domain as jobs.ashbyhq.com, D-501 allows it) and returns toolstore's acme fixture as short JSON. Item 2: a fingerprint planted in a private copy of the tool misses the page -> FingerprintMiss, row needs_repair v1, tool unregistered and disabled; a refetch of the still broken page does not offer it; the fixed page (button renamed Apply -> Apply now) offers it again, the run relocates (record Relocated: @fingerprint patched in the file, version 2, status repaired, core tools.relocate ledger event), the patched tool is re-registered and the next call is a plain match. Also tested: a broken tool on a page that matches exactly is repaired by record Ok (D-304, version 2, file untouched); a healthy tool's partial still only gets the D-505 note; a page.api body cut at the cap names the cap. Live (#[ignore]) passed on 2026-10-26 for org ashby (default) and linear; openai fails, its API answer is over 5 MB (B-560). Each acceptance test was seen red once: reverting list_jobs.js fails accept_1 (https API call to the plain test server), reverting site.rs/fetch.rs/lib.rs fails accept_2 at the fixed-page fetch. fmt, clippy -p srv-web -p toolstore --all-targets -D warnings, cargo test -p srv-web -p toolstore and cargo test --workspace are green (workspace: 771 passed, 0 failed, 11 ignored; accept_t13: 5 passed, 1 ignored live)."
+not_done: "1. docs/03 acceptance 3 (an ephemeral tool with last_ok 15 days old deleted by reflect, with a ledger event) is T-16 (reflect is not built); the tester should mark it n/a for T-13. 2. Phase 1 ladder rungs 1, 2, 4 are the tester's. 3. B-560 (page.api 5 MB cap vs big Ashby boards) is open with a default. 4. D-77/D-78 store follow-ups (deprecated tool_path, sb_sheet aliases) are T-11b; toolstore::fingerprint already uses sb_sheet::data aliases on this branch. B-33 item 3 (loader finds a retired tool's file) does not affect srv-web: register() drops retired rows itself."
+gotchas:
+  - "The seeded tool now calls the posting API with the page's scheme (D-561): https in production, http when an offline test serves the board over http. The test server is plain HTTP, so without this the exact seeded file cannot be tested offline; there is no TLS-downgrade seam in srv-web."
+  - "D-506 changed (D-561): a needs_repair row or a process-disabled tool is registered again when its fingerprint is not a miss on the fetched page. round2_t12.rs tool_health_is_honoured_and_a_miss_disables_for_the_process now expects list_items (needs_repair, but its fingerprint matches the shop page) to be registered; the miss half of that test is unchanged."
+  - "Relocated files are not committed by srv-web (D-560); in a real run the patched tools/<domain>/<name>.js stays dirty until reflect (T-16) or the agent commits it with a task id."
+  - "tests/common/mod.rs Server gained set_routes (a page that changes between fetches); routes are snapshotted per connection and responses send Connection: close, so a swap applies to the next request."
+  - "Known edge, not handled: two concurrent repair calls on the same partial page can both see needs_repair and both record Relocated (version 3). serve_io runs calls concurrently, but a model rarely calls the same reader twice at once."
+  - "I wrote crates/srv-web/tests/common/mod.rs once with a python heredoc instead of Edit (brief said Write/Edit only); the content was checked by fmt/clippy/tests."
+decisions_made: [D-560, D-561]
+blockers_opened: [B-560]
+files_touched:
+  - tools/ashbyhq.com/list_jobs.js
+  - crates/srv-web/src/site.rs
+  - crates/srv-web/src/fetch.rs
+  - crates/srv-web/src/lib.rs
+  - crates/srv-web/tests/accept_t13.rs
+  - crates/srv-web/tests/common/mod.rs
+  - crates/srv-web/tests/round2_t12.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/handoffs/T-13-rust-coder-1.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -p srv-web -j 2 --test accept_t13 (live: add -- --include-ignored)"

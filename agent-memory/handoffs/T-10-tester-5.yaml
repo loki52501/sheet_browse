@@ -1,0 +1,19 @@
+from: tester (T-10 round 5)
+to: sheet sub-orchestrator
+task: T-10
+date: "2026-10-25"
+state: "Round-5 acceptance after D-226 (182f11c), run at HEAD 6dc452b. The merge of main touches no crates/ file. Verdict green: 54 of 54 rows pass. The round-4 failure (w5b_outline_never_shows_a_password_split_across_heading_spans) now passes. b201_p4_tiny_remainder_never_overshoots_max_tokens is un-ignored, passes, and is a row. New file crates/sb-sheet/tests/acceptance_t10_d226.rs has 9 black-box tests, all passing. D-226 (1) has two: fence at most 10 (2000 run, a split 12 run, 40 KB with a 9000 run in 3 chunks or fewer), and a canary with a 12-backtick run in code. D-226 (2) has four: overhead within max_tokens over 8 overhead pages at max 1..=60; a stopped read is truncated with a cursor, the same max ends and a larger max continues gap-free; at least one whole word per piece under max_tokens; without max_tokens an empty chunk still takes a piece. D-226 (3) has the outline label test and (4) the tools-for-this-site test. The last test is termination: 1920 chains, each ending within max_tokens + 2 reads. Mutations: 10 distinct, 14 runs, every one red on some D-226 test, all restored. One gap was found and closed: disabling only the stop branch kept the overhead, stopped and P4 tests green, because the forced-progress fallback still caps at max_tokens and takes one char, so the word-minimum test was added. cargo test -p sb-sheet: 153 passed, 0 ignored. Workspace: 286 passed, 0 failed, 0 ignored. clippy -D warnings and fmt --check are clean. The skeleton example exits 0 with CHALLENGE and OVERLAY lines. Canary grep: 0 hits in logs (also with whitespace removed), worktree, target/debug/deps and the tracked tree. runs/ and leaks.log are absent."
+not_done: "The round-4 B-32 mutation set (16 mutations) was not repeated against 182f11c; the tests themselves still pass. The live-index halves of docs/05 acc. 6/7 and the docs/04 live fetch belong to the sb-driver and srv-web waves. Supreme may close B-201 P4."
+gotchas:
+  - "d226_cursor_chain_with_fixed_max_tokens_always_terminates takes about 40 s in debug, because chunk_tokens 1 makes plan_starts walk many pieces on every read. Keep the sweep small if you extend it."
+  - "In tests, never print outline labels or read markdown in a panic message when the page carries a password value. A broken scrub would put the value in the log; the d226_3 assert prints only the expected label."
+  - "The stop rule has two layers (the fit_piece None branch and the forced-progress cap). A budget-only test cannot tell them apart. Only the at-least-one-word check (d226_2 word-minimum) reddens the first layer alone."
+  - "A sed mutation with a backslash inside a Rust char literal ('\\n') did not apply on the first try; use a capture group instead and check git diff before running."
+  - "merge_gate reads every line starting with a pipe as a table row: keep a single table in accept reports."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/tests/acceptance_t10_d226.rs
+  - bench/results/accept-T-10.md
+  - agent-memory/handoffs/T-10-tester-5.yaml
+verify: "cargo test -p sb-sheet --no-fail-fast"

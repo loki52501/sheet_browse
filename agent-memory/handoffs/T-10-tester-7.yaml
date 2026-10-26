@@ -1,0 +1,19 @@
+from: tester (T-10 round 7)
+to: sheet sub-orchestrator
+task: T-10
+date: "2026-10-25"
+state: "Round-7 acceptance after D-229/D-230 (c550253), run at HEAD c8bd2e4. Verdict red: 70 rows, 69 pass, 1 fail. The fail is the reviewer's round-7 blocking item reproduced black-box (D-231, recorded in c8bd2e4 but not implemented). A password value holding the cell separator plus an in-cell pipe (cells 'x' and 'y|z' for 'x | y|z') shows in a table row. Cell 1 keeps the value's head as plain text, and the in-cell pipe is rendered as a backslash-escaped pipe that no joined reading drops. All 4 rows leak (plain/plain, link/plain, plain/link/plain, pipe in cell 1 then link) at chunk 0 and 30. The test is d231_value_with_an_in_cell_pipe_across_cells_never_shows in crates/sb-sheet/tests/acceptance_t10_d229.rs, committed #[ignore]d (red-first), so run it with --ignored. Every D-229/D-230 row passes. The round-6 W-5b finding passes and is no longer ignored. New file acceptance_t10_d229.rs has 7 black-box tests: the value starting in the link (renderer and label readings, a button's quoted label, a renderer-only value); across table cell separators; across three spans (also an empty link, where only the collapsed reading shows the value, and code); the same in headings feeding remaining: and the skeleton; a cut sweep with chains to the end (chunk 1, max spread over the page; a cut lands between *** runs, asserted); D-230 kept text; and D-231. The leak check is any 8-char window of a value in the raw, rendered or label reading, each as is, squeezed and alphanumerics only, plus a chain's joined bodies. Mutations: 11 on the D-229 path, each red, with reader.rs restored byte for byte and git diff clean. Gates: cargo test -p sb-sheet 174 passed, 0 failed, 1 ignored (the D-231 finding). cargo test --workspace -j 2 (Postgres up on 5433): 774 passed, 0 failed, 6 ignored over 76 result lines. clippy -D warnings, fmt --check (both) and the skeleton example are clean. Canary grep: 0 hits in every log (also with whitespace removed), in the worktree, target/debug/deps, target/tmp and the tracked tree. runs/ and leaks.log are absent."
+not_done: "Coder: implement D-231 (drop the inserted escape backslash in at least one joined_hits reading, and prefilter or skip with no password), then remove the #[ignore] from d231_value_with_an_in_cell_pipe_across_cells_never_shows. Then a tester re-runs round 8. The review's should-fix 1 to 3 stay in T-10c. Optional: the plain/plain cross-cell value is hidden by the D-218 literal scrub, which also eats the cell separator, so the row loses a cell (no leak)."
+gotchas:
+  - "cargo test -q prints no 'test X ... FAILED' lines. Parse the 'failures:' list (4-space indented names) or the 'test result' line."
+  - "Python open() in text mode on Windows writes CRLF. A mutation script that restores reader.rs that way leaves git status dirty (EOL only). Use newline='' or git checkout the file. The test file needed the same care."
+  - "Every value in these tests starts with the canary, so a window inside the canary maps to several values. The helper reports those as 'a part several values share'. The D-231 test also names each value it finds whole."
+  - "A read with password values costs about 20 ms in debug on a 12-block page (9 values), against 6 ms with none. A chunk-1 chain over a large page takes minutes. Keep sweep pages small."
+  - "A per-read window check misses a value that chunk 1 cuts into pieces shorter than the window, behind the '> ' prefix each continuation repeats. Check the alphanumerics of the chain's joined bodies."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/tests/acceptance_t10_d229.rs
+  - bench/results/accept-T-10.md
+  - agent-memory/handoffs/T-10-tester-7.yaml
+verify: "cargo test -p sb-sheet --no-fail-fast; cargo test -p sb-sheet --test acceptance_t10_d229 -- --ignored"

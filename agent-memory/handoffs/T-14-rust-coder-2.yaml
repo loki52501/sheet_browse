@@ -1,0 +1,32 @@
+from: rust-coder-2 (T-14 round 2)
+to: next (tester and reviewer, round 2)
+task: T-14
+date: "2026-10-26"
+state: "Round-2 fixes for review-T-14 on swarm/servers-T14. The shell classifier fails closed by construction (D-523): every simple command must be an allowlisted program or builtin with only its listed flags, and every path it replaces or deletes must be a literal path inside runs/; anything else is Delete. Lexer refuses arithmetic, [..] with $( or a backtick, non-plain ${..}, function definitions and unquoted here-docs with $( ` $[ ${. Forbidden builtins and wrappers (let declare printf -v read unset test -v eval exec source trap alias history env xargs ln bash -c...), find -exec/-delete/-fprint, cp -l/-s, git -c and every git option that runs a program, and build tools (cargo npm make python node...) are Delete. Hard-linked files are outside runs/ (paths::hard_linked, GetFileInformationByHandle). A line that also extracts, clones or copies a tree makes its other runs/ targets Delete. Without bash on Windows only a plain argv command runs (no cmd.exe); bash runs with BASH_ENV/ENV/CDPATH/PS4/IFS/BASH_FUNC_* removed. Also closed beyond the review: gh aliases and extensions (unknown gh groups) and writes to .git/, .gitattributes, .gitmodules, .curlrc, .wgetrc are Delete. S3: fs.delete inside runs/ is Read (declared class Read), like shell rm. S4: moving a file from outside runs/ is Delete (fs.move and mv). S6: diff text mode runs in spawn_blocking with a 10 s similar deadline. S7: no machine path; skills found under $CLAUDE_CONFIG_DIR/skills or ~/.claude/skills (dirs), else a note naming the folder and SB_SKILLS_DIR. S8: pandoc gets --sandbox when 2.15+, an empty cwd, and docx.write a Lua filter that drops images (works on pandoc 2.12 here); docx.read uses -t markdown-raw_html. S10: the Job Object has JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and the tree is killed before a failed wait returns. cargo fmt --all --check clean; clippy -p srv-files --all-targets -D warnings clean. cargo test -p srv-files -j 2: 47 unit, 21 accept_t14 (4 ignored docs), 1 accept_t14_history, 2 contract = 71 passed, 0 failed, 4 ignored. With SB_PANDOC/SB_PYTHON set, --ignored docs: docx, pdf, xlsx pass; pptx fails only on the missing python-pptx package (as in round 1). cargo test --workspace -j 2: 775 passed, 0 failed, 9 ignored."
+not_done: "1) Tester and reviewer round 2 (not self-accepted). 2) Two tester assertions changed by S3 (accept_t14.rs fs_delete_inside_runs_runs_outside_asks and r1_fs_case_and_dotdot_variants_classed_by_real_target: in-runs fs.delete class Fill -> Read, comment cites D-523); the tester should confirm. 3) Residual, not closed: programs reached through PATH folders outside runs/, ~/.gitconfig-style files under other names (GIT_CONFIG_GLOBAL is not settable from a line, but an existing global config with core.fsmonitor still runs on git status), and git hooks or drivers already present in a repo before the run. 4) B-520 and B-521 are answered in D-523 (S3 Read for both; build tools Delete); supreme may close them. 5) Not run on Linux/macOS."
+gotchas:
+  - "Do not append to files with shell heredocs: the auto-mode classifier denied a cat >> heredoc append; use Edit."
+  - "A job closed with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE reports exit code 0 for its processes, so proc::tests::closing_the_job_kills_the_tree proves the kill by time (ping -n 60 ends in well under 20 s). A mutation run with the flag set to 0 made it fail."
+  - "pandoc 2.12 (anaconda) has no --sandbox; docs.rs asks pandoc --version once per program and only then passes it. The Lua image filter is what protects 2.12."
+  - "This machine sets CLAUDE_CONFIG_DIR=E:/apps/Claude/claude-code, so skills discovery finds skills/synced/<uuid>/ there without SB_SKILLS_DIR."
+  - "rustfmt puts every flag of the allowlist tables on its own line, so classify.rs is about 5 500 lines; the tests live in src/shell/classify/tests.rs."
+  - "A workspace test run started while sources are still being edited compiles a half-edited tree; rerun after the last edit."
+decisions_made: [D-523]
+blockers_opened: []
+files_touched:
+  - Cargo.lock
+  - crates/srv-files/Cargo.toml
+  - crates/srv-files/src/paths.rs
+  - crates/srv-files/src/util.rs
+  - crates/srv-files/src/proc.rs
+  - crates/srv-files/src/fs.rs
+  - crates/srv-files/src/diff.rs
+  - crates/srv-files/src/docs.rs
+  - crates/srv-files/src/shell/mod.rs
+  - crates/srv-files/src/shell/lex.rs
+  - crates/srv-files/src/shell/classify.rs
+  - crates/srv-files/src/shell/classify/tests.rs
+  - crates/srv-files/tests/accept_t14.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/handoffs/T-14-rust-coder-2.yaml
+verify: "export CARGO_TARGET_DIR=F:/sb-swarm/target-servers && cargo test -p srv-files -j 2"

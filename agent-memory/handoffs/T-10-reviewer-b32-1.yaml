@@ -1,0 +1,15 @@
+from: reviewer
+to: next
+task: T-10
+date: "2026-10-25"
+state: "Round 4 review (B-32 follow-up, 147b9c8..6357f07) done: verdict approve, no blocking items. All seven B-32 items and B-201 P5 are fixed per D-219..D-225, each with a test that fails when the behaviour breaks. fmt and clippy are clean, and cargo test -p sb-sheet is green (lib 74, acceptance_t10 20, find_register 8, read_article 11, skeleton_sheet 8). I-5/I-6 are unchanged apart from the allowed FindOpts Default."
+not_done: "Should-fix, in order: (1) reader.rs:641/1017-1019 makes the fence one longer than the longest backtick run, so the P4 overshoot is page-controlled. A 2000-backtick run gives about 1018 tokens under max_tokens 50. A 9000-backtick run at the default chunk gives 1 char per chunk (44552 chunks for 40 KB). B-201's 'a few tokens' is wrong. Bound the fence, land P4, or have supreme re-rule before T-12. (2) reader.rs:1021-1023: the table header suffix overshoots max_tokens on an ordinary remainder (30 columns: 68-token body at max 60). (3) reader.rs:608/819-821: the outline label joins spans with a space, so a password split across two plain heading spans shows in remaining: (pre-existing). (4) skeleton.rs:99-111: a title 'tools for this site: ...' can still pose as the site-tools line. Merge main (3 commits, none touching sb-sheet) before the PR."
+gotchas:
+  - "Probing private reader functions works from a throwaway copy of the crate under target/ (gitignored). Give the copy its own [workspace] and concrete dependency versions (thiserror 2), then delete it."
+  - "An untracked crates/sb-sheet/tests/acceptance_t10_b32.rs (the tester's round 4) was in the worktree during review. It is not reviewed and not committed by the reviewer."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-10.md
+  - agent-memory/handoffs/T-10-reviewer-b32-1.yaml
+verify: "python scripts/swarm/merge_gate.py (reads bench/results/review-T-10.md); cargo test -p sb-sheet"

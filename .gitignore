@@ -11,3 +11,6 @@ wt/
 .claude/state/
 .claude/settings.local.json
 __pycache__/
+chromium/
+# SearXNG secret, generated locally (docker-compose.yml, D-31)
+config/searxng/secret.env

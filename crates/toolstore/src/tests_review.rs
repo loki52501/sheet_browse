@@ -28,6 +28,11 @@ struct Store {
     /// When set, the next `tool_health_set` first turns this file into a directory, so a
     /// rollback that writes the file back fails too (a fault injected after the archive move).
     block_path: Mutex<Option<PathBuf>>,
+    /// When set, `tool_health` fails (a memory error while loading, D-315).
+    fail_get: AtomicBool,
+    /// When set, the next `tool_health` call first writes this file (path, source): a tool
+    /// file that changes while the rows are being read (D-315 read order).
+    late_file: Mutex<Option<(PathBuf, String)>>,
 }
 
 impl Store {
@@ -96,6 +101,12 @@ impl MemoryStore for Store {
         Ok(LedgerId(l.len() as i64))
     }
     async fn tool_health(&self, domain: &str) -> Result<Vec<ToolHealth>> {
+        if let Some((p, src)) = self.late_file.lock().unwrap().take() {
+            fs::write(p, src).unwrap();
+        }
+        if self.fail_get.load(Ordering::SeqCst) {
+            return Err(MemoryError::Invalid("tool_health refused (test)".into()));
+        }
         Ok(self
             .health
             .lock()
@@ -847,11 +858,14 @@ async fn retire_persists_the_row_before_moving_the_file() {
     store.put(h);
     // A file where the archive folder should be: the move fails.
     fs::write(dir.path().join("_archive"), "blocker").unwrap();
+    // D-316: the retire happened (the row says so), only the move failed: record is Ok.
     let r = ts.record(&store, res("register", miss())).await;
-    assert!(r.is_err(), "{r:?}");
+    let r = r.unwrap_or_else(|e| panic!("a failed archive step failed the retire: {e}"));
+    assert_eq!(r.status, ToolStatus::Retired);
     let h = store.row("luma.com", "register").unwrap();
     assert_eq!(h.status, ToolStatus::Retired);
     assert!(ts.try_tool_path("luma.com", "register").unwrap().is_file());
+    assert_retired_with_failed_archive(&store, "register", "luma.com/register.js", None);
     // Recoverable: the next sweep archives the retired file in place.
     fs::remove_file(dir.path().join("_archive")).unwrap();
     let done = ts.sweep(&store, Utc::now(), &|_| 0).await.unwrap();
@@ -860,6 +874,98 @@ async fn retire_persists_the_row_before_moving_the_file() {
         "{done:?}"
     );
     assert!(!ts.try_tool_path("luma.com", "register").unwrap().exists());
+    let last = store.ledger.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((last.tool.as_str(), last.ok), ("tools.archive", true));
+}
+
+/// D-316: the events of a retire whose archive step failed, for tool `name` in the ledger: one
+/// ok:true `tools.retire` (`archived: null`, `archive_failed: <rel>`), followed by one ok:false
+/// `tools.archive` naming the file (and `err`, when given), and no ok:false `tools.retire`.
+fn assert_retired_with_failed_archive(store: &Store, name: &str, rel: &str, err: Option<&str>) {
+    let ev: Vec<LedgerEvent> = store
+        .ledger
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.args["name"] == name)
+        .cloned()
+        .collect();
+    let retire: Vec<usize> = (0..ev.len())
+        .filter(|&i| ev[i].tool == "tools.retire")
+        .collect();
+    assert_eq!(retire.len(), 1, "{ev:?}");
+    let r = &ev[retire[0]];
+    assert!(r.ok, "{r:?}");
+    assert_eq!(r.server, "core");
+    assert_eq!(
+        r.consequences.get("archived"),
+        Some(&serde_json::Value::Null),
+        "{r:?}"
+    );
+    assert_eq!(r.consequences["archive_failed"], rel, "{r:?}");
+    assert!(r.result_summary.contains(rel), "{r:?}");
+    assert!(
+        r.why
+            .as_deref()
+            .is_some_and(|w| w.contains("retired") || w.contains("unused")),
+        "{r:?}"
+    );
+    let a = ev
+        .get(retire[0] + 1)
+        .unwrap_or_else(|| panic!("no tools.archive after the retire: {ev:?}"));
+    assert_eq!(a.tool, "tools.archive", "{ev:?}");
+    assert!(!a.ok, "{a:?}");
+    assert_eq!(a.consequences["failed"], rel, "{a:?}");
+    assert!(a.result_summary.contains(rel), "{a:?}");
+    if let Some(err) = err {
+        assert!(a.result_summary.contains(err), "{a:?}");
+        assert!(a.why.as_deref().is_some_and(|w| w.contains(err)), "{a:?}");
+    }
+}
+
+/// D-316: record() reaching 5 misses retires the tool even when the archive's set-mtime
+/// step fails: Ok with the row retired and saved, the file in place, an ok:true
+/// `tools.retire` and an ok:false `tools.archive` event; the next sweep archives the file.
+#[tokio::test]
+async fn record_retire_with_a_failed_archive_is_ok() {
+    let (dir, ts) = luma();
+    let store = Store::default();
+    let mut h = row(ToolStatus::NeedsRepair, 2);
+    h.fails = MISSES_TO_RETIRE - 1;
+    store.put(h);
+    let refuse = |_: &Path| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "set mtime refused (test)",
+        ))
+    };
+    let r = ts
+        .record_with(&store, res("register", miss()), &refuse)
+        .await;
+    let r = r.unwrap_or_else(|e| panic!("a failed archive step failed record: {e}"));
+    assert_eq!(r.status, ToolStatus::Retired);
+    assert_eq!(r.fails, MISSES_TO_RETIRE);
+    assert_eq!(store.row("luma.com", "register").unwrap(), r);
+    let file = ts.try_tool_path("luma.com", "register").unwrap();
+    assert!(file.is_file());
+    assert!(!dir.path().join("_archive/luma.com/register.2.js").exists());
+    assert_retired_with_failed_archive(
+        &store,
+        "register",
+        "luma.com/register.js",
+        Some("set mtime refused"),
+    );
+    assert_eq!(store.ledger_len(), 2);
+
+    let done = ts.sweep(&store, Utc::now(), &|_| 0).await.unwrap();
+    assert!(
+        matches!(&done[..], [SweepAction::Archived { name, version: 2, .. }] if name == "register"),
+        "{done:?}"
+    );
+    assert!(!file.exists());
+    assert!(dir.path().join("_archive/luma.com/register.2.js").is_file());
+    let last = store.ledger.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((last.tool.as_str(), last.ok), ("tools.archive", true));
 }
 
 #[tokio::test]
@@ -994,7 +1100,9 @@ fn set_readonly(p: &Path, ro: bool) {
 
 /// Review should-fix 1 (b): an archive that fails for one tool is a ledger failure, not the
 /// end of the sweep. Later tools in the same domain, later domains and the 90-day deletes are
-/// still swept, and the next sweep archives the tools that failed.
+/// still swept, and the next sweep archives the tools that failed. D-316: the idle ephemeral
+/// tool whose archive step fails is still retired (ok:true `tools.retire`, ok:false
+/// `tools.archive`, `SweepAction::Retired { archived: None }`).
 #[tokio::test]
 async fn sweep_records_a_failed_archive_and_goes_on() {
     let dir = tempfile::tempdir().unwrap();
@@ -1036,20 +1144,34 @@ async fn sweep_records_a_failed_archive_and_goes_on() {
     let retired: Vec<_> = done
         .iter()
         .filter_map(|a| match a {
-            SweepAction::Retired { domain, name, .. } => Some(format!("{domain}/{name}")),
+            SweepAction::Retired {
+                domain,
+                name,
+                archived,
+                ..
+            } => Some((format!("{domain}/{name}"), archived.is_some())),
             _ => None,
         })
         .collect();
-    assert_eq!(retired, ["luma.com/register", "zeta.com/list"], "{done:?}");
+    assert_eq!(
+        retired,
+        [
+            ("luma.com/aaa".to_string(), false),
+            ("luma.com/register".to_string(), true),
+            ("zeta.com/list".to_string(), true)
+        ],
+        "{done:?}"
+    );
     assert!(
         done.iter()
             .any(|a| matches!(a, SweepAction::Deleted { path, .. } if *path == gone)),
         "{done:?}"
     );
     assert!(!gone.exists());
-    assert_eq!(done.len(), 3, "{done:?}");
+    assert_eq!(done.len(), 4, "{done:?}");
 
-    // The failures: one ok:false event each, files untouched in place, aaa's row retired.
+    // The failures: one ok:false tools.archive event each, files untouched in place, aaa's
+    // row retired with an ok:true tools.retire.
     let failed: Vec<(String, String)> = store
         .ledger
         .lock()
@@ -1059,11 +1181,12 @@ async fn sweep_records_a_failed_archive_and_goes_on() {
         .map(|e| (e.tool.clone(), e.result_summary.clone()))
         .collect();
     assert_eq!(failed.len(), 2, "{failed:?}");
-    assert_eq!(failed[0].0, "tools.retire");
+    assert_eq!(failed[0].0, "tools.archive");
     assert!(failed[0].1.contains("luma.com/aaa.js"), "{failed:?}");
     assert!(failed[0].1.contains("set mtime refused"), "{failed:?}");
     assert_eq!(failed[1].0, "tools.archive");
     assert!(failed[1].1.contains("luma.com/bbb.js"), "{failed:?}");
+    assert_retired_with_failed_archive(&store, "aaa", "luma.com/aaa.js", Some("set mtime refused"));
     assert!(root.join("luma.com/aaa.js").is_file());
     assert!(root.join("luma.com/bbb.js").is_file());
     assert_eq!(
@@ -1084,6 +1207,15 @@ async fn sweep_records_a_failed_archive_and_goes_on() {
     assert_eq!(archived, ["aaa", "bbb"], "{done:?}");
     assert!(root.join("_archive/luma.com/aaa.1.js").is_file());
     assert!(root.join("_archive/luma.com/bbb.2.js").is_file());
+    let l = store.ledger.lock().unwrap();
+    for n in ["aaa", "bbb"] {
+        let last = l.iter().rev().find(|e| e.args["name"] == n).unwrap();
+        assert_eq!(
+            (last.tool.as_str(), last.ok),
+            ("tools.archive", true),
+            "{n}"
+        );
+    }
 }
 
 /// Review should-fix 1 (a): a read-only tool file is retired and archived by sweep, and the
@@ -1175,4 +1307,168 @@ async fn sweep_records_a_failed_delete_and_goes_on() {
     assert!(failed[0]
         .result_summary
         .contains("_archive/luma.com/a.1.js"));
+}
+
+// ---------------------------------------------------------------- B-33 (3): live loader
+
+fn names(tools: &[Tool]) -> Vec<&str> {
+    tools.iter().map(|t| t.namespaced.as_str()).collect()
+}
+
+/// D-315: a retired row whose file is still in place (its archive step failed) is not
+/// loaded; the file is reported as skipped with the retired version. The sync `load`, which
+/// does not read `tools.health`, still lists it.
+#[tokio::test]
+async fn load_live_skips_a_retired_row_whose_file_is_in_place() {
+    let (_dir, ts) = luma();
+    let store = Store::default();
+    store.put(row(ToolStatus::Retired, 3));
+    let file = ts.try_tool_path("luma.com", "register").unwrap();
+    assert!(file.is_file());
+    let r = ts.scan_live(&store, "luma.com", "/").await.unwrap();
+    assert!(r.tools.is_empty(), "{:?}", names(&r.tools));
+    assert_eq!(r.skipped, vec![(file, "retired (v3)".to_string())]);
+    assert!(ts
+        .load_live(&store, "https://luma.com/x", "/x")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(names(&ts.load("luma.com", "/").unwrap()), ["luma.register"]);
+}
+
+/// D-315: every status other than retired, and no row at all, still loads.
+#[tokio::test]
+async fn load_live_keeps_every_status_but_retired() {
+    let (_dir, ts) = luma();
+    for status in [
+        None,
+        Some(ToolStatus::Ephemeral),
+        Some(ToolStatus::Saved),
+        Some(ToolStatus::Repaired),
+        Some(ToolStatus::NeedsRepair),
+        Some(ToolStatus::Ask),
+    ] {
+        let store = Store::default();
+        if let Some(st) = status {
+            store.put(row(st, 2));
+        }
+        let r = ts.scan_live(&store, "luma.com", "/").await.unwrap();
+        assert_eq!(names(&r.tools), ["luma.register"], "{status:?}");
+        assert!(r.skipped.is_empty(), "{status:?}: {:?}", r.skipped);
+    }
+}
+
+/// D-315: a retired site tool no longer shadows the `_generic` tool of the same name; a
+/// row in another folder (`_generic/register` retired) does not hide the site tool.
+#[tokio::test]
+async fn retired_site_tool_lets_the_generic_one_load() {
+    let (dir, ts) = luma();
+    put(dir.path(), "_generic/register.js", REGISTER);
+    let store = Store::default();
+    store.put(row(ToolStatus::Retired, 1));
+    let r = ts.scan_live(&store, "luma.com", "/").await.unwrap();
+    assert_eq!(names(&r.tools), ["generic.register"]);
+    assert_eq!(r.tools[0].domain, GENERIC);
+    assert_eq!(r.skipped.len(), 1, "{:?}", r.skipped);
+    assert_eq!(r.skipped[0].1, "retired (v1)");
+    // Sync load: the site file still shadows the generic one.
+    assert_eq!(names(&ts.load("luma.com", "/").unwrap()), ["luma.register"]);
+
+    // The other way round: only the generic row is retired, the site tool loads.
+    let store = Store::default();
+    store.put(ToolHealth {
+        domain: GENERIC.into(),
+        ..row(ToolStatus::Retired, 4)
+    });
+    let r = ts.scan_live(&store, "luma.com", "/").await.unwrap();
+    assert_eq!(names(&r.tools), ["luma.register"]);
+}
+
+/// D-315: a retired `_generic` row is skipped on every site and on `_generic` itself.
+#[tokio::test]
+async fn retired_generic_row_is_skipped() {
+    let (dir, ts) = luma();
+    let paginate = dir.path().join("_generic/paginate.js");
+    put(
+        dir.path(),
+        "_generic/paginate.js",
+        &REGISTER.replace("@name register", "@name paginate"),
+    );
+    let store = Store::default();
+    store.put(ToolHealth {
+        domain: GENERIC.into(),
+        name: "paginate".into(),
+        ..row(ToolStatus::Retired, 2)
+    });
+    for domain in ["luma.com", "example.org", GENERIC] {
+        let r = ts.scan_live(&store, domain, "/").await.unwrap();
+        assert!(
+            !names(&r.tools).contains(&"generic.paginate"),
+            "{domain}: {:?}",
+            names(&r.tools)
+        );
+        assert!(
+            r.skipped
+                .contains(&(paginate.clone(), "retired (v2)".to_string())),
+            "{domain}: {:?}",
+            r.skipped
+        );
+    }
+    assert_eq!(
+        names(&ts.load_live(&store, "luma.com", "/").await.unwrap()),
+        ["luma.register"]
+    );
+}
+
+/// D-315: a memory error while reading `tools.health` is an error, never an unfiltered list.
+#[tokio::test]
+async fn load_live_fails_closed_on_a_memory_error() {
+    let (_dir, ts) = luma();
+    let store = Store::default();
+    store.fail_get.store(true, Ordering::SeqCst);
+    for domain in ["luma.com", GENERIC] {
+        let r = ts.load_live(&store, domain, "/").await;
+        assert!(matches!(r, Err(StoreError::Memory(_))), "{domain}: {r:?}");
+        let r = ts.scan_live(&store, domain, "/").await;
+        assert!(matches!(r, Err(StoreError::Memory(_))), "{domain}: {r:?}");
+    }
+}
+
+/// D-315 read order: `scan_live` reads every tool file before any `tools.health` row. Retire
+/// saves the row before it moves the file, so with files first a retire that commits before
+/// the row read is always filtered, even when its archive then fails. The fake writes a new
+/// tool file inside the row read: with rows first (the round 1 order) that file was read
+/// after the rows and served, which is the window a retire-with-failed-archive could use.
+#[tokio::test]
+async fn scan_live_reads_files_before_rows() {
+    let (dir, ts) = luma();
+    let late = dir.path().join("luma.com/late.js");
+    let late_src = REGISTER.replace("@name register", "@name late");
+    for domain in ["luma.com", GENERIC] {
+        let store = Store::default();
+        let target = if domain == GENERIC {
+            dir.path().join("_generic/late.js")
+        } else {
+            late.clone()
+        };
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        *store.late_file.lock().unwrap() = Some((target.clone(), late_src.clone()));
+        let r = ts.scan_live(&store, domain, "/").await.unwrap();
+        assert!(store.late_file.lock().unwrap().is_none(), "{domain}");
+        assert!(target.is_file(), "{domain}");
+        assert!(
+            !r.tools.iter().any(|t| t.header.name == "late"),
+            "{domain}: a file written during the row read was served: {:?}",
+            names(&r.tools)
+        );
+        assert!(r.skipped.is_empty(), "{domain}: {:?}", r.skipped);
+        // The next call sees it: the file is a valid tool that fits the path.
+        let r = ts.scan_live(&store, domain, "/").await.unwrap();
+        assert!(
+            r.tools.iter().any(|t| t.header.name == "late"),
+            "{domain}: {:?}",
+            names(&r.tools)
+        );
+        fs::remove_file(&target).unwrap();
+    }
 }

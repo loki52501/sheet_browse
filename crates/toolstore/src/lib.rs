@@ -139,6 +139,9 @@ impl ToolStore {
 
     /// I-7 `load(domain, path)`: site tools whose `@match` fits `path`, then `_generic/` at
     /// lower precedence (T-3). Invalid files are skipped; use [`ToolStore::scan`] to see them.
+    ///
+    /// Files only: this does not consult `tools.health`, so a retired tool whose file is still
+    /// in place is loaded. Runtime callers use [`ToolStore::load_live`] (D-315).
     pub fn load(&self, domain: &str, path: &str) -> Result<Vec<Tool>, StoreError> {
         Ok(self.scan(domain, path).tools)
     }
