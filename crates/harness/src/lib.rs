@@ -4,6 +4,8 @@
 //! * [`daemon`]: harnessd, the `harness_core::sched` loop with a watcher on the
 //!   schedules-changed marker.
 //! * [`launcher`]: [`ClaudeLauncher`], the default `harness_core::sched::Launcher` (D-106).
+//! * [`reflect`]: [`reflect::ReflectLauncher`], which runs `reflect` schedules (H-5, G-3, T-16).
+//! * [`proposals`]: the T-7 / T-8 proposals reflect writes (D-142).
 //!
 //! The binaries are thin: they read [`Env`] from the process environment, call into this
 //! library, and turn errors into a scrubbed message and exit code 1 (`anyhow` only there).
@@ -11,6 +13,8 @@
 pub mod cli;
 pub mod daemon;
 pub mod launcher;
+pub mod proposals;
+pub mod reflect;
 
 pub use harness_core::sched::{LaunchExit, LaunchRequest, Launcher};
 pub use launcher::ClaudeLauncher;
