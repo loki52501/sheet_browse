@@ -14,6 +14,11 @@ argument vectors, and checked gh 2.93.0's own flag table and request behaviour (
 
 ## Should fix
 
+Sub-orchestrator note: both items below were fixed after this review in ce4a763
+(`repo_host` gates `-R/--repo` hosts and repo URLs to github.com or SB_GH_HOSTS, else refused;
+`api.github.com` gates as `github.com`), tests `gh::tests::repo_hosts_are_github_hosts_only`
+and `gh::tests::api_hosts_are_github_api_hosts_only`.
+
 - crates/srv-cli/src/gh/mod.rs:133 and :142-146: read commands still reach any host through `-R/--repo
   [HOST/]OWNER/REPO` or a URL repo argument, and the gate domain stays `github.com`. Probes: `pr view -R any.host/o/r 5`,
   `issue list --repo any.host/o/r` and `repo view https://any.host/o/r` all give (Read, github.com). With gh 2.93.0,
