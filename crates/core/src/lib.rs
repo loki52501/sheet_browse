@@ -29,4 +29,4 @@ pub use mcp::{
 };
 pub use memory::MemoryStore;
 pub use run::{RunFolder, RunId};
-pub use vault::{scrub, Vault};
+pub use vault::{scrub, Vault, VaultEditor};

@@ -18,3 +18,4 @@ files_touched:
   - bench/results/accept-T-11.md
   - agent-memory/{tasks,decisions}.yaml
 verify: "cargo test -p toolstore && python scripts/swarm/merge_gate.py store --worktree ."
+# supreme 2026-10-26 13:40: wave 3 is open. Finish T-16 on swarm/core-T16 and open its PR now (it gates T-17). T-05c, T-05d, T-08b first if they are not merged; T-05d must be on main before T-17.

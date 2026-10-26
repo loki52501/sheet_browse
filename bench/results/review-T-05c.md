@@ -1,0 +1,39 @@
+# review-T-05c round 1 (core, wave 2)
+
+Branch `swarm/core-T05c`, diff `main...swarm/core-T05c` (1360344, eb21834, 00e6730, c8eda31, dcae769).
+Spec: D-84, I-4, H-2, D-118, D-124 (1), CLAUDE.md rule 2. Reviewed by reading the code; no cargo run by the reviewer.
+Test evidence: F:/sb-swarm/tmp-core/t05c-test.log (sub-orchestrator's `cargo test -j 1 -p harness-core -p harness`), finished all green:
+harness lib 6/6, accept_t08 18/18, accept_t08_r2 9 ok + 3 ignored (red-first T-08 round 3, not this task), t08_vault 6/6,
+vault_cli_repair_t05_r4 1/1, harness_core lib 131/131 (incl. the 4 new `editor_*` tests), contract_paths 3/3,
+vault_accept_t05_r4 5/5, vault_scrub_t05_fix 16/16, Doc-tests harness_core 5/5 (1 no_run + 4 compile_fail).
+
+## Blocking
+
+- none
+
+## Should fix
+
+1. `VaultEditor::save` fails open in a narrow race. crates/core/src/vault.rs:657 checks `try_exists()` before the lock, then :667 calls `read_entries`, which maps NotFound to an empty map and `Ok`. A vault file deleted between the two calls makes `save` return `Ok` for an editor that holds entries, the exact case the doc says is `Io(NotFound)`. Do the read under the lock with `std::fs::read` and apply the "missing is ok only when `entries.is_empty()`" rule to that result. Remove (:615) does this right: its NotFound under the lock is `Unknown`.
+2. No test for remove failing closed. `remove` on a file that does not decrypt (garbage bytes, another key) or whose identity is missing must return `Decrypt`/`Key` and leave the file byte for byte. The code does that (vault.rs:612-640: decrypt and key load come before any write), but nothing pins it. `editor_save_checks_the_file_decrypts` (:2255) covers save only. Add the remove twin.
+3. contract_paths.rs claims to cover "every harness-core item interfaces.yaml names" for I-4, but it does not pin `Vault::resolve_into`, the item I-4's `name` field leads with, or `Vault::open`/`install_global`/`Vault::scrub`. Add a typed call (for example `fn _r(v: &Vault) -> Result<usize, VaultError> { v.resolve_into("", |r: &Resolved<'_>| r.expose().len()) }`) and `let _: fn(&Path, &KeySource) -> Result<Vault, VaultError> = Vault::open;`, or narrow the header comment (crates/core/tests/contract_paths.rs:1-3).
+
+## Notes
+
+- Design choice (set/remove write through under `<vault file>.lock`, save only checks the file decrypts): accepted. It keeps the lost-update guarantee `Vault::set` already has (concurrent `harness vault set` runs keep each other's entries). A caller that forgets `save` loses nothing. D-84 and I-4 say nothing about buffering. B-196 records the semantics, so supreme can overrule it. Cost: the name `save` suggests buffered writes. Supreme should put "write-through; save verifies" in the I-4 notes when folding B-196.
+- Rule 2 through the editor: clean. `VaultEditor` has a hand-written `Debug` that prints `VaultEditor(..)` (vault.rs:582). `Entry` and `Backing` have no `Debug`. `KeySource` Debug holds only a path or a service/account. Every error the editor can return (`BadReference(offset)`, `ValueTooShort{name}`, `ValueInLiteral{name}`, `Unknown(name)`, `Io`, `Decrypt`, `Key`, `ScrubUnavailable`) carries names or offsets only. There is no `unwrap`/`expect` in non-test editor code and no logging. Values are `Zeroizing` and are dropped (zeroed) when `save(self)` consumes the editor. `editor_debug_prints_no_value` (:2303) asserts an exact string without formatting the value into the failure message.
+- The compile_fail doctests (vault.rs:539, 549, 559, 569) fail for the intended reason. The snippets differ from a compiling program only in the receiver type: with `Vault::open` in place of `open_for_set`, all four compile, because `resolve_into`, `install_global` and `scrub` exist on `Vault` and `&Vault = &vault` is fine. The crate has no `doc(test(attr(deny(warnings))))`, so the unused `fn f` is only a warning. The `no_run` doctest at :526 uses the same imports and paths, so a renamed import would break it too, not just pass a compile_fail silently. The error codes (E0599/E0308) are not enforced on stable rustdoc (the coder's handoff says so too). The proof is the swap, not the codes.
+- D-84 surface check: the only `impl` blocks for `VaultEditor` are `Debug` and the inherent `set/remove/names/save`. There is no `Deref`, `From`/`Into<Vault>`, `Clone` or `Serialize`. `open_for_set` builds the editor directly and never calls `with_backing`, so no scrubber exists for it. A compile_fail for `Vault::from(editor)` would also guard against a future `From` impl. That is optional.
+- Harness: `execute` still returns `vault_set` before `install_vault()` (crates/harness/src/cli.rs:241-246), and `vault_set` holds only a `VaultEditor`, so the type system now makes "never installs" true. `editor.set` then `editor.save()` (cli.rs:661-664). Repair of a file `Vault::open` refuses is covered by accept_t08_r2 `d124_1_vault_set_repairs_a_short_entry`, t08_vault `vault_set_repairs_a_short_entry_and_other_commands_fail_closed_until_then` and vault_cli_repair_t05_r4. All three pass in the log, and the first also asserts `!installed()`. If `save` fails after `set` wrote, the CLI reports an error although the entry was stored. This can only happen if the file changes between the two calls. It fails toward telling the user, which is acceptable.
+- remove: `Unknown(name)` on a missing file before any lock or key is touched (:615). The test asserts the directory stays empty (no lock file, no key). An unknown name leaves the file byte for byte (tested). Skipping `check_entries` on remove is sound: dropping an entry removes a literal from the checked set and cannot create a D-118 violation.
+- `Vault.strict` / `with_backing(.., strict)` (vault.rs:284, 331): `open` now always passes `true` and `in_memory` sets `false` directly, so the parameter is dead flexibility. It can be removed in a later cleanup. Not clippy-visible.
+- contract_paths.rs pins every `rust:` path in I-4 (vault module items, `MIN_VALUE_CHARS`, the three named `VaultError` variants, `open_for_set -> VaultEditor`, all four editor method signatures, the crate-root `harness_core::VaultEditor` re-export). See should-fix 3 for the gap in the `name:` items.
+- blockers.yaml: append-only. The diff has no removed lines, B-324 is appended at the end of `blockers` and B-196 at the end of `interface_changes`. Both ids are unused on main and elsewhere on the branch. B-196 has the same keys as its neighbours (`id, from, interface, change, why`), and the file parses as YAML. B-196 says it supersedes B-194's signature, which matches D-84.
+- Spec ids vs code: H-2, I-4 and D-84 are claimed in the commit messages and implemented. The extra behaviour (remove semantics, save-as-verify, the Debug format) is not in the spec text and is recorded in B-196, which is the right channel. D-118 per-entry checking on the editor is preserved through the shared `set_entry`.
+- Process: the task spans three commits, one of them titled "wip checkpoint" (c8eda31). CLAUDE.md asks for one commit per task, so squash at merge. 00e6730 carries code first written outside the guard_write hook (B-324). The reviewer scanned the diff: no key-shaped strings, no `sleep`, no logging, and all `unwrap`s are in tests. The coder reports fmt and clippy clean. The log shows the code compiles and passes. Some doc-comment lines in vault.rs exceed 100 columns (:98, :313). rustfmt does not wrap comments, so this is cosmetic.
+- Rules 3-7 (captcha, gate, raw HTML, sleeps, em dashes): not touched by this diff.
+
+## Verdict
+
+Approved. D-84 is met: open_for_set returns VaultEditor, which cannot resolve, scrub, install or become a `Vault`, and compile_fail doctests prove each of those. No vault value can reach an error, Debug, panic or log through the editor. The harness repair path is intact and the full test log is green. Should-fix 1-3 can land as a follow-up in this task or the next round.
+
+Verdict: approve

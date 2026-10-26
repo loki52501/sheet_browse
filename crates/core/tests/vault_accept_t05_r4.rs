@@ -300,8 +300,9 @@ fn r4_2_open_refuses_a_file_holding_a_value_in_literal() {
 
 // ---------------------------------------------------------------------------------------
 // R4-3. A short entry already in a file can be repaired through set: on an `open` handle
-// by setting the same name (when it is the only broken entry), and on an `open_for_set`
-// handle one entry at a time. The new value is still checked; the old value is gone.
+// by setting the same name (when it is the only broken entry), and on the `VaultEditor`
+// from `open_for_set` one entry at a time (D-84). The new value is still checked; the old
+// value is gone.
 
 #[test]
 fn r4_3_short_entry_repair_through_set() {
@@ -365,7 +366,7 @@ fn r4_3_short_entry_repair_through_set() {
         Vault::open(&path, &key),
         Err(VaultError::ValueTooShort { ref name, .. }) if name == "st"
     ));
-    let mut fix = Vault::open_for_set(&path, &key).unwrap();
+    let mut fix: harness_core::vault::VaultEditor = Vault::open_for_set(&path, &key).unwrap();
     // Another entry can be added while both are still broken; open keeps refusing.
     fix.set("other", &format!("{c}-other"), EntryKind::Secret)
         .unwrap();
@@ -373,7 +374,7 @@ fn r4_3_short_entry_repair_through_set() {
         Vault::open(&path, &key),
         Err(VaultError::ValueTooShort { ref name, .. }) if name == "st"
     ));
-    // The new value is still checked on the repair handle.
+    // The new value is still checked on the editor.
     assert!(matches!(
         fix.set("st", "Zq7", EntryKind::Personal),
         Err(VaultError::ValueTooShort { .. })
@@ -391,6 +392,7 @@ fn r4_3_short_entry_repair_through_set() {
     ));
     expect_in_literal(fix.set("v", "(TEST)", EntryKind::Personal), "v", "repair v");
     fix.set("v", "Zq7-v-value", EntryKind::Personal).unwrap();
+    fix.save().unwrap();
     let ok = Vault::open(&path, &key).unwrap();
     let names: Vec<String> = ok.names().into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, ["other", "st", "test", "v"]);

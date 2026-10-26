@@ -74,6 +74,7 @@ foreach ($a in $Areas) {
     "`$env:TMP = '$tmp'"
     "`$env:TEMP = '$tmp'"
     "`$env:TMPDIR = '$tmp'"
+    "`$env:CARGO_BUILD_JOBS = '2'"   # several sessions build at once; full parallelism exhausts RAM and the paging file
     "Set-Location -LiteralPath '$wt'"
     "claude '$($first -replace "'", "''")'"
   ) | Set-Content -Encoding ASCII (Join-Path $stateDir "launch.ps1")
