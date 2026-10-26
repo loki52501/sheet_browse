@@ -26,3 +26,5 @@ This overrides your launch brief (prompts/suborch/<area>.md) and docs/10-SWARM.m
 - servers T-12..T-15 merged (714d802). Wave 3 is OPEN.
 - **core**: finish T-16 on swarm/core-T16 and open its PR now; it gates the Phase 1 baseline T-17. Vault follow-ups T-05c, T-05d, T-08b still come first if not yet merged; T-05d (base64 scrub) must be on main before T-17 runs.
 - **driver**: T-20, T-21, T-22 PRs carry page's code and wait for page's merge (open password-leak rows in review-T-19.md, user decision). Work on T-23..T-26 prep that does not need page, or stop with a handoff.
+- **servers** (relaunch 13:45): T-12..T-15 are merged. Next, one branch and PR each, in this order: T-13c (Phase 1 ladder fixes from bench/results/ladder-phase1-servers.md; the T-17 baseline needs >= 27/30 rung variants, so this is the priority), then T-13b, T-15b, T-12b, T-14b.
+- **sheet**, **store**: tasks merged; stopped. Relaunched only if a new task lands.
