@@ -351,3 +351,12 @@ tasks:
     title: "review-T-18 leftovers: run the Unix Pipe launch on Linux (only compiled and clippy-checked); a real-Chromium test for getFrameTree seeding and prerender activation (restored me tab with iframes, with T-22 acceptance 4); session_events channel after detach; CdpError::Closed keeps the method; sweep stale profiles/bench-* after a crash; B-601 tab titles (T-22)."
     status: todo
     from: T-18
+  - id: T-18d
+    step: follow-up
+    wave: 3
+    owner: driver/suborch
+    branch: swarm/driver-T18d
+    title: "B-199: bench profile removal flakes on a loaded Windows host (chromium_driver::bench_headless_launch_registry_and_cleanup, 'bench profile ... not removed'), making the D-87 workspace gate flaky for every area. Remove the bench profile with a capped retry after the browser is gone instead of TempDir's single silent attempt."
+    status: in_progress
+    claimed_at: "2026-10-26"
+    from: B-199
