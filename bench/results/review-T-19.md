@@ -1,205 +1,229 @@
-# Review: T-19 combined (B-5, B-7, I-10, I-11, D-435..D-442)
+# Review: T-19 combined (B-5, B-7, I-10, I-11, D-435..D-443)
 
-reviewer-12, 2026-10-26, round 7. Pinned to 7cb7020 on swarm/page. The D-442 code is 295253e,
-and D-442 supersedes D-440 and D-441. This is the file the merge gate reads. Earlier rounds:
-round 6 (reviewer-11) `git show 0cc160e:bench/results/review-T-19.md`, round 5
-`git show 1b0b5f9:bench/results/review-T-19.md`, round 4 `git show 71aa8c0:bench/results/review-T-19.md`.
+reviewer-13, 2026-10-26, round 8. Pinned to a9e246a on swarm/page. The D-443 code is 8fb00b4,
+and D-443 extends D-442. This is the file the merge gate reads. Earlier rounds:
+round 7 (reviewer-12) `git show dc14a2c:bench/results/review-T-19.md`, round 6 (reviewer-11)
+`git show 0cc160e:bench/results/review-T-19.md`, round 5 `git show 1b0b5f9:bench/results/review-T-19.md`,
+round 4 `git show 71aa8c0:bench/results/review-T-19.md`.
 
-Question this round: can a password value reach index(), state() or text() at 7cb7020
-(hard rule 5)?
+Question this round: can a password value reach index(), state() or text() at a9e246a
+(hard rule 5) in a shape I rule Blocking?
 
 Method:
-- All runs used a `git archive 7cb7020 injected bench/pages` snapshot in runs/reviewer-12/snap,
+- All runs used a `git archive a9e246a injected bench/pages` snapshot in runs/reviewer-13/snap,
   with NODE_PATH pointing at the worktree's injected/test/node_modules.
-- Re-run on the snapshot (copies in runs/reviewer-12): probe-r11-jsdom.js (real and frozen
-  clock), probe-r11-chromium.js, probe-r10-jsdom.js (loading and post-load, each real and
-  frozen) and probe-r10-chromium.js (4 modes).
+- Re-run on the snapshot (copies with paths rewritten in runs/reviewer-13/from-reviewer-1{0,1,2}):
+  every jsdom probe of rounds 5 to 7 in 4 modes (real, FROZEN, POSTLOAD, POSTLOAD+FROZEN), and
+  every Chromium probe (r9, r10, r11, r12). Output in runs/reviewer-13/out. The fix, muta, pre440
+  and dbg4 copies test other code and were not re-run.
 - New:
-  - runs/reviewer-12/probe-r12-jsdom.js (X1..X6) and probe-r12b-jsdom.js (X7), run in all 4 modes.
-  - runs/reviewer-12/probe-r12-chromium.js (O1..O4): click a show toggle, `await __sb.settle()`
-    with its defaults, then walk and read. "same" reads in the evaluate that awaited settle;
-    "next" reads in a second evaluate.
+  - runs/reviewer-13/probe-r13-jsdom.js (Y1..Y6), 4 modes. "mid" is a full read inside the step
+    while the password is still in the page.
+  - runs/reviewer-13/probe-r13-chromium.js (Y1g, Y3, Y5, Y2c, Y6, Y7, O5, O6): fill, click Show,
+    `await __sb.settle()` (defaults), read in the same evaluate ("same"), in a second evaluate
+    ("next"), and once the page clock passes click + 3.2 s ("late").
+  - runs/reviewer-13/dbg3-timed.js: reviewer-11's dbg3 with the copy-to-swap time and a frozen clock.
+  - runs/reviewer-13/fix (prototype, diff in runs/reviewer-13/fix.diff) for the Blocking item.
 - reads/getter is the number of value getter calls on canary fields. LEAK means the canary
   appears in index(), text() or state().
 
-Gates at 7cb7020:
-- `node --test injected/test/` (snapshot): 98 tests, 98 pass, 0 fail, 146 s.
-- ACCEPT A18 diagnostic: the swap ran at 234 ms and 219 ms after navigation and read `filled`.
-  The late runs (2210 ms and 2204 ms) read `ada`, so A18's over-mark branch really runs.
-- Mutants on jsdom.test.js:
-  - The 583eae0 (D-441) injected.js fails :1249 and :1411.
-  - `all = true` fails :1249 (the "a login parent that lost two fields" control).
-  - `all = false` fails :1249 and :1411.
-- The 583eae0 injected.js also fails both new D-442 Chromium tests (browser.test.js:648, :664)
-  with "a value getter was called".
-- `git diff 583eae0 7cb7020 -- crates/ agent-memory/interfaces.yaml` is empty, so the sb-act
+Gates at a9e246a:
+- `node --test injected/test/` (snapshot): 103 tests, 103 pass, 0 fail, 177 s. O1..O3 report
+  settled true with the password present at the same-evaluate read, copy filled, reads {}.
+  ACCEPT A18 took its over-mark branch (at 318 ms and 192 ms read `filled`; 2225 ms and 2133 ms read text).
+- Mutants on the snapshot: no `nearLivePw` call fails the D-443 jsdom test (:1544); no D-443 (3)
+  rule fails it too; no 2 s limit on the mask fails jsdom.test.js:951, the D-439 test and :1249.
+  The coder's six mutants (runs/js-coder-10/mut) agree.
+- `git diff dc14a2c a9e246a -- crates/ agent-memory/interfaces.yaml` is empty, so the sb-act
   approval stands.
 
-## Probe results (7cb7020)
+## Probe results (a9e246a)
 
-| # | Case | loading | after load | frozen clock |
-|---|---|---|---|---|
-| **M1** | round 6 Blocking. Chromium, d441 shape, page held "loading" by a sync script | ok, getter 0; after load ok, getter 0 | | |
-| M2 / M3 | same, page interactive / complete | | ok, getter 0 / ok, getter 0 | |
-| **M4** | round 6 Blocking. Chromium, copy added while loading, swap after load (433 ms) | ok, getter 0 | | |
-| **N1** | jsdom, copy added while loading, swap after load | ok, reads 0 | | ok |
-| N1r, N2c, N3, N3r, N4, N4s | | ok, reads 0 | | ok |
-| N2 | after load, copy, 70 fields elsewhere, swap | | LEAK, reads 74 | LEAK, reads 74 |
-| N2b | same with 60 fields | | LEAK, reads 64 (real clock crosses 2 s) | ok |
-| N5 | one batch: copy and another field added, password removed | | LEAK, reads 4 | LEAK |
-| V1..V4b, V6, V7, V7k, V7d, V8, V8k, V11..V13 | round 5 variants | ok, reads 0 | ok, reads 0 | ok |
-| V3m | neutral copy, read while both fields exist | after the removal ok; mid LEAK (reads 1) | same | same |
-| V5 | 3 batches, cross-parent, neutral | LEAK, reads 3 | LEAK, reads 3 | LEAK |
-| V9 | S.born cap, key-matched copy in another parent, 70 fields | LEAK, reads 73 | LEAK, reads 73 | LEAK |
-| C shared | Chromium fade, shared keys | mid ok, after ok, getter 0 | | |
-| C neutral / wrap / d440 | Chromium, read while both fields exist | mid LEAK getter 3 each; after ok, getter 0 | | |
-| X1 | new. Copy added to a sibling div (other parent), neutral, password removed | LEAK, reads 3 | LEAK | LEAK |
-| X1b | new. Copy in the parent plus a mirror in another parent | the mirror leaks, reads 4 | LEAK | LEAK |
-| X2w | new. Wrapper [display:none text input, password] rebuilt add-first, plus a re-added #nick | LEAK, reads 4 | LEAK | LEAK |
-| X2w0 | new. Same, without #nick | LEAK, reads 4 | LEAK | LEAK |
-| X2h | new. Same as X2w, but the extra input is `type=hidden` (not a value field, e.out = 1) | ok, reads 0 (LEAK, reads 4 at 583eae0) | ok | ok |
-| X5 | new. Fragment [trick, password]: add [trick2, copy], then remove both | LEAK, reads 3 | LEAK | LEAK |
-| X5s / X6 | new. Single remembered field / copy moved in from another parent | ok / ok | ok / ok | ok |
-| X7 / X7f | new. Password plus confirm, one toggle, neutral copies (wrapper / same parent) | LEAK, reads 10 / LEAK, reads 10 | LEAK | LEAK |
-| **O1** | new. Chromium, CSS fade on the old field, removed on transitionend, read after settle() | same: settled true, LEAK getter 3; next: ok | | |
-| **O2** | new. Chromium, JS-timed exit (setTimeout 400 ms, no animation), read after settle() | same and next: settled true, LEAK getter 3 | | |
-| **O3** | new. Chromium, exit class on the wrapper, transition on the input inside it | same and next: settled true, LEAK getter 3 | | |
-| O4 | new. Chromium, 3.5 s fade (longer than the settle cap) | settled false, LEAK getter 3 | | |
+jsdom columns are real clock / frozen clock; POSTLOAD rows matched the loading rows unless shown.
 
-D-442 closes round 6's Blocking item. M1, M4 and N1 read 0, and browser.test.js:648 and :664
-pin it with a held parser-blocking script (no fixed delay). It also closes V8, N3 and N3r,
-which had leaked since before D-440.
+| # | Case | result |
+|---|---|---|
+| r9 A, A2, B, B3, F | reviewer-10/11 r9-probe-jsdom2 | ok, reads 0, all modes ("I wrap label: Sign in empty" is the known over-mark line) |
+| V1..V4b, V6, V7, V7k, V7d, V8, V8k, V11..V13, V3m (mid), V3k (mid) | probe-r10-jsdom (both copies) and -snap2 | ok, reads 0, all modes |
+| V5 | 3 batches, cross-parent, neutral | LEAK, reads 3, all modes |
+| V9 | S.born cap, key copy in another parent, 70 fields | LEAK, reads 73, all modes |
+| N1, N1r, N2c, N3, N3r, N4, N4s, N5 | probe-r11-jsdom | ok, reads 0, all modes |
+| N2 / N2b | 70 / 60 fields elsewhere, swap | real clock LEAK (reads 74 / 64); frozen ok |
+| dbg loadingadd/postload k 0..30 | probe-r11-dbg | ok |
+| dbg k 62..70 | probe-r11-dbg (has no FROZEN switch, so every mode is real clock) | LEAK. dbg3-timed: copy to swap took 3.1..5.3 s in jsdom; frozen clock k 40..70 all ok |
+| dbg3 k 40..61 | probe-r11-dbg3 (real clock only) | LEAK (k 40 ok once): same cause, jsdom took more than 2 s |
+| dbg2 | loading fields-then-copy k 0..70 | ok |
+| X1 / X1b | copy in a sibling div / mirror in another parent | LEAK, reads 3 / 4, all modes |
+| X2w / X2w0 / X5 | wrapper or fragment [CSS-hidden text, pw] rebuilt add-first | LEAK after the removal, reads 4 / 4 / 3, all modes |
+| X2h, X5s, X6, X7, X7f | | ok, reads 0, all modes (X7, X7f closed by D-443 (2)) |
+| Chromium r9 fade, wrapper+checkbox, modal | | ok |
+| Chromium C shared / neutral / wrap / d440 | mid and after | ok, getter 0 (round 7: mid LEAK) |
+| Chromium M1..M4 | | ok, getter 0 |
+| Chromium O1 css / O2 timer / O3 child | same and next | settled true, ok, getter 0 (round 7: LEAK) |
+| Chromium O4 long (3.5 s fade) | same and next | settled false, LEAK, getter 3 |
+| **Y1** | new, jsdom. Copy into an existing sibling slot (X1 class) | mid LEAK (reads 3), after LEAK, all modes |
+| Y1g | new. Copy appended to the form (the password's grandparent), pw removed from its wrapper | mid ok; after LEAK, all modes; Chromium: same/next ok, late LEAK |
+| Y1w | new. Copy in a new wrapper added to the form, old wrapper removed | ok |
+| Y2 / Y2b / Y2d | new. Password parent detached and reattached / moved out of the form / reattached in a later task | ok |
+| Y2c | new. Parent detached, pw removed while detached, parent put back (one task) | jsdom LEAK; Chromium ok (jsdom has no transient observers) |
+| Y3 / Y3d | new. One batch adds the copy and moves (re-attaches) the password after it | mid LEAK (reads 3), after ok; Chromium same/next LEAK, late ok |
+| Y3m / Y3f | new. Copy, then one microtask later the pw moved / a new pw attached | ok |
+| Y5 | new. One batch: pw replaced by [text copy, new display:none password, same name] | LEAK mid and after, all modes; Chromium LEAK same/next/late |
+| **Y6** | new. Clone and hide: copy added, password hidden (display:none) and kept | jsdom real clock LEAK after 2.1 s; Chromium same/next ok, late LEAK (pw still present), settled true |
+| **Y7** | new, Chromium. Twin text input present from load (display:none), synced on input; Show flips display | settled true; same, next and late LEAK, getter 2/4/6 |
+| O5 | new, Chromium. 2.5 s CSS fade on the old field (inside the 3 s cap) | settled true; same LEAK (pw present, getter 3), next and late LEAK after the removal |
+| O6 | new, Chromium. JS-timed exit of 2.5 s | settled true; same/next ok; late LEAK after the removal |
 
-What is still open:
-- The pre-existing shapes that D-442 sends to T-19b (N2, N5, V5, V9, the overlap read).
-- New shapes: X1, X1b, X2w, X2w0, X5, X7.
-- None of these is a regression: each also leaked at 583eae0 (X and O probes re-run on the
-  583eae0 injected.js in runs/reviewer-12/muta). X2h leaked at 583eae0 and D-442 (2) fixes it.
+Every leak in the coder's list reproduces as reported. D-443 closes O1..O3, C mid, V3m mid,
+X7 and X7f, and N5 stays closed.
 
 ## Blocking
 
-- injected.js:894 and :899 with :2156 (overlap read, hard rule 5).
-  - What: a neutral add-first copy is read while the password is still in the page, and this
-    happens after `settle()` resolves with `settled: true`.
-  - Why Blocking now: rounds 4 to 6 ruled this Should fix on the premise that "settle() usually
-    waits the transition out", and D-442 deferred it to T-19b on that record. O1..O3 show the
-    premise is false:
-    - O2: a JS-timed exit (react-transition-group `timeout`, Vue `duration`) has no running
-      animation. Settle is quiet after 150 ms, and the old field is removed at 400 ms.
-    - O3: when the exit class is on a wrapper, `runningAnims` counts only animations on that
-      element (`c.self`, :2156), not the transition on the input inside it.
-    - O1: Animation.finished resolves before transitionend is dispatched, so a caller that reads
-      in the same evaluate (settle then walk) reads during the overlap.
-    - docs/05-BROWSER.md #9 has the consequence capture diff the page "≤ 500 ms or until
-      settle" after every act step. So the normal path (click Show, settle, diff) walks during
-      the transition.
-    - Every add-first rebuild has an overlap. That makes this the most reachable leak left,
-      more reachable than round 5's V7, which was Blocking and needed the same neutral copy
-      plus a second field.
-  - Proposed fix, prototyped in runs/reviewer-12/fix (about 15 lines):
-    - The S.born entry records `ns`: the add-time `nearOf(p)` found a sensitive field in that
-      parent that this batch did not add.
-    - `fieldValue` returns `filledNoRead` for a field that has a live `ns` entry while its
-      parent still holds a field in S.sens.
-    - Result: O1, O2 and O3, C neutral/wrap/d440 mid and V3m mid all read 0.
-  - Cost of the fix: `node --test` goes to 93/98. Five controls see an unrelated field that was
-    added next to a live password within 2 s read `empty` instead of its text for that window.
-    The five are jsdom.test.js:951, :1082 and :1249 (the login-parent control), A14 and A16.
-    This is the same trade D-442 made for B-415, but it changes the D-435 (1) and D-438 controls.
-  - Supreme has two options:
-    - Take the fix in an amendment (D-443), and turn O1..O3 into browser tests.
-    - Re-accept this leak in writing, citing O1..O3 (as D-442 did for the others). This item
-      then becomes Should fix.
-  - O4 (an exit longer than the 2 s window or the 3 s cap) stays open under either option.
-    Settle returns `settled: false` there, which the driver can act on.
+- injected.js:909..:922 `fieldValue` (hard rule 5): a show toggle that swaps visibility between
+  the password and a plain twin, instead of adding and removing fields, puts the password in
+  index(), text() and state() with `settled: true`, and it stays there on every later read.
+  - Y7: a twin `<input type=text>` exists from load, hidden, kept in sync by an input listener or
+    a shared model (Vue `v-show` twins, Angular `[hidden]` twins, hand-rolled toggles). Click
+    Show, settle, read: getter 2 at the first read, the canary in the blob.
+  - Y6: clone and hide (the legacy jQuery show-password plugins): the copy is added next to the
+    password, the password gets display:none and stays. D-443 (1) masks the copy for 2 s, then
+    the next read leaks for as long as the page lives.
+  - Why Blocking: this is the round 7 standard. A normal click Show, settle, read flow on a
+    pattern a site author writes in three lines reaches it, settle reports settled, and nothing
+    tells the driver to wait. It needs less than round 7's Blocking item (no rebuild, no timing),
+    and the leak is persistent, not a window. It is not a D-443 regression: no add or remove
+    happens in Y7, so no rule from D-435 to D-443 applies, and it leaked at every earlier round.
+  - Proposed fix, prototyped in runs/reviewer-13/fix (12 lines, fix.diff): `fieldValue` returns
+    `filledNoRead` for a value field whose parent directly holds a sensitive field that is not
+    `displayed()`. Results: Y5, Y6 and Y7 read 0 (Chromium, same/next/late), and
+    `node --test injected/test/` stays 103/103.
+  - Cost: a visible field that sits in the same parent as a hidden password reads empty|filled
+    instead of text. An identifier-first login that keeps the hidden password next to the email
+    in one container is the likely case. That is an efficiency cost only, and rule 5 outranks it.
+  - Supreme options: take the fix in an amendment (D-444) with Y6 and Y7 as browser tests, or
+    re-accept the twin and clone-and-hide shapes in writing citing Y6 and Y7. The second option
+    turns this item into Should fix.
 
 ## Should fix
 
-All of these are pre-existing (they also leaked at 583eae0). Each needs a neutral copy plus a
-batch or tree shape that framework toggles rarely produce. D-442 accepts N2, N5, V5 and V9 in
-writing. Each one-line ruling says how reachable the shape is.
+Rulings for the leaks the coder reports and D-443 sends to T-19b, then the new shapes.
+Every item here also leaked at 7cb7020.
 
-- N5 (one batch adds the copy and a second value field and removes the password).
-  - Should fix: a keyed re-render that turns one input into two in one commit is unusual for a
-    show toggle.
-  - Fix: when one sensitive field out and 2..k in with no key match, mark all k (fail closed,
-    the same trade as D-442).
-- S.born cap (N2, V9: 70 value fields; N2b is ok at 60 on a frozen clock).
-  - Should fix: it needs more than 64 value fields added inside the copy's 2 s window. A
-    spreadsheet or grid mount could do that by accident, but a login page will not.
-  - Fix: when the cap is hit, evict entries whose parent has no sensitive field first. Add a
-    fakeClock test. S.gone (32) and NEAR_MAX (64) are still untested.
-- V5, X1, X1b (cross-parent neutral copy: a new wrapper filled in a later batch, a copy in a
-  sibling container, a mirror field).
-  - Should fix: there is no structural or key link left to follow. Closing these needs either
-    the overlap fix above (it covers the window while the password exists only for the same
-    parent) or a "page shows the value elsewhere" rule.
-- X7 / X7f (password plus confirm rebuilt by one toggle, neutral copies; 10 reads).
-  - Should fix: a sign-up "show passwords" toggle is common, but a rebuild that drops every key
-    is not.
-  - Cheap fix at :2011: `all = g.e.out === g.e.sens`. Every value field the parent lost was
-    sensitive, so this cannot be an SPA login swap, where the username is not sensitive.
-- X2w, X2w0, X5 (the lost set holds the password plus a CSS-hidden text input, such as an
-  autofill-trick username).
-  - Should fix: e.out = 2 looks like an SPA login swap, so with two remembered fields neither
-    is marked.
-  - The trick input is not sensitive, so `e.out === e.sens` does not help. This needs an
-    "invisible value field does not count" refinement, or the overlap fix.
+- V5 (3 batches, cross-parent): Should fix. An empty wrapper has to mount in one commit and its
+  input in a later one, in a container other than the password's parent. React, Vue and Svelte
+  commit a toggle's subtree at once.
+- X1 and Y1 (copy into an existing, unrelated container): Should fix. There is no structural or
+  key link, so this is the page printing the secret somewhere else. A show toggle renders into the
+  password's own slot.
+- X1b (mirror field elsewhere): Should fix, the same class as X1. The copy in the parent is
+  masked now, and only the mirror reads.
+- V9 (S.born cap): Should fix. It needs more than 64 value fields mounted inside the 2 s window
+  plus a cross-parent copy with a shared key. No show-toggle flow does that. Fix: evict entries
+  whose parent holds no sensitive field first, and add a fakeClock test (BORN_MAX, S.gone 32 and
+  NEAR_MAX 64 are still untested).
+- N2, N2b, dbg k 62..70, dbg3 (real clock): Should fix, and a jsdom artifact as measured.
+  dbg3-timed shows jsdom took 3.1 to 5.3 s to add 40 to 70 fields, and with a frozen clock every
+  k reads 0. A browser mounts 70 fields in milliseconds, so in a browser this reduces to O5/O6.
+- O4 (3.5 s exit, settled false): Should fix. It is a reported non-settle, so the driver can wait
+  or re-settle, and show-password exits run 150 to 400 ms in every UI kit.
+  - Correct the record: the boundary is the 2 s window (SENS_KEEP_MS, injected.js:897), not the
+    3 s settle cap. O5 (a 2.5 s CSS fade) reports `settled: true` and leaks at the same-evaluate
+    read and after the removal. O6 (a 2.5 s JS-timed exit) settles at once and leaks on every
+    read after the removal, because the copy's S.born entry has expired.
+  - Should fix rather than Blocking because no real toggle animates for more than 2 s.
+  - D-443's "exits longer than the settle cap" should read "exits longer than 2 s".
+- X2w, X2w0, X5 (a CSS-hidden autofill-trick text input in the lost set): Should fix.
+  - The copy is masked during the overlap now. The leak starts after the removal (e.out 2,
+    e.sens 1, more than one remembered field).
+  - It needs both a trick input inside the password's wrapper and an add-first wrapper rebuild.
+  - Fix: do not count a value field that is not `displayed()` in e.out.
+- Y1g (copy at the grandparent, the password removed from a wrapper that stays): Should fix.
+  - It is masked during the overlap, and leaks after the removal because the removal target
+    (the wrapper) is not the copy's parent (injected.js:2045).
+  - It needs the copy and the password in different JSX slots.
+  - Cheap fix: when `all` holds, also inherit a remembered field with a live S.nearPw entry whose
+    parent contains `g.parent`. A14 is safe, because an SPA swap also loses a field that is not
+    sensitive.
+- Y3, Y3d (the password moved in the same batch the copy is added): Should fix. The overlap read
+  leaks because nearOf skips every same-batch add (injected.js:2095), including a password that
+  was only moved. D-443 (1) says "holds a connected sensitive field at the time of the add",
+  which a moved password does. Keyed reconcilers insert before the existing node without moving
+  it, so this is rare. Fix: skip only fresh fields that are not also in this batch's removals.
+- Y5 (pw replaced by [text copy, hidden new password with the same name]): Should fix. D-443 (3)
+  stands down on the new password's key match (injected.js:2025). The Blocking prototype closes
+  Y5. Without it, compute addKeyHit over the non-sensitive added fields only.
 - Tests:
-  - pastBornWindow (accept-t19.test.js:64) is a page-clock condition with a 15 s cap. It is
-    honest: S.born has no event at the end of its window. Note that it adds about 2 s to A10,
-    A14 and A18 each.
-  - The O1..O3 shapes have no tests (they would come with the Blocking fix).
+  - browser.test.js O1..O3 do not assert `same.pw` (it is a diagnostic only). On a fast machine
+    the O1 same-evaluate read could land after the removal. The mid read asserts the overlap, so
+    this is minor.
+  - Y6 and Y7 have no tests (they would come with the Blocking fix).
 
 ## Notes
 
-- Test honesty (583eae0..7cb7020):
-  - A18 now asserts the B-415 over-mark. Inside 2 s Nickname must be `filled`, and the run took
-    the `at <= 2000` branch on this machine. After the window it must read `ada`.
-  - A slow machine (at > 2000) accepts either reading and prints the diagnostic. That is a
-    weak branch, but a correct one.
-  - A10 and A14 only add `pastBornWindow` before their swaps. Their password assertions are
-    unchanged, and a later swap means fewer fields in S.born, so the leak checks are not weaker.
-  - jsdom: "same parent, two fields" moved from the aged-out block into the D-442 test, and its
-    expectation flipped from text to masked, as D-442 (2) says. `sameMasked` maps only
-    empty|filled to masked, so a text reading still fails. Canary-in-blob and reads == 0 stay
-    on every case. No test was weakened to hide a leak.
-- helpers.serve `hold()` waits on a promise the test releases, not on a timer. The tests
-  release it in `finally`.
+- Item 2 (diff dc14a2c..a9e246a, injected/):
+  - `fieldValue` (injected.js:909) is still the only value getter call site: `el.value` at :916
+    and :921, select labels at :925.
+  - Its one caller is the row state at :1467, which feeds index(), state(), text() and
+    fingerprint(). The text collector skips input, select and textarea (:586). `attr(el, "value")`
+    is read only for button-type inputs (:644..:647).
+  - `nearLivePw` is applied on both the input and the textarea branch (:915, :920). No reader
+    bypasses the S.nearPw mask.
+  - S.nearPw holds a WeakMap from element to `{ t, parent: WeakRef }`, with no value (rule 2/5).
+    No timers or sleeps were added (rule 6).
+- Test honesty (dc14a2c..a9e246a):
+  - jsdom :951: the expectation moved from text to masked (`sameMasked` still fails on a text
+    reading). A new late run pins the 2 s end. reads == 0 and the canary check stay.
+  - The D-439 "second later field" case waits 2001 ms before reading text; its reads == 0 stays.
+  - The :1249 case flipped from text to masked, as D-443 (3) says.
+  - `leakShape` now spies every password, which is stronger.
+  - A14: r2's D-435 (1) text reads now accept empty|filled, and the exact text moved to r3 after
+    the window. The canary, fragment and reads {} checks now cover r1..r3. That is wider than
+    before, not weaker.
+  - A16: `pastBornWindow` comes before reading the cumulative `__pwReads`, and the promo
+    assertion is unchanged.
+  - No reads == 0 or canary assertion was removed or weakened.
 - Conformance:
-  - 295253e implements D-442 (1) and (2) as written: the ld flag and the swap skip are gone,
-    and `all = g.e.out === 1`.
-  - No timers or sleeps were added (rule 6), and no value enters S.born (rule 2/5).
-  - d442-loading.html is a fixture, not a user draft (rule 7).
-  - Rules 1 and 3 do not apply. I-11 shapes are unchanged.
-- The handoff file is named T-19-js-coder-8.yaml, but it says `from: js-coder-9`.
+  - 8fb00b4 implements D-443 (1) to (3) as written, except the Y3 gap (a moved password counts
+    as "added by this batch").
+  - D-443 (4)'s cost shows up exactly in the tests that changed.
+  - Rules 1, 3 and 7 do not apply. d443-overlap.html is a fixture, and its `setTimeout` exits
+    are the page under test, not driver waits.
+- Quality: `nearLivePw` runs querySelectorAll on the add-time parent for every read of every
+  masked field for 2 s. With `<main>` as the parent that is O(fields) per read. This is
+  efficiency only.
+- nearOf (:2088) computes `sensitive()` for at most NEAR_MAX non-S.sens fields per parent. A
+  password past the 64th field of a large parent that was never walked is not seen at add time.
+  Not probed.
 - Over-marking (efficiency only, open): OTP and SSN name matches, D-437 and D-439 one-field
-  swaps, r9 I, and now D-442 (2). S.sens is sticky, so an over-marked parser field stays
-  `filled` for the life of the page.
+  swaps, r9 I, D-442 (2), D-443 (3) and (4). The Blocking prototype would add hidden-password
+  neighbours.
 - sb-act, round 5 (reviewer-7, 361b28d, D-409): approve, unchanged since.
 
 ## Resolved in earlier rounds
 
-- Round 6 Blocking (D-441 `ld` skip; M1, M4, N1): fixed by D-442 (295253e). Pinned by
-  browser.test.js:648 and :664 and by jsdom.test.js:1411, and both tests fail on the D-441 code.
-  Full text: `git show 0cc160e:bench/results/review-T-19.md`.
-- Round 5 Blocking (D-440; V7, C d440): closed by D-441 and kept by D-442 (V7 and d440 read 0).
-  See `git show 1b0b5f9:bench/results/review-T-19.md`.
-- V8, N3, N3r, X2h (two remembered fields in a one-field parent): fixed by D-442 (2).
-- Round 4 Blocking (D-435 (2) split add-first, shared keys): fixed by D-438 (1). See
+- Round 7 Blocking (the overlap read after `settled: true`; O1, O2, O3, C neutral/wrap/d440 mid,
+  V3m mid): fixed by D-443 (1) in 8fb00b4. All read 0, and they are pinned by browser.test.js
+  O1..O3 and jsdom.test.js:1544. The old code fails those tests with 20 getter calls (the coder's
+  check), and the no-mask mutant fails :1544 (this round). Full text:
+  `git show dc14a2c:bench/results/review-T-19.md`.
+- X7, X7f (password plus confirm): fixed by D-443 (2). N5: fixed by D-443 (3).
+- Round 6 Blocking (D-441 `ld` skip; M1, M4, N1): fixed by D-442 (295253e), still 0. See
+  `git show 0cc160e:bench/results/review-T-19.md`.
+- Round 5 Blocking (D-440; V7, C d440): closed by D-441, kept by D-442 and D-443. See
+  `git show 1b0b5f9:bench/results/review-T-19.md`.
+- V8, N3, N3r, X2h: fixed by D-442 (2). Round 4 Blocking (D-435 (2)): fixed by D-438 (1). See
   `git show 71aa8c0:bench/results/review-T-19.md`.
 - D-438 (2)..(4), R1 B1/B2, and sb-act R2 B1..B3 and R4 B1: fixed in earlier rounds.
 
 ## Verdict
 
-D-442 is implemented as written and closes round 6's Blocking item (M1, M4, N1 read 0 and are
-pinned by tests that fail on the old code). The tests are honest.
+D-443 is implemented as written and closes round 7's Blocking item (O1..O3 and the C mid reads
+are 0 in Chromium, pinned by tests that fail on the old code). The tests are honest.
 
-One Blocking item remains, on new evidence. The overlap read, previously excused because settle
-would wait it out, happens after `settle()` returns `settled: true` (O1..O3). On the normal act,
-settle and diff path, a neutral add-first show toggle puts the password in index(). A ~15-line
-fail-closed fix exists (runs/reviewer-12/fix). It needs a supreme amendment because it
-over-marks five controls for 2 s. Supreme can instead re-accept the leak in writing citing
-O1..O3, which would make this Should fix.
+One Blocking item remains, on new evidence. A visibility-swap show toggle (Y7 twin, Y6 clone and
+hide) puts the password in every reader with `settled: true`, and it stays there. No add/remove
+rule can see it. A 12-line fail-closed fix exists (runs/reviewer-13/fix, 103/103). Supreme can
+take it as D-444 or re-accept the shape in writing citing Y6 and Y7, which would make this
+item Should fix.
 
 Verdict: request changes
