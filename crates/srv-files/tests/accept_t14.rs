@@ -1092,3 +1092,91 @@ async fn vault_canary_never_leaves_through_fs_read() {
     let ledger = std::fs::read_to_string(e.run.ledger_jsonl()).unwrap();
     assert!(!ledger.contains(&secret));
 }
+
+// ---- acceptance re-run (tester, after rounds 2 and closing): Phase 1 ladder rung 9 ----
+
+/// docs/08 rung 9 at the tool level: "Write a file then delete it". fs.write outside runs/
+/// is Fill and allowed without an ask; fs.delete of it is Delete and asks; a timeout skips
+/// and keeps the file; the ledger (store rows and the jsonl mirror) shows both calls and
+/// the ask outcome. The proceed answer is checked too, so the skip is the gate's doing.
+#[tokio::test]
+async fn r2_ladder_rung9_write_then_delete_outside_runs() {
+    for answer in [None, Some(AskOutcome::AnsweredProceed)] {
+        let asker = match answer {
+            Some(a) => ScriptedAsker::with([a]),
+            None => ScriptedAsker::new(),
+        };
+        let e = env(asker).await;
+        let label = if answer.is_none() {
+            "timeout"
+        } else {
+            "proceed"
+        };
+
+        let out = e
+            .ok(
+                "fs.write",
+                json!({"path": "rung9.txt", "content": "written by rung 9\n"}),
+            )
+            .await;
+        assert!(out.text.starts_with("wrote:"), "{label}: {}", out.text);
+        assert_eq!(
+            std::fs::read_to_string(e.p("rung9.txt")).unwrap(),
+            "written by rung 9\n",
+            "{label}: the file is on disk"
+        );
+        assert!(
+            e.asker.cards().is_empty(),
+            "{label}: a Fill write does not ask"
+        );
+        let tools = e.tool_events();
+        assert_eq!(tools.len(), 1, "{label}: {tools:?}");
+        assert_eq!(tools[0].tool, "fs.write");
+        assert_eq!(tools[0].class, Some(Class::Fill), "{label}: write is Fill");
+        assert_eq!(
+            tools[0].mode,
+            Some(LedgerMode::Allow),
+            "{label}: allowed by the gate"
+        );
+        assert!(tools[0].ok);
+
+        let out = e.ok("fs.delete", json!({"path": "rung9.txt"})).await;
+        let cards = e.asker.cards();
+        assert_eq!(cards.len(), 1, "{label}: one ask for the delete");
+        assert_eq!(cards[0].class, Class::Delete, "{label}");
+        assert_eq!(cards[0].on_timeout, OnTimeout::Skip, "{label}: H-1.3");
+        assert!(
+            cards[0].what.contains("rung9.txt"),
+            "{label}: {}",
+            cards[0].what
+        );
+
+        let core = e.core_events();
+        let asks: Vec<_> = core
+            .iter()
+            .filter(|x| x.tool == "fs.delete" && x.class == Some(Class::Delete))
+            .collect();
+        assert_eq!(asks.len(), 1, "{label}: one ask outcome row: {core:?}");
+        let jsonl = std::fs::read_to_string(e.run.ledger_jsonl()).unwrap();
+        assert!(jsonl.contains("\"fs.write\""), "{label}: write mirrored");
+        assert!(jsonl.contains("\"fs.delete\""), "{label}: delete mirrored");
+
+        let tools = e.tool_events();
+        if answer.is_none() {
+            assert!(out.text.starts_with("skipped"), "{label}: {}", out.text);
+            assert!(e.p("rung9.txt").exists(), "timeout keeps the file");
+            assert_eq!(asks[0].mode, Some(LedgerMode::TimeoutSkip));
+            assert!(jsonl.contains("timeout_skip"), "outcome mirrored");
+            assert_eq!(tools.len(), 1, "the delete did not run: {tools:?}");
+        } else {
+            assert!(out.text.starts_with("deleted"), "{label}: {}", out.text);
+            assert!(!e.p("rung9.txt").exists(), "proceed deletes");
+            assert_eq!(asks[0].mode, Some(LedgerMode::AnsweredProceed));
+            assert!(jsonl.contains("answered_proceed"), "outcome mirrored");
+            assert_eq!(tools.len(), 2, "{tools:?}");
+            assert_eq!(tools[1].tool, "fs.delete");
+            assert_eq!(tools[1].class, Some(Class::Delete));
+            assert!(tools[1].ok);
+        }
+    }
+}
