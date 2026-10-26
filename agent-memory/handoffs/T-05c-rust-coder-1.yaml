@@ -1,0 +1,21 @@
+from: rust-coder
+to: tester
+task: T-05c
+date: "2026-10-25"
+state: "D-84 done on swarm/core-T05c (00e6730 draft, c8eda31 callers and tests). Vault::open_for_set returns harness_core::vault::VaultEditor (also re-exported at the crate root) with set, remove, names, save and a value-free Debug; no resolve_into, scrub, install_global, Deref or From to Vault. set and remove write through under <vault file>.lock (shared set_entry with Vault::set); remove of an unknown name or on a missing file is Unknown(name), writes nothing and creates no key or lock file; save writes nothing and only checks the file decrypts (missing file ok only for an empty editor, else Io(NotFound)). Four compile_fail doctests (E0599 resolve_into, install_global, scrub; E0308 &Vault) are proven meaningful: the same snippets compile against Vault::open, and swapping E0599/E0308 does not make rustdoc fail on this toolchain (rustc 1.99), so the codes are not enforced; the open-vs-open_for_set swap is the real proof. New unit tests: editor_remove_drops_the_entry_from_the_file, editor_remove_of_a_missing_name_or_file_writes_nothing, editor_save_checks_the_file_decrypts, editor_debug_prints_no_value; each proven red by breaking Debug, the remove Unknown check, the remove write, the missing-file check and save's decrypt check. harness cli vault_set uses the editor and calls save. New crates/core/tests/contract_paths.rs pins every I-4 path incl. VaultEditor methods. B-196 (interface_changes, I-4) records the method set and write-through semantics. Passing with a random SB_VAULT_CANARY: cargo test -p harness-core --lib vault:: 31/31, --doc vault 5/5, --test contract_paths 3/3, harness lib 6/6; 0 canary hits in every log. cargo fmt --all --check clean; cargo clippy -p harness-core -p harness --all-targets -D warnings clean."
+not_done: "1. Full cargo test -p harness-core -p harness was not completed: the first run hit a rustc out-of-memory crash (STATUS_STACK_BUFFER_OVERRUN compiling accept_t08 at -j 2), and the -j 1 rerun was killed by Claude Code for low system memory while accept_t08 was running. The integration tests touched by this task (vault_accept_t05_r4 r4_3, vault_scrub_t05_fix open_for_set_repairs_a_pre_floor_file, harness t08_vault, accept_t08_r2, vault_cli_repair_t05_r4) still need a run. 2. Tester: accept-T-05c.md. 3. Supreme: fold B-196 into I-4 notes (interface freeze D-90: names already in interfaces.yaml, so this is notes only)."
+gotchas:
+  - "rustdoc does not fail a compile_fail doctest whose error code differs on this toolchain; prove compile_fail tests by making the snippet compile instead."
+  - "Run cargo test with -j 1 and nothing else heavy running: -j 2 crashed rustc out of memory on accept_t08."
+  - "The PostToolUse hook runs rustfmt after each edit; re-read before editing a region you just changed."
+decisions_made: []
+blockers_opened: [B-196]
+files_touched:
+  - crates/core/src/vault.rs
+  - crates/core/src/lib.rs
+  - crates/core/tests/contract_paths.rs
+  - crates/core/tests/vault_accept_t05_r4.rs
+  - crates/core/tests/vault_scrub_t05_fix.rs
+  - crates/harness/src/cli.rs
+  - agent-memory/blockers.yaml
+verify: "SB_VAULT_CANARY=<random> cargo test -j 1 -p harness-core -p harness"

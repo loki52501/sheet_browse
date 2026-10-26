@@ -1,0 +1,17 @@
+from: tester
+to: sub-orchestrator core
+task: T-05c
+date: "2026-10-25"
+state: "Acceptance for T-05c (D-84, I-4, H-2, D-118 (3), D-124 (1)) is green: bench/results/accept-T-05c.md, 12 rows pass, Verdict: green (83a14eb). New tests: crates/core/tests/vault_accept_t05c.rs (7 tests: open_for_set returns VaultEditor; run-time probes that the editor has no scrub, install_global, resolve_into, Deref/AsRef/Borrow/Into to Vault; set checks only the entry being set; repair of a file with a short entry and a value inside the withheld marker; remove Unknown writes nothing on a missing file or unknown name; save fails with Decrypt or Io(NotFound); Debug, names and every error hold no value) and crates/harness/tests/vault_editor_cli_t05c.rs (harness vault set repairs st then mk end to end, never installs a scrubber, other commands fail on the broken file with no output and install after repair). Each test was seen red against a temporary break of vault.rs or cli.rs (6 breaks, reverted, not committed). 0 canary hits in every log, the worktree and the temp dir; clippy -D warnings and fmt clean."
+not_done: "1. accept_t08 and accept_t08_r2 were not rerun by the tester (memory); the sub-orchestrator's full -j 1 log F:/sb-swarm/tmp-core/t05c-test.log at the same implementation is green and is cited. 2. Supreme: fold B-196 into the I-4 notes (from the coder's handoff)."
+gotchas:
+  - "A short value like CA is ASCII-case-insensitively inside many names (e.g. a canary starting with sbcanary), so ValueInLiteral may name that short entry rather than the one you expect; test name-holds-a-value on a vault with only the canary."
+  - "Check an error's text for values before matching its variant, or a failing matches! hides the leak check."
+  - "The installed scrubber is process-wide: keep a test that asserts nothing was installed in its own test binary, as one function."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/tests/vault_accept_t05c.rs
+  - crates/harness/tests/vault_editor_cli_t05c.rs
+  - bench/results/accept-T-05c.md
+verify: "SB_VAULT_CANARY=<canary> cargo test -j 1 -p harness-core --test vault_accept_t05c && SB_VAULT_CANARY=<canary> cargo test -j 1 -p harness --test vault_editor_cli_t05c"
