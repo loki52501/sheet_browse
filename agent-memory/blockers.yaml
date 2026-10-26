@@ -215,6 +215,16 @@ blockers:
     question: "D-601 gives the pinned path as <home>/chromium/156.0.8078.4/chrome-<platform>/chrome(.exe), but the macOS Chrome for Testing archive has no 'chrome' binary. And is an empty SB_CHROMIUM or SB_HOME 'set'?"
     default_taken: "macOS resolves to chrome-mac-arm64 (or chrome-mac-x64)/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing; Windows and Linux follow D-601 exactly (chrome-win64/chrome.exe, chrome-linux64/chrome). An empty SB_CHROMIUM or SB_HOME counts as unset. A set source that names a missing file is an error naming SB_CHROMIUM, never a fall-through."
     needs_user: false
+  - id: B-605
+    task: T-20
+    question: "D-55 and D-73 say element ids are never reused within a tab frame and sb-driver passes walk({base}) per document, but walk() returns only {count}, so the driver cannot know where a document's ids end. Which base should each new document get?"
+    default_taken: "D-604: document k of a tab frame gets base 1 + k * 100000 (u32 ids, so 42949 documents per frame, then fail closed); the first document keeps short ids. Proposed for area page (additive I-11 change, not filed as an interface change yet): walk() and index() also return next, the id the document would issue next, so the driver can track the high-water mark and give the next document max(next) + 1, keeping ids short after navigations."
+    needs_user: false
+  - id: B-606
+    task: T-20
+    question: "Background tabs in one window are hidden (visibilityState hidden, no requestAnimationFrame, timers about 1 per second on chromium-1248), so act(id), which awaits two frames, stalls there. Should Driver::open make tabs or windows, and what about the headed me profile?"
+    default_taken: "D-605: open() creates every tab in its own window (Target.createTarget newWindow true), headless and headed alike, so tabs can act in parallel (B-4 #10); a tab that is hidden anyway (a popup in its opener's window, a minimized window) gets Page.bringToFront once when an act finds it hidden. If the user prefers tabs in one window for me, T-22's scheduler must front the tab it acts on and serialize acts per window."
+    needs_user: false
 interface_changes:
   - id: B-401
     from: page/suborch

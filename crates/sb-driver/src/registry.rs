@@ -164,6 +164,8 @@ pub struct Registry {
     pending: HashMap<String, Pending>,
     seeds: Vec<Seed>,
     next_tab: u32,
+    /// Sessions whose runtime install (B-4 #3) the renderer has acknowledged.
+    installed: std::collections::HashSet<String>,
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
@@ -404,6 +406,7 @@ impl Registry {
 
     fn detached(&mut self, sid: &str) {
         self.pending.remove(sid);
+        self.installed.remove(sid);
         match self.sessions.get(sid).cloned() {
             Some(Owner::Tab(tab)) => {
                 if self.tabs.get(&tab).is_some_and(|t| t.session == sid) {
@@ -742,6 +745,20 @@ impl Registry {
         self.tabs.get(&tab)?.opener
     }
 
+    /// Record the reply to the session's `Page.addScriptToEvaluateOnNewDocument` (applied in
+    /// wire order by the driver). Only tracked sessions are kept.
+    pub(crate) fn set_installed(&mut self, session: &str) {
+        if self.tracks(session) {
+            self.installed.insert(session.to_string());
+        }
+    }
+
+    /// True once the renderer has acknowledged the session's runtime install: a navigation
+    /// started after this gets `__sb` in its document (B-4 #3).
+    pub(crate) fn installed(&self, session: &str) -> bool {
+        self.installed.contains(session)
+    }
+
     /// The registry's frame number for a CDP frame id.
     pub fn frame_by_cdp_id(&self, tab: TabId, cdp_id: &str) -> Option<u32> {
         self.tabs.get(&tab)?.by_cdp.get(cdp_id).copied()
@@ -765,6 +782,21 @@ impl Registry {
     /// The frame's `sb` world context, where `globalThis.__sb` lives.
     pub fn sb_context(&self, tab: TabId, frame: u32) -> Option<&ExecContext> {
         self.tabs.get(&tab)?.frames.get(&frame)?.sb_ctx.as_ref()
+    }
+
+    /// The `sb` or default context with this id on `session`, wherever it is registered.
+    pub(crate) fn context_by_id(&self, session: &str, id: i64) -> Option<&ExecContext> {
+        self.tabs
+            .values()
+            .flat_map(|t| t.frames.values())
+            .flat_map(|f| [f.sb_ctx.as_ref(), f.default_ctx.as_ref()])
+            .flatten()
+            .find(|c| c.session == session && c.id == id)
+    }
+
+    /// The frame's current URL.
+    pub(crate) fn frame_url(&self, tab: TabId, frame: u32) -> Option<&str> {
+        Some(self.tabs.get(&tab)?.frames.get(&frame)?.url.as_str())
     }
 
     /// The frame's main-world context.

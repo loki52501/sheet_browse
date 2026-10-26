@@ -3,6 +3,8 @@
 //!
 //! T-18: launch (B-2, D-601) over the pipe transport (B-3, D-600) and the target and frame
 //! registry (B-4 #2). `tabs` and `frames` are answered from the registry.
+//! T-20: the page runtime (B-4 #3, D-604), `open`, and actionability with retry (B-4 #6,
+//! D-603) behind `act`.
 
 use harness_core::gate::StopReason;
 use harness_core::ToolCtx;
@@ -14,9 +16,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::watch;
+use tokio::time::Instant;
 
+mod actionable;
+#[cfg(test)]
+mod chromium_t20;
 mod launch;
 mod registry;
+mod runtime;
 
 pub use launch::{
     binary_name, launch_args, platform_dir, resolve_chromium, LaunchEnv, CHROMIUM_VERSION,
@@ -175,6 +182,10 @@ impl From<CdpError> for DriverError {
     }
 }
 
+/// `open`: how long a new tab may take to commit its first document, and then to settle and
+/// walk it.
+const OPEN_CAP: Duration = Duration::from_secs(30);
+
 fn lock(m: &Mutex<Registry>) -> MutexGuard<'_, Registry> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -203,7 +214,6 @@ fn observe(
         r.apply(e.session.as_deref(), &e.method, &e.params);
         (attached.is_some_and(|sid| r.tracks(sid)), r.take_seeds())
     };
-    bump(changed);
     if let Some(sid) = attached {
         let seed = seeds.iter().any(|s| s.session == sid && !s.replay_contexts);
         on_attached(registry, changed, sid, tracked, seed, cdp);
@@ -215,6 +225,9 @@ fn observe(
         drop(cdp.start(Some(&s.session), "Runtime.disable", json!({})));
         drop(cdp.start(Some(&s.session), "Runtime.enable", json!({})));
     }
+    // Last: a registry waiter that wakes now and sends to a new session (open's
+    // Page.navigate) queues behind the setup above, so the runtime is installed first.
+    bump(changed);
 }
 
 /// One `Page.getFrameTree` whose reply is applied in wire order (`start_then`), so frames
@@ -236,12 +249,14 @@ fn seed_frames(
 }
 
 /// Every auto-attached target is paused (`waitForDebuggerOnStart`). Sessions the registry
-/// tracks (tabs, OOPIFs, pending prerenders) get Page and Runtime events and auto-attach for
-/// their own children; then every target runs. A target that was already running when we
-/// attached also gets one `Page.getFrameTree` (its existing frames are not replayed), placed
-/// before `Runtime.enable` so the frames are known when its contexts are replayed. All are
-/// queued at once (pipelined, no round trip waited on); CDP handles a session's commands in
-/// order, so the domains are on before the target runs. Other replies are not awaited.
+/// tracks (tabs, OOPIFs, pending prerenders) get Page and Runtime events, the page runtime
+/// (B-4 #3) and auto-attach for their own children; then every target runs. A target that
+/// was already running when we attached also gets one `Page.getFrameTree` (its existing
+/// frames are not replayed), placed before `Runtime.enable` so the frames are known when its
+/// contexts are replayed. All are
+/// queued at once (pipelined); the target runs when the runtime install has replied (B-4 #3),
+/// so the domains and the runtime are in place before its first document. Other replies are
+/// not awaited.
 fn on_attached(
     registry: &Arc<Mutex<Registry>>,
     changed: &Arc<watch::Sender<u64>>,
@@ -261,6 +276,32 @@ fn on_attached(
             "Target.setAutoAttach",
             json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true}),
         ));
+        // B-4 #3: the page runtime for every new document of this target. The target runs
+        // only once the renderer has replied (one round trip, D-604): a navigation is
+        // started in the browser process and does not queue behind renderer-side commands,
+        // so a target resumed earlier could commit its first document (a popup's, or one
+        // created with a URL) without Page events and without the sb world (seen on
+        // chromium-1248). The reply is recorded in wire order for `open`.
+        let (r, c, session, run) = (
+            registry.clone(),
+            changed.clone(),
+            sid.to_string(),
+            cdp.clone(),
+        );
+        cdp.start_then(
+            Some(sid),
+            "Page.addScriptToEvaluateOnNewDocument",
+            runtime::install_params(),
+            move |reply| {
+                if reply.is_ok() {
+                    lock(&r).set_installed(&session);
+                }
+                // Resume on any reply: a target whose install failed still runs.
+                drop(run.start(Some(&session), "Runtime.runIfWaitingForDebugger", json!({})));
+                bump(&c);
+            },
+        );
+        return;
     }
     drop(cdp.start(Some(sid), "Runtime.runIfWaitingForDebugger", json!({})));
 }
@@ -273,6 +314,8 @@ pub struct Driver {
     cdp: Cdp,
     registry: Arc<Mutex<Registry>>,
     changed: watch::Receiver<u64>,
+    /// Element id bases per tab frame (D-604).
+    bases: Mutex<runtime::Bases>,
     pipe: Arc<Pipe>,
     // Last: removed only after the browser is gone.
     profile: ProfileDir,
@@ -317,6 +360,7 @@ impl Driver {
             cdp,
             registry,
             changed,
+            bases: Mutex::new(runtime::Bases::default()),
             pipe,
             profile,
         };
@@ -389,10 +433,99 @@ impl Driver {
         let _ = tokio::time::timeout(cap, self.cdp.closed()).await;
     }
 
-    /// I-9 `open`.
+    /// I-9 `open`: a new tab at `url`. Returns once its document has committed, settled in
+    /// the page (B-4 #8 DOM part, capped at 3 s) and been walked with a fresh base (D-73), in
+    /// one round trip after the commit. Scheduling (max 6 live tabs, B-4 #10) is T-22.
     pub async fn open(&self, url: &str) -> Result<TabId, DriverError> {
-        let _ = url;
-        todo!("T-22/T-23")
+        // Its own window, so the tab stays visible: a background tab is hidden, and rAF
+        // (which act(id) awaits) never fires there (D-605).
+        // about:blank first, then Page.navigate on the tab's session once the renderer has
+        // acknowledged the runtime install queued at attach (B-4 #3), so the first document
+        // of `url` has `__sb`. Page.navigate is handled in the browser process and does not
+        // wait for renderer-side commands queued before it: a target created with the URL, or
+        // navigated before that reply, committed without Page events or the sb world (seen
+        // on chromium-1248).
+        let created = self
+            .cdp
+            .call(
+                None,
+                "Target.createTarget",
+                json!({ "url": "about:blank", "newWindow": true }),
+            )
+            .await?;
+        let target = created
+            .get("targetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| DriverError::Cdp("Target.createTarget: no targetId".into()))?
+            .to_string();
+        let opened = self.open_target(&target, url).await;
+        if opened.is_err() {
+            // No half-open tab is left behind.
+            drop(
+                self.cdp
+                    .start(None, "Target.closeTarget", json!({ "targetId": target })),
+            );
+        }
+        opened
+    }
+
+    async fn open_target(&self, target: &str, url: &str) -> Result<TabId, DriverError> {
+        let (tab, session, g0) = self
+            .wait_registry(OPEN_CAP, |r| {
+                let t = r.tab_by_target(target)?;
+                let s = r.session(t)?;
+                r.installed(s)
+                    .then(|| Some((t, s.to_string(), r.generation(t, 0)?)))
+                    .flatten()
+            })
+            .await
+            .ok_or_else(|| DriverError::Timeout("open: the new tab did not attach".into()))?;
+        let blank = url.trim().is_empty() || url.trim().eq_ignore_ascii_case("about:blank");
+        if !blank {
+            let nav = self
+                .cdp
+                .call(Some(&session), "Page.navigate", json!({ "url": url }))
+                .await?;
+            if let Some(err) = nav.get("errorText").and_then(Value::as_str) {
+                return Err(DriverError::Cdp(format!("open: {err}")));
+            }
+            if nav.get("isDownload").and_then(Value::as_bool) == Some(true) {
+                return Err(DriverError::Cdp(
+                    "open: the URL is a download, not a page".into(),
+                ));
+            }
+            // The condition: the main frame committed a new document with an sb context.
+            self.wait_registry(OPEN_CAP, |r| {
+                let moved = r.generation(tab, 0)? != g0;
+                let u = r.frame_url(tab, 0)?;
+                (moved && u != "about:blank" && r.sb_context(tab, 0).is_some()).then_some(())
+            })
+            .await
+            .ok_or_else(|| {
+                DriverError::Timeout(format!(
+                    "open: no document committed within {} s",
+                    OPEN_CAP.as_secs()
+                ))
+            })?;
+        }
+        let deadline = Instant::now() + OPEN_CAP;
+        let mut retried = false;
+        loop {
+            let old = self.sb_key(tab, 0);
+            match self
+                .based_ctx(tab, 0, deadline, Some(SettleOpts::default()), false)
+                .await
+            {
+                Ok(_) => return Ok(tab),
+                // The document was replaced under the walk (a redirect): once more in the new
+                // one (B-4 #11).
+                Err(runtime::CallError::Lost) if !retried => {
+                    retried = true;
+                    self.next_ctx(tab, 0, old, deadline).await;
+                }
+                Err(e) => return Err(e.into_driver("open")),
+            }
+        }
     }
 
     /// I-9 `act(tab, program, ctx) -> ActResult`. The gate has already passed the program's
@@ -405,8 +538,7 @@ impl Driver {
         program: &str,
         ctx: &ToolCtx,
     ) -> Result<ActResult, DriverError> {
-        let _ = (tab, program, ctx);
-        todo!("T-20/T-21: B-4 #6 #7 #9")
+        self.act_steps(tab, program, ctx).await
     }
 
     /// The tab's current index (I-5), all frames merged, ElemRefs and `child_frame` rewritten.
@@ -628,6 +760,19 @@ mod tests {
             v
         }
 
+        /// The next `n` messages the client wrote, whole.
+        async fn sent_raw(&mut self, n: usize) -> Vec<Value> {
+            let mut v = Vec::new();
+            for _ in 0..n {
+                let raw = tokio::time::timeout(Duration::from_secs(5), self.sent.recv())
+                    .await
+                    .expect("a message within 5 s")
+                    .expect("transport open");
+                v.push(serde_json::from_slice(&raw).expect("json"));
+            }
+            v
+        }
+
         fn nothing_more_sent(&mut self) -> bool {
             self.sent.try_recv().is_err()
         }
@@ -660,7 +805,7 @@ mod tests {
             "sessionId": "S1", "waitingForDebugger": false,
             "targetInfo": {"targetId": "T1", "type": "page", "url": "https://a.test/"}}}))
             .await;
-        // Everything is on the wire before any reply: no serial round trip. The frame tree is
+        // The setup is on the wire before any reply: no serial round trip. The frame tree is
         // read before Runtime.enable, so replayed contexts find their frames.
         let sent = w.sent(5).await;
         assert_eq!(
@@ -670,7 +815,7 @@ mod tests {
                 "Page.getFrameTree",
                 "Runtime.enable",
                 "Target.setAutoAttach",
-                "Runtime.runIfWaitingForDebugger"
+                "Page.addScriptToEvaluateOnNewDocument",
             ]
         );
         assert!(sent.iter().all(|(s, _, _)| s.as_deref() == Some("S1")));
@@ -694,8 +839,8 @@ mod tests {
         .await;
         assert_eq!(
             w.cdp.pending(),
-            0,
-            "the seed's slot is gone after its reply"
+            1,
+            "the seed's slot is gone after its reply; the install's waits for its own"
         );
     }
 
@@ -713,7 +858,7 @@ mod tests {
                 "Page.enable",
                 "Runtime.enable",
                 "Target.setAutoAttach",
-                "Runtime.runIfWaitingForDebugger"
+                "Page.addScriptToEvaluateOnNewDocument",
             ]
         );
         // A second session on the same page (explicit attach): not tracked, nothing enabled.
@@ -727,6 +872,54 @@ mod tests {
         assert!(w.nothing_more_sent());
         let t = lock(&w.registry).tab_by_target("T1").unwrap();
         assert_eq!(lock(&w.registry).session(t), Some("S1"));
+    }
+
+    #[tokio::test]
+    async fn paused_target_runs_only_after_the_runtime_install_replied() {
+        let mut w = wired();
+        w.inject(json!({"method": "Target.attachedToTarget", "params": {
+            "sessionId": "S1", "waitingForDebugger": true,
+            "targetInfo": {"targetId": "T1", "type": "page", "url": "about:blank"}}}))
+            .await;
+        let sent = w.sent_raw(4).await;
+        let install = &sent[3];
+        assert_eq!(install["method"], "Page.addScriptToEvaluateOnNewDocument");
+        assert_eq!(install["sessionId"], "S1");
+        assert_eq!(install["params"]["worldName"], SB_WORLD);
+        assert_eq!(install["params"]["source"], runtime::INJECTED_JS);
+        assert!(
+            install["params"].get("runImmediately").is_none(),
+            "an sb context in a new tab belongs to a navigated document (D-604)"
+        );
+        // Still paused: its first document must not start before the install is in.
+        assert!(w.nothing_more_sent());
+        assert!(!lock(&w.registry).installed("S1"));
+        w.inject(
+            json!({"id": install["id"].clone(), "sessionId": "S1", "result": {"identifier": "1"}}),
+        )
+        .await;
+        let run = w.sent_raw(1).await;
+        assert_eq!(run[0]["method"], "Runtime.runIfWaitingForDebugger");
+        assert_eq!(run[0]["sessionId"], "S1");
+        w.until("install acknowledged", |r| r.installed("S1")).await;
+        // An error reply (the target went away) resumes it but never counts as installed.
+        w.inject(json!({"method": "Target.attachedToTarget", "params": {
+            "sessionId": "S2", "waitingForDebugger": true,
+            "targetInfo": {"targetId": "T2", "type": "page", "url": "about:blank"}}}))
+            .await;
+        let sent = w.sent_raw(4).await;
+        w.inject(json!({"id": sent[3]["id"].clone(), "sessionId": "S2",
+            "error": {"code": -32000, "message": "gone"}}))
+            .await;
+        let run = w.sent_raw(1).await;
+        assert_eq!(run[0]["method"], "Runtime.runIfWaitingForDebugger");
+        assert_eq!(run[0]["sessionId"], "S2");
+        w.inject(json!({"method": "Target.detachedFromTarget", "params": {"sessionId": "S1"}}))
+            .await;
+        w.until("S1 gone", |r| !r.tracks("S1")).await;
+        let r = lock(&w.registry);
+        assert!(!r.installed("S2"));
+        assert!(!r.installed("S1"), "forgotten with its session");
     }
 
     #[tokio::test]
@@ -748,7 +941,7 @@ mod tests {
                 "Page.enable",
                 "Runtime.enable",
                 "Target.setAutoAttach",
-                "Runtime.runIfWaitingForDebugger"
+                "Page.addScriptToEvaluateOnNewDocument",
             ]
         );
         assert_eq!(lock(&w.registry).tabs().len(), 1);
