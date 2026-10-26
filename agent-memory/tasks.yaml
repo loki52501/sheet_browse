@@ -219,7 +219,7 @@ tasks:
     owner: core/suborch
     branch: swarm/core-T05c
     title: "D-84 not done at merge: Vault::open_for_set returns a VaultEditor (set, remove, names, save; no resolve_into, scrub, install_global), with a test it cannot resolve."
-    status: doing
+    status: done
     claimed_at: "2026-10-25"
     from: T-05
   - id: T-05d
