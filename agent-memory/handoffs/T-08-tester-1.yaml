@@ -1,0 +1,22 @@
+from: tester (core, T-08)
+to: core/suborch, then supreme (merge gate)
+task: T-08
+date: "2026-10-25"
+state: "Acceptance for T-08 at 15e09d3 is green: bench/results/accept-T-08.md has 15 rows, all pass, Verdict: green. crates/harness/tests/accept_t08.rs (18 tests, 15 rows) covers docs/01 Acceptance item 4 through the real harness and harnessd binaries on Postgres with a fake claude, plus every numbered clause of D-116 ((1) placement, (2) crate/bins/deps, (3) marker wake with no poll, (4) due rule + coalescing, skip while running, schedule_fired before launch / no hot loop, (5) watch/reflect skipped with one log line, (6) launch failure -> failed status and Result line, stopped exception, (7) prompt on stdin, absolute SB_RUNS_ROOT, scrubbed answer.md), `harness vault set` never printing the value (canary greps), and `harness ask` printing the AlreadyExists message (B-177). No code change needed."
+not_done: "1. T-09 (D-122): step-1 end-to-end with the echo example, plus the vault grep across ledger, DB and runs/ through a stdio tool server. 2. A live `claude -p` firing (rule 1 keeps it out of tests). 3. Re-run accept_t08 against whatever commit lands the uncommitted edits now in wt/core (sched.rs, cli.rs, daemon.rs, launcher.rs, harnessd.rs, Cargo.toml were modified in the shared tree when I committed; my verdict is for 15e09d3 only)."
+gotchas:
+  - "The guard_write hook refuses writes outside F:/sb-swarm/wt/core, so write tests there and cp them into the detached worktree to run."
+  - "bench/fixtures/fake_claude.rs is compiled by the test with plain `rustc` into CARGO_TARGET_TMPDIR, no Cargo.toml change. Point SB_CLAUDE (binaries) or ClaudeLauncher::print (in-process) at it. FAKE_CLAUDE_DIR records argv/stdin/env per SB_RUN_ID, FAKE_CLAUDE_EXIT sets the exit code, and FAKE_CLAUDE_LEAK=1 prints SB_VAULT_CANARY to stdout in -p mode only."
+  - "Tests that install a global vault or set process env run in a child process: the parent re-runs the test binary with `--exact child_x` and SB_T08_CHILD=child_x, then greps that child's whole stdout and stderr. The child_* tests return at once in a normal run."
+  - "harnessd's vault key is always the OS keychain (no env override, D-101), so a test cannot plant a vault value in the real harnessd without touching the user's keychain. Plant the canary in-process instead (D-116 (7) row)."
+  - "rpassword on Windows opens CONIN$/CONOUT$ and never falls back to stdin. Start `harness vault set` with DETACHED_PROCESS, or it may block on a console."
+  - "merge_gate.py splits table rows on every '|', so an escaped \\| inside a cell shifts the result column. Keep pipes out of report cells."
+  - "acc4 waits for a real minute boundary (up to ~60 s); the whole file takes ~70 s plus build."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/harness/tests/accept_t08.rs
+  - bench/fixtures/fake_claude.rs
+  - bench/results/accept-T-08.md
+  - agent-memory/handoffs/T-08-tester-1.yaml
+verify: "SB_VAULT_CANARY=sbcanary-$(date +%s%N) cargo test -p harness --test accept_t08"
