@@ -1,0 +1,66 @@
+<!doctype html>
+<!--
+  bench/pages/accept-d439.html: D-439 (remove-first rebuilds across batches) for the T-19
+  acceptance (tester-8). The test types one canary into every password field, then drives the
+  site's own handlers. Each replacement shares no identity (id, name, label, aria-label,
+  placeholder, autocomplete) with the removed field, so only D-439's same-parent rule can mark it:
+    #rm-mic   removed, a microtask later one neutral type=text input appended to the same parent
+    #rm-task  removed, 300 ms later one neutral type=text input appended to the same parent
+  Negatives (must keep reading their values):
+    #rm-other removed; 300 ms later a neutral pre-filled input is appended to a different parent
+    #rm-two   removed; 300 ms later two neutral pre-filled inputs are appended to the same parent
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Remove-first rebuilds · acceptance fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } div { margin-top: 4px; min-height: 8px; }</style>
+<script>
+  const $ = (id) => document.getElementById(id);
+  function neutral(id, label, value) {
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = id;
+    n.name = id.replace(/-/g, "_");
+    n.setAttribute("aria-label", label);
+    n.value = value;
+    return n;
+  }
+  async function removeMicro() {
+    const o = $("rm-mic");
+    const p = o.parentNode;
+    const n = neutral("plain-m", "Plain field m", o.value);
+    o.remove();
+    await null;
+    p.appendChild(n);
+  }
+  function removeTask() {
+    const o = $("rm-task");
+    const p = o.parentNode;
+    const n = neutral("plain-t", "Plain field t", o.value);
+    o.remove();
+    setTimeout(() => p.appendChild(n), 300);
+  }
+  function removeOther() {
+    $("rm-other").remove();
+    setTimeout(() => $("elsewhere").appendChild(neutral("coupon", "Coupon", "WELCOME10")), 300);
+  }
+  function removeTwo() {
+    const o = $("rm-two");
+    const p = o.parentNode;
+    o.remove();
+    setTimeout(() => p.append(neutral("first-n", "First name", "Ada"), neutral("last-n", "Last name", "Lovelace")), 300);
+  }
+</script>
+</head>
+<body>
+<main>
+  <h1>Remove-first rebuilds</h1>
+  <form id="f">
+    <div id="h-mic"><input id="rm-mic" type="password" aria-label="Hidden m"></div>
+    <div id="h-task"><input id="rm-task" type="password" aria-label="Hidden t"></div>
+    <div id="h-other"><input id="rm-other" type="password" aria-label="Hidden o"></div>
+    <div id="h-two"><input id="rm-two" type="password" aria-label="Hidden two"></div>
+  </form>
+  <div id="elsewhere"></div>
+</main>
+</body>
+</html>

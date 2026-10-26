@@ -1,0 +1,17 @@
+from: page/rust-coder
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "D-408 applied in commit 0554c29 (crates/sb-act/src/classify.rs, lib.rs), raise-only. (1) Ctx::form_button: a non-submit button/menuitem (not a link) with a form id, or formless but sharing its heading with form rows in the same frame (max over those forms), gets pay_words/upgrade/renew -> Pay and create_text/change_text/(form twofa + set-up verb) -> Account on its own name; with form Pay evidence (ev.pay: card field or checkout text) any single PAY_TOKENS word (checkout, pay, payment, purchase, buy, donate, donation, topup, order, place, confirm, submit, complete, bid, renew, upgrade, subscribe, transfer) is Pay. Form evidence alone does not raise: 'Show details' and 'Back to top' in a card form stay Navigate. (2) names_enter: Enter/Return/NumpadEnter as any segment split at '+', whitespace or control chars is Enter ('Enter+', 'Enter+Shift', ' Enter', 'Enter\\t', '\\tEnter', 'Enter\\0'); 'Enterprise' is not. (3) delete_text: leave group, wipe device (up to one filler word). Doc line near old classify.rs:571 wrapped; the unit-test wall-clock bounds are 5 s each, the evidence_builds()==1 counter is the exact check. New unit test d408_form_buttons_enter_chords_delete_words. Gates (unpiped): fmt --check clean, clippy --all-targets -D warnings clean, cargo test -p sb-act all green (lib 59, accept_t19_classify 16, forms 11, quote_fuzz 6, round2 18, round3 15, wire_from_injected 3)."
+not_done: "1) Reviewer and tester on 0554c29. 2) tests/accept_t19_round3.rs (tester-owned) still has a 250 ms wall-clock bound in d406_enter_in_200_submit_1700_row_form_under_250ms; the tester may want to widen it the same way. 3) Review Should 3's split-heading 2SV set-up (2-Step Verification and Set up your phone on different rows) is still Submit; a word-gap Should per D-407, not touched. 4) Nit 'New password' field without autocomplete still open."
+gotchas:
+  - "A formless 'Create account' button with no heading shared with a form stays Navigate (D-408 scopes the raise to form context)."
+  - "A non-submit 'Create account' button in a login form is now Account (button text counts in a login, as on a submit). Raise-only, costs one ask."
+  - "The heading-shared lookup is one O(n) scan per formless button click with a heading; Enter in a big form still builds evidence once."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-act/src/classify.rs
+  - crates/sb-act/src/lib.rs
+  - agent-memory/handoffs/T-19-rust-coder-7.yaml
+verify: "cargo fmt -p sb-act --check && cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act"

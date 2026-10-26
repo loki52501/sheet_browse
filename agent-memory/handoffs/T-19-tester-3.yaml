@@ -1,0 +1,20 @@
+from: page/tester-3
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Round 2 acceptance for the sb-act half of T-19 (B-7, I-10, D-403, D-404) is green at b1772ca. crates/sb-act/src was last changed in 51f1c7e. Items 1-6 from round 1 were re-run and still pass. Items 7-11 are new in crates/sb-act/tests/accept_t19_round2.rs (18 tests): D-403 key steps, implicit submission and evidence; D-404 2FA, the Delete key, delete dialogs and PlannerError::ChallengeTarget; and a lowering guard that checks every fixture against a field-only submit rule. The fixtures are now shared in crates/sb-act/tests/common/mod.rs. cargo test -p sb-act: 99 passed (unit 48, classify 16, forms 11, quote_fuzz 6, round2 18), 0 failed, 0 ignored. fmt --check and clippy --all-targets -D warnings are clean. Report: bench/results/accept-T-19-sb-act.md, Verdict: green."
+not_done: "1) A reviewer still has to sign off on e0ee962 and 51f1c7e (a tester is not a reviewer). 2) The injected.js half of T-19 is not covered here; injected/ was not touched. 3) B-431 (formless SPA submits) is still open. 4) Open question, not a failure: k#=Space on an <input type=file> row with role textbox is Fill, while c# on it is Navigate (D-403 (1) treats a textbox as a text field)."
+gotchas:
+  - "Class order is Read < Fill < Navigate < Submit < Send < Account < Delete < Pay < Challenge. Fill is below Navigate, so Tab on a link (Fill) is lower than clicking it (Navigate); D-403 (1) allows this."
+  - "check_planner numbers steps after D-430 skipping, so in `t#4=a; c#10; ?s; c#9; ?s` the challenge is step 4, because the ?s counts as a step."
+  - "tests/common/mod.rs carries #![allow(dead_code)] because each test crate that includes it uses only some of the fixtures."
+  - "Untracked bench/pages/accept-*.html and injected/test/accept-t19.test.js, check-wire-shape.js belong to the injected tester and were not staged."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-act/tests/common/mod.rs
+  - crates/sb-act/tests/accept_t19_classify.rs
+  - crates/sb-act/tests/accept_t19_round2.rs
+  - bench/results/accept-T-19-sb-act.md
+  - agent-memory/handoffs/T-19-tester-3.yaml
+verify: "cargo fmt -p sb-act --check && cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act"

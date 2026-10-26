@@ -1,0 +1,22 @@
+from: page/js-coder-5
+to: page/suborch
+task: T-19
+date: "2026-10-25"
+state: "D-438 applied in injected/injected.js (commit 2ec0d4f). (1) S.born keeps added value fields that stay non-sensitive ({t, WeakRef field, WeakRef parent}, 2000 ms, cap 64, never a value); a batch that removes a sensitive field marks (S.sens + markDirty) the remembered fields from earlier batches that share a D-435 key or are the single connected field added to the removal's parent (record target). At add time each added value field is matched against the sensitive value fields already in its record target (not added by the same batch; S.sens members always, up to 64 others through sensitive()), which closes the overlap read. (2) fieldsIn returns value fields only (textarea, inputs other than checkbox/radio/hidden/button/submit/reset/image/file/range/color), so the D-437 swap, S.gone and S.born ignore show checkboxes and hidden inputs. (3) fieldKeys throwing on a removed sensitive field pushes {t, keys: null} (match-all) to S.gone and marks every remembered add (both sides); fieldLabels/byIdIn search every removed node of the record, including a removed label[for] itself. (4) passiveFrame: an hcaptcha.com frame with frame=challenge in its hash returns not passive whenever displayed; size=invisible is read only from the query of google.com/recaptcha/* or recaptcha.net frames. Reviewer-9 probes now: probe-jsdom2 A, A2, B, B3, F ok; probe-jsdom D, D2, D3, D4, D5, E, F ok; probe-chromium fade (during and after), wrapcb, modal ok; probe-v3 hCaptcha hash gives CHALLENGE rows. node --test injected/test/ 87/87 (includes the tester's uncommitted accept-t19.test.js), cargo test -p sb-act --test wire_from_injected 3/3."
+not_done: "1) Remove-first neutral-identity split (probe-jsdom C: remove, await, append an input that shares no key) still reads; D-438 covers only add-first for the same-parent rule. 2) The add-side fail-closed catch (an added field whose fieldKeys throws next to a sensitive one) has no test: sensitive(f) reads el.id before fieldKeys, outside the try, so a throwing id getter on an added field aborts inheritSensitive instead; only reachable from the same JS world (jsdom), not from a page in Chromium (isolated world). 3) The same-parent rule also runs for add-first page transitions: an SPA route that mounts a one-field page before removing a login wrapper from the same parent marks that one field (reads empty|filled), the add-first form of D-437's accepted cost; same-batch two-out-one-in still reads (tested). 4) Caps (S.gone 32, S.born 64, overlap sensitive() calls 64 per parent) are untested. 5) No real hCaptcha capture was taken; the rule follows D-438 (4) as written. 6) Reviewer-8 note 3 (otp/ssn over-match) still open."
+gotchas:
+  - "Mutation runner: runs/js-coder-5/mut.js copies injected/ (without node_modules and accept-t19.test.js) and bench/pages into runs/js-coder-5/mut/<name>, applies one anchor replacement, and runs the D-438|D-437 tests with NODE_PATH pointing at injected/test/node_modules. Pass mutant names as arguments to run a subset; jsdom-only mutants take seconds, browser ones about a minute."
+  - "Mutants killed (12): M1 skip the born pass, M2 never push S.born, M3 drop the same-parent rule, M4 same-parent rule for any count, M5 never prune S.born, M6 skip the overlap check, M7 count every input type, M8 skip a removed label[for] node itself, M9 catch leaves keys [] (fail open), M10 e.out >= 1 && e.sens >= 1, M11 drop the hCaptcha frame=challenge rule, M12 the old size=invisible test on the whole src. M1, M3, M6 are also killed by the Chromium fade test."
+  - "A '#size=invisible' hash right after '#' never matched the old [?&] regex; use '#hl=en&size=invisible' to test the hash case."
+  - "To make fieldKeys throw in jsdom, define an own throwing id getter on a field the walk already marked sensitive (sensitive() then returns from S.sens before reading id)."
+  - "fade-show.html splits show() (mount) from fade() (start the leave) so a test can read while both fields exist without racing the transition."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - injected/injected.js
+  - injected/test/jsdom.test.js
+  - injected/test/browser.test.js
+  - bench/pages/add-first.html
+  - bench/pages/fade-show.html
+  - agent-memory/handoffs/T-19-js-coder-5.yaml
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page node --test injected/test/ && cargo test -p sb-act --test wire_from_injected && node runs/js-coder-5/mut.js"

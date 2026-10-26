@@ -129,18 +129,27 @@ tasks:
     step: 6
     title: "sb-cdp Pipe transport, launch, flattened sessions, pipelining; registry skeleton"
     docs: [docs/05-BROWSER.md]
-    status: todo
+    status: done
+    owner: driver/suborch
+    claimed_at: "2026-10-25"
+    branch: swarm/driver-T18
     note: "gated by swarm.yaml (area driver needs page merged), not by T-17 (D-43)"
   - id: T-19
     step: 6
     title: "injected.js: identity, walk, names, roles, states, flags, collapse, dirty re-walk; acceptance 1"
     docs: [docs/05-BROWSER.md]
-    status: todo
+    status: doing
+    owner: page/suborch
+    claimed_at: "2026-10-23"
     note: "area page, wave 1; includes the sb-act half of B-7 (I-10). Not gated by T-17 (D-43)"
   - id: T-20
     step: 6
     title: "act(id) in page + Rust retry/backoff/5 s cap; acceptance 2"
-    status: todo
+    status: done
+    owner: driver/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/driver-T20
+    note: "branch = main + swarm/driver-T18 + swarm/page (bb520c8) merged locally (D-88)"
     blocked_by: [T-18, T-19]
   - id: T-21
     step: 6
@@ -269,3 +278,27 @@ tasks:
     title: "page review items: Blocking in review-T-19.md, add-first password-field rebuild split across observer batches leaks the password into index()/state() (D-435 (2), hard rule); then its should-fix items."
     status: todo
     from: T-19
+  - id: T-18b
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T18b
+    title: "D-601: first-run download of the pinned Chrome for Testing 156.0.8078.4 into <SB_HOME or cwd>/chromium/, without blocking the transport."
+    status: todo
+    from: T-18
+  - id: T-18c
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T18c
+    title: "review-T-18 leftovers: run the Unix Pipe launch on Linux (only compiled and clippy-checked); a real-Chromium test for getFrameTree seeding and prerender activation (restored me tab with iframes, with T-22 acceptance 4); session_events channel after detach; CdpError::Closed keeps the method; sweep stale profiles/bench-* after a crash; B-601 tab titles (T-22)."
+    status: todo
+    from: T-18
+  - id: T-20b
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T20b
+    title: "review-T-20 round 2 leftovers: D-606 settle inside wait_slot has no effect (drop it or let it run past the slot; supreme to amend D-606); skip the last wait when the next slot is at or past the deadline; D-607 first-paint wait costs 3 s on a page that never paints; open dropped during Target.createTarget leaks the tab; open accepts any URL scheme; dead NoBase path and unused force in based_ctx; a challenge overlay is retried as a cover; open can wait up to 3 x OPEN_CAP; row 1 < 50 ms flaked once in 20 (72 ms, cause unknown, diagnostics added). B-606 (me scheduling, newWindow focus) needs the user; B-607 is area page."
+    status: todo
+    from: T-20

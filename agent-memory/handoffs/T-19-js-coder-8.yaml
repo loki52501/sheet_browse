@@ -1,0 +1,22 @@
+from: js-coder-9
+to: page sub-orchestrator
+task: T-19
+date: "2026-10-26"
+state: "D-442 implemented in commit 295253e (injected/injected.js inheritSensitive): the D-441 skip and the S.born ld flag are gone; for each lost sensitive field g, a remembered field x with x.p === g.parent inherits when g.e.out === 1 (the parent lost exactly one value field; e.out counts fieldsIn() results, which are value fields only, D-438 (2)), else only when it is the single remembered field of the parent (D-438 (1)). Key matches and g.keys === null unchanged. The unused e.swap flag is removed too. node --test injected/test/ 98/98 twice; cargo test -p sb-act --test wire_from_injected 3/3. Mutants: all=false fails jsdom 'two fields added, then removal' and V8; all=true fails the 'a login parent that lost two fields' control."
+not_done: "Tester and reviewer still have to check D-442. Probes still leaking on 295253e, all listed in D-442 as T-19b: N5 (one batch adds copy + another field and removes the password, reads 4), N2 (S.born cap, 70 fields, reads 74), V9 (cap, shared keys, reads 73), V5 (3 batches cross-parent, reads 3), the overlap read while both fields exist (V3m midLeak, Chromium C neutral/wrap/d440 mid getter 3). N2b leaks only on jsdom's real clock (window crossed by slowness), ok frozen."
+gotchas:
+  - "accept-t19.test.js (the tester's file) changed only in A10, A14, A18 plus one helper pastBornWindow(): A10 and A14 call it before their swaps; A18 now asserts Nickname reads filled when the swap's performance.now() is <= 2000 (nick was parsed after time 0, so the swap is inside its window), allows filled or 'ada' above 2000 on a slow machine, and adds a 'late' run per page after the window that must read 'ada'. pastBornWindow is a test-only waitForFunction on performance.now() > loadEventEnd + 2050 (polling 50 ms): S.born has no event at the end of its window."
+  - "helpers.serve: an extra route may carry hold(), a promise the server awaits before answering. browser.test.js uses it for /slow.js (bench/pages/d442-loading.html's parser-blocking script): holdSlow() returns release(); tests release in finally so after() can close the server."
+  - "A field whose value was set by attribute (value=\"Ann\") and is then marked sensitive reads empty, not filled (no caret or validity evidence). jsdom D-442 expectations use { kind: 'masked' } (empty or filled) for those, via sameMasked()."
+  - "helpers.js was CRLF in this worktree (index is LF, text=auto eol=lf); the edit wrote it back LF."
+  - "Old-vs-new runs: runs/js-coder-9/{old,new} (old = 583eae0 injected.js with the new tests; tests patched by runs/js-coder-9/tablepatch.py to print ROW lines). Probe outputs: runs/js-coder-9/r11-*.out, r10-*.out."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - injected/injected.js
+  - injected/test/jsdom.test.js
+  - injected/test/browser.test.js
+  - injected/test/accept-t19.test.js
+  - injected/test/helpers.js
+  - bench/pages/d442-loading.html
+verify: "TMP=F:/sb-swarm/tmp-page node --check injected/injected.js && node --test injected/test/ && cargo test -p sb-act --test wire_from_injected; probes: NODE_PATH=injected/test/node_modules node runs/reviewer-11/probe-r11-chromium.js F:/sb-swarm/wt/page (M1..M4 leak=false getter=0)"

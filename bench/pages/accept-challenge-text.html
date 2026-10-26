@@ -1,0 +1,38 @@
+<!doctype html>
+<!--
+  bench/pages/accept-challenge-text.html: D-429 (2) negatives for the T-19 acceptance. Ordinary
+  UI that uses challenge-like words, with no challenge widget, response field or challenge host
+  on the page: none of it may be CHALLENGE, every control stays actionable, and the text is read.
+    "Press and hold Shift ..." next to a file input
+    "Press and hold the mic button to talk" next to a Mic button, and a "Hold to talk" button
+    "Press & hold to record a voice message."
+    an "Are you human?" quiz heading with a Start button
+  The test then adds real widgets and prompts (h-captcha box, PerimeterX press-and-hold,
+  "Are you a robot?") to check the positives on the same page, and removes them again.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Files and voice · acceptance fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } section { margin-top: 12px; }</style>
+</head>
+<body>
+<main>
+  <h1>Upload and talk</h1>
+  <section id="files">
+    <p>Press and hold Shift to select several files.</p>
+    <input id="files-in" type="file" aria-label="Files" multiple>
+  </section>
+  <section id="voice">
+    <p>Press and hold the mic button to talk</p>
+    <button id="mic" type="button">Mic</button>
+    <button id="hold" type="button">Hold to talk</button>
+    <p>Press &amp; hold to record a voice message.</p>
+  </section>
+  <section id="quiz">
+    <h2>Are you human?</h2>
+    <p>Take our quiz about what makes us human.</p>
+    <button id="start" type="button">Start the quiz</button>
+  </section>
+  <div id="extra"></div>
+</main>
+</body>
+</html>

@@ -10,3 +10,6 @@ publish.workspace = true
 harness-core.workspace = true
 sb-sheet.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
