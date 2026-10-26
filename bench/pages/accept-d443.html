@@ -1,0 +1,51 @@
+<!doctype html>
+<!--
+  bench/pages/accept-d443.html: D-443 (1) and (4) for the T-19 acceptance (tester-9, round 4).
+  The test types one canary into #pw, then drives the site's own handlers. Copies share no
+  identity (id, name, label, aria-label, placeholder, autocomplete) with the password:
+    showLate()  add-first show toggle with a JS-timed exit: a neutral type=text copy carrying the
+                value is appended next to #pw at once, #pw is removed 700 ms later
+    addBeside() a neutral pre-filled field is appended next to #pw2, which stays (D-443 (4):
+                masked for up to 2 s from its add, then it reads)
+    addAway()   a neutral pre-filled field is appended to a box with no password (never masked)
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Overlap read · acceptance fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } div { margin-top: 4px; min-height: 8px; }</style>
+<script>
+  const $ = (id) => document.getElementById(id);
+  function neutral(id, label, value) {
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = id;
+    n.name = id.replace(/-/g, "_");
+    n.setAttribute("aria-label", label);
+    n.value = value;
+    return n;
+  }
+  function showLate() {
+    const o = $("pw");
+    o.parentNode.appendChild(neutral("copy-late", "Visible entry", o.value));
+    setTimeout(() => o.remove(), 700);
+  }
+  function addBeside() { $("box2").appendChild(neutral("beside", "Beside entry", "beside text")); }
+  function addAway() { $("box3").appendChild(neutral("away", "Away entry", "away text")); }
+</script>
+</head>
+<body>
+<main>
+  <h1>Sign in</h1>
+  <form id="f1" action="/login" method="post">
+    <label>Email <input id="email" name="email" type="email" value="ada@example.org"></label>
+    <div id="box1"><label for="pw">Password</label> <input id="pw" name="password" type="password" autocomplete="current-password"></div>
+    <button id="show" type="button" onclick="showLate()">Show password</button>
+  </form>
+  <form id="f2" action="/pin" method="post">
+    <div id="box2"><label for="pw2">PIN</label> <input id="pw2" name="pin" type="password"></div>
+    <button id="beside-btn" type="button" onclick="addBeside()">Add beside</button>
+  </form>
+  <section><div id="box3"><label>Note <input id="note" name="note" value="kept"></label></div>
+    <button id="away-btn" type="button" onclick="addAway()">Add away</button></section>
+</main>
+</body>
+</html>

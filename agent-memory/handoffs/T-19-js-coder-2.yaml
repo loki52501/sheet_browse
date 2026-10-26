@@ -1,0 +1,37 @@
+from: page/js-coder
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "D-405 (1)-(10) applied in injected/injected.js and injected/media.js, with decisions D-422..D-428 and interface change B-412 (I-11 shapes). `node --test injected/test/` now runs four suites (jsdom, browser, media, accept-t19): 56/56, three consecutive green runs. `cargo test -p sb-act` green including the new crates/sb-act/tests/wire_from_injected.rs, which deserializes the committed injected/test/fixtures/register.index.json and register.text.json into Vec<IndexRow> / Vec<TextBlock> and classifies the real Register click as Account. Measured: about:blank settle ~150 ms, empty body without scripts ~155 ms, scripted empty body ends at content_ms (~1010 ms), busy.html cap 3000-3016 ms (one 3082 ms outlier seen once under parallel cargo load), frames() budget 400 ms honoured (~405 ms for 400 requested times)."
+not_done: "1) B-431 (synthetic form ids for formless SPA field groups) still open. 2) data/roles.txt drift test (B-404 default) not written: the file does not exist yet. 3) Review notes not taken: index() delta API (D-51 incremental shipping), aria-labelledby target text changes do not re-dirty the control. 4) sb-driver must now walk({base}) after every navigation and in every frame before any read (B-412), and per D-424 must not read a child frame whose owner row is not visible (a hidden reCAPTCHA bframe child answers with its own challenge-page row)."
+gotchas:
+  - "Chromium resets an input's selection when its type changes, so caret evidence for empty|filled is gone after a show-password toggle; injected.js keeps the last evidence (from a read or the field's last input event) across a type change (D-426)."
+  - "frames.html's captcha child is now served from /cdn-cgi/challenge-platform/frame-child.html; helpers.serve maps that prefix to bench/pages, since a bare captcha substring in a URL no longer marks a page as a challenge (D-405 (3))."
+  - "Test open() helpers in browser.test.js and accept-t19.test.js run walk({base: 1}) after load (opts.base sets another base, null skips); call index() in a child frame only after walking that frame."
+  - "Regenerate the wire fixtures with `node injected/test/gen-fixtures.js` whenever index()/text() output for register.html changes; browser.test.js fails until you do (boxes are compared for presence only)."
+  - "accept-t19.test.js A3b asserts the busy cap stays under 3050 ms over 20 runs; running cargo or another browser suite in parallel can push one run past it."
+  - "Under index.js every top-level before() hook is shared by all four suites, so one failing hook fails all 56 tests. media.test.js recorded a broken clip under load (0.96 s, white only) and once timed out its 10 s recording wait, after which the run hung; it now validates the clip (every colour, at least 2 s, played from a blob), re-records up to 3 times, waits up to 30 s and closes the recording context on failure."
+  - "Bash heredocs with apostrophes still fail here; use the Edit tool or quote-free text."
+decisions_made: [D-422, D-423, D-424, D-425, D-426, D-427, D-428]
+blockers_opened: [B-412]
+files_touched:
+  - injected/injected.js
+  - injected/media.js
+  - injected/test/helpers.js
+  - injected/test/index.js
+  - injected/test/package.json
+  - injected/test/jsdom.test.js
+  - injected/test/browser.test.js
+  - injected/test/media.test.js
+  - injected/test/accept-t19.test.js
+  - injected/test/gen-fixtures.js
+  - injected/test/fixtures/register.index.json
+  - injected/test/fixtures/register.text.json
+  - bench/pages/frames.html
+  - bench/pages/challenge-interstitial.html
+  - bench/pages/challenge-widgets.html
+  - bench/pages/how-captchas-work.html
+  - crates/sb-act/tests/wire_from_injected.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+verify: "cd injected/test && npm ci && cd ../.. && node --test injected/test/ && cargo test -p sb-act"

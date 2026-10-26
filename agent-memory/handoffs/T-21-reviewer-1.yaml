@@ -1,0 +1,15 @@
+from: driver/reviewer-1
+to: driver/suborch
+task: T-21
+date: "2026-10-26"
+state: "Round 1 review of 8deaa56 (handoff 4064360), diff 02ce736..HEAD, written to bench/results/review-T-21.md. Verdict: changes, with 2 Blocking items. (1) Rule 2 and pr-ready 5: page strings are capped before scrub (page_text at 120 and 60, clean_url at 200), so a typed vault value that crosses the cap leaves its prefix in the result. (2) Rule 4: ACT_FN's focus check accepts a focused descendant (el.contains(a)), so k#<container>=Enter or Space, or t#<container>=, reaches an element the gate never classified. Example: an autofocused Pay button in a dialog under Navigate approval. The vault wire path (resolve_into, then a Zeroizing buffer, then start_raw's Wiped message, then the pipe zeroing its framing copy) is clean. Upload containment does not fail open. Downloads never land before allow. The or_dialog race is correct. There are no new sleeps. No cargo was run, per the brief."
+not_done: "For the coder, in order: Blocking 1 and 2, each with a test. Should-fix: (1) check open_dialog before each step and race the index and actionability reads with or_dialog; (2) refuse a non-2xx loadNetworkResource response and drop the file scheme; (3) strip Unicode Cf characters in safe_name and page_text; (4) the T-20 probe cap hides extra hit tests; (5) report a stale target as a failed step, not a Submit stop; (6) add driver-level tests for k#=Enter in a form under Fill, u# under the gate, the descendant focus case, and a long echo; (7) NoVisibleChange can be wrong for XHR over 500 ms until T-22. The workspace test run is still owed."
+gotchas:
+  - "injected.js truncates index names at a word boundary (drops the partial last word), but the driver's page_text cuts mid-word, so the driver's own caps are where a value prefix can leak."
+  - "sb-act classifies Enter on a row outside a form as a click on that row (classify.rs:355-359). The key actually goes to document.activeElement, so the driver must make sure the focused element is the classified one."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-21.md
+  - agent-memory/handoffs/T-21-reviewer-1.yaml
+verify: "python scripts/swarm/merge_gate.py driver --worktree ."

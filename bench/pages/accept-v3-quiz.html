@@ -1,0 +1,97 @@
+<!doctype html>
+<!--
+  bench/pages/accept-v3-quiz.html: D-436 and D-435 (3) for the T-19 acceptance (tester-8).
+  An "Are you human?" quiz heading, a "Press and hold the button to start" line, a Start button
+  and an ordinary form. The query string picks what else is on the page (no network: every
+  frame is srcdoc):
+    ?v=none        nothing else
+    ?v=badge       an invisible reCAPTCHA v3 badge (fixed, with its logo frame and its hidden
+                   g-recaptcha-response textarea inside) plus the hidden challenge bframe
+    ?v=bound       a v3-bound <button class="g-recaptcha" data-sitekey data-callback>
+    ?v=script      a script element carrying data-sitekey (v3 render config)
+    ?v=scriptshown the same script styled display:block with text, so it renders a box: a script
+                   is never challenge context, displayed or not (D-436)
+    ?v=invisible   a data-size=invisible widget with its frame
+    ?v=hidden      an hCaptcha box that is display:none
+    ?v=v3all       badge + bound + script + invisible together
+    ?v=v2          a visible reCAPTCHA v2 checkbox (div.g-recaptcha with its 304x78 frame)
+    ?v=v2frame     only the visible v2 checkbox frame, no wrapper
+    ?v=resp        a g-recaptcha-response field outside any badge
+    ?v=v3v2        everything from v3all plus the visible v2 checkbox
+  Passive v3 markers are not challenge context: nothing on the page may be CHALLENGE. A visible
+  widget, a challenge frame or a response field is: the heading and the hold line become
+  CHALLENGE, while Start, Email and Send stay ordinary, actionable rows.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Quiz night · acceptance fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } section { margin-top: 12px; }</style>
+</head>
+<body>
+<main>
+  <h1>Quiz night</h1>
+  <section id="quiz">
+    <h2>Are you human?</h2>
+    <p>Take our quiz about what makes us human.</p>
+    <p>Press and hold the button to start</p>
+    <button id="start" type="button">Start the quiz</button>
+  </section>
+  <form id="news" action="/news" method="post">
+    <label>Email <input id="email" name="email" type="email"></label>
+    <span id="send-slot"><button id="send" type="submit">Send</button></span>
+  </form>
+  <div id="extra"></div>
+</main>
+<div id="tail"></div>
+<script>
+  (function () {
+    const v = new URLSearchParams(location.search).get("v") || "none";
+    const badge =
+      '<div class="grecaptcha-badge" data-style="bottomright" style="position:fixed;right:0;bottom:14px;width:256px;height:60px">' +
+      '<div class="grecaptcha-logo"><iframe title="reCAPTCHA" srcdoc="&lt;p&gt;badge&lt;/p&gt;" style="width:256px;height:60px;border:0"></iframe></div>' +
+      '<textarea id="g-recaptcha-response" name="g-recaptcha-response" class="g-recaptcha-response" style="display:none"></textarea></div>' +
+      '<div style="visibility:hidden;position:absolute;top:-10000px"><iframe title="recaptcha challenge expires in two minutes" srcdoc="&lt;p&gt;c&lt;/p&gt;"></iframe></div>';
+    const script = '<script type="text/plain" id="rc-cfg" data-sitekey="fixture-v3" data-action="quiz"><\/script>';
+    const invisible =
+      '<div id="inv" class="g-recaptcha" data-sitekey="fixture" data-size="invisible">' +
+      '<iframe title="reCAPTCHA" srcdoc="&lt;p&gt;i&lt;/p&gt;" style="width:256px;height:60px;border:0"></iframe></div>';
+    const hidden = '<div id="hc-hidden" class="h-captcha" data-sitekey="fixture" style="display:none;width:300px;height:60px"></div>';
+    const v2 =
+      '<div id="v2" class="g-recaptcha" data-sitekey="fixture" style="width:304px;height:78px">' +
+      '<iframe title="reCAPTCHA" width="304" height="78" srcdoc="&lt;p&gt;checkbox&lt;/p&gt;" style="border:0"></iframe></div>';
+    const v2frame = '<iframe id="v2f" title="reCAPTCHA" width="304" height="78" srcdoc="&lt;p&gt;checkbox&lt;/p&gt;" style="border:0"></iframe>';
+    const resp = '<textarea id="resp" name="g-recaptcha-response" style="display:none"></textarea>';
+    const bind = () => {
+      const b = document.getElementById("send");
+      b.className = "g-recaptcha";
+      b.setAttribute("data-sitekey", "fixture-v3");
+      b.setAttribute("data-callback", "onSubmit");
+      b.setAttribute("data-action", "submit");
+    };
+    const extra = document.getElementById("extra");
+    const tail = document.getElementById("tail");
+    const v3all = () => {
+      tail.innerHTML = badge;
+      bind();
+      extra.innerHTML = script + invisible;
+    };
+    if (v === "badge") tail.innerHTML = badge;
+    else if (v === "bound") bind();
+    else if (v === "script") extra.innerHTML = script;
+    else if (v === "scriptshown") {
+      extra.innerHTML = '<script type="text/plain" id="rc-cfg" data-sitekey="fixture-v3" style="display:block;width:200px;height:20px">render=fixture-v3<\/script>';
+    }
+    else if (v === "invisible") extra.innerHTML = invisible;
+    else if (v === "hidden") extra.innerHTML = hidden;
+    else if (v === "v3all") v3all();
+    else if (v === "v2") extra.innerHTML = v2;
+    else if (v === "v2frame") extra.innerHTML = v2frame;
+    else if (v === "resp") extra.innerHTML = resp;
+    else if (v === "v3v2") {
+      v3all();
+      extra.insertAdjacentHTML("beforeend", v2);
+    }
+    document.documentElement.setAttribute("data-variant", v);
+  })();
+</script>
+</body>
+</html>

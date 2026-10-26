@@ -1,0 +1,23 @@
+from: page/tester-7
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Round-2 acceptance of the T-19 JS half (B-4 #4 #6 #8, B-5, B-9 media.js part, I-11 with D-73) against HEAD af7f3b2, which includes 4d1c76d (D-405, D-422..D-428) and 9ed9218 (D-429). Verdict: green, 14/14 rows pass (bench/results/accept-T-19-js.md; merge_gate check_accept returns None). New tests in injected/test/accept-t19.test.js: A8 no-base shapes (35 calls exactly {why: no base}, plus navigation and child frame), A9 challenge-page shapes (challenge path and Just a moment title), A10 password canary over type swap, -webkit-text-security, autocomplete, pw- name and three rebuild styles, A11 D-429 negatives and positives on bench/pages fixtures. node --test injected/test/ ran 65/65 three times in a row, 61/61 before the new tests. cargo test -p sb-act --test wire_from_injected 3/3, cargo test -p sb-sheet index_row_wire_shape 1/1. A run with SB_VAULT_CANARY set: 0 canary hits in stdout, runs/, the 11 dump files, injected/ and bench/. Each of 6 mutants (no inheritance, no pw- names, id before base, non-integer base, challenge context always on, no title check) is killed by the intended new test. A3b busy cap 3000.1..3016.1 ms over 100 calls; no flakes."
+not_done: "1) Spec owner: on a page with only an invisible reCAPTCHA v3 badge or a v3-bound data-sitekey button, an Are you human? quiz heading becomes CHALLENGE (probe runs/accept-T-19-js-r2/probe-v3-quiz.js, not committed). D-429 wording allows it, but D-405 (5) and D-424 intend v3 never to stop. Proposed default: passive v3 markers do not count as challenge context. 2) Contract wording: __sbMedia frame() before base gives {t:null, why:no base}, and frames(id,[a,b]) gives a single t:null entry, not one per time. Every whole-call refusal does this. Proposed default: the I-11 notes say a single t:null entry is a whole-call refusal. 3) Not covered by design: a rebuild in a later task or into an unrelated parent, un-observed open shadow roots, fields built detached (js-coder-3 not_done 4 and 5)."
+gotchas:
+  - "merge_gate.py check_accept treats every line starting with | as one table: a second table, or a | inside a cell (even in backticks), fails the gate. Keep one table per accept file and write alternation patterns as repeated --test-name-pattern flags."
+  - "The write guard rejects files outside the worktree (F:/sb-swarm/tmp-page included): put tester scratch scripts under runs/. Bash heredocs with apostrophes fail; use the Write or Edit tool."
+  - "rm -rf on a shell variable path is blocked by a safety check: build mutant snapshots in fresh directories instead of deleting old ones."
+  - "Mutation snapshots: git archive HEAD injected bench/pages into a temp dir, copy the new test file and fixtures, run with NODE_PATH=<worktree>/injected/test/node_modules."
+  - "SB_VAULT_CANARY set in a Bash command is not visible to the scan_output hook. Grep with -c or -l only, so the canary is never printed."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - injected/test/accept-t19.test.js
+  - bench/pages/accept-pw.html
+  - bench/pages/accept-challenge-page.html
+  - bench/pages/accept-just-a-moment.html
+  - bench/pages/accept-challenge-text.html
+  - bench/results/accept-T-19-js.md
+  - agent-memory/handoffs/T-19-tester-7.yaml
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page node --test injected/test/ && cargo test -p sb-act --test wire_from_injected"

@@ -1,0 +1,22 @@
+from: driver/suborch
+to: supreme, next driver session
+task: T-21
+date: "2026-10-26"
+state: "T-21 done on swarm/driver-T21 (main + swarm/driver-T20 + swarm/page 0a87891 merged locally, D-88): input synthesis (click/check/type/select/key/upload/scroll, frame offsets with per-parent scroll), per-step gate on the live row before any input (H-1.4, rule 4), exact-focus rule for k#/t# (D-615), @vault resolved only inside ToolCtx::resolve_into into a zeroed start_raw buffer, consequence capture (Navigated, OpenedTab, Dialog paused, Download stopped and asked, NoVisibleChange), Driver::dialog and Driver::download, B-8 diff, scrub-before-cap with an 8-char prefix rule (D-616). Review round 2 approve, no Blocking (bench/results/review-T-21.md); acceptance round 2 green, 21 rows (bench/results/accept-T-21.md); cargo test -j 2 --workspace --no-fail-fast -- --test-threads=1: 998 passed, 0 failed, 5 ignored; canary sweep 0 hits."
+not_done: "PR for T-21. Then T-22 (registry complete, settle() with Network in-flight tracking, B-614 frame-0 consequence window, B-601 titles, close(), acceptance 4 and 5) on swarm/driver-T22 from main + swarm/driver-T21. Follow-up T-21b filed."
+gotchas:
+  - "Rule 4 residual for supreme: focus inside a closed shadow root is retargeted to the host, so k#/t# on such a host passes the exact-focus check (review-T-21 round 2 Should-fix 1, T-21b item 1). Clicks on closed hosts are equally blind because injected.js cannot index closed roots."
+  - "Use a vault canary containing '-': core's vault_scrub_t05_fix fails on undashed canaries (older core bug, not driver)."
+  - "tabs()/frames() scrub through core's global scrubber, which is empty until install_global runs (the MCP server does it at start); B-613 asks core for a ToolCtx::scrub and the cut-prefix rule."
+  - "Python write_text on this host writes CRLF; normalise to LF before committing."
+decisions_made: [D-608, D-609, D-610, D-611, D-612, D-613, D-614, D-615, D-616, D-617, D-618, D-619]
+blockers_opened: [B-608, B-609, B-610, B-611, B-612, B-613, B-614]
+files_touched:
+  - crates/sb-driver/
+  - crates/sb-cdp/
+  - agent-memory/tasks.yaml
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - bench/results/review-T-21.md
+  - bench/results/accept-T-21.md
+verify: "SB_VAULT_CANARY=sbcanary-<unique> cargo test -j 2 -p sb-driver -p sb-cdp -- --test-threads=1"

@@ -1,0 +1,28 @@
+<!doctype html>
+<!--
+  bench/pages/popup.html: new-tab fixture for docs/05 B-4 #9 and acceptance 3/4.
+    target=_blank link          opens_new_tab in the index; the driver reports "opened tab 2"
+    onclick="window.open(...)"  opens_new_tab from the handler attribute
+    listener window.open        invisible to the index (isolated world cannot see listeners);
+                                only the driver's Target.attachedToTarget sees it
+    no-op button                "no visible change"
+    same-tab link               navigates, opens_new_tab false
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Popups · fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } button, a { display: block; margin: 12px 0; }</style>
+</head>
+<body>
+<main>
+  <h1>Popups</h1>
+  <a id="newtab" href="register.html" target="_blank">Open register in a new tab</a>
+  <button id="pop" type="button" onclick="window.open('register.html', 'reg', 'width=640,height=640')">Open popup window</button>
+  <button id="pop2" type="button">Open popup from a listener</button>
+  <button id="noop" type="button">Does nothing</button>
+  <a id="same" href="register.html">Register in this tab</a>
+</main>
+<script>
+  document.getElementById("pop2").addEventListener("click", () => window.open("register.html"));
+</script>
+</body>
+</html>

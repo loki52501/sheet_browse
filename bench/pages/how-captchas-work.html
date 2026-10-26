@@ -1,0 +1,24 @@
+<!doctype html>
+<!--
+  bench/pages/how-captchas-work.html: an ordinary article about captchas, served by the tests at
+  /posts/how-captchas-work (D-405 (3)). A URL or text that merely mentions captcha is not a
+  challenge: index() and text() must be the normal article, with no CHALLENGE row. The long
+  paragraph quotes "I'm not a robot" on purpose (over the short-prompt limit, D-422).
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>How captchas work · Fixture blog</title></head>
+<body>
+<header><nav aria-label="Blog"><a href="/">Home</a> <a href="/posts">Posts</a></nav></header>
+<main>
+  <article>
+    <h1>How captchas work</h1>
+    <p>Captchas try to tell people and programs apart. The classic checkbox asks you to tick
+      "I'm not a robot" and then watches how the pointer moved, how long the page was open and
+      what the browser reports about itself, before it decides whether to show a puzzle at all.</p>
+    <h2>Invisible checks</h2>
+    <p>Newer versions run without any visible widget and only score the visit.</p>
+    <form action="/subscribe"><label for="nl">Email</label> <input id="nl" type="email"> <button type="submit">Subscribe</button></form>
+  </article>
+</main>
+</body>
+</html>

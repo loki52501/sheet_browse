@@ -1,0 +1,25 @@
+from: page/js-coder-6
+to: page/suborch
+task: T-19
+date: "2026-10-25"
+state: "D-439 applied in injected/injected.js (commit edd30e4). (1) Remove-first across batches: in inheritSensitive a batch's S.gone entries are built first ({t, keys, parent: null}); for a parent that lost exactly one value field, a sensitive one, and gained none in the batch, the entry gets parent = WeakRef(parent) (a same-batch one-for-one still goes through D-437). On the add side, the first later batch within 2000 ms that adds value fields to an armed parent consumes the entry (parent set to null) and, when it adds exactly one, that field inherits (S.sens). An armed entry is kept even when the removed field has no keys. (2) The add side's S.sens.has(f) || sensitive(f) check and every key read run inside the fail-closed try; a throw marks the field sensitive and the batch goes on. The removal side's sensitive(f) is also wrapped: a removed field whose sensitivity cannot be read counts as a sensitive one (its keys then usually throw too, giving a match-all S.gone entry, D-438 (3)). Throwing getters are reachable only from the same JS world (jsdom), not from a page in Chromium. (3) Chromium: bench/pages/remove-first.html (remove; setTimeout 0; append a neutral input into the same parent) and a browser test asserting zero value getter calls. bench/pages/add-first.html gains #w6 (user + password in one wrapper) for the lost-two control. node --test injected/test/jsdom.test.js 39/39 (2 new), jsdom.test.js + browser.test.js 65/65 (3 new), node --test injected/test/ 89/91 (the 2 failures are B-415, below, and also fail on HEAD 2ec0d4f), cargo test -p sb-act --test wire_from_injected 3/3."
+not_done: "1) B-415: accept-t19 A10 and A14 fail in full-suite runs (and intermittently alone) on HEAD 2ec0d4f and on edd30e4 alike: D-438 (1)'s born same-parent rule counts parse-time inserts, so #nick (added to the form through its label at load) is 'the single field added' when a wrapper in the same form is swapped within 2 s of load. Not fixed (outside D-439); proposed defaults in blockers.yaml B-415. 2) Consumption is my reading of 'a later batch adds exactly one': the first later batch that adds value fields to the armed parent decides; a later batch adding two fields consumes the entry without marking, and a third single add later does not inherit. 3) Over-mark cost (accepted by D-437/D-439): a one-field step that removes its only (sensitive) field and, within 2 s, appends any one field into the same parent marks it. 4) Caps still untested (S.gone 32, S.born 64, NEAR_MAX 64). 5) A field counted under two record targets (parser or incremental builders: container added, then the input into it, same batch) counts for both parents; that is the root of B-415."
+gotchas:
+  - "Mutation runner: runs/js-coder-6/mut.js (copy of js-coder-5's, pattern D-439|D-438|D-437|D-435). Mutants killed (11): N1 never arm the parent (jsdom + Chromium), N2 ignore heirs (jsdom + Chromium), N3 heir for any count, N4 entry not consumed, N5 arm when the parent lost two, N6 S.gone never pruned, N7 add-side sensitive() back outside the try, N8 add-side catch fails open, N9 removal-side catch fails open, N10 drop a keyless armed entry, N11 swap counts >= 1. js-coder-5's M2-M9 still killed on the new code (M10's anchor changed; N11 is its replacement)."
+  - "runs/js-coder-6/base.js copies injected/ and bench/pages with HEAD's injected.js into runs/js-coder-6/base so the same tests (accept-t19 included) can run against the old code; run node --test runs/js-coder-6/base/injected/test/ with NODE_PATH=injected/test/node_modules. On HEAD all 3 new tests and the tester's A17 D-439 fail."
+  - "runs/js-coder-6/dbg.js builds a copy whose S.sens logs each add with its caller line into globalThis.__sensLog (world sb); probe-nick2.js shows #nick marked by markSens (the born pass) at btn-wrap within 2 s of load and not after a 2.5 s wait."
+  - "In a page fixture, an inline onclick handler resolves names through the form first: a button id='show' inside a form shadows a global function show(). remove-first.html calls reveal()."
+  - "A sensitive field with no value reads {kind: 'empty'}; a non-sensitive empty field reads {kind: 'text', text: ''}, so 'empty' is enough to prove a field with no value was marked."
+  - "To make fieldKeys throw but not sensitive() on an added field, give it an own id getter that returns '' on the first read and throws after (sensitive reads id once); delete the own property after the observer ran and before the walk."
+decisions_made: []
+blockers_opened:
+  - B-415
+files_touched:
+  - injected/injected.js
+  - injected/test/jsdom.test.js
+  - injected/test/browser.test.js
+  - bench/pages/add-first.html
+  - bench/pages/remove-first.html
+  - agent-memory/blockers.yaml
+  - agent-memory/handoffs/T-19-js-coder-6.yaml
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page node --test injected/test/ && cargo test -p sb-act --test wire_from_injected && node runs/js-coder-6/mut.js"

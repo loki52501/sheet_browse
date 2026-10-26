@@ -1,0 +1,21 @@
+from: page/tester-9
+to: page/suborch
+task: T-19
+date: "2026-10-26"
+state: "Round-4 combined acceptance of T-19, pinned to a9e246a (code 8fb00b4, D-443), in bench/results/accept-T-19.md. Verdict red: 34 rows, 32 pass, 2 fail (J24 A21, J19 the full suite). Both fails have one cause, review-T-19 round 8's Blocking item (Y7 synced twin shown by display, Y6 clone and hide). It leaks at a9e246a in my own test: A21 reads {twin-t: 15, clone-c: 5} and the value reaches __sb output in-page. D-444 (1) fixes it but is not implemented at a9e246a. A21 passes on reviewer-13's prototype (runs/reviewer-13/fix). Every other row is green: sb-act 145/145, clippy and fmt clean. The full suite was 104/104 x5 and 105/105 x4 before A21 existed, and is 105/106 x3 on the committed files (i1..i3). A18 alone passed 6 of 6, and A3b peaked at 3015.9 ms over 280 calls. The SB_VAULT_CANARY greps (TAP, runs/, injected/, bench/, the dump dir, the whole TMP tree) found 0 hits in 3 canary runs. Judgement on the js-coder test changes: A10, A14 and A16 still test their items. A18 now pins D-442 (3)'s accepted over-mark instead of D-435 (1) inside the window, and the row is restated. A10 lost its inside-window leak coverage, which new A19 puts back. I tightened A14: q and nick must read text at r2, because D-443 (4) does not cover them. New A20 checks D-443 (1)(4) independently of O1..O3. Mutants at a9e246a: 8 of 8 killed by the full suite; allone and non5 survive accept-t19 alone."
+not_done: "1) Implement D-444 (1) (coder), then re-run J24 (A21) and J19 (full suite x3). A21 is deterministic, with no timing involved. 2) D-444 (2) Y3/Y3d (a password moved in the copy's batch) and D-444 (3) Y5 (a new hidden password with the old key) have no tester row. Add them when D-444 lands. 3) accept-t19 has no D-443 (2) or (3) row (the allone and non5 mutants are only killed by jsdom.test.js's D-443 test). 4) A18 asserts exactly filled inside the window. If B-415 is fixed without the over-mark, relax it to filled or text. 5) T-19b observation: masked fields read empty although pre-filled (A14 r2: dn, bio, phone, l-email), which can make a planner retype. 6) Still open by decision (T-19b): S.born cap, cross-parent copies, exits longer than 2 s."
+gotchas:
+  - "HEAD moved during the run (7c73a1c review round 8, a95a31a D-444 decided), and a js-coder has staged and unstaged edits to injected.js, browser.test.js, jsdom.test.js and d444-twins.html in the worktree. Commit your own files with git commit -- <paths> only. Run tests from a git archive snapshot (runs/tester-11/snap), never from the worktree."
+  - "accept-t19 writes its dumps to os.tmpdir()/sb-accept-T-19-js. With TMP set to F:/sb-swarm/tmp-page, the reviewer and every tester share that directory, so check the mtimes before you read a dump."
+  - "Keep the canary string outside runs/ (I kept it in the session scratchpad), or the runs/ grep finds the canary file itself."
+  - "page.evaluate drops undefined object keys, so deepEqual against {kind, text: undefined} fails. Compare with {kind} only."
+  - "In leak fixtures, give the twin or copy neutral keys (no password-like name or aria-label). Otherwise the name heuristics mask it, and the test passes for the wrong reason."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - injected/test/accept-t19.test.js
+  - bench/pages/accept-d443.html
+  - bench/pages/accept-d444.html
+  - bench/results/accept-T-19.md
+  - agent-memory/handoffs/T-19-tester-9.yaml
+verify: "git archive a9e246a injected bench/pages into a fresh dir, copy in injected/test/accept-t19.test.js and bench/pages/accept-d44[34].html, then with TMP=TEMP=TMPDIR=F:/sb-swarm/tmp-page NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules run node --test injected/test/ (105/106, A21 fails until D-444 (1) lands) and cargo test -p sb-act (145 passed)"

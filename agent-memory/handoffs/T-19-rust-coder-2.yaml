@@ -1,0 +1,18 @@
+from: page/rust-coder
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "D-58 (B-430) applied in crates/sb-act/src/classify.rs, commit c92695b. submit() now raises Submit to Pay when the card/IBAN field rule (D-402) fires OR is_pay(): the submit button's name, or form_texts() (headings over the button and form rows, plus role=form row names) say checkout / check out, place order, confirm order, pay (pay now), buy now, complete purchase, add card. Raise-only via max (D-36). Enter in a form raises through its submits as before. Hints (D-434) are kept. No public API change, no new deps. fmt and clippy --all-targets -D warnings clean; cargo test -p sb-act passes 35/35 (3 new: checkout_text_is_pay, checkout_text_negatives, checkout_text_keeps_hints_and_max)."
+not_done: "1) reviewer + tester on 706dc5a and c92695b (a coder does not accept its own work). 2) B-431 (formless SPA submits get no form context, so a formless 'Place order' only gets the button-name rule, not heading text) still waits on the js-coder's synthetic form id."
+gotchas:
+  - "Matching is whole words from tokens(), never substrings: 'Repay later', 'Payroll settings', 'Display options', 'Link PayPal account' are not Pay. 'Pay with PayPal', 'Google Pay', 'Apple Pay' are Pay (intended: a false Pay costs one ask)."
+  - "Two-word phrases allow fillers: place/confirm ... order within 2 words, complete ... purchase within 2, add ... card within 3 ('Add a new card'; also 'Add gift card', accepted as a false Pay). check out and buy now must be adjacent."
+  - "The text rule applies only to submit-type steps (a SUBMIT click or Enter in a form with a submit). A non-submit 'Pay' link is Navigate, as before; a formless SPA button that injected.js does not flag submitish is not raised (B-431)."
+  - "Heading text applies to login forms too (unlike Account, D-433): a login under a 'Checkout' heading is Pay. Left as is per D-58 raise-only; flag to suborch if guest-checkout logins ask too often."
+  - "injected/test/ is untracked work from the js-coder in this worktree; not staged."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-act/src/classify.rs
+  - agent-memory/handoffs/T-19-rust-coder-2.yaml
+verify: "cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act"

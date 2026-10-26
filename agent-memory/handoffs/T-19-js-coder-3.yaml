@@ -1,0 +1,19 @@
+from: page/js-coder-3
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "D-429 applied in injected/injected.js (commit 9ed9218), resolving review-T-19-js round 2 Should 1 and 2. (1) onMut: inheritSensitive() marks every input/textarea added by the same mutation batch that removed a sensitive field (itself or inside a removed subtree), when the add lands in the parent it was removed from or inside it; doWalk() and ensure() call flushMut() (mo.takeRecords) first, so a rebuild in the same task as the read is marked before anything reads it. SENSITIVE_NAME_RE gains \\bpw\\b and pw[_-]. (2) CHALLENGE_TEXT_RE lost the bare press-and-hold and are-you-human alternatives: challengeWords() accepts press (and|&) hold only with a human/robot/bot word, and are you (a) human only when S.chCtx (challengeContext(): a response field, data-sitekey / hcaptcha widget id / #px-captcha / captcha, turnstile, geetest, arkose, funcaptcha class or id, or a challenge frame in the light DOM); a change of chCtx forces a full walk. 'Are you a robot' stays a strong prompt. Optional note taken: walk({base}) needs a JS number that is a safe positive integer, a numeric string is no base. node --test injected/test/ 61/61 (56 before plus 5 new), cargo test -p sb-act --test wire_from_injected 3/3. register fixtures unchanged (no regeneration needed). Mutation checks: each new jsdom and Chromium test fails with its fix removed."
+not_done: "1) Review round-2 note 'Just a moment' title without the ellipsis left as is: it over-flags, which is the safe direction, and dropping it could miss a Cloudflare interstitial. 2) Delta index() (D-51 incremental shipping) and aria-labelledby target text re-dirtying the control: left open as instructed. 3) Still open from js-coder-2: B-431 synthetic form ids, data/roles.txt drift test (B-404), sb-driver walk({base}) per frame (B-412). 4) Rebuilds that insert the new field in a later task (remove now, insert after a timer) or into an unrelated parent are not covered by D-429 (1); the outgoing vault scrub stays the backstop. 5) The round-2 notes about an un-observed open shadow root and a field built detached are unchanged (sb-driver handoff note)."
+gotchas:
+  - "A test field named or id'd pw-anything is now sensitive by name alone, so an inheritance test must give the replacement a neutral name and id (the first Chromium version passed with the fix removed because the id was pw-shown)."
+  - "Inline onclick handlers resolve names through the form first: a button id=show inside the form shadows a global function show(), so the toggle in rebuild.html is rebuildPw()."
+  - "In Chromium the value getter can be counted inside world sb by redefining HTMLInputElement.prototype.value there (isolated worlds have their own prototypes); restore the descriptor in a finally."
+  - "Git Bash sed and node -e with backslash regex text are unreliable here; use node - with a quoted heredoc and String.raw for file mutation checks."
+  - "The inheritance net is wide on purpose: a re-render that swaps a whole form after a password field was in it reports every new field as empty|filled. That costs text values, never a password."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - injected/injected.js
+  - injected/test/jsdom.test.js
+  - injected/test/browser.test.js
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page node --test injected/test/ && cargo test -p sb-act --test wire_from_injected"

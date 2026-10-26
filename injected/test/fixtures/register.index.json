@@ -1,0 +1,361 @@
+[
+ {
+  "id": 1,
+  "frame": 0,
+  "role": "link",
+  "name": "Home",
+  "state": {},
+  "flags": {},
+  "landmark": "nav",
+  "box": {
+   "x": 320,
+   "y": 17,
+   "w": 43,
+   "h": 21
+  }
+ },
+ {
+  "id": 2,
+  "frame": 0,
+  "role": "link",
+  "name": "Pricing",
+  "state": {},
+  "flags": {},
+  "landmark": "nav",
+  "box": {
+   "x": 375,
+   "y": 17,
+   "w": 48,
+   "h": 21
+  }
+ },
+ {
+  "id": 3,
+  "frame": 0,
+  "role": "link",
+  "name": "Sign in",
+  "state": {},
+  "flags": {},
+  "landmark": "nav",
+  "box": {
+   "x": 435,
+   "y": 17,
+   "w": 48,
+   "h": 21
+  }
+ },
+ {
+  "id": 4,
+  "frame": 0,
+  "role": "heading",
+  "name": "Create your account",
+  "state": {},
+  "flags": {},
+  "landmark": "main",
+  "box": {
+   "x": 320,
+   "y": 93,
+   "w": 640,
+   "h": 48
+  }
+ },
+ {
+  "id": 5,
+  "frame": 0,
+  "role": "textbox",
+  "name": "Email",
+  "nearby": "Start your free trial. No card required.",
+  "heading": "Create your account",
+  "state": {
+   "value": {
+    "kind": "empty"
+   },
+   "input_type": "email",
+   "autocomplete": "email"
+  },
+  "flags": {},
+  "form": "f1",
+  "landmark": "main",
+  "box": {
+   "x": 320,
+   "y": 239,
+   "w": 640,
+   "h": 44
+  }
+ },
+ {
+  "id": 6,
+  "frame": 0,
+  "role": "textbox",
+  "name": "Password",
+  "nearby": "Start your free trial. No card required.",
+  "heading": "Create your account",
+  "state": {
+   "value": {
+    "kind": "empty"
+   },
+   "input_type": "password",
+   "autocomplete": "new-password"
+  },
+  "flags": {},
+  "form": "f1",
+  "landmark": "main",
+  "box": {
+   "x": 320,
+   "y": 295,
+   "w": 640,
+   "h": 44
+  }
+ },
+ {
+  "id": 7,
+  "frame": 0,
+  "role": "textbox",
+  "name": "Full name",
+  "nearby": "Start your free trial. No card required.",
+  "heading": "Create your account",
+  "state": {
+   "value": {
+    "kind": "empty"
+   },
+   "input_type": "text"
+  },
+  "flags": {},
+  "form": "f1",
+  "landmark": "main",
+  "box": {
+   "x": 320,
+   "y": 351,
+   "w": 640,
+   "h": 44
+  }
+ },
+ {
+  "id": 8,
+  "frame": 0,
+  "role": "combobox",
+  "name": "Plan",
+  "heading": "Create your account",
+  "state": {
+   "value": {
+    "kind": "text",
+    "text": "Basic"
+   },
+   "options": [
+    "Basic",
+    "Plus",
+    "Pro"
+   ]
+  },
+  "flags": {},
+  "form": "f1",
+  "landmark": "main",
+  "box": {
+   "x": 320,
+   "y": 443,
+   "w": 640,
+   "h": 41
+  }
+ },
+ {
+  "id": 9,
+  "frame": 0,
+  "role": "checkbox",
+  "name": "I agree to the Terms of Service",
+  "heading": "Create your account",
+  "state": {
+   "checked": false,
+   "input_type": "checkbox"
+  },
+  "flags": {},
+  "form": "f1",
+  "landmark": "main",
+  "box": {
+   "x": 324,
+   "y": 501,
+   "w": 13,
+   "h": 13
+  }
+ },
+ {
+  "id": 10,
+  "frame": 0,
+  "role": "iframe",
+  "name": "reCAPTCHA",
+  "heading": "Create your account",
+  "state": {},
+  "flags": {
+   "challenge": true,
+   "opaque": true
+  },
+  "form": "f1",
+  "landmark": "main",
+  "box": {
+   "x": 321,
+   "y": 533,
+   "w": 304,
+   "h": 78
+  }
+ },
+ {
+  "id": 11,
+  "frame": 0,
+  "role": "button",
+  "name": "Register",
+  "heading": "Create your account",
+  "state": {
+   "submitish": true,
+   "covered": true
+  },
+  "flags": {
+   "submit": true
+  },
+  "form": "f1",
+  "landmark": "main",
+  "box": {
+   "x": 320,
+   "y": 624,
+   "w": 640,
+   "h": 48
+  }
+ },
+ {
+  "id": 12,
+  "frame": 0,
+  "role": "heading",
+  "name": "Stay in the loop",
+  "state": {},
+  "flags": {},
+  "landmark": "footer",
+  "box": {
+   "x": 320,
+   "y": 1204,
+   "w": 640,
+   "h": 36
+  }
+ },
+ {
+  "id": 13,
+  "frame": 0,
+  "role": "textbox",
+  "name": "Email",
+  "heading": "Stay in the loop",
+  "state": {
+   "value": {
+    "kind": "empty"
+   },
+   "input_type": "email"
+  },
+  "flags": {},
+  "form": "f2",
+  "landmark": "footer",
+  "box": {
+   "x": 362,
+   "y": 1275,
+   "w": 177,
+   "h": 21
+  }
+ },
+ {
+  "id": 14,
+  "frame": 0,
+  "role": "button",
+  "name": "Subscribe",
+  "heading": "Stay in the loop",
+  "state": {
+   "submitish": true
+  },
+  "flags": {
+   "submit": true
+  },
+  "form": "f2",
+  "landmark": "footer",
+  "box": {
+   "x": 544,
+   "y": 1260,
+   "w": 104,
+   "h": 48
+  }
+ },
+ {
+  "id": 15,
+  "frame": 0,
+  "role": "link",
+  "name": "Privacy",
+  "heading": "Stay in the loop",
+  "state": {},
+  "flags": {},
+  "landmark": "footer",
+  "box": {
+   "x": 320,
+   "y": 1325,
+   "w": 49,
+   "h": 21
+  }
+ },
+ {
+  "id": 16,
+  "frame": 0,
+  "role": "link",
+  "name": "Terms",
+  "heading": "Stay in the loop",
+  "state": {},
+  "flags": {},
+  "landmark": "footer",
+  "box": {
+   "x": 382,
+   "y": 1325,
+   "w": 41,
+   "h": 21
+  }
+ },
+ {
+  "id": 17,
+  "frame": 0,
+  "role": "region",
+  "name": "Cookie consent",
+  "state": {},
+  "flags": {
+   "overlay": true
+  },
+  "landmark": "region",
+  "box": {
+   "x": 0,
+   "y": 580,
+   "w": 1280,
+   "h": 140
+  }
+ },
+ {
+  "id": 18,
+  "frame": 0,
+  "role": "button",
+  "name": "Accept all",
+  "nearby": "We use cookies to run this site.",
+  "state": {},
+  "flags": {},
+  "landmark": "region",
+  "box": {
+   "x": 16,
+   "y": 652,
+   "w": 105,
+   "h": 48
+  }
+ },
+ {
+  "id": 19,
+  "frame": 0,
+  "role": "button",
+  "name": "Reject",
+  "nearby": "We use cookies to run this site.",
+  "state": {},
+  "flags": {},
+  "landmark": "region",
+  "box": {
+   "x": 125,
+   "y": 652,
+   "w": 79,
+   "h": 48
+  }
+ }
+]

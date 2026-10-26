@@ -1,0 +1,30 @@
+<!doctype html>
+<!--
+  bench/pages/challenge-interstitial.html: a Cloudflare-style interstitial for D-5 / D-405 (4).
+  The prompt is a plain paragraph ("Verify you are human by completing the action below.") and
+  the widget sits in a closed shadow root (unreachable from any world), next to a hidden
+  cf-turnstile-response field. Expected: a CHALLENGE row for the prompt paragraph and one for
+  the widget host (found through its response field), the footer link still a normal row.
+  Self-contained: no network, no real widget.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Checking your connection · fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } #widget { width: 300px; height: 65px; border: 1px solid #ccc; }</style>
+</head>
+<body>
+<main>
+  <h1>shop.example.test</h1>
+  <p id="prompt">Verify you are human by completing the action below.</p>
+  <div id="widget">
+    <input type="hidden" name="cf-turnstile-response" value="">
+  </div>
+  <p>shop.example.test needs to review the security of your connection before proceeding.</p>
+</main>
+<footer><a href="/help">Why am I seeing this page?</a></footer>
+<script>
+  // The widget lives in a closed shadow root, as the real one does.
+  const root = document.getElementById("widget").attachShadow({ mode: "closed" });
+  root.innerHTML = '<label><input type="checkbox"> Verify</label>';
+</script>
+</body>
+</html>

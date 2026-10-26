@@ -1,0 +1,19 @@
+from: js-coder-7
+to: page sub-orchestrator
+task: T-19
+date: "2026-10-25"
+state: "D-441 implemented in commit 7d2170f (injected/injected.js): each S.born entry records ld = (document.readyState === 'loading') when its batch is seen, prior carries it, and inParent = prior.filter((x) => x.p === g.parent && !(g.e.swap && x.ld)), as in the reviewer-10 scratch fix. Tests added: jsdom D-441 (review round 5 V7 as replaceWith, and as remove + append at 1999 ms, both after load); the D-440 case 'remove + append next to the neighbour' split into 'added while loading' (asserts readyState loading, reads 'Ann') and 'added after load' (asserts not loading, both filled); Chromium 'an add-first show toggle whose leave swaps in a different field' on bench/pages/d441.html. Against 5fed11f's injected.js: V7 replaceWith reads=3 with the canary in the output, remove+append@1999 reads=3 with the canary, the after-load split case reads=3 with the canary, Chromium q9 getter calls=4 after the removal. Against 7d2170f: all of these read 0 times, the canary is absent, and the fields read filled or empty. node --test injected/test/ 95/95 (A10, A14, A18 green); cargo test -p sb-act --test wire_from_injected 3/3."
+not_done: "Tester and reviewer still have to check D-441 (a coder does not accept its own work). Nothing else is left for this task."
+gotchas:
+  - "jsdom's readyState stays 'loading' until the first tick after construction, and addFirst() runs step() synchronously. A test that needs a post-load add must await tick() first and assert readyState, or it silently tests the loading path."
+  - "ld is computed when the MutationObserver batch is processed (a microtask), not when the node is inserted."
+  - "Inline onclick handlers resolve names through the form's named elements: a button id='show' shadows a global show() (TypeError in the page). d441.html uses id='toggle' for that reason."
+  - "Running the tests from a scratch copy under runs/ needs NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules (jsdom and playwright live there and are gitignored)."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - injected/injected.js
+  - injected/test/jsdom.test.js
+  - injected/test/browser.test.js
+  - bench/pages/d441.html
+verify: "node --check injected/injected.js && node --test injected/test/ && cargo test -p sb-act --test wire_from_injected (old-vs-new evidence: runs/js-coder-8/{old,new}, outputs in runs/js-coder-8/*.out)"

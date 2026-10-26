@@ -1,0 +1,21 @@
+from: page/tester-5
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Round 4 acceptance for the sb-act half of T-19 (B-7, I-10, D-408) is green against crates/sb-act/src at 0554c29 (HEAD e93ac7b only adds the reviewer's report). Items 1-18 re-run and pass. Items 19-23 are new in crates/sb-act/tests/accept_t19_round4.rs (8 tests): non-submit Pay and Account buttons in form context (positives and the negatives Show details, Back to top, formless Create account with no shared heading, links, a frame-1 button), Enter chords (18 values) and Enterprise-style non-Enter keys, leave group and wipe device, a raise-only check against a pre-D-408 baseline (3078 probes, 381 raised, 0 lowered), and an Enter-chord guard over every fixture. The new fixture D408 is in tests/common/mod.rs and in ALL, so the round-2 and round-3 guards walk it too. Item 16's wall-clock bound in accept_t19_round3.rs is now 5 s (the test was renamed to d406_enter_in_200_submit_1700_row_form_loose_wall_clock); the exact check is the lib test d406_enter_in_a_big_form_is_linear (evidence_builds()==1), which item 16 now runs. cargo test -p sb-act: unit 59, classify 16, forms 11, quote_fuzz 6, round2 18, round3 15, round4 8, wire_from_injected 3, 0 failed, 0 ignored. fmt --check and clippy --all-targets -D warnings are clean. Report: bench/results/accept-T-19-sb-act.md, Verdict: green."
+not_done: "1) Spec owner: a formless Pay-word button with no heading shared with a form ('Pay now', 'Pay $20.00', 'Complete purchase' under a Checkout heading with the card form in a Stripe-style iframe) is still Navigate; D-408 scopes the raise to form context. A follow-up decision could make Pay words on any button Pay, as D-407 already does for 'Upgrade'. 2) Chords split at '+', whitespace and control characters only: 'Enter-Shift' and 'Ctrl-Enter' are not Enter (Navigate on a card field). Fine if sb-driver rejects '-' chords; a lowering if it accepts them. 3) Carried: a bare 'Expiry' field is not card evidence (D-407 Should)."
+gotchas:
+  - "bench/fixtures/t19_pre_d408_classes.txt is the class of every (fixture, row, probe) with crates/sb-act/src at 3122050. Adding a fixture to ALL or changing RAISE_KEYS/raise_programs makes raise_only_every_fixture_vs_pre_d408 fail on a key mismatch until it is regenerated: make a temporary worktree at HEAD, git checkout 3122050 -- crates/sb-act/src, copy the current tests/common/mod.rs and accept_t19_round4.rs, and run the test with T19_WRITE_BASELINE=<path> (see the report). A later raise-only check for a newer src change should take a new baseline from the commit before it, not reuse this one."
+  - "A multi-letter key name that is not a known key ('Enterprise') is the row's click class (D-403 unknown-key rule), not Fill like a typed 'a'. On a text field that is Navigate."
+  - "Hooks block Write/Edit outside the worktree, including the session scratchpad; use bash for scratch files under F:/sb-swarm/tmp-page."
+  - "Other agents' uncommitted files (agent-memory/decisions.yaml, bench/results/review-T-19-js.md, agent-memory/handoffs/T-19-reviewer-5.yaml) were not staged."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-act/tests/accept_t19_round4.rs
+  - crates/sb-act/tests/accept_t19_round3.rs
+  - crates/sb-act/tests/common/mod.rs
+  - bench/fixtures/t19_pre_d408_classes.txt
+  - bench/results/accept-T-19-sb-act.md
+  - agent-memory/handoffs/T-19-tester-5.yaml
+verify: "cargo fmt -p sb-act --check && cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act"

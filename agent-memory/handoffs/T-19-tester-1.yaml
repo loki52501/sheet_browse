@@ -1,0 +1,23 @@
+from: page/tester-1
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Acceptance for the sb-act half of T-19 (B-7, I-10) is green against 6c0e62a (implementation from 706dc5a and c92695b). Added 33 integration tests in crates/sb-act/tests/ (accept_t19_forms.rs 11, accept_t19_quote_fuzz.rs 6, accept_t19_classify.rs 16), public API only, with I-5 wire-JSON index fixtures (register.html signup, login, saved-card checkout, unsubscribe/cancel, job application, e-sign, frame 2 form). cargo test -p sb-act: 35 unit + 33 acceptance tests pass, 0 ignored. clippy --all-targets -D warnings and fmt --check are clean. Report: bench/results/accept-T-19-sb-act.md, Verdict: green."
+not_done: "1) Reviewer sign-off on 706dc5a and c92695b (a tester is not a reviewer). 2) The injected.js half of T-19 has not been through acceptance; it is in progress in injected/ and was not touched. 3) B-431 (formless SPA submits get no form context) is still open; these tests do not cover it."
+gotchas:
+  - "Wire-JSON fixtures needed serde_json as an sb-act dev-dependency (crates/sb-act/Cargo.toml [dev-dependencies], plus one Cargo.lock line). The non-dev dependency set is unchanged, so sb-act is still pure."
+  - "Refs are numeric, so 'c#Register' in the task list means c#10 in the register fixture (Register is row 10)."
+  - "Pass multiple libtest filters after `--` (`cargo test -p sb-act --test accept_t19_quote_fuzz -- malformed_ fuzz_`). Without `--`, cargo rejects the second positional."
+  - "Fuzzing uses an in-file xorshift PRNG with fixed seeds, so it is reproducible and needs no rand dependency."
+  - "Untracked bench/pages/*.html other than register.html, injected/media.js and injected/test/ belong to other agents and were not staged."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-act/tests/accept_t19_forms.rs
+  - crates/sb-act/tests/accept_t19_quote_fuzz.rs
+  - crates/sb-act/tests/accept_t19_classify.rs
+  - crates/sb-act/Cargo.toml
+  - Cargo.lock
+  - bench/results/accept-T-19-sb-act.md
+  - agent-memory/handoffs/T-19-tester-1.yaml
+verify: "cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act"

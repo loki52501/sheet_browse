@@ -1,0 +1,23 @@
+<!doctype html>
+<!--
+  bench/pages/dialog.html: JS dialog and download fixture for docs/05 B-4 #9 and acceptance 3.
+    "Show alert"     alert()   -> "dialog: Saved" (paused)
+    "Delete item"    confirm() -> "dialog: Delete this item?" (paused)
+    "Ask name"       prompt()
+    "Download notes" a[download] with a data: URL -> "download: notes.txt" (stopped, asks)
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Dialogs · fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } button, a { display: block; margin: 12px 0; }</style>
+</head>
+<body>
+<main>
+  <h1>Dialogs</h1>
+  <button id="alert" type="button" onclick="alert('Saved')">Show alert</button>
+  <button id="confirm" type="button" onclick="if (confirm('Delete this item?')) document.getElementById('log').textContent = 'deleted'">Delete item</button>
+  <button id="prompt" type="button" onclick="document.getElementById('log').textContent = prompt('Your name?') || ''">Ask name</button>
+  <a id="dl" href="data:text/plain;charset=utf-8,fixture%20notes" download="notes.txt">Download notes</a>
+  <p id="log"></p>
+</main>
+</body>
+</html>

@@ -1,0 +1,16 @@
+from: page/reviewer-11
+to: page/suborch
+task: T-19
+date: "2026-10-25"
+state: "Round 6 leak check at 583eae0 in bench/results/review-T-19.md: Verdict request changes, one Blocking item. node --test injected/test/ 95/95 on a git-archive snapshot; reverting D-441 to D-440 fails jsdom.test.js:1253 and :1342. Round 5's V7 / Chromium d440 is closed on a page past 'loading' (V7 after a tick, d440, M2 interactive, M3 complete all read 0). sb-act unchanged since 5fed11f."
+not_done: "1) Blocking, needs supreme to amend D-441: ld = readyState 'loading' is not 'parser insert'. A show toggle clicked while a parser-blocking script keeps the page loading records the copy as ld, so the d441 shape still leaks (Chromium probe-r11-chromium.js M1: canary in index()/state(), getter 3, still after load; M4: copy while loading, swap after load, getter 3; jsdom N1 and V7 without a tick, 4 reads; all 0 at 1fe3caf^). Proposed fix in runs/reviewer-11/fix2 (95/95, M1/M4 read 0): record EDIT_AT time on input events, carry edit on the lost entry and t on prior, skip only when x.ld && (g.edit === undefined || x.t < g.edit). Add M1/M4 as browser tests. 2) Should (pre-D-440, judged not Blocking: neutral copy plus unusual batch shape): V8/N3r two born fields in the parent (fix with the same EDIT_AT narrowing), overlap read (V3m, C neutral/wrap/d440 mid getter 3), N5 one batch adds copy plus another field, V5 cross-parent 3 batches, S.born cap (V9, N2 at 70 fields on a frozen clock) and untested caps."
+gotchas:
+  - "jsdom's readyState goes loading -> interactive -> complete within the microtasks after construction; a probe needing 'loading' must mutate synchronously after the base walk, and ld is evaluated when the observer batch runs, not at insertion."
+  - "Unfrozen jsdom probes with 35+ added fields cross the 2 s SENS_KEEP_MS window (jsdom is slow), which looks like a cap leak. Freeze performance.now (FROZEN=1 in the probes, or fakeClock in tests) before blaming BORN_MAX."
+  - "Chromium 'loading' needs a parser-blocking resource: probe-r11-chromium.js runs its own http server with a delayed /slow.js and opens with waitUntil 'commit'."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19.md
+  - agent-memory/handoffs/T-19-reviewer-11.yaml
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules node runs/reviewer-11/probe-r11-chromium.js (M1 and M4 leak=true at 583eae0; pass runs/reviewer-11/fix2 as argv[2] for the fix) and node --test injected/test/ in a 583eae0 snapshot (95/95)"
