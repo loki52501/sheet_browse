@@ -98,4 +98,11 @@ Line numbers are for HEAD (5cb3308 / cbba088).
   - `cargo test -p toolstore` on the clean committed tree: the coder reports it green, and the tester
     is running the gates.
 
+## Round 2 (c899d29, checked by the store sub-orchestrator, not re-reviewed by this reviewer)
+
+- Should-fix 1 (site-only memory error) and 2 (typed scan_live/load_live through `&dyn MemoryStore`): covered by tests/accept_t11b.rs `r3_memory_error_is_err_never_a_list` and `r6_live_loader_signatures` (a2568a8).
+- Should-fix 3: the four `archived` asserts now use `consequences.get("archived") == Some(&Value::Null)`.
+- Race note: scan_live reads every file before any row (`read_folders`, then the rows, then one `finish` pass); new test `tests_review::scan_live_reads_files_before_rows` fails on the old order. Sync `scan` keeps its tools, skipped list and order.
+- Reforge of a retired row: filed as B-34 / follow-up T-11c (before T-28), outside this diff.
+
 Verdict: approve

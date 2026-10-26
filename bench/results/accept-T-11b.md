@@ -77,4 +77,11 @@ checked by reading.
   (B-33 item 4, deferred to T-28 by the blocker's default; not in T-11b scope).
 - No vault values are involved in T-11b paths; no canary run was needed.
 
+## Round 2 (c899d29)
+
+- `cargo fmt --all -- --check` clean; `cargo clippy -p toolstore --all-targets -- -D warnings` clean.
+- `cargo test -p toolstore`: lib 123, accept_t11 41, accept_t11b 9, contract_paths 4; 0 failed.
+- Mutation M1 (retired filter disabled) re-run on the new `finish` pass: the same 5 accept_t11b tests red, restored.
+- `cargo test --workspace` on round 2: not re-run; the run was stopped by the host for low memory while compiling. The round 1 run above (722 passed, 0 failed) predates round 2, which changed only toolstore internals and tests (no public signature).
+
 Verdict: green

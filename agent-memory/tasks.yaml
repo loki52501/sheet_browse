@@ -259,7 +259,7 @@ tasks:
     owner: store/sub-orchestrator
     branch: swarm/store-T11b
     title: "B-33: item 3 first (the loader skips a retired row even when its file is still in place), then items 1-2 (ledger retire event, contract_paths for tool_path/archive_path and ApiFetch::api); item 4 before T-28."
-    status: doing
+    status: done
     claimed_at: "2026-10-25"
     from: T-11
   - id: T-11c
