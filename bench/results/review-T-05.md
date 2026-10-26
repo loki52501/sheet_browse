@@ -1,73 +1,95 @@
-# Review T-05 round 4: core::vault (fc23dd2)
+# Review T-05 round 5: core::vault (5cec6ef)
 
 Scope:
-- Code: `git diff a4f3224 fc23dd2 -- crates/core` (vault.rs, tests vault_accept_t05.rs, vault_accept_t05_r3.rs, vault_scrub_t05_fix.rs). crates/core is unchanged from fc23dd2 to HEAD 15e09d3.
-- Callers: `crates/harness/src/cli.rs`, `crates/harness/src/lib.rs`, `crates/core-pg/src/lib.rs`.
-- Records: D-76, D-118, interfaces.yaml I-4. fc23dd2 carried no handoff.
-- Line numbers are `crates/core/src/vault.rs` at 15e09d3 unless another file is named.
+- Code: `git diff 5cec6ef~1 5cec6ef`. Files: `crates/core/src/vault.rs`, `crates/core/tests/vault_accept_t05.rs`, D-118 in `agent-memory/decisions.yaml`, B-194 in `agent-memory/blockers.yaml`, and handoff `T-05-rust-coder-5.yaml`.
+- This round answers review-T-05 round 4.
+- Out of scope, as briefed:
+  - `harness vault set` using `open_for_set`, which the T-08 coder owns.
+  - The r3_2 and r3_5 ignores, which the tester owns.
+- Line numbers refer to `crates/core/src/vault.rs` at 5cec6ef unless another file is named.
 
-Checks run (detached worktree of 15e09d3, own target dir, random `SB_VAULT_CANARY`):
-- `cargo test -p harness-core --lib vault::`: 25 passed.
-- `--test vault_accept_t05 / _r2 / _r3 / vault_scrub_t05_fix`: 9 / 14 / 9 (+2 ignored) / 16 passed.
-- `--test vault_accept_t05_r3 -- --ignored`: r3_2 and r3_5 fail as announced (premise changed).
-- `cargo clippy -p harness-core --all-targets -- -D warnings`: clean. `rustfmt --check` on all 5 vault files: clean.
-- Canary: 0 hits in the combined output.
+Checks run (detached worktree at 5cec6ef, own target dir, unique `SB_VAULT_CANARY`):
+- `cargo clippy -p harness-core --all-targets -- -D warnings`: clean.
+- `cargo check --workspace --all-targets`: clean. `#[non_exhaustive]` breaks no downstream match. The only one outside vault.rs is `mcp.rs:1136`, which matches a single variant.
+- `cargo test -p harness-core --lib vault::`: 26 passed. The new test `scrub_pass_cap_withholds_unsettled_output` passes on its own.
+- Test targets:
+  - `vault_accept_t05`: 9 passed.
+  - `vault_accept_t05_r2`: 14 passed.
+  - `vault_accept_t05_r3`: 9 passed, 2 ignored (r3_2 and r3_5, owned by the tester).
+  - `vault_scrub_t05_fix`: 16 passed.
+- `rustfmt --edition 2021 --check` on both changed Rust files: clean.
+- `blockers.yaml` and `decisions.yaml` both parse as YAML.
+- Canary: 0 hits across all test output, with `--nocapture`.
 
 ## Blocking
 
-- **VaultError is not `#[non_exhaustive]`** (`:57-58`). D-76 and the I-4 notes in interfaces.yaml both say it is. This round adds a variant (`ValueInLiteral`, `:79-82`), which is exactly the breakage D-76 guards against. Fix: add the attribute. Integration tests are separate crates, so the exhaustive match in `tests/vault_accept_t05.rs:412-425` then needs a `_` arm. That is a tester change.
+- none
 
 ## Should fix
 
-- **Round-3 item 3 is fixed in the library only. The user still cannot repair a vault.** `harness vault set` opens the vault with `Vault::open` (`crates/harness/src/cli.rs:612`), and `open` refuses a file with a broken entry. Both error texts tell the user to run `harness vault set <name>` (`:71-72`, `:79-80`), and that command fails with the same error, so the user goes round in a loop. The module doc (`:33-34`) says `open_for_set` "opens such a file so that command can repair it", but no caller uses it.
-  - Fix: use `Vault::open_for_set` in `vault_set`. The process never installs that handle globally, so this is safe.
-  - Add a CLI test: a file with a short entry, `vault set` on that entry, then `open` succeeds.
-- **D-118 no longer matches the code. Amend it as follows:**
-  - In (2), replace "and a match that only overlaps a literal is kept, so a value cannot hide behind one" with: "a match that only overlaps a literal is kept and widened to cover the whole literal; scrub repeats until a pass changes nothing (at most 8 passes, after which the whole output is withheld as the SCRUB_WITHHELD marker), so a literal scrub wrote cannot complete another value".
-  - In (2), narrow "scrub output stays parseable by vault_refs" to "the @vault(name) literals of existing entries in the input stay parseable". Counterexample to the broad claim: the input `@vault(xxhunter22yy)`, with `pw = hunter22`, is a well-formed reference to an unknown name. It scrubs to `@vault(xx@vault(pw)yy)`, which gives `BadReference(0)`. That result is idempotent and leaks nothing, but it does not parse. The module doc `:22-24` needs the same narrowing.
-  - Add a (3b): "set and open also refuse a non-empty value any of whose spellings occurs, ignoring ASCII case, inside `@vault(` or inside `@vault(n)` for any entry name n (VaultError::ValueInLiteral { name }, naming the entry whose value hides). Both errors name only the entry and point to `harness vault set <name>`. Vault::open_for_set skips these rules so that command can repair a file; set on that handle (and on in_memory) checks only the entry being set, and set on a handle from open checks every entry of the re-read file."
-  - Fix (4) to match: the withheld marker is no longer only in_memory's backstop.
-- **I-4 additions without a blocker.** `Vault::open_for_set` (`:297`) and `VaultError::ValueInLiteral` are new public API. They are not in interfaces.yaml, and no `interface_changes` B- entry asks supreme for them (B-150 was the earlier precedent). File one.
-- **The pass cap is untested, and its marker text is misleading** (`:742-749`, `:787`). Nothing exercises hitting `MAX_SCRUB_PASSES`. Text built from a value C followed by the tail of `k = ")xyz1"` repeated 8 or more times (`C xyz1 xyz1 ...` written without spaces) costs one pass per repeat, so it hits the cap. The output is then withheld as "vault scrubber unavailable", which is wrong in this case. It fails closed, so nothing leaks.
-  - Add a test for the cap.
-  - Consider giving this case its own marker text, e.g. `@vault(?) [output withheld: scrub did not settle]`.
+- **The idempotence claim has one exception: a vault value that occurs inside a marker's text.**
+  - Where: D-118 (2), the module doc at `:25`, and `:553`, `:558`, `:763`.
+  - `scrub` returns `SCRUB_UNSETTLED` (and the in_memory backstop returns `SCRUB_WITHHELD`) verbatim, without checking it against the vault.
+  - Example: an entry with value `settle`, `output` or `withheld` passes every D-118 rule. A cap-hitting input then returns a string that holds that value's bytes, and `scrub(marker) != marker`.
+  - Effects:
+    - D-118's unconditional `scrub(scrub(s)) == scrub(s)` is false in this case.
+    - The D-ledger rule (`decisions.yaml:331`) would refuse a line that carries the marker.
+  - The marker is a constant, so nothing about the value leaks. That is why this is not blocking.
+  - The test asserts `scrub(SCRUB_UNSETTLED) == SCRUB_UNSETTLED` only for its own two entries (`:1680`).
+  - Cheapest fix: extend (3b) so that `check_entries` also refuses a value any of whose spellings occurs, ignoring ASCII case, in either marker. Add one test for it, and add "or inside a withheld marker" to D-118 (3b).
+  - Alternative: narrow D-118 (2) and the module doc to name the exception.
 
 ## Notes
 
-- **Round-3 Should-fix status:**
-  1. Values inside literals: **resolved.**
-     - `check_entries` (`:127-164`) checks every spelling of every value, ignoring ASCII case, against `@vault(` and against every name's literal. Names with empty values are included, which is stricter than the scrubber's `names`.
-     - It runs before the lock on the handle's entries and again on the re-read file (`:375-395`).
-     - Tests cover `vault`, `AULT(`, `(test)`, `zip_94110`, the KELVIN SIGN, and a new name that would swallow an existing value.
-  2. D-118 (2) idempotence when a value contains `( ) @`: **resolved.**
-     - Widening (`:791-804`) leaves no literal fragment, and the fixed-point loop catches a literal that completes another value.
-     - r3_6 is green.
-     - The 3000-case property test in `vault_scrub_t05_fix.rs` checks no leak, the fixed point, and that known refs still parse.
-     - Termination: each changing pass either removes non-literal text or merges two or more literals into one.
-     - Parseability holds only in the narrowed sense above.
-  3. Repairing a short value: library only. See Should fix.
-- **New ValueTooShort text:** `vault entry "x" is shorter than 4 characters; ...; give it a longer value with \`harness vault set x\``. It names only the key (twice) and the floor, never the value. The r3_2 fixed string just needs updating.
-- **ValueInLiteral** carries the name only. When it names a different entry than the one being set, the caller learns that entry's value is a substring of the chosen literal. The only caller is the user's own CLI, and scrub already gives the same membership oracle, so this adds no exposure.
-- **Leak paths:**
-  - `strict` is not in `Debug`.
+Round-4 items:
+- **Blocking (`#[non_exhaustive]`): resolved** (`:66`).
+  - `vault_accept_t05.rs:425` gained `_ => "other"`. The "variant not exercised" list still names every current variant, including `ValueInLiteral`.
+  - Side effect: the `_` arm means a future variant no longer fails to compile in that test. An exhaustive match in a vault.rs unit test (same crate, so `non_exhaustive` does not apply) would restore that tripwire. Optional.
+- **D-118 amendment: resolved.** I checked the text against the code:
+  - (2) Widening matches `widen_over_literals`. The pass cap matches `:751-763`: the first pass plus at most 7 more is 8 passes, counting the confirming pass. The withheld text is exactly `SCRUB_UNSETTLED`. Parseability is narrowed and gives the `@vault(xxhunter22yy)` counterexample.
+  - (3b) The literal list holds every entry name, valued or not (`:146-147`). `Only` versus `All` matches `set` (`:376-404`). Both error texts name only the entry and point to `harness vault set <name>`.
+  - (4) The two markers and their triggers match the code.
+  - The coder deviated from my round-4 wording by naming the cap marker by its own text instead of SCRUB_WITHHELD. That is correct, because round 5 gave the cap its own marker.
+  - Imprecision, not wrong:
+    - (3b), B-194 and the module doc `:39-40` say `set` on an `open_for_set` or in_memory handle "checks only the entry being set". `Check::Only` also checks every other value against the new name's literal (`:148-151`, `:157`), so the error can name a different entry. The `Check::Only` doc comment (`:115-117`) says this correctly. Consider "checks only the rules involving the entry being set".
+    - The module doc `:41` says "The withheld marker" (singular), but there are now two distinct texts.
+    - The `MAX_SCRUB_PASSES` doc (`:799-801`) says "Ordinary text takes 1, a value completed by a literal takes 2 or 3". Counting the confirming pass, text holding one plain value takes 2 and a completion takes 3. Text with no value takes 1.
+- **interface_changes: resolved.** B-194 (`blockers.yaml:155`, unique at HEAD) files `Vault::open_for_set` and `VaultError::ValueInLiteral { name }` as additive I-4 items and records `non_exhaustive`. interfaces.yaml I-4 still lacks both items, which is expected until supreme accepts B-194.
+- **Pass cap test: resolved** (`:1652-1682`). The test asserts:
+  - the exact boundary: 6 repeats settle, 7, 8 and 64 are withheld;
+  - the exact marker text, and that it holds neither value;
+  - `vault_refs` and `resolve_into` give `BadReference(0)`, and the sink is never called;
+  - the marker is a fixed point for that vault, and it differs from the failed-build marker.
+  - The coder's handoff says it was proven red once.
+
+SCRUB_UNSETTLED safety (asked in the brief):
+- It is a `const`, built from nothing derived from a value. Apart from the Should-fix collision above, it holds no value.
+- It cannot become a resolvable reference:
+  - `?` fails `is_name_byte`, so `parse_refs` fails at byte 0 for any template that contains the marker. `resolve_into` parses before it looks anything up, so the sink never runs.
+  - `set` cannot create an entry named `?` (`invalid_name_at`). Even a hand-edited file with that name would not help, because the parser rejects `?` whatever the entries are.
+  - A template that embeds the marker next to valid refs fails as a whole, which is fail closed.
+
+Other notes:
+- Only adversarial text reaches the cap: values that start with `)` or end with `@`, repeated 7 or more times. The cost is the whole output, which fails closed. That is acceptable.
+- Leak paths are unchanged from round 4:
   - No new log, panic or return path carries a value.
-  - All new `unwrap`s are in `#[cfg(test)]`.
-  - `open_for_set`'s scrubber is documented as never to be installed globally, and no caller does.
-  - `mcp.rs` still passes `ToolError::Vault` through unscrubbed. That is fine for name-only variants.
-- **Round-3 test gap** (wrapping forms with the real canary): closed by `canary_wrapped_in_literals_is_scrubbed_to_a_fixed_point`.
-- **Cost:** any scrub with a match now takes one extra confirming pass. Text with no match still takes one pass.
-- **Spec ids:** H-2 and D-118 behaviour is implemented, but D-118's text is stale (see above). I-4 is claimed, but `non_exhaustive` is missing and the additions are unfiled. Behaviour beyond the spec: `open_for_set` and the strict/only check modes.
-- **Process:** fc23dd2 has no handoff, so this review's handoff records the state.
-- **Hard rules 1 and 3-7:** this change does not touch them. There are no keys, sleeps, challenge code, gate paths or HTML. The error strings are not user drafts.
+  - `strict` is not in `Debug`.
+  - The new `unwrap`s are confined to `#[cfg(test)]`.
+- Carried from round 4, out of scope here:
+  - `harness vault set` must call `Vault::open_for_set`, plus a CLI repair test (T-08 coder). Until then the repair hint in both errors loops for the user.
+  - r3_2 and r3_5 stay ignored (tester). HEAD also has tester commit 0790269 (T-05 round 4 acceptance), which I did not review here.
+- Spec ids:
+  - H-2 and D-118 are implemented, and D-118 now matches the code apart from the Should-fix exception.
+  - I-4 and D-76: `non_exhaustive` is present, and the additions are filed as B-194.
+  - No behaviour goes beyond the spec, now that the strict and only modes are in D-118 (3b).
+- Hard rules 1 and 3-7: this change does not touch them. There are no keys, sleeps, challenge code, gate paths or HTML, and the error and marker strings are not user drafts.
 
 ## Verdict
 
-Request changes:
-- One blocking item: `#[non_exhaustive]` on VaultError (D-76, I-4). It is a one-line fix plus a `_` arm in the row-5 test.
-- The scrub and leak logic is sound, and round-3 items 1 and 2 are resolved and tested.
-- Before merge, also:
-  - wire `open_for_set` into `harness vault set`, so the repair hint works;
-  - amend D-118 as written above;
-  - file the I-4 additions.
+Approve:
+- The round-4 Blocking item and all three in-scope Should-fix items are resolved and tested.
+- D-118 and the module doc match the code.
+- The new marker cannot resolve and carries no value-derived data.
+- Before merge, either refuse values that occur in the withheld markers or narrow the idempotence claim. Wiring the CLI to `open_for_set` remains owned by T-08.
 
-Verdict: request changes
+Verdict: approve
