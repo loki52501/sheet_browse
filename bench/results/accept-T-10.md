@@ -1,32 +1,44 @@
-# Acceptance T-10 (tester, round 6): docs/05 B-6 and docs/04 W-5, crate sb-sheet, after D-227/D-228
+# Acceptance T-10 (tester, round 7): docs/05 B-6 and docs/04 W-5, crate sb-sheet, after D-229/D-230
 
-Branch `swarm/sheet` at HEAD 8ca6ec81165755c989f7a0a30000916386705e27 (8ca6ec8), plus the round-6
-test file listed below. The code under test is the D-227 commit d2cf21b: a long first word is cut by
-characters under max_tokens, and the outline is capped. D-228 clarifies D-227: the word threshold is
-the read's budget. Commits since round 5 (6dc452b):
-- d2cf21b: D-227 in reader.rs. The coder also amended my `d226_2_a_read_under_max_tokens_never_takes_less_than_a_word`
-  and shrank the termination test.
-- 185ad00: the d226_2 overhead sweep is smaller at chunk_tokens 1 and 3. Chunk 0/20/400 keep 1..=60.
-- 8ca6ec8: `tests/contract_paths.rs`.
-- bb2ab68: merge of main. In `crates/`, it brings only other crates.
+Branch `swarm/sheet` at HEAD c8bd2e46bf6ad0dd738d2dc7628d9bde71e6b517 (c8bd2e4), plus the round-7
+test file listed below. The code under test is c550253: D-229, as clarified by D-230 (B-203). The
+body is checked against every password value as a markdown renderer shows it. A contributing link
+span renders as `***` whole, and a contributing plain span hides only its own characters. Commits
+since round 6 (9f74cf2):
+- c550253: reader.rs (D-229). It also removes the `#[ignore]` from my round-6
+  `w5b_body_never_shows_a_value_joined_across_a_link_form`. That one line is its only change to a
+  tester file.
+- 06eb03a, f62b481: agent-memory (D-229, D-230).
+- a402967: merge of main. It brings no crate files.
+- c3b9c4f: the reviewer's round 7. Its verdict is changes, with one blocking item: a value holding
+  the cell separator plus an in-cell pipe.
+- c8bd2e4: D-231 recorded for that item. Not implemented: reader.rs is unchanged since c550253.
 
 Tests:
-- `crates/sb-sheet/tests/acceptance_t10.rs` (20 tests) and `acceptance_t10_b32.rs` (16 tests): unchanged,
-  all re-run.
-- `crates/sb-sheet/tests/acceptance_t10_d226.rs` (9 tests): re-run as amended by d2cf21b and 185ad00.
-  The amended tests were checked by mutation (rows below).
-- `crates/sb-sheet/tests/acceptance_t10_d227.rs`: new this round. It holds 8 black-box tests through the
-  public API, with fixtures built here. 7 pass. One is a red-first W-5b finding, committed `#[ignore]`d
-  and run here with `--ignored`. No test in the file takes more than 3 s in debug (the whole binary runs in 3.4 s).
+- `crates/sb-sheet/tests/acceptance_t10.rs` (20), `acceptance_t10_b32.rs` (16),
+  `acceptance_t10_d226.rs` (9) and `acceptance_t10_d227.rs` (8): unchanged except for the removed
+  `#[ignore]`. All were re-run.
+- `crates/sb-sheet/tests/acceptance_t10_d229.rs`: new this round. It holds 7 black-box tests through
+  the public API, with fixtures built here. 6 pass. One is a red-first D-231 finding, committed
+  `#[ignore]`d and run here with `--ignored`. Each test runs in under 3 s in debug. The slowest is
+  the cut sweep at 2.3 s, and the whole binary runs in 2.2 s.
+- Leak check used by the new tests: no 8-char window of any value may show. It is checked in the raw
+  markdown, the renderer's reading (each `[x](#id)` as `x`) and the label reading (each
+  `[alias "label"](#id)` as `label`). Each reading is checked as is, with whitespace removed and as
+  alphanumerics only. The check covers every markdown, `remaining:` entry, cursor and skeleton, and
+  the joined bodies of each cursor chain. So no prefix of a value of 8 or more chars shows in any
+  read.
 
-Canary: `SB_VAULT_CANARY` was set to a fresh unique string (`sbcanary-T10r6-<ns>-<pid>`), the same
-one for every run: sb-sheet, `--ignored`, mutations, clippy, fmt, example and workspace. It was planted
-as a `FieldValue::Text` value on password rows. New placements this round:
-- straddling the 80-char label cut: whole, split over two plain spans, and split over three plain spans;
-- as the text of a link to the password field at the cut;
-- in a heading folded into `+N more`;
-- split across two adjacent headings;
-- joined to a link form with no space, before or after the link.
+Canary: `SB_VAULT_CANARY` was set to a fresh unique string (`sbcanary-T10r7-<ns>-<pid>`). The same
+string was used for every run: sb-sheet, `--ignored`, the mutations, clippy, fmt, the example and the
+workspace. It was planted as a `FieldValue::Text` password value, with the canary as the head of
+every value. New placements this round (each split across span kinds, with no space at the split):
+- link then plain, starting in the link;
+- across table cell separators;
+- across three spans;
+- the same in headings feeding `remaining:` and the skeleton;
+- glued to a word;
+- across cells with an in-cell pipe (D-231).
 
 | item | command | result | note |
 |---|---|---|---|
@@ -39,11 +51,11 @@ as a `FieldValue::Text` value on password rows. New placements this round:
 | A7-pure chunk cursors: no repeats, no gaps | `cargo test -p sb-sheet --test acceptance_t10 a7_chunk_cursors_no_repeats_no_gaps` | pass | Checked at chunk_tokens 60, 120 and 333. Each of the 400 split words appears once and in order. |
 | A7-pure D-211/D-216: no chunk is only a heading or ends on one | `cargo test -p sb-sheet --test acceptance_t10 a7_no_chunk_ends_on_a_heading_when_content_follows` | pass | Checked at chunk_tokens 60, 120 and 333. |
 | W5-a first heading is the title, no nav links, `remaining:` lists sections, cursor continues (docs/04 acc., pure half) | `cargo test -p sb-sheet --test acceptance_t10 w5a_first_heading_title_remaining_lists_sections_cursor_continues` | pass | The first heading is `# Tokio Runtime Guide`. `remaining:` has word counts. The last chunk has no cursor. |
-| W5-b password value never emitted by read, sheet, sheet_line, find_lines, skeleton (canary) | `SB_VAULT_CANARY=<unique> cargo test -p sb-sheet --no-fail-fast -j 2 -- --nocapture > log` (also the `--ignored`, mutation, clippy, fmt, example and workspace logs), then `grep -c -F "$SB_VAULT_CANARY"` on each log (also with all whitespace removed), `grep -rlF` on `runs/`, the worktree and target/debug/deps, and `git grep -lF` | pass | `w5b_password_value_never_emitted` and `r2_w5b_autocomplete_password_span_and_scrub_before_chunking` pass. Contiguous hits: 0 in every log (sb-sheet, ignored, mutations, clippy, both fmt, example, workspace). With whitespace removed: also 0 in every log. `runs/` is absent. The worktree outside target/ has 0 hits, as do target/debug/deps and the tracked tree. There is no `.claude/state/leaks.log`. The ledger table and jsonl mirror do not apply: sb-sheet is pure and writes neither. The one W-5b fail (a value joined across a link form, row below) is a rendered-text spelling. The canary string itself never reached any output. |
+| W5-b password value never emitted by read, sheet, sheet_line, find_lines, skeleton (canary) | `SB_VAULT_CANARY=<unique> cargo test -p sb-sheet --no-fail-fast -j 2 -- --nocapture > log` (also the `--ignored`, mutation, clippy, both fmt, example and workspace logs), then `grep -c -F "$SB_VAULT_CANARY"` on each log (also with all whitespace removed), `grep -rlF` on `runs/`, the worktree outside target/ and target/debug/deps, and `git grep -lF` | pass | `w5b_password_value_never_emitted` and `r2_w5b_autocomplete_password_span_and_scrub_before_chunking` pass. Contiguous hits: 0 in every log (sb-sheet, `--ignored`, three mutation logs, clippy, both fmt, example, workspace). With all whitespace removed: also 0 in every log. `runs/` is absent. There are 0 hits in the worktree outside target/ and .git, in target/debug/deps, in target/tmp (the canary file aside) and in the tracked tree (`git grep`). There is no `.claude/state/leaks.log`. The ledger table and the jsonl mirror do not apply, because sb-sheet is pure and writes neither. The D-231 fail (row below) is a real leak: in that fixture the value's head shows as plain cell text. But no log, file or tracked path holds the canary, because the tests' assert messages name cases only. |
 | W5-b escaped spellings of password values (D-218) | `cargo test -p sb-sheet --test acceptance_t10 r3_w5b_escaped_password_spellings_never_emitted` | pass | Values holding a pipe, brackets and quotes are absent from every output. |
 | W5-b canary through the B-32 escapes (D-219, D-223, D-225) | `cargo test -p sb-sheet --test acceptance_t10_b32 b32_canary_never_leaks_through_the_new_escapes` | pass | Absent from read (3 regions x chunk 4000/30/10, outline, cursor), skeleton, sheet, sheet_line and find_lines. |
 | W5-b outline never shows a password split across heading spans (D-226 (3)) | `cargo test -p sb-sheet --test acceptance_t10_b32 w5b_outline_never_shows_a_password_split_across_heading_spans` | pass | The body renders `## Key *** end`. No outline entry or read at chunk 10/30/60 holds the value, even with whitespace removed. |
-| W5-b round-6 finding: the read body never shows a value joined across a link form as rendered text (H-2, D-218 spirit) | `cargo test -p sb-sheet --test acceptance_t10_d227 -- --ignored` (`w5b_body_never_shows_a_value_joined_across_a_link_form`) | fail | Red-first. It is committed `#[ignore]`d so the suite stays green. Two values are tested. In the first, plain text ends in `(` and the tail is an unknown-element link's text. In the second, the link text is the head and the plain text after it starts with `.`. needs_space() puts no space around the link form in either case, so the body holds `<head>([<tail>](#99)` or `[<head>](#98).tail`. With each `[text](#id)` reduced to `text` (what a markdown renderer shows), both values appear. This holds in a paragraph and in a heading's body line, at chunk 0 and 30: 5 hits (`chunk 0 read 0: split before/after a link, in the body`, `chunk 30 read 1/2/3`). The outline is clean, because outline_text reduces the link forms and then scrubs. Missing: the body scrub must also run on the link-reduced spelling, and a hit must replace the spans involved with `***`. Another fix would always put a space between plain text and a link form. |
+| W-5b round-6 finding: the read body never shows a value joined across a link form as rendered text (H-2, D-229) | `cargo test -p sb-sheet --test acceptance_t10_d227 w5b_body_never_shows_a_value_joined_across_a_link_form` | pass | No longer ignored. c550253 removed the `#[ignore]` line, and that one line is the only change to the file since 9f74cf2 (`git diff 9f74cf2 HEAD -- crates/sb-sheet/tests/`). Both values (split before a link after `(`, and after a link before `.`) are hidden in a paragraph and in a heading, at chunk 0 and 30. The outline is clean. In the mutation check it goes red under N1, N5 and N11. |
 | W5-c CHALLENGE frame content never emitted by read | `cargo test -p sb-sheet --test acceptance_t10 w5c_challenge_frame_content_never_emitted_by_read` | pass | Frames 1 and 2 are absent across regions and chunk sizes. Main text is still read. |
 | W5-c spans into the challenge frame, sealed regions (D-218) | `cargo test -p sb-sheet --test acceptance_t10 r3_w5c_spans_into_challenge_frame_and_sealed_regions` | pass | No sealed-frame text and no `#f1.`/`#f2.` ref. Sealed regions answer `no region`. |
 | W5-c extra: challenge frame content not in sheet, find, skeleton | `cargo test -p sb-sheet --test acceptance_t10 w5c_extra_challenge_frame_content_not_in_sheet_find_skeleton` | pass | No hit outside frame 0, and no marker in sheet, find_lines or skeleton. |
@@ -86,37 +98,48 @@ as a `FieldValue::Text` value on password rows. New placements this round:
 | D-227 a page heading cannot pose as the `+N more` entry | `cargo test -p sb-sheet --test acceptance_t10_d227 d227_a_page_heading_cannot_pose_as_the_more_entry` | pass | Ten posing headings, among them `+5 more sections, 10 words`, `- +3 more ...`, a newline followed by a fake entry, `remaining:`, `truncated: ...`, `(top)`, and levels 0, 9 and none. A `remaining:` body paragraph is also on the page. With 10 or 40 sections, at chunk 0/10 and max 400: there is at most one `remaining:` header line. Every outline line before index 20 starts `- #` or `- (top) (`, and no label holds a newline. The only `- +` line is the real fold, as the last line, and there is none without a fold. |
 | D-227 W-5b a password value never appears in `remaining:` | `cargo test -p sb-sheet --test acceptance_t10_d227 d227_password_value_never_appears_in_remaining` | pass | The value is placed across the 80-char cut (whole, over two spans, over three spans, as link text of the password field), in a folded section, and across two adjacent headings. At chunk 10/30/4000, with and without max 60: neither the value nor the squeezed canary is in the `remaining:` block, an entry, the read or the cursor. No prefix of 8 or more chars of the value shows in a capped label. |
 | D-227 the label is scrubbed before it is cut | `cargo test -p sb-sheet --test acceptance_t10_d227 d227_label_is_scrubbed_before_the_cut` | pass | The value straddles the cut and is joined only by outline_text (plain text ending `(` plus a link's text). The label shows `***` and no prefix of the value. This is the only test that reddens M7. |
-| D-227 mutation check: each D-227 path goes red when broken, then restored | `python target/scratch/mutate_t10r6.py <log> [ids]`: each mutation is applied to reader.rs, then `cargo test -q -p sb-sheet --test <bin> <filter>`, then reader.rs is restored. Afterwards `git status --short` and `git diff --stat` were checked | pass | 12 mutations, each red on at least one test. M1 word_cap back to chunk_cap: long-first, the-word and d226_2_a_read red. M2 word_cap 0: d228 red (d226_2_a_read green, gap noted). M3 no entry cap: outline and poser red. M4 OUTLINE_MAX 21: outline red. M5 no label cap: outline red. M6 OUTLINE_LABEL_MAX 81: outline red. M7 cut before the scrub: label red (d227_password green, because the body is scrubbed before the label is built, so plain-text values cannot reach a label). M8 fold line rendered like an entry: outline red. M9 fold words 0: outline red. M10 fold always plural: outline red. M11 label without hashes: poser red. M12 stop cursor used not raised: termination red. After the runs, `git status --short` shows only the new test file and `git diff --stat` is empty. |
-| I-5/I-6 contract paths and signatures (8ca6ec8) | `cargo test -p sb-sheet --test contract_paths` | pass | 1 passed (`i6_signatures_hold`). |
-| CLI skeleton example | `cargo run -p sb-sheet --example skeleton -- crates/sb-sheet/examples/register.index.json` | pass | Exit 0. Output includes `17 elements: 5 links, 4 buttons, 6 fields`, `! CHALLENGE #11 iframe "reCAPTCHA"`, `! OVERLAY #17 region "Cookie consent"` and `main: form`. |
-| clippy | `cargo clippy -p sb-sheet --all-targets -j 2 -- -D warnings` | pass | Exit 0, no warnings, the four acceptance files included. |
+| D-229 a value starting in the link (link then plain), in the renderer's and the label's reading | `cargo test -p sb-sheet --test acceptance_t10_d229 d229_value_starting_in_the_link_never_shows` | pass | Four placements. (1) A link whose text holds other words before the value's head, then `.tail` (paragraph). (2) A link that is exactly the head, then `!tail` (list item). (3) A button's quoted label as the head, then `.tail` (quote). Here the value shows only in the outline label's reading. (4) A value that only the renderer's reading shows: plain text ending `(`, then the `button "` of a button form. Chunk 0 and the chunk-30 chain to the end: no 8-char window of any value in the raw, rendered or label reading of any markdown, entry or cursor. The same holds with whitespace removed, as alphanumerics only, and over the chain's joined bodies. The contributing forms `](#99)`, `](#98)`, `](#5)` and `](#6)` are gone, while the unrelated `[Docs](#50)` stays. The plain texts `intro`, `keep alpha see`, `keep bravo`, `keep charlie` and `keep delta` stay. |
+| D-229 a value across a table cell separator | `cargo test -p sb-sheet --test acceptance_t10_d229 d229_value_across_a_table_cell_separator_never_shows` | pass | Rows with a 3-column header. The value runs through: a plain cell then a link cell; a link cell then a plain cell; a plain cell then a plain cell (the D-218 literal scrub on the whole row); and plain, link, plain over three cells. Same leak checks as above: no window shows. The contributing forms `](#97)`, `](#96)` and `](#95)` are gone. All six kept cell texts stay. The plain-then-link row keeps its 3 cells (4 separators). |
+| D-229 a value across three spans | `cargo test -p sb-sheet --test acceptance_t10_d229 d229_value_across_three_spans_never_shows` | pass | Four cases. (1) Plain ending `(`, a link, then plain starting `).`. (2) A link, plain `.`, then a link: the renderer puts a space before the second link, and the value holds that space. (3) Plain, an empty-text link, plain: once the empty form is read as text this leaves two spaces, so only the whitespace-collapsed reading shows the value. (4) Plain, link, plain in a code block. No window shows. The four contributing forms are gone, and `keep one/two/three/four` and `let k =` stay. |
+| D-229 the same joins in headings feed `remaining:` and the skeleton | `cargo test -p sb-sheet --test acceptance_t10_d229 d229_joined_value_in_a_heading_never_reaches_remaining_or_skeleton` | pass | An h1 and three h2/h3 headings hold plain-then-link, link-head-then-plain, three-span and plain-then-button-label values. Checked over chunk 0 and the chunk-30 chain, plus chains at chunk 0/10/30 with max_tokens 3/5/8/13/21/40 followed to the end, so the headings sit in `remaining:` (entries were seen, asserted > 0), and over the skeleton. No window shows in any markdown, entry, cursor or the skeleton. Under max 5, the labels keep `Golf keep`, `keep hotel`, `India keep` and `Kilo keep`, and one shows `***`. The skeleton keeps `Title keep`. |
+| D-229 a cut inside a hidden region never shows part of a value (cursor chains to the end) | `cargo test -p sb-sheet --test acceptance_t10_d229 d229_cut_inside_a_hidden_region_never_shows_part_of_a_value` | pass | One short page holds one placement of every kind above, plus a word glued to the hidden text (`glued***`). Eleven chains, each followed to its end: chunk 1 with no max_tokens (the whole page, 4 chars at a time), chunk 0 at max 3/9/17/26/38/51/67 (the budgets are spread over the page), and chunk 3 at max 5/23/47. A cut lands between `***` runs (asserted > 0). No 8-char window of any value shows in any read, entry or cursor, nor in the alphanumerics of a chain's joined bodies. That last check catches a value cut into pieces shorter than a window, which the per-read check cannot see at chunk 1. 2.3 s in debug. |
+| D-230 a plain span keeps its non-value text | `cargo test -p sb-sheet --test acceptance_t10_d229 d230_plain_span_keeps_its_non_value_text` | pass | Paragraph: the line starts `Alpha bravo charlie ***`, keeps `delta echo foxtrot golf [Docs](#50)`, has no `](#84)`, and has at most 3 `***`. Heading: `## Lima mike ***` ... `november oscar`, and its `remaining:` label keeps both phrases. Table row: `keep left1`, `keep note1` and `***` are there. No window of any value shows. |
+| D-231 (review round 7 blocking) a value holding the cell separator and an in-cell pipe never shows | `cargo test -p sb-sheet --test acceptance_t10_d229 -- --ignored` (`d231_value_with_an_in_cell_pipe_across_cells_never_shows`) | fail | Red-first, committed `#[ignore]`d so the suite stays green. It is the reviewer's blocking item, reproduced black-box. D-231 is recorded (c8bd2e4) but not implemented: reader.rs is unchanged since c550253. Four rows, each value holding the cell separator plus a pipe inside a cell: plain/plain, link/plain, plain/link/plain, and a pipe in cell 1 with a link after. The row renders the in-cell pipe as a backslash-escaped pipe, which no joined reading drops, and the D-218 escaped spellings escape every pipe or none. So the canary shows in the raw markdown (cell 1 keeps the value's head), and with the escape read as a pipe each of the 4 values shows whole: `chunk 0 read 0` for all 4, and `chunk 30 read 1/2/3/4`. Missing: D-231 (drop the inserted escape backslash in at least one joined reading). The test needs no change once that is in. Remove its `#[ignore]` then. |
+| D-229/D-230 mutation check: each new scrub path goes red when broken, then restored | `python target/tmp/r7/mutate_t10r7.py <log> [ids]`: each mutation is applied to reader.rs, then `cargo test -q -p sb-sheet -j 2 --test acceptance_t10_d229` plus the d227 `w5b_body` and `d227_label` tests, then reader.rs is restored byte for byte. Afterwards `git status --short` and `git diff --stat` were checked | pass | 11 mutations, each red. N1 hit loop off (joined_hits gives nothing): all 6 d229 tests and w5b red. N2 label reading off (floor FormOnly only): link-start, heading and cut red. N3 renderer reading off (floor Always only): link-start and cut red. N4 collapsed reading off: three-spans and cut red. N5 plain-char hiding off: all 6 d229 tests, w5b and d227_label red. N6 link-span hiding off: all 6 d229 tests red. N7 D-230 reversed (whole plain span hidden): link-start, table, three-spans, heading, d230 and d227_label red. N8 table row joined check off: table, d230 and cut red. N9 code joined check off: three-spans and cut red. N10 a plain-only hit does not trigger a rebuild: three-spans and cut red. N11 inline joined check off: 5 d229 tests and w5b red. The first pass found that the cut test missed N2 (a value cut by chunk 1 into pieces shorter than a window, behind the `> ` prefix each continuation repeats). The alphanumerics-only reading and the spread budgets closed that gap, and the final run above is all red. After the runs, `git status --short` shows only the new test file and `git diff --stat` is empty. |
+| I-5/I-6 contract paths and signatures | `cargo test -p sb-sheet --test contract_paths` | pass | 1 passed (`i6_signatures_hold`). |
+| CLI skeleton example | `cargo run -p sb-sheet --example skeleton -- crates/sb-sheet/examples/register.index.json` | pass | Exit 0. The output includes `17 elements: 5 links, 4 buttons, 6 fields`, `! CHALLENGE #11 iframe "reCAPTCHA"`, `! OVERLAY #17 region "Cookie consent"` and `main: form`. |
+| clippy | `cargo clippy -p sb-sheet --all-targets -j 2 -- -D warnings` | pass | Exit 0, no warnings, with all five acceptance files included (the new acceptance_t10_d229.rs too). |
 | fmt | `cargo fmt -p sb-sheet --check` and `cargo fmt --all -- --check` | pass | Both exit 0. |
-| cargo test -p sb-sheet all pass; the only ignored test is the red-first W-5b finding | `cargo test -p sb-sheet --no-fail-fast -j 2 -- --nocapture` | pass | Exit 0: 163 passed, 0 failed, 1 ignored (`w5b_body_never_shows_a_value_joined_across_a_link_form`, recorded as fail above). Per binary: unit 83, acceptance_t10 20, acceptance_t10_b32 16, acceptance_t10_d226 9 (6.6 s), acceptance_t10_d227 7+1 ignored (3.4 s), contract_paths 1, find_register 8, read_article 11, skeleton_sheet 8. |
-| cargo test --workspace | `cargo test --workspace --no-fail-fast -j 2` | pass | Exit 0. 75 result lines (61 test binaries and 14 doctest runs): 763 passed, 0 failed, 6 ignored. The ignored ones are this round's red-first W-5b test, three red-first T-08 round-3 harness tests (`d124_1_*`) and two child-process helpers (`d119_7_diag_child`, `file_asker_stderr_child`). The first workspace attempt at the default -j ran rustc out of memory while a reviewer built in the same worktree. The second hit LNK1285 on two corrupt PDBs left behind, which were deleted. The third run, recorded here, is clean. |
+| cargo test -p sb-sheet all pass; the only ignored test is the red-first D-231 finding | `cargo test -p sb-sheet --no-fail-fast -j 2 -- --nocapture` | pass | Exit 0: 174 passed, 0 failed, 1 ignored (`d231_value_with_an_in_cell_pipe_across_cells_never_shows`, recorded as fail above). Per binary: unit 87, acceptance_t10 20, acceptance_t10_b32 16, acceptance_t10_d226 9 (7.1 s), acceptance_t10_d227 8 (2.9 s), acceptance_t10_d229 6 plus 1 ignored (2.2 s), contract_paths 1, find_register 8, read_article 11, skeleton_sheet 8. |
+| cargo test --workspace | `cargo test --workspace --no-fail-fast -j 2` | pass | Postgres was checked first: sheetbrowse-postgres-1 (pgvector pg16 on 127.0.0.1:5433) is up and healthy. Exit 0. There are 76 result lines (62 test binaries and 14 doctest runs): 774 passed, 0 failed, 6 ignored. The ignored ones are this round's red-first D-231 test, three red-first T-08 round-3 harness tests (`d124_1_*`) and two child-process helpers (`d119_7_diag_child`, `file_asker_stderr_child`). The `boom @vault(test)` panic line in the log comes from core's passing `vault::tests::global_scrub_before_and_after_install`, which panics on purpose. |
 
 ## Failures
 
-- W5-b round-6 finding (`w5b_body_never_shows_a_value_joined_across_a_link_form`, run with `--ignored`).
-  The body scrub runs on rendered units. Link forms keep `[` `](#id)` around their text, and
-  needs_space() puts no space between a link form and a neighbouring `(`, `"`, `'` before it or
-  `.,;:!?)'"` after it. So a value with punctuation at the split point, displayed partly as plain text
-  and partly as a link's text, reaches the model as a markdown spelling that renders the whole value.
-  The outline is already safe (outline_text plus ctx.scrub, D-226 (3)). What is missing: the same check
-  in the body, that is, scrub the link-reduced spelling of each unit and replace the spans involved with
-  `***` on a hit, or always separate a link form from plain text. The test needs no change once the
-  body is fixed. Remove its `#[ignore]` then.
+- D-231 (`d231_value_with_an_in_cell_pipe_across_cells_never_shows`, run with `--ignored`). This
+  reproduces the reviewer's round-7 blocking item black-box. A password value that holds the cell
+  separator and also a pipe inside a cell shows in a table row:
+  - cell 1 keeps the value's head as plain text, so the canary is in the raw markdown;
+  - with the inserted backslash read away, the whole value shows. A markdown renderer drops that
+    backslash.
+
+  The cause, as the review found: table_row_tagged copies the `\` it inserts with `Shows::Always`,
+  so no reading in joined_hits drops it. escaped_spellings escapes every pipe or none, never the
+  mixed spelling. Missing: D-231 (drop the inserted escape in at least one joined reading). The test
+  needs no change once that is in. Remove its `#[ignore]` then.
 
 ## Known open edges (not rows of the table)
 
-- The coder-amended `d226_2_a_read_under_max_tokens_never_takes_less_than_a_word` is looser than D-228.
-  It accepts any partial word in the last read that fills the remainder, and does not check that the
-  word was longer than the read's budget. It passes, and the new D-228 test covers the gap.
-  Tightening it is optional.
-- The round-5 D-226 mutation set (10 mutations) was not repeated in full. M12 (stop cursor not spent)
-  and M1 against d226_2 were re-run. All D-226 tests still pass.
-- Seen, not a defect against any T-10 item: under a small max_tokens, continuation reads can repeat
-  `chunk 2 of 2`. Chunk numbering follows the canonical chunk_tokens plan.
-- B-202 (table header separator wider than the chunk) is deferred by D-227. It is not a row.
+- A value across two plain cells is hidden by the D-218 literal scrub on the whole row. That scrub
+  also removes the cell separator inside the hidden text, so the row loses a cell:
+  `keep l3 *** keep r3` becomes one cell under a 3-column header. This is not a leak. It predates
+  D-229, because the literal scrub is D-218's. A row where a link cell contributes keeps its cells
+  (asserted).
+- Cost, as in the review's should-fix 4: on the cut-sweep page (12 blocks) a debug read takes about
+  20 ms with 9 password values, against about 6 ms with none.
+- Seen, not tested: a renderer-inserted space between two link forms is outside D-229 (the review's
+  note). Round 6's known edges still stand: the coder-amended d226_2 test is looser than D-228,
+  continuation reads under a small max_tokens can repeat `chunk 2 of 2`, and B-202 is deferred.
+- The round-6 D-227 mutation set (12 mutations) was not repeated. Every D-227 test still passes.
 
 ## Out of scope for T-10 (need sb-driver or a live browser; not rows of the table)
 
