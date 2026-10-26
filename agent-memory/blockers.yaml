@@ -361,6 +361,11 @@ blockers:
     question: "For area page (injected.js): Settled.changed should count DOM mutations made while sb-driver waits for the network between two in-page settles (accept-T-22 note 2), but __sb exposes no mutation counter (S.mutCount is internal), so the driver cannot read the count at the start of a wait. Should __sb expose mutations() -> number (S.mutCount, after flushMut) or let settle(opts) take a since-count?"
     default_taken: "D-625 work in sb-driver: before a network wait between two settle calls, the driver sends (not awaited) a small function into the sb world that starts a MutationObserver and records a mark; the next SETTLE_FN call adds the count since the mark to changed and drops the observer with its last mark (or after the settle's remaining time + 1 s by a page timer). It lives in the isolated world only (globalThis.__sbGap there, never the page's window). Proposed for page: __sb.mutations() so the driver reads S.mutCount in the call it already makes and the extra observer goes."
     needs_user: false
+  - id: B-618
+    task: T-22
+    question: "For supreme (merge tooling): since wave 3 opened (main 1d921ee), merge_gate.py driver adds areas.driver.later.tasks, so it prints 'gate BLOCKED: T-23..T-26 missing review-T-2x.md' on swarm/driver-T22 (2c6fafb). merge.ps1 runs that gate for every driver PR, so #6, #11 and #12 (T-20, T-21, T-22) cannot pass it although each has an approve review. Per-task PRs (D-91) need the gate to check the PR's own task, not the area's whole list."
+    default_taken: "Area driver does not edit scripts/swarm/. Proposed: merge_gate.py takes the task from the head branch name (swarm/<area>-T<nn>[x] -> T-<nn>[x], plus the tasks that branch carries, e.g. T-18 T-20 T-21 for driver-T22) or an explicit --tasks list from merge.ps1, and only falls back to the area list for a swarm/<area> branch."
+    needs_user: false
 
 interface_changes:
   - id: B-401
