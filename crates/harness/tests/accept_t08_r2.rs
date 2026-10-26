@@ -591,7 +591,6 @@ async fn d124_1_reading_commands_print_the_literal() {
 /// `harness ledger <run>` prints the run id and its parent from the runs row; a value in
 /// either (a run started before the value was added) must print as the literal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "red-first T-08 round 3: print_ledger writes r.id and r.parent_run raw in the header line instead of through cell()/clean()"]
 async fn d124_1_ledger_header_prints_run_ids_as_literals() {
     let _g = LOCK.lock().await;
     let (db, store) = TestDb::store().await;
@@ -641,7 +640,6 @@ async fn d124_1_ledger_header_prints_run_ids_as_literals() {
 /// `harness tools pin|unpin|retire <domain>/<name>` echo the tool id; a vault value in it
 /// (typed by the user) must print as the literal, as `ask` does for its run argument.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "red-first T-08 round 3: tools pin/unpin/retire echo {d}/{n} raw instead of clean(), so a vault value in the tool id is printed"]
 async fn d124_1_tools_commands_echo_the_tool_id_as_literal() {
     let _g = LOCK.lock().await;
     let (db, store) = TestDb::store().await;
@@ -777,7 +775,6 @@ async fn d124_1_writing_commands_store_and_print_no_value() {
 /// be stored as the literal (rule 2: outgoing strings are scrubbed), like schedule add's
 /// prompt and tools retire's why.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "red-first T-08 round 3: cli gate set passes --note to gate_rule_set unscrubbed, so a vault value lands in gate.rules.note"]
 async fn d124_1_gate_set_note_is_scrubbed_before_the_database() {
     let _g = LOCK.lock().await;
     let (db, store) = TestDb::store().await;
