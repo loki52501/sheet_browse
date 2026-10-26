@@ -12,17 +12,20 @@
 //!   recipient, the resolved body's length and FNV-1a 64 hash, and whether any literal was
 //!   left unresolved. Never the resolved text itself. The model gets one short line.
 //!
-//! The wiring is the production one apart from the key source: a `PgStore` ledger, the real
-//! age `Vault` (installed as the process-wide scrubber), and a `FileAsker` on the run.
+//! The wiring is the production one apart from the vault: a `PgStore` ledger, the real age
+//! `Vault` (installed as the process-wide scrubber), and a `FileAsker` on the run. The vault
+//! is always a test vault: echo refuses to start without both `--vault-key` and
+//! `SB_VAULT_PATH`, and never falls back to the OS keychain or the default vault path, so the
+//! sink's length and hash line is only ever computed over a test value.
 //!
 //! Environment, as `core_pg::bootstrap` reads it:
 //! * `DATABASE_URL` (default `core_pg::DEFAULT_DATABASE_URL`);
-//! * `SB_VAULT_PATH`: the vault file (a test-owned temp vault);
+//! * `SB_VAULT_PATH` (required): the vault file (a test-owned temp vault);
 //! * `SB_RUNS_ROOT` (default `runs`) and `SB_RUN_ID` (required: the run folder and its
 //!   `runs` row must exist, as `harness run` leaves them).
 //!
 //! Arguments:
-//! * `--vault-key <file>`: an age identity file (default: the OS keychain, D-101). The path
+//! * `--vault-key <file>` (required): an age identity file. Never the OS keychain. The path
 //!   only; the key itself never comes from the command line or the environment (D-1);
 //! * `--sink <file>`: where the sink appends its lines (required);
 //! * `--ask-timeout-ms <n>`: shortens every ask card's 60 s timer (test seam), so a test
@@ -37,7 +40,7 @@ use harness_core::class::Class;
 use harness_core::gate::{AskCard, AskOutcome, Asker};
 use harness_core::memory::MemoryStore;
 use harness_core::run::{RunFolder, RunId};
-use harness_core::vault::{default_key, default_path, KeySource, Vault};
+use harness_core::vault::{KeySource, Vault};
 use harness_core::{
     serve_io, Classified, FileAsker, Harness, ToolCtx, ToolError, ToolHandler, ToolOutput,
     ToolRegistry, ToolSpec,
@@ -58,9 +61,9 @@ const TOOL: &str = "echo.send";
     about = "step-1 acceptance fake tool server (docs/01, D-122)"
 )]
 struct Args {
-    /// Age identity file for the vault (default: the OS keychain).
+    /// Age identity file of the test vault (required; never the OS keychain).
     #[arg(long)]
-    vault_key: Option<PathBuf>,
+    vault_key: PathBuf,
     /// File the sink appends one JSON line per send to.
     #[arg(long)]
     sink: PathBuf,
@@ -200,12 +203,12 @@ fn env(k: &str) -> Option<String> {
 async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    // The vault first, so every later message is scrubbed (H-2).
-    let path = default_path()?;
-    let key = args
-        .vault_key
-        .clone()
-        .map_or_else(default_key, KeySource::IdentityFile);
+    // The vault first, so every later message is scrubbed (H-2). Only a test vault: an
+    // explicit file and an explicit identity file, never the default path or the keychain.
+    let path = env("SB_VAULT_PATH").map(PathBuf::from).ok_or_else(|| {
+        anyhow::anyhow!("SB_VAULT_PATH is required (a test vault; no default path)")
+    })?;
+    let key = KeySource::IdentityFile(args.vault_key.clone());
     let vault = Vault::open(&path, &key)?;
     vault.install_global();
     let vault = Arc::new(vault);

@@ -699,20 +699,36 @@ fn flip_case(s: &str) -> String {
         .collect()
 }
 
+/// The canary planted as `@vault(test)`: SB_VAULT_CANARY when set (the tester's fresh value),
+/// else a runtime-unique ASCII value (process id, nanos and random hex), so b2 never skips.
+fn canary() -> String {
+    if let Some(c) = std::env::var("SB_VAULT_CANARY")
+        .ok()
+        .filter(|c| !c.trim().is_empty())
+    {
+        return c;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(nanos);
+    let c = format!(
+        "cnryT09q{:x}z{:x}k{:016x}",
+        std::process::id(),
+        nanos,
+        h.finish()
+    );
+    assert!(c.chars().count() >= MIN_VALUE_CHARS);
+    c
+}
+
 /// "`@vault(test)` resolves inside the fake tool's sink; the value appears nowhere in
 /// stdout, ledger, DB, or `runs/`. A test greps all of them."
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn b2_vault_value_resolves_in_the_sink_and_nowhere_else() {
-    let Some(canary) = std::env::var("SB_VAULT_CANARY")
-        .ok()
-        .filter(|c| !c.trim().is_empty())
-    else {
-        eprintln!(
-            "SKIPPED b2_vault_value_resolves_in_the_sink_and_nowhere_else: SB_VAULT_CANARY is \
-             unset; set it to a unique string of at least {MIN_VALUE_CHARS} characters"
-        );
-        return;
-    };
+    let canary = canary();
     let s = Session::new("vault canary").await;
     {
         std::fs::create_dir_all(s.vault_path.parent().unwrap()).unwrap();
@@ -861,9 +877,19 @@ async fn b3_ledger_is_append_only_and_mirrored() {
         "update ledger.events set why = 'rewritten'",
         "update ledger.events set ok = false where id = (select min(id) from ledger.events)",
         "delete from ledger.events",
+        "truncate ledger.events",
     ] {
-        let r = sqlx::query(sql).execute(&mut conn).await;
-        assert!(r.is_err(), "{sql} must fail at the database");
+        // The statement-level trigger of migrations/0001_init.sql, not any other error.
+        match sqlx::query(sql).execute(&mut conn).await {
+            Ok(r) => panic!(
+                "{sql} must fail at the database, affected {}",
+                r.rows_affected()
+            ),
+            Err(e) => assert!(
+                e.to_string().contains("ledger is append-only"),
+                "{sql} failed for another reason: {e}"
+            ),
+        }
     }
     let n: i64 = sqlx::query("select count(*) from ledger.events")
         .fetch_one(&mut conn)
