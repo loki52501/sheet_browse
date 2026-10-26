@@ -224,10 +224,11 @@ tasks:
   - id: T-05d
     step: follow-up
     wave: 2
-    owner: core
+    owner: core/suborch
     branch: swarm/core-T05d
     title: "D-77/B-151: scrub base64 and base64url spellings of every vault value (both alphabets, padded and unpadded, 3 alignments, trimmed edges, patterns under 8 chars skipped); tests for Basic auth and a JWT payload carrying the canary. Not a hold (D-88), but due before the Phase 1 baseline T-17 (zero vault leaks)."
-    status: todo
+    status: doing
+    claimed_at: "2026-10-25"
     from: T-05
   - id: T-07b
     step: follow-up
