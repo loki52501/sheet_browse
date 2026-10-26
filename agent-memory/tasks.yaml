@@ -208,7 +208,11 @@ tasks:
   - id: T-24
     step: 6
     title: "sb-media; acceptance 8"
-    status: todo
+    status: in_progress
+    owner: driver/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/driver-T24
+    note: "Started before T-23 per WAVE2 13:40 (prep that does not need page): the direct-file path (ffmpeg frames, perceptual-hash dedupe, 9-up contact sheets, manifest.json, one sharp frame) covers acceptance 8 on its own. Tab paths (video.list over __sbMedia, in-page seek + canvas, element screenshot, transcript) need page's media.js and become T-24b."
     blocked_by: [T-23]
   - id: T-25
     step: 6
