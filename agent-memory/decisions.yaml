@@ -318,3 +318,27 @@ decisions:
   - id: D-85
     text: "B-195 accepted (I-13 draft): Launcher::before_run (provided, default Ok) runs first in Runner::execute, before the prompt is scrubbed; a failure returns SchedError::BeforeRun(LaunchError) with no folder or runs row. harnessd's daemon::ReopenVault re-opens the vault there. The harness-crate launcher constants and ClaudeLauncher fields (D-124) stay harness-internal. Condition: SchedError is marked #[non_exhaustive] in the same change, as VaultError was (D-76)."
     why: "A vault value added while harnessd runs would otherwise be unknown to the scrubber for every scheduled run until a restart, which is a leak path; re-opening before anything is written closes it, and failing before the runs row keeps a half-started run out of the ledger. SchedError has gained a variant each round, so non_exhaustive keeps srv-cli (wave 2) safe from the next."
+  - id: D-86
+    text: "The repo has a remote: origin = https://github.com/loki52501/sheet_browse.git, with main and every swarm branch pushed. PRs are real GitHub pull requests (gh pr create --base main --head swarm/<branch>); areas push their own branches; the supreme pushes main after every merge. Supersedes D-46 (local-only). Never force-push; never push main from an area session."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core. A real remote gives every merge a PR record and lets areas publish branches without the supreme reading worktrees."
+  - id: D-87
+    text: "Merge rule (overrides docs/10 S-3 and S-8 where they differ): a PR merges when its reviewer report has no Blocking items and cargo test --workspace passes on the merge commit, and no leak hook fired (CLAUDE.md hard rule, kept). A red acceptance item does not block a merge; it becomes a follow-up task on main (T-xxb) owned by the same area. Supreme second-opinion reviews are non-blocking notes filed into blockers.yaml; they never hold a merge or a launch."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core."
+  - id: D-88
+    text: "Holds are abolished: no wave-2 launch or merge waits on a should-fix in another area. D-77's base64 scrub, B-32 item 1 and B-33 item 3 become ordinary follow-up tasks (T-05d, T-10b, T-11b) running in parallel with wave 2."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core."
+  - id: D-89
+    text: "Review loops are capped at two rounds per PR: round 1 review + test, round 2 fixes. After round 2 the PR merges under D-87 and everything left is filed as follow-ups."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core; wave-1 PRs went 3 to 5 rounds."
+  - id: D-90
+    text: "Interface freeze: no amendment to interfaces.yaml until T-17 is done. An area that needs a change works around it locally and files the proposal; the supreme answers 'deferred to wave 4' and moves on. D-84 (VaultEditor) and D-85 (before_run, non_exhaustive SchedError) are the last accepted items; if core has not finished them they become follow-up tasks (T-05c, T-08b), not merge conditions."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core."
+  - id: D-91
+    text: "One PR per task from now on, on branch swarm/<area>-T<nn> (for example swarm/servers-T12, swarm/core-T05d). core's remaining work after its merge, every follow-up, and every wave-2 and wave-3 task each gets its own branch and merges alone."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core; one branch per area made each merge wait for the area's slowest task."
+  - id: D-92
+    text: "The supreme relaunches any stopped area session itself, without asking, with scripts/swarm/launch.ps1 (Start-Process wt.exe form, TMP on F:/sb-swarm/tmp-<area>). It still asks the user only about: a merge conflict it cannot resolve, a vault or captcha rule, or deleting something."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core."
+  - id: D-93
+    text: "Supreme checkpoint commits at most once per hour, one line. Decisions only when they change what someone else must do."
+    why: "speed: three days produced 2 merged areas; the old rule serialised everything behind core."

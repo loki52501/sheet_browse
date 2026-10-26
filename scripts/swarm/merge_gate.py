@@ -4,11 +4,10 @@
 
 Passes (exit 0) only when, for every task the area owns this wave (agent-memory/swarm.yaml
 areas.<area>.tasks, plus later.tasks once that wave is open):
-  * tasks.yaml says status done;
   * bench/results/review-<task>.md has a Blocking section that is empty or `- none`, and its
     last `Verdict:` line is `Verdict: approve`;
-  * bench/results/accept-<task>.md has every table result cell `pass` and ends with a
-    `Verdict: green` line;
+  (D-87: a task not marked done, or an accept-<task>.md that is missing or not all `pass` /
+  `Verdict: green`, prints a `gate warning` and becomes a follow-up task; it does not block);
 and agent-memory/decisions.yaml + blockers.yaml load without duplicate keys or ids (the
 union merge driver can produce both), every blockers.yaml entry sits under the section its
 fields belong to (a merge can move entries between sections, D-75), and the area's worktree has no leak log
@@ -140,13 +139,20 @@ def main(argv):
     tasks = {t["id"]: t for t in load(ROOT / "agent-memory" / "tasks.yaml")["tasks"]}
     mine = area_tasks(swarm, area)
     results = ROOT / "bench" / "results"
+    warnings = []
     for tid in mine:
         status = tasks.get(tid, {}).get("status")
         if status != "done":
-            problems.append(f"{tid}: status {status}, not done")
-        for p in (check_review(results / f"review-{tid}.md"), check_accept(results / f"accept-{tid}.md")):
-            if p:
-                problems.append(f"{tid}: {p}")
+            warnings.append(f"{tid}: status {status}, not done")
+        p = check_review(results / f"review-{tid}.md")
+        if p:
+            problems.append(f"{tid}: {p}")
+        # D-87: a red or missing acceptance report never blocks; it becomes a follow-up task (T-xxb).
+        p = check_accept(results / f"accept-{tid}.md")
+        if p:
+            warnings.append(f"{tid}: {p} -> file a follow-up task")
+    for w in warnings:
+        print(f"gate warning: {w}")
     if worktree is not None:
         leaks = worktree / ".claude" / "state" / "leaks.log"
         if leaks.exists() and leaks.read_text(encoding="utf-8", errors="replace").strip():
