@@ -1824,3 +1824,87 @@ test("A21 D-444 (1): visibility-swap show toggles (a synced twin, clone and hide
     assert.equal(r.kinds.user, "ada", k + ": user (control) reads its text");
   }
 });
+
+// A22 (tester-10, round 5): review-T-19 round 8 Y3, Y3x, Y3d (D-444 (2)) and Y5, Y5v (D-444 (3))
+// in Chromium. One page load per case; type the password, click Show, read as soon as the copy
+// is in the page (mid), after settle() in the same evaluate (same), again (next), and once the
+// page clock is 2.05 s past the last change (late). Values compared in world sb; only kinds
+// and booleans return.
+test("A22 D-444 (2)(3): a password moved or re-attached in its copy's batch, or replaced by a new password with its key, never lets the copy read or emit the value", async (t) => {
+  const secret = process.env.SB_VAULT_CANARY || "sbpw" + crypto.randomBytes(12).toString("hex");
+  const CASES = [
+    // [case, the old password leaves the page later (wait for it before the late read)]
+    ["y3", true],
+    ["y3x", true],
+    ["y3d", true],
+    ["y5", false],
+    ["y5v", false],
+  ];
+  const lines = [];
+  const fails = [];
+  for (const [k, removedLater] of CASES) {
+    const o = await open("accept-d444b.html");
+    const IDS = ["pw-" + k, "copy-" + k, "pw2-" + k];
+    await o.ev((ids) => {
+      const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+      globalThis.__pwReads = {};
+      Object.defineProperty(HTMLInputElement.prototype, "value", {
+        configurable: true,
+        enumerable: d.enumerable,
+        get() {
+          if (ids.includes(this.id)) globalThis.__pwReads[this.id] = (globalThis.__pwReads[this.id] || 0) + 1;
+          return d.get.call(this);
+        },
+        set(v) {
+          d.set.call(this, v);
+        },
+      });
+    }, IDS);
+    await o.page.fill("#pw-" + k, secret);
+    await o.ev(() => globalThis.__sb.index());
+    const read = (settleFirst) => o.ev(async (a) => {
+      const sb = globalThis.__sb;
+      const out = [];
+      if (a.settleFirst) out.push(await sb.settle({ cap: 3000 }));
+      const present = !!document.getElementById(a.ids[0]);
+      out.push(sb.walk({ dirty: true }), sb.index(), sb.text(), sb.text("f-" + a.k), sb.frames(),
+        sb.fingerprint("textbox \"Shown entry " + a.k + "\""));
+      const kinds = {};
+      for (const id of a.ids.concat(["user"])) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        const s = sb.state(el);
+        out.push([s, sb.name(el), await sb.act(sb.id(el))]);
+        const v = s && s.value ? s.value : {};
+        kinds[id] = id === "user" ? v.text : v.kind + ("text" in v ? "+text" : "");
+      }
+      const blob = JSON.stringify(out);
+      let frag = false;
+      for (let i = 0; i + 8 <= a.secret.length; i += 2) if (blob.includes(a.secret.slice(i, i + 8))) frag = true;
+      return { present, kinds, leak: blob.includes(a.secret) || frag };
+    }, { settleFirst, secret, ids: IDS, k });
+    await o.page.click("#show-" + k, { noWaitAfter: true });
+    await o.page.waitForFunction((id) => !!document.getElementById(id), "copy-" + k, { polling: "raf", timeout: 5000 });
+    const mid = await read(false);
+    const same = await read(true);
+    const next = await read(false);
+    if (removedLater) await o.page.waitForFunction((id) => !document.getElementById(id), "pw-" + k, { polling: "raf", timeout: 5000 });
+    await pastBornWindow(o, await o.page.evaluate(() => performance.now()));
+    const late = await read(false);
+    const reads = await o.ev(() => globalThis.__pwReads);
+    const all = { mid, same, next, late };
+    lines.push(`${k}: ` + Object.entries(all).map(([w, r]) => `${w} pw ${r.present ? "present" : "gone"} copy ${r.kinds["copy-" + k]}` +
+      (r.kinds["pw2-" + k] ? ` pw2 ${r.kinds["pw2-" + k]}` : "") + ` leak ${r.leak}`).join(", ") + `, getter ${JSON.stringify(reads)}`);
+    if (Object.keys(reads).length) fails.push(`${k}: world sb called a value getter ${JSON.stringify(reads)}`);
+    for (const [w, r] of Object.entries(all)) {
+      if (r.leak) fails.push(`${k} ${w}: the value or a fragment is in __sb output`);
+      if (!["empty", "filled"].includes(r.kinds["copy-" + k])) fails.push(`${k} ${w}: copy ${r.kinds["copy-" + k]}`);
+      if (r.kinds["pw2-" + k] && r.kinds["pw2-" + k].endsWith("+text")) fails.push(`${k} ${w}: new password ${r.kinds["pw2-" + k]}`);
+      if (r.kinds.user !== "ada") fails.push(`${k} ${w}: user (control) ${r.kinds.user}`);
+    }
+    // the moves must overlap the password, or the case does not test D-444 (2)
+    if (removedLater && !mid.present) fails.push(`${k}: the mid read did not overlap the password`);
+  }
+  t.diagnostic(`ACCEPT A22 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""}; ` + lines.join("; "));
+  assert.deepEqual(fails, []);
+});
