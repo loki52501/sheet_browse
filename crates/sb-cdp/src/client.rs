@@ -375,7 +375,7 @@ async fn read_loop(mut inbound: mpsc::Receiver<Bytes>, sender: CdpSender, observ
             let mut sessions = lock(&sender.shared.sessions);
             if let Some(s) = event.session.as_deref() {
                 if let Some(tx) = sessions.get(s) {
-                    let _ = tx.send(event.clone());
+                    let _ = (tx, event.clone());
                 }
             }
             if let Some(gone) = detached {
