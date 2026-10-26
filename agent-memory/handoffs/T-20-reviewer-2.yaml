@@ -1,0 +1,15 @@
+from: driver/reviewer-2
+to: driver/suborch
+task: T-20
+date: "2026-10-26"
+state: "Round 2 review of 84f8294 (handoff ec14c21), diff 73b35fe..HEAD, in bench/results/review-T-20.md. Verdict approve, Blocking none. Round-1 Blocking 1 is closed: the cap is strict, every call and wait is capped at t0 + cap, and the tolerance is 40 ms. Round-1 Blocking 2 is closed: per D-606 the wait is a settle capped at the slot, then sleep_until(slot), and a live test asserts the executed schedule against literal numbers on a page that mutates every 10 ms. All 5 round-1 Should-fix items are addressed. Brief checks pass: the one sleep_until (actionable.rs:522) has its rule-6 comment; D-607's paint wait is a condition with a cap; the CloseOnDrop guard closes the tab; tidy_why has no bypass in the light DOM; me never sends bringToFront. No cargo was run (per the brief)."
+not_done: "Follow-ups (Should-fix in the review): (1) B-606 says deferred to the user but needs_user is false; for me, open's newWindow can also take focus; (2) the settle in wait_slot has no effect on timing (it is capped at the slot, and sleep_until follows), so supreme should drop it or let it extend past the slot (amend D-606); (3) when the next slot is at or after the deadline the driver still waits out up to 500 ms; (4) D-607 can cost 3 s on a page that never paints (an empty body); (5) B-607, the shadow-DOM id forge, goes to area page; (6) the round-1 Notes carry over (dead NoBase path, the unused force parameter, any URL scheme in open, a challenge overlay retried as a cover, 3 x OPEN_CAP). The workspace test run is still owed."
+gotchas:
+  - "Paint timing emits no first-paint for a document that renders only the default background, so a PerformanceObserver('paint') wait on an empty page always runs to its cap."
+  - "describe() lets the page put whitespace only into the id. Parser tag names stop at whitespace and the class part is the first whitespace-split token, so split_ref's ' (' can come only from an id."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-20.md
+  - agent-memory/handoffs/T-20-reviewer-2.yaml
+verify: "python scripts/swarm/merge_gate.py driver --worktree ."

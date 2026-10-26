@@ -1,144 +1,133 @@
-# Review: T-20 (area driver), round 1
+# Review: T-20 (area driver), round 2
 
-Reviewer-1, 2026-10-26. Scope: `git diff 0d7bae6..HEAD`, which is commit 8a32525 (code) and
-64405ae (handoff). Merged T-18 and page code is out of scope. injected.js `act()`, `settle()`,
-`walk()`, `resolve()` and `describe()` were read to check how the Rust side uses them. No cargo
-command was run (per the brief); the coder's gate results are in
-agent-memory/handoffs/T-20-rust-coder-1.yaml.
+Reviewer-2, 2026-10-26, under D-89. Scope: `git diff 73b35fe..HEAD`. That is commit 84f8294
+(code) and ec14c21 (handoff, D-606, D-607, B-607). I read `describe()` and `coverWhy()` in
+injected.js to check the tidy_why neutralisation. I ran no cargo command (per the brief). The
+coder's gate results are in agent-memory/handoffs/T-20-rust-coder-2.yaml.
 
 ## Blocking
 
-- **The 5 s cap is not strict (B-4 #6, acceptance 2 "5 s cap respected").** Three places run
-  past the deadline:
-  - `crates/sb-driver/src/actionable.rs:227`: every attempt gets `deadline + ANSWER_GRACE`
-    (300 ms).
-  - `actionable.rs:325`: `wait_change` also gets `+ ANSWER_GRACE`, and its `wait` is capped only
-    at the deadline.
-  - `actionable.rs:311`: `bring_to_front` gets the same grace.
+- none
 
-  The worst case is a busy page. The last wait ends at 5.3 s and the attempt after it at 5.6 s.
-  The text still reads `after 5.0 s` (`actionable.rs:274-278` prints `cap`, not the elapsed
-  time). The test makes this acceptable: `crates/sb-driver/src/chromium_t20.rs:23`
-  (`CAP_TOLERANCE` 350 ms) and `:289` and `:304` assert `<= 5.35 s`. Required:
-  - no in-page call or wait may end after `t0 + cap`;
-  - when the budget runs out mid-attempt, the step reports the last real answer, not `not
-    answering`;
-  - the test asserts `<= ACT_CAP` plus a scheduling epsilon of a few ms, not 350 ms.
-- **The retry wait is neither the spec's `await settle()` nor the schedule (B-4 #6 "on why,
-  `await settle()`, retry at 0·50·100·250·500 ms then 500 ms steps").** `CHANGE_FN`
-  (`actionable.rs:47-59`) resolves at the first DOM mutation. On any page that mutates
-  continuously (a carousel, a clock, an ad slot, style-attribute animations) each wait ends at
-  once. Retries then run back to back, about 20 per second. That is roughly 100 `act()` calls in
-  5 s, each one running `scrollIntoViewIfNeeded` again and doing a CDP round trip. The schedule
-  holds only on a page that does not move.
+Round 1 Blocking 1 (strict 5 s cap) is closed:
+- `ANSWER_GRACE` is gone.
+- Every act call, wait and `Page.bringToFront` is capped at `t0 + cap`:
+  - `crates/sb-driver/src/actionable.rs:412`, `:461` (`slot.min(deadline)`) and `:485-493`;
+  - `call_sb` and `raw_call` send nothing once the deadline has passed
+    (`crates/sb-driver/src/runtime.rs:202-205`, `:336-338`).
+- A budget that runs out mid-attempt reports the last real answer with the measured time
+  (`actionable.rs:341-345`). The text reads `not answering` only when the page never answered.
+- The tolerance is now 40 ms (`chromium_t20.rs:23`, `accept_t20.rs:29`). The coder measured
+  5.002 to 5.013 s.
 
-  D-603 records the change as a coder decision, but the spec text is not ambiguous, so it needed
-  a blocker for supreme (CLAUDE.md). `wait_change` also turns every `DriverError::Cdp`
-  (`actionable.rs:331`) into an immediate retry, which is another way to bypass the schedule.
-
-  The fix is either of these, and the choice is supreme's:
-  - wait with `__sb.settle({cap: step})`, so the wait never ends before a mutation-free quiet
-    period or the step;
-  - wait the full step as the condition's deadline.
-
-  Either way, add a test that fails when the executed schedule is wrong. Today the mutation
-  "`retry` never incremented" (every wait 0 ms) passes all of chromium_t20. A
-  disabled-for-5-s case could assert attempts in roughly 10 to 20 (the schedule gives about
-  14).
+Round 1 Blocking 2 (B-4 #6 retry wait) is closed:
+- `CHANGE_FN` is gone. `wait_slot` (`actionable.rs:501-524`) awaits `__sb.settle` capped at
+  `min(slot, deadline)`, then `sleep_until(slot)`.
+- A CDP error during the wait now fails the step (`WaitEnd::Failed`). It is no longer an
+  instant retry.
+- D-606 records the change as a sub-orchestrator decision.
+- The test asserts the executed schedule against literal spec numbers. The page mutates every
+  10 ms, the bound per wait is -2/+80 ms, and 10 to 16 attempts must fit
+  (`chromium_t20.rs:369-400`). The coder reports seeing both mutations go red.
 
 ## Should-fix
 
-- **Bases can repeat (D-604, D-55).** `crates/sb-driver/src/runtime.rs:317-321` hands back the
-  base when the walk call comes back `Lost`, but the walk may already have run in the page
-  (`S.based = true`, injected.js:1278-1281) before the context died. If that document is
-  restored from bfcache, it keeps the base. The next document was given the same base, so ids
-  from the two overlap in one tab frame, and an id the model holds from document Y resolves to
-  a different element in restored document X. Only the `no runtime` give-back
-  (`runtime.rs:329-331`) is provably safe. Do not give back on `Lost`. It costs one stride out
-  of 42949.
-- **Page text can forge element refs in a why.** `tidy_why` (`actionable.rs:156-173`) allows
-  space, `(`, `)`, `#` and digits. `describe()` appends the raw `id` attribute
-  (injected.js:1351-1354), so `<div id="x (OVERLAY #12)">` yields `covered by div#x (OVERLAY #12)
-  (OVERLAY #40)`, which points the model at element 12. This is pr-ready section 5's first
-  defect. In the Rust part of the why, replace `(`, `)` and `#` that the driver did not write,
-  or have area page sanitise `describe()`. `exception_text` (`runtime.rs:155-163`) puts page
-  exception text into `DriverError` with no character filter. That one is lower risk because of
-  the isolated world.
-- **Untested behaviour that the brief asks for:**
-  - "Context-destroyed retry at most once." There is no test where the context is lost twice.
-    Mutating `if !retried` to always retry stays green in `call_sb` (`runtime.rs:364`) and
-    `open` (`lib.rs:301`). Add a mock test: `Lost` twice returns `Lost` and sends no third call.
-  - "`open` closes the half-open tab." There is no test. `open` of an unreachable URL (for
-    example `http://127.0.0.1:1/`) should return `Err` and leave `tabs()` unchanged.
-- **D-605 does not fit the `me` profile.** E-2 (docs/07:19) says scheduled mail runs use `me`
-  headed in a hidden window. A minimized window, or on Windows one that other windows fully
-  cover (native occlusion), reports `visibilityState hidden`. Two things follow:
-  - `Page.bringToFront` (`actionable.rs:244-249`) activates the OS window, which steals focus
-    from the user and un-hides the "hidden window";
-  - if the window stays hidden, every step fails with `the tab is not visible after 5.0 s`.
+Filed as follow-ups. None of these blocks.
 
-  B-606 has `needs_user: false`, and its default covers only "tabs in one window". It should
-  cover the case above:
-  - mark B-606 needs_user, or get a supreme decision before T-22;
-  - do not call `bringToFront` under `Profile::Me`;
-  - consider `--disable-backgrounding-occluded-windows`, `--disable-renderer-backgrounding` and
-    `--disable-background-timer-throttling`. These are scheduling flags, not UA or fingerprint
-    changes, but check them against D-5.
+- **B-606's flag contradicts its text.** The round-2 note says me scheduling is deferred to
+  "T-22 and the user", but `needs_user` is still `false` (agent-memory/blockers.yaml, B-606).
+  Under `Profile::Me`:
+  - `open` still makes a new OS window (`lib.rs:480`, `newWindow: true`), which can take the
+    user's focus;
+  - an occluded `me` window now fails every step at once with `TAB_HIDDEN_ME`.
 
-  For `bench` (headless) a window per tab is fine.
-- **The "< 50 ms" check is weakened.** `chromium_t20.rs:236-239` asserts the median of three
-  first answers, while acceptance 2 says the covered answer comes back in under 50 ms. The
-  reason given (a stall in a fresh window's compositor) is plausible. Record it as a decision or
-  blocker so the weakening is visible, or warm the window and then assert every run.
+  Set `needs_user: true`, or get a supreme decision before T-22.
+- **The settle inside `wait_slot` has no effect on timing.** It is capped at the slot, and
+  `sleep_until(slot)` follows it whatever it returns (`actionable.rs:506-522`). So the wait is
+  exactly the slot on every page. The settle costs one CDP round trip and an in-page observer
+  per retry, about 13 per capped step, and changes nothing. The rule-6 comment is accurate.
+  Supreme should choose one of these in a D-606 amendment:
+  - drop the settle and keep the slot timer;
+  - let settle extend past the slot (to the budget) on a noisy page, so the spec's
+    "`await settle()`" means something.
+- **Waiting out a slot that no attempt follows.** When the next slot is at or after the
+  deadline, `wait_slot` still waits until the deadline (`actionable.rs:459-461`). Then the
+  step fails with the same why, so up to 500 ms is spent for nothing. Latency outranks the
+  literal "after 5.0 s". Return `out_of_time` at once when `slot >= deadline`, or record why
+  not.
+- **D-607 can cost 3 s on a page that never paints.** The paint timing spec does not emit
+  `first-paint` for a document that renders only the default background, for example an empty
+  body before an SPA mounts. Such a page waits the full `PAINT_CAP_MS` in `open`
+  (`runtime.rs:51-81`). D-607 admits this ("only a page that never paints pays the cap").
+  Consider capping at about 1.5 s, or resolving on the first rAF after settle as well.
+- **B-607 residual (area page).** An id that contains whitespace inside a shadow root is not
+  reported in `odd`, so `covered by tag#x (#99)` still reads as ref 99. It is correctly routed
+  to page. `describe()` should neutralise the id and class itself.
+- **The round-1 Notes that were not addressed carry over:**
+  - the dead `NoBase` path;
+  - the unused `force` parameter in `based_ctx` (`runtime.rs:333`);
+  - `open` accepts any URL scheme;
+  - a challenge overlay is retried as a cover for 5 s instead of stopping;
+  - the total wait in `open` can reach 3 x `OPEN_CAP`.
 
 ## Notes
 
+- **Checks the brief asked for:**
+  - **`sleep_until`:** there is one in the crate (`actionable.rs:522`), and it has a rule-6
+    comment at `:519-521`. The crate doc (`lib.rs:2-3`) names it as the one timer.
+  - **D-607 first-paint wait:** it is a condition with a cap. A `PerformanceObserver('paint')`
+    or an existing paint entry ends it, and `setTimeout(end, min(paintCap, settle.cap))` caps
+    it (`runtime.rs:56-73`). It is skipped for hidden and `about:` documents. The entry check
+    and `observe` run in the same task, so no entry can be missed between them. If the
+    observer throws, the wait ends at once.
+  - **`open` drop guard:**
+    - `CloseOnDrop` (`lib.rs:312-326`) is armed after `createTarget` (`:489`) and disarmed
+      only on success (`:494`). An error from `?` or a dropped future closes the tab.
+    - A mock test and a live test (`http://127.0.0.1:1/`) cover this.
+    - Gap: a drop while `createTarget` is still in flight leaks the tab, because its id is not
+      known yet. This is minor.
+  - **tidy_why:** I found no bypass in the light DOM.
+    - `split_ref` needs `" ("` and digits only. `describe()` gives the page whitespace only
+      through `id`: parser tag names and the first class token cannot hold whitespace.
+    - `neutral_desc` maps everything in the description except `[alnum-_]` and the one
+      separator. So a forged ref inside D is always destroyed, and the trailing ref is the
+      driver's own.
+    - The only way to forge the trailing ref is an id that ends in `" (#n)"` with no real ref
+      after it. `odd` covers that in the light DOM, from the isolated world, so the page
+      cannot tamper with it. The shadow-DOM case is B-607.
+    - Exception text now goes through the fallback filter (no `#`, `(` or `)`).
+    - Unit and live tests: `/forged`, `/forged2`.
+  - **`me` and `bringToFront`:** the only `Page.bringToFront` is in `bring_to_front`
+    (`actionable.rs:481`). It is reached only after the `Profile::Me` check at `:434-436`.
+    The mock test asserts nothing is sent, and the live test asserts the opener stays
+    `hidden`.
+- **Round-1 Should-fix status:**
+  1. Bases: fixed. `give_back` happens only on `no runtime` (`runtime.rs:367`).
+  2. Forged refs: fixed, with the B-607 residual above.
+  3. Untested behaviour: fixed.
+     - `a_context_lost_twice_is_not_retried_a_third_time` and
+       `a_failed_open_is_retried_once_and_closes_its_half_open_tab` both assert no third call.
+     - The live half-open close test.
+  4. `me`/D-605: the code is fixed. B-606's flag remains (above).
+  5. `< 50 ms`: fixed. Every sample is asserted (chromium_t20 (a), accept_t20 rows 1 and 1b),
+     and row 1b is no longer `#[ignore]`. The coder saw 18 of 19 runs green. The one red run
+     was before `PAINT_CAP` 3000, and its values were not captured. The tester should confirm
+     stability under load.
+- **Tolerance:** 40 ms is more than "a few ms". It is acceptable on Windows timer granularity,
+  given the measured 2 to 13 ms.
 - **Hard rules hold in this diff:**
-  - rule 6: no `sleep`. Every wait is a condition with a cap: `wait_registry`, the in-page
-    `CHANGE_FN` and `settle` timers as condition deadlines, and `timeout_at`.
-  - rule 2: `act_steps` never touches `ctx`, and `step_label` drops values (test
-    `step_labels_never_carry_values`). `Why` and `StepResult` hold only labels and page whys.
-  - rule 3: `challenge` is terminal. The program stops with `StopReason{class: Challenge}`,
-    tested at `chromium_t20.rs:392-415`.
-  - rule 5: the WALK, ACT and SETTLE functions return counts, points or whys only.
-  - No keys and no em dashes.
-- **Fail-closed:** an unknown why, or an answer that is neither `{x,y}` nor `{why}`, is
-  terminal (`classify_why`, `parse_answer` and tests). Good.
-- **Install ordering:** resume happens only in the reply hook of
-  `Page.addScriptToEvaluateOnNewDocument` (`lib.rs:174-186`). The mock test
-  `paused_target_runs_only_after_the_runtime_install_replied` asserts nothing is sent before
-  the reply. Good. Resuming after an error reply fails open for the runtime but recovers
-  through the `createIsolatedWorld` fallback. That is acceptable.
-- **Base overflow** fails closed with a unit test (`runtime.rs:410-427`).
-- **I-9 and I-11:** signatures are unchanged. `open` and `act` match I-9. The I-11 use is
-  correct: `walk({base})` before the first call into each sb context, then `act(id)` as a
-  promise. D-73's "walk with a base after every navigation" holds.
-- **Dead code:**
-  - The `NoBase` re-walk path in `actionable` cannot fire through `act()`, because `resolve()`
-    answers `stale` when the document has no base (injected.js:286). D-603's text about `no
-    base` is misleading.
-  - The `force` parameter of `based_ctx` is always `false`.
-- **`open`:**
-  - Dropping the `open` future after `Target.createTarget` leaks the tab (no drop guard).
-  - The total wait can reach 3 x `OPEN_CAP` (90 s).
-  - Any scheme is accepted (`javascript:`, `file:`, `chrome:`). This is upstream gate
-    territory, but worth a T-22 or T-23 check.
-- **Challenge overlay:** a challenge overlay that covers the target answers `covered by ...`
-  and is retried for 5 s. Nothing is solved, but stopping at once would be better (page area:
-  `coverWhy` could check `inChallenge(hit)`). `w()` does not check for a challenge either.
-- **Test placement:** putting `src/chromium_t20.rs` in `src/` is justified for now. Acceptance
-  2 needs the first in-page answer time and `actionable_within`, `call_sb` and `Why`, which are
-  all `pub(crate)`. The cost is that `cargo test --lib` launches Chromium. A `testing` feature
-  that exposes them (as harness-core does) would let the test move to `tests/` later.
-- **Owed:**
-  - The handoff says the full workspace test run is still owed after 8a32525.
-  - `accept_t18` row 7 flaked once under load (T-18c).
+  - no keys and no em dashes;
+  - no new non-test `unwrap` or `expect`;
+  - rule 2: whys and labels carry no values;
+  - rule 3: `challenge` is still terminal;
+  - rule 5: `ACT_FN` adds only id strings from the why.
+- **Interfaces:** I-9 public signatures are unchanged. `pid()` returns 0 only for the in-crate
+  mock (`pipe: None`).
+- **Still owed:** a full workspace test run (the handoff's `not_done` 1).
 
 ## Verdict
 
-Two Blocking items:
-- the 5 s cap overruns by design, and the test allows it;
-- the B-4 #6 retry wait follows neither the spec nor the schedule, and nothing tests the
-  executed schedule.
+Both round-1 Blocking items are closed, with tests that fail on the relevant mutations. Round
+2 adds no new rule break. The remaining items are follow-ups.
 
-Verdict: changes
+Verdict: approve
