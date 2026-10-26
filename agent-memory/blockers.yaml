@@ -176,6 +176,26 @@ blockers:
     question: "docs/03 T-4 says a fingerprint miss disables the tool 'for this run'. D-561 (T-13) re-registers a needs_repair or process-disabled tool within the same run when a later fetched page's fingerprint is not a miss, and repairs it on a clean run. Does that amendment of T-4 stand?"
     default_taken: "Keep D-561: re-enabling only on a page whose fingerprint matches or partially matches is no capability gain (check_repair refuses header changes; the registry class floor holds, D-127), and it is what lets 'fixing the page flips it back via relocate with version = 2' happen without a restart. If supreme prefers the literal T-4 text, the same-run re-enable can be dropped; a needs_repair row from an earlier run still reaches relocate."
     needs_user: false
+  - id: B-520
+    task: T-14
+    question: "docs/04 says `shell(\"rm -rf runs/x\")` is 'Read-class-safe'. Is that the class Read, or only 'allowed like Read'? ledger::report lists Read events under Read:, so an in-runs deletion shows as a read, not under Did."
+    default_taken: "Class Read for shell commands whose every changed target is scratch (the literal reading; D-520 (4)). The explicit fs.write/move/mkdir/delete tools are declared Fill, so their in-runs writes show under Did. Supreme may prefer Fill for both."
+    needs_user: false
+  - id: B-521
+    task: T-14
+    question: "Fail-closed shell classification makes every unknown command (python script.py, node x.js, make, go build) class Delete, so each one asks and times out to skip. Is that the intended cost, or should known project commands get an allowlist (like config/cli-allow.toml for C-4)?"
+    default_taken: "Delete for unknown commands (D-520 (5)); cargo build/test/fmt/run and npm test/run/install are Fill because this repo needs them. An allowlist file can be added later without changing the parser."
+    needs_user: false
+  - id: B-522
+    task: T-14
+    question: "B-192 follow-up: srv-files now treats a run's asks/, ledger.jsonl, report.md and prompt.md (and the run folder and runs root) as outside scratch, so fs.write, fs.move, fs.delete and shell redirections into asks/<n>.answer are Delete and ask. Claude Code's built-in Write and Bash tools are not behind the gate and can still write that file."
+    default_taken: "srv-files closes its own route (D-520 (2)); the general fix stays with B-192 (an answer the session cannot forge)."
+    needs_user: false
+  - id: B-526
+    task: T-14
+    question: "For area core: harness-core test mcp_t07::file_asker_stderr_has_no_canary (crates/core/tests/mcp_t07.rs:1602) fails 3/3 when TEMP is a longer path (e.g. F:/sb-swarm/tmp-servers/t14acc-F) and passes with the default TEMP. The FileAsker stderr line 'ask: cannot create <temp path>\\asks: ...; skipped, nobody saw' is cut by the core line-length cap before 'nobody saw', so the assertion depends on the temp path length. Found by the T-14 acceptance re-run; no srv-files code involved."
+    default_taken: "Not a servers fix. Core shortens the path in that line (or puts the fail-closed words first) so the cap never cuts them, or asserts on a prefix. Until then run the workspace suite with a short TEMP."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core
