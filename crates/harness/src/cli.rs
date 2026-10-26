@@ -13,6 +13,7 @@
 //! harness ledger <run>                        print the ledger as a table
 //! harness db migrate|status
 //! harness ask <run> <n> yes|no                answer an ask card (D-105)
+//! harness mcp                                 serve the `mem` tools over stdio (T-16, D-141)
 //! ```
 //!
 //! [`execute`] runs one parsed command against a [`Ctx`] and writes its output to `out`.
@@ -96,6 +97,8 @@ pub enum Cmd {
         #[arg(value_enum)]
         answer: YesNo,
     },
+    /// Serve the `mem` MCP tools (reviews, schedules, contacts, watch state) over stdio
+    Mcp,
 }
 
 #[derive(Debug, Subcommand)]
@@ -244,6 +247,11 @@ pub async fn execute(cli: Cli, ctx: &Ctx, out: &mut dyn Write) -> Result<(), Cli
     {
         return vault_set(ctx, name, *personal, out);
     }
+    if let Cmd::Mcp = &cli.cmd {
+        // core_pg::bootstrap opens and installs the vault itself (fail closed) and reads
+        // DATABASE_URL, SB_RUNS_ROOT and SB_RUN_ID; stdout carries only JSON-RPC.
+        return crate::mem_server::serve().await;
+    }
     // Rule 2: without an installed vault scrub() is the identity. Fail closed.
     ctx.env.install_vault()?;
     match cli.cmd {
@@ -308,6 +316,8 @@ pub async fn execute(cli: Cli, ctx: &Ctx, out: &mut dyn Write) -> Result<(), Cli
         Cmd::Tools { cmd } => tools(ctx, cmd, out).await,
         Cmd::Ledger { run } => print_ledger(ctx, &run, out).await,
         Cmd::Db { cmd } => db(ctx, cmd, out).await,
+        // Handled above, before the vault is installed here (bootstrap installs it).
+        Cmd::Mcp => crate::mem_server::serve().await,
         Cmd::Ask { run, n, answer } => {
             let yes = answer == YesNo::Yes;
             harness_core::ask::answer(&ctx.env.runs_root, &RunId(run.clone()), n, yes)?;

@@ -32,6 +32,13 @@
 //!   gap: a process that dies inside the handler after a mid-call stop loses that line
 //!   (nothing ran on its behalf: the ask returned `TimeoutSkip`).
 //!
+//! # Contacts (H-1.1, M-3, D-141)
+//!
+//! After a Send (approved class) that returned ok with no stop, run under `allow` or
+//! `answered_proceed`, every scrubbed recipient is touched in `memory.contacts`, so the next
+//! Send to them is allowed without an ask. Skipped, failed, stopped and `timeout_proceed`
+//! Sends touch nothing.
+//!
 //! # Fail closed (rule 4, D-119)
 //!
 //! Before the handler runs, any error (run lookup, gate, ledger on the ask path) means it
@@ -64,7 +71,7 @@ use crate::gate::{
     ASK_TIMEOUT,
 };
 use crate::ledger::Ledger;
-use crate::memory::{ts_now, LedgerEvent, LedgerMode, MemoryStore};
+use crate::memory::{contact_key, ts_now, LedgerEvent, LedgerMode, MemoryStore};
 use crate::run::{RunFolder, RunId};
 use crate::vault::{Resolved, Vault, VaultError};
 use async_trait::async_trait;
@@ -1207,6 +1214,9 @@ pub async fn dispatch(
                         write_or_diag(&ctx, ctx.stop_event(h)).await;
                     }
                     write_or_diag(&ctx, e).await;
+                    if class == Class::Send && held.is_none() && touches_contacts(mode) {
+                        touch_recipients(harness, &call, server).await;
+                    }
                 }
             }
             Ok(out)
@@ -1222,6 +1232,35 @@ pub async fn dispatch(
             write_or_diag(&ctx, e).await;
             Err(err)
         }
+    }
+}
+
+/// Whether a completed Send under this mode makes its recipients contacts (H-1.1, M-3,
+/// D-141): an allowed Send (every recipient known, or a rule allowed it) and a Send the user
+/// answered yes. A `timeout_proceed` Send ran without anyone approving a new recipient, so it
+/// does not turn the recipient into a contact: the next Send to them asks again (fail closed).
+fn touches_contacts(mode: LedgerMode) -> bool {
+    matches!(mode, LedgerMode::Allow | LedgerMode::AnsweredProceed)
+}
+
+/// H-1.1, M-3 (D-141): after a Send that returned ok and did not stop, each recipient the
+/// gate saw (scrubbed, blank ones dropped, one per [`contact_key`]) is touched in
+/// `memory.contacts`, so the next Send to them is allowed. Channel: the call's classified
+/// domain, else the server name. The note is empty (a stored note is kept). A store failure
+/// goes to stderr: the message was sent, the call must not turn into an error the model
+/// would retry.
+async fn touch_recipients(harness: &Harness, call: &Call, server: &str) {
+    let channel = call.domain.as_deref().unwrap_or(server);
+    let mut seen: Vec<String> = Vec::new();
+    for r in &call.recipients {
+        let key = contact_key(r);
+        if key.is_empty() || seen.contains(&key) {
+            continue;
+        }
+        if let Err(err) = harness.store.touch_contact(&key, channel, "").await {
+            diag(&harness.vault, &format!("touch_contact failed: {err}"));
+        }
+        seen.push(key);
     }
 }
 
