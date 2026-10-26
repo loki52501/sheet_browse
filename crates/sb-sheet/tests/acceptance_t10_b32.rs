@@ -652,15 +652,15 @@ fn b32_6_headings_only_fill_stays_within_max_tokens() {
                         "page {pi} chunk {chunk} max {m}: headings-only chunk not filled: {first:?}"
                     );
                 }
-                // every read stays within what max_tokens leaves. B-201 P4 (open, deferred to
-                // step 3 by supreme) is the one exempt case: a remainder of at most 4 chars
-                // cannot hold a `### ` prefix plus one char, so the piece overshoots by it.
+                // every read stays within what max_tokens leaves, a tiny remainder included:
+                // a remainder that cannot hold a `### ` prefix plus a word stops the read
+                // (B-201 P4, D-226)
                 let mut spent = 0usize;
                 for (i, o) in outs.iter().enumerate() {
                     let left = m - spent;
                     let got = estimate(body(&o.markdown));
                     assert!(
-                        got <= left || left * 4 <= 4,
+                        got <= left,
                         "page {pi} chunk {chunk} max_tokens {m} read {i}: {got} > {left}: {}",
                         o.markdown
                     );
@@ -676,11 +676,9 @@ fn b32_6_headings_only_fill_stays_within_max_tokens() {
     }
 }
 
-/// B-201 P4, open and deferred to step 3 by supreme (blockers.yaml B-201): with max_tokens
-/// leaving fewer chars than a unit's fixed overhead, the reader still makes progress and
-/// overshoots the remainder. Not a T-10 row; un-ignore when area sheet fixes P4.
+/// B-201 P4, fixed by D-226: with max_tokens leaving fewer chars than a unit's fixed overhead
+/// plus a word, the read stops (truncated) instead of overshooting the remainder.
 #[test]
-#[ignore = "B-201 P4 open, deferred to step 3 (live browser readers)"]
 fn b201_p4_tiny_remainder_never_overshoots_max_tokens() {
     let page = vec![
         h(1, 2, "Aaaa"),

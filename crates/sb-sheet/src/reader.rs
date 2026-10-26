@@ -29,6 +29,9 @@ const LANDMARKS: [&str; 8] = [
 const CURSOR_VERSION: &str = "v1";
 /// Characters per token (D-200); used to turn a token budget into a character budget.
 const CHARS_PER_TOKEN: usize = 4;
+/// Inside a code block a backtick run is cut to this many, so the fence (one longer, at most
+/// 10) is fixed overhead the page cannot grow (D-226).
+const CODE_BACKTICK_RUN_MAX: usize = 9;
 
 pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpts) -> ReadOutput {
     let ctx = Ctx::new(index);
@@ -122,23 +125,22 @@ pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpt
 
     // This call's budget: one chunk, capped by what max_tokens leaves.
     let left = opts.max_tokens.map(|m| m.saturating_sub(used));
-    let budget = match left {
-        Some(l) => chunk_tokens.min(l),
-        None => chunk_tokens,
-    };
 
-    let (body, next) = if start.unit >= units.len() || budget == 0 {
-        (String::new(), start)
+    let (body, next, stopped) = if start.unit >= units.len() || left == Some(0) {
+        (String::new(), start, false)
     } else {
-        let (pieces, next) = next_chunk(&units, start, budget, left);
-        (join_pieces(&units, &pieces), next)
+        let c = next_chunk(&units, start, chunk_tokens, left);
+        (join_pieces(&units, &c.pieces), c.next, c.stopped)
     };
     // Units are scrubbed already; this pass is defence in depth.
     let body = ctx.scrub(&body);
     // `used` comes from a caller-supplied cursor: never overflow on a forged value.
     let used_after = used.saturating_add(estimate(&body));
     let more = next.unit < units.len();
-    let truncated = more && opts.max_tokens.is_some_and(|m| used_after >= m);
+    // What max_tokens leaves cannot hold the next piece's overhead plus a word: the read ends
+    // here instead of overshooting (D-226). Its cursor marks the position with the budget
+    // spent, so the same max_tokens ends at once and a larger one continues from here.
+    let truncated = more && (stopped || opts.max_tokens.is_some_and(|m| used_after >= m));
 
     let remaining: Vec<OutlineEntry> = if more {
         outline_from(&units, next)
@@ -151,12 +153,17 @@ pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpt
     } else {
         Vec::new()
     };
-    let cursor = if more && !truncated {
+    let cursor = if more && (!truncated || stopped) {
+        let spent = if stopped {
+            opts.max_tokens.map(|m| used_after.max(m))
+        } else {
+            opts.max_tokens.map(|_| used_after)
+        };
         Some(Cursor(encode_cursor(
             region.as_deref().unwrap_or(""),
             &units,
             next,
-            opts.max_tokens.map(|_| used_after),
+            spent,
             hash,
         )))
     } else {
@@ -315,12 +322,12 @@ impl<'a> Linked<'a> {
 
 /// `t` as the renderers may escape it: table cells turn `|` into `\|`, link labels and plain
 /// spans turn `[` `]` into `(` `)`, quoted labels turn `"` into `'`, inline text cuts runs
-/// of three or more backticks to two (D-219), and code turns `](` into `)(` (D-223). Every
-/// combination is listed, so a scrub catches the value however it was rendered (D-212,
-/// D-218).
+/// of three or more backticks to two (D-219), code turns `](` into `)(` (D-223) and cuts runs
+/// longer than nine backticks to nine (D-226). Every combination is listed, so a scrub catches
+/// the value however it was rendered (D-212, D-218).
 fn escaped_spellings(t: &str) -> Vec<String> {
     let mut out = vec![t.to_string()];
-    for mask in 1u8..32 {
+    for mask in 1u8..64 {
         let mut v = t.to_string();
         if mask & 1 != 0 {
             v = link_text(&v);
@@ -336,6 +343,9 @@ fn escaped_spellings(t: &str) -> Vec<String> {
         }
         if mask & 16 != 0 {
             v = break_link_shape(&v);
+        }
+        if mask & 32 != 0 {
+            v = cut_code_backticks(&v);
         }
         if !out.contains(&v) {
             out.push(v);
@@ -540,7 +550,7 @@ struct Unit {
     close: String,
     /// After the last piece only (table header separator).
     suffix: String,
-    /// Plain-text label for outlines (`## FAQ`), headings only.
+    /// Outline label (`## FAQ`): the scrubbed body heading without link syntax, headings only.
     label: Option<String>,
 }
 
@@ -604,9 +614,6 @@ fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
             unit.level = level;
             unit.prefix = format!("{hashes} ");
             unit.cont_prefix = unit.prefix.clone();
-            // The label is printed in the `remaining:` outline: escape it like plain spans.
-            let label = cut_backticks(&link_text(plain_text(b, ctx).trim()));
-            unit.label = Some(format!("{hashes} {label}"));
             unit.body = body;
         }
         BlockKind::ListItem => {
@@ -637,7 +644,8 @@ fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
                 return None;
             }
             // One backtick longer than any run in the body, so the body cannot close it
-            // (D-219). The scrub below only replaces text with `***`, never adds backticks.
+            // (D-219). `code_text` cut runs to nine, so the fence is at most ten (D-226). The
+            // scrub below only replaces text with `***`, never adds backticks.
             let fence = "`".repeat(longest_backtick_run(&body).saturating_add(1).max(3));
             unit.prefix = format!("{fence}\n");
             unit.cont_prefix = unit.prefix.clone();
@@ -656,11 +664,56 @@ fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
     // Scrub before chunking and hashing, so a split can never cut a password value in two
     // and the hash and outline never see one (D-212).
     unit.body = ctx.scrub(&unit.body);
-    unit.label = unit.label.map(|l| ctx.scrub(&l));
     if unit.body.is_empty() {
         return None;
     }
+    if unit.kind == BlockKind::Heading {
+        // The `remaining:` label is the body heading itself (spans joined, escaped and
+        // scrubbed the same way) with link syntax dropped, so it never shows a spelling the
+        // body hides (D-226, H-2).
+        let hashes = "#".repeat(usize::from(unit.level));
+        unit.label = Some(ctx.scrub(&format!("{hashes} {}", outline_text(&unit.body))));
+    }
     Some(unit)
+}
+
+/// A rendered line with each link form reduced to its label: `[text](#id)` to `text`,
+/// `[alias "label"](#id)` to `label`. Plain text carries no `[` after escaping (D-219), so
+/// every `[` starts a form; an unclosed one is kept as is.
+fn outline_text(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(i) = rest.find('[') {
+        out.push_str(rest.get(..i).unwrap_or(""));
+        let from = rest.get(i..).unwrap_or("");
+        let form = from.find("](").and_then(|j| {
+            let close = from.get(j + 2..)?.find(')')?;
+            Some((from.get(1..j)?, j + 2 + close + 1))
+        });
+        match form {
+            Some((inner, end)) => {
+                out.push_str(form_label(inner));
+                rest = from.get(end..).unwrap_or("");
+            }
+            None => {
+                out.push_str(from);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    collapse(&out)
+}
+
+/// The visible label inside a link form's brackets: the quoted label of `alias "label"`,
+/// else the whole text.
+fn form_label(inner: &str) -> &str {
+    match inner.find(" \"") {
+        Some(q) if inner.ends_with('"') && inner.len() > q + 2 => {
+            inner.get(q + 2..inner.len() - 1).unwrap_or(inner)
+        }
+        _ => inner,
+    }
 }
 
 fn heading_level(b: &TextBlock) -> u8 {
@@ -720,12 +773,23 @@ fn break_link_shape(s: &str) -> String {
 /// Runs of three or more backticks cut to two, so text outside a code block cannot open or
 /// close a fence (D-219).
 fn cut_backticks(s: &str) -> String {
+    cut_backtick_runs(s, 2)
+}
+
+/// Runs of more than [`CODE_BACKTICK_RUN_MAX`] backticks cut to that many: the code fence is
+/// sized from the longest run, so the page cannot make it longer than ten (D-226).
+fn cut_code_backticks(s: &str) -> String {
+    cut_backtick_runs(s, CODE_BACKTICK_RUN_MAX)
+}
+
+/// Every run of backticks in `s` cut to at most `max`.
+fn cut_backtick_runs(s: &str, max: usize) -> String {
     let mut out = String::with_capacity(s.len());
     let mut run = 0usize;
     for c in s.chars() {
         if c == '`' {
             run += 1;
-            if run > 2 {
+            if run > max {
                 continue;
             }
         } else {
@@ -786,6 +850,7 @@ fn needs_space(before: &str, next: &str) -> bool {
 /// Code keeps its line breaks and its `[` `]`; trailing blank lines go. Consecutive plain
 /// spans are joined (a span that renders to nothing does not split them) before the scrub
 /// and [`break_link_shape`], so `[x]` and `(#3)` in two spans cannot meet as a link (D-223).
+/// Backtick runs are cut to nine after joining, since spans may meet in a run (D-226).
 fn code_text(spans: &[Span], ctx: &Ctx<'_>) -> String {
     let mut out = String::new();
     let mut plain = String::new();
@@ -803,7 +868,7 @@ fn code_text(spans: &[Span], ctx: &Ctx<'_>) -> String {
         out.push_str(&form);
     }
     out.push_str(&break_link_shape(&ctx.scrub(&plain)));
-    out.trim_end().trim_start_matches('\n').to_string()
+    cut_code_backticks(out.trim_end().trim_start_matches('\n'))
 }
 
 /// The block's text as words (links as their visible text), for scoring and outlines.
@@ -943,18 +1008,36 @@ fn join_pieces(units: &[Unit], pieces: &[Piece]) -> String {
     out
 }
 
-/// Fill one chunk from `pos` within `budget` tokens. Breaks between units; a unit that does
-/// not fit an empty chunk is cut at a sentence, else a word, else a char boundary (D-204).
-/// A chunk that holds only headings never ends there: the next unit is cut into the room
-/// left, at least a quarter of the chunk, but never past `hard` tokens (what max_tokens
-/// leaves, D-222). Always makes progress.
-fn next_chunk(units: &[Unit], pos: Pos, budget: usize, hard: Option<usize>) -> (Vec<Piece>, Pos) {
-    // `budget` is a caller option: a huge value saturates instead of overflowing.
-    let cap = budget.max(1).saturating_mul(CHARS_PER_TOKEN);
+/// One chunk's plan: its pieces, where the next chunk starts, and whether the read stopped
+/// short because what max_tokens leaves cannot hold the next piece (D-226).
+struct Chunk {
+    pieces: Vec<Piece>,
+    next: Pos,
+    stopped: bool,
+}
+
+/// Fill one chunk from `pos` within `chunk_tokens`, never past `hard` tokens (what max_tokens
+/// leaves). Breaks between units; a unit that does not fit an empty chunk is cut at a
+/// sentence, else a word, else a char boundary (D-204). A chunk that holds only headings
+/// never ends there: the next unit is cut into the room left, at least a quarter of the
+/// chunk, but never past `hard` (D-222).
+///
+/// Fixed overhead (prefix, D-225 backslash, close fence, table header separator) counts
+/// against the cap like body text (D-226). When `hard` is the binding cap and it cannot hold
+/// the next unit's overhead plus one word of body (a word longer than a whole chunk counts
+/// by one char), the chunk takes nothing and is `stopped`. Otherwise an empty chunk always
+/// takes one piece, at least one char, so a plan always makes progress.
+fn next_chunk(units: &[Unit], pos: Pos, chunk_tokens: usize, hard: Option<usize>) -> Chunk {
+    // `chunk_tokens` is a caller option: a huge value saturates instead of overflowing.
+    let chunk_cap = chunk_tokens.max(1).saturating_mul(CHARS_PER_TOKEN);
     let hard_cap = hard.map_or(usize::MAX, |h| h.saturating_mul(CHARS_PER_TOKEN));
+    let cap = chunk_cap.min(hard_cap);
+    // Under max_tokens a piece holds at least one word; without it one char is enough.
+    let word_cap = if hard.is_some() { chunk_cap } else { 0 };
     let mut used = 0usize;
     let mut pieces: Vec<Piece> = Vec::new();
     let mut cur = pos;
+    let mut stopped = false;
     while cur.unit < units.len() {
         let u = &units[cur.unit];
         let start = skip_lead(u, cur.off);
@@ -992,53 +1075,55 @@ fn next_chunk(units: &[Unit], pos: Pos, budget: usize, hard: Option<usize>) -> (
         if !pieces.is_empty() && !headings_only {
             break;
         }
-        // Too big for an empty (or headings-only) chunk: split this unit's body.
-        let prefix = if start == 0 {
-            &u.prefix
-        } else {
-            &u.cont_prefix
-        };
-        // A piece that poses as a harness line carries one more char, its backslash (D-225).
-        let overhead = chars(prefix) + chars(&u.close) + usize::from(needs_line_escape(u, start));
-        let avail = if headings_only {
+        // Too big for an empty (or headings-only) chunk: cut this unit's body.
+        let end = if headings_only {
             // The quarter-chunk floor only where max_tokens leaves room for it (D-222).
-            let taken = used + sep + overhead;
-            let room = cap.saturating_sub(taken).max(cap / 4);
-            let room = room.min(hard_cap.saturating_sub(taken));
-            let suffix_only =
-                used + sep + whole_chars > hard_cap && chars(rest_of(u, start)) <= room;
-            if room == 0 || suffix_only {
-                // No room under max_tokens for a piece of this unit (or only for the body
-                // without its table suffix): end the chunk on the headings.
-                break;
+            let taken = used + sep;
+            let floor = (cap / 4).saturating_add(piece_overhead(u, start));
+            let room = cap
+                .saturating_sub(taken)
+                .max(floor)
+                .min(hard_cap.saturating_sub(taken));
+            match fit_piece(u, start, room, word_cap) {
+                Some(end) => end,
+                // No room for a piece of this unit: end the chunk on the headings.
+                None => break,
             }
-            room
         } else {
-            cap.saturating_sub(overhead)
-        }
-        .max(1);
-        let rest = rest_of(u, start);
-        if chars(rest) <= avail {
-            // Only the suffix overflowed; take the whole unit.
-            pieces.push(whole);
-            cur = Pos {
-                unit: cur.unit + 1,
-                off: 0,
-            };
-            break;
-        }
-        let cut = start
-            + if u.kind == BlockKind::Code {
-                code_cut_point(rest, avail)
-            } else {
-                cut_point(rest, avail)
-            };
+            match fit_piece(u, start, cap, word_cap) {
+                Some(end) => end,
+                // max_tokens is the binding cap: stop rather than overshoot it (D-226).
+                None if hard_cap <= chunk_cap => {
+                    stopped = true;
+                    break;
+                }
+                // chunk_tokens cannot hold this unit's overhead: one char still goes
+                // (progress), but never past what max_tokens leaves.
+                None => {
+                    let rest = rest_of(u, start);
+                    let end = match rest.chars().nth(1) {
+                        Some(_) => start + rest.chars().next().map_or(0, char::len_utf8),
+                        None => u.body.len(),
+                    };
+                    let piece = Piece {
+                        unit: cur.unit,
+                        start,
+                        end,
+                    };
+                    if chars(&piece_text(u, &piece)) > hard_cap {
+                        stopped = true;
+                        break;
+                    }
+                    end
+                }
+            }
+        };
         pieces.push(Piece {
             unit: cur.unit,
             start,
-            end: cut,
+            end,
         });
-        let next_off = skip_lead(u, cut);
+        let next_off = skip_lead(u, end);
         cur = if next_off >= u.body.len() {
             Pos {
                 unit: cur.unit + 1,
@@ -1065,7 +1150,61 @@ fn next_chunk(units: &[Unit], pos: Pos, budget: usize, hard: Option<usize>) -> (
         };
         pieces.pop();
     }
-    (pieces, cur)
+    Chunk {
+        pieces,
+        next: cur,
+        stopped,
+    }
+}
+
+/// Chars a piece of `u` from byte `start` carries besides its body: the prefix, the D-225
+/// backslash and the close fence. The suffix goes only to the unit's last piece.
+fn piece_overhead(u: &Unit, start: usize) -> usize {
+    let prefix = if start == 0 {
+        &u.prefix
+    } else {
+        &u.cont_prefix
+    };
+    chars(prefix) + chars(&u.close) + usize::from(needs_line_escape(u, start))
+}
+
+/// End byte of the biggest piece of `u` from `start` whose text fits `room` chars: the whole
+/// rest with its suffix when that fits, else a cut (D-204) that leaves the suffix to a later
+/// piece. `None` when `room` cannot hold the overhead plus the least body: one word, or one
+/// char when the word with the overhead is longer than `word_cap` (no chunk could hold it;
+/// `0` means one char is always enough) (D-226).
+fn fit_piece(u: &Unit, start: usize, room: usize, word_cap: usize) -> Option<usize> {
+    let rest = rest_of(u, start);
+    if rest.is_empty() {
+        return None;
+    }
+    let base = piece_overhead(u, start);
+    let rest_chars = chars(rest);
+    let last = base
+        .saturating_add(rest_chars)
+        .saturating_add(chars(&u.suffix));
+    if last <= room {
+        return Some(u.body.len());
+    }
+    // A cut piece is never the last one: it leaves at least one char.
+    let avail = room.checked_sub(base)?.min(rest_chars.saturating_sub(1));
+    let trimmed = rest.trim_start();
+    let word = rest_chars.saturating_sub(chars(trimmed))
+        + trimmed.split_whitespace().next().map_or(0, chars);
+    let need = if base.saturating_add(word) > word_cap {
+        1
+    } else {
+        word.max(1)
+    };
+    if avail < need {
+        return None;
+    }
+    let cut = if u.kind == BlockKind::Code {
+        code_cut_point(rest, avail)
+    } else {
+        cut_point(rest, avail)
+    };
+    Some(start + cut)
 }
 
 /// The body of `u` from byte `start` (a char boundary from [`skip_lead`]); empty if not.
@@ -1169,14 +1308,14 @@ fn plan_starts(units: &[Unit], from: Pos, chunk_tokens: usize) -> Vec<Pos> {
     let mut starts = Vec::new();
     let mut pos = from;
     while pos.unit < units.len() {
-        let (pieces, next) = next_chunk(units, pos, chunk_tokens, None);
-        if pieces.is_empty() && next == pos {
+        let c = next_chunk(units, pos, chunk_tokens, None);
+        if c.pieces.is_empty() && c.next == pos {
             break;
         }
-        if !pieces.is_empty() {
+        if !c.pieces.is_empty() {
             starts.push(pos);
         }
-        pos = next;
+        pos = c.next;
     }
     starts
 }
@@ -2281,5 +2420,278 @@ let x"
         let body = body_of(&first.markdown);
         assert!(body.starts_with("\\remaining:x"), "{body:?}");
         assert!(estimate(body) <= 5, "{} tokens: {body:?}", estimate(body));
+    }
+
+    fn code_block(order: u32, t: &str) -> TextBlock {
+        main_block(block(order, 0, BlockKind::Code, vec![text(t)]))
+    }
+
+    /// The longest run of backticks on any line of `s`.
+    fn longest_run(s: &str) -> usize {
+        longest_backtick_run(s)
+    }
+
+    /// Follow a read sequence under `max` and check every read stays within what is left.
+    fn read_within(blocks: &[TextBlock], max: usize, chunk_tokens: usize) -> Vec<ReadOutput> {
+        let outs = read_all(
+            &[],
+            blocks,
+            ReadOpts {
+                max_tokens: Some(max),
+                ..opts(chunk_tokens)
+            },
+        );
+        let mut spent = 0usize;
+        for (i, o) in outs.iter().enumerate() {
+            let got = estimate(body_of(&o.markdown));
+            assert!(
+                got <= max - spent,
+                "read {i}: {got} tokens > {} left: {}",
+                max - spent,
+                o.markdown
+            );
+            spent += got;
+        }
+        let last = outs.last().map(|o| o.markdown.as_str()).unwrap_or("");
+        assert!(
+            last.ends_with(&format!("truncated: max_tokens {max} reached")),
+            "{last}"
+        );
+        outs
+    }
+
+    #[test]
+    fn code_backtick_runs_are_cut_to_nine_so_the_fence_is_at_most_ten() {
+        // D-226 (1): the fence is fixed overhead the page cannot grow
+        let run = "`".repeat(2000);
+        let blocks = vec![code_block(1, &format!("let a = 1;\n{run}\nlet b = 2;"))];
+        let md = read(&[], &blocks, &opts(0)).markdown;
+        let (nine, ten) = ("`".repeat(9), "`".repeat(10));
+        assert_eq!(md, format!("{ten}\nlet a = 1;\n{nine}\nlet b = 2;\n{ten}"));
+        // spans that meet in a run are cut after joining
+        let blocks = vec![main_block(block(
+            1,
+            0,
+            BlockKind::Code,
+            vec![text("x ``````"), text("``````` y")],
+        ))];
+        let md = read(&[], &blocks, &opts(0)).markdown;
+        assert_eq!(md, format!("{ten}\nx {nine} y\n{ten}"));
+        // a run of nine is kept whole; the fence is one longer
+        let blocks = vec![code_block(1, &format!("a {nine} b"))];
+        let md = read(&[], &blocks, &opts(0)).markdown;
+        assert_eq!(md, format!("{ten}\na {nine} b\n{ten}"));
+        // the scrub knows the cut spelling
+        let v = format!("k{}z", "`".repeat(12));
+        let s = escaped_spellings(&v);
+        let cut = format!("k{nine}z");
+        assert!(s.contains(&cut), "{cut} not in {s:?}");
+        let mut pw = row(5, "textbox", "Password");
+        pw.state.input_type = Some("password".into());
+        pw.state.value = Some(FieldValue::Text(v.clone()));
+        let blocks = vec![code_block(1, &format!("let p = {v};"))];
+        let md = read(&[pw], &blocks, &opts(0)).markdown;
+        assert!(md.contains("let p = ***;"), "{md}");
+        assert!(!md.contains(&cut), "{md}");
+    }
+
+    #[test]
+    fn long_backtick_run_stays_within_max_tokens() {
+        // review round 4 probe: a 2000-backtick run with max_tokens 50
+        let code = format!(
+            "{}\n{}\n{}",
+            words("a", 40),
+            "`".repeat(2000),
+            words("b", 40)
+        );
+        let blocks = vec![code_block(1, &code)];
+        let outs = read_within(&blocks, 50, 0);
+        let first = body_of(&outs[0].markdown);
+        assert!(first.starts_with("``````````\na00"), "{first:?}");
+        for o in &outs {
+            assert!(longest_run(&o.markdown) <= 10, "{}", o.markdown);
+        }
+    }
+
+    #[test]
+    fn huge_block_with_a_long_run_is_a_few_chunks() {
+        // review round 4 probe: 40 KB of code with a 9000-backtick run made 44552 chunks
+        let line = "let value = compute(alpha, beta, gamma);\n";
+        let half = line.repeat(500);
+        let code = format!("{half}{}\n{half}", "`".repeat(9000));
+        assert!(code.len() > 40_000);
+        let blocks = vec![code_block(1, &code)];
+        let first = read(&[], &blocks, &opts(0));
+        assert!(first.chunks <= 3, "{} chunks", first.chunks);
+        let outs = read_all(&[], &blocks, opts(0));
+        assert_eq!(outs.len(), first.chunks);
+        for o in &outs {
+            let body = body_of(&o.markdown);
+            assert!(estimate(body) <= DEFAULT_CHUNK_TOKENS, "{}", estimate(body));
+            assert!(longest_run(body) <= 10);
+            assert!(body.starts_with("``````````\n") && body.ends_with("\n``````````"));
+        }
+    }
+
+    fn header_row(order: u32, cols: usize) -> TextBlock {
+        let mut b = block(
+            order,
+            0,
+            BlockKind::TableRow,
+            (0..cols).map(|i| text(&format!("c{i:02}"))).collect(),
+        );
+        b.table = Some(1);
+        b.header = true;
+        main_block(b)
+    }
+
+    #[test]
+    fn table_header_separator_counts_against_the_budget() {
+        // review round 4 probe: a 30-column header row (181 chars) and its 122-char `|---|`
+        // separator with max_tokens 60 returned a 68-token body
+        let mut data = block(
+            2,
+            0,
+            BlockKind::TableRow,
+            (0..30).map(|i| text(&format!("d{i:02}"))).collect(),
+        );
+        data.table = Some(1);
+        let blocks = vec![header_row(1, 30), main_block(data)];
+        let outs = read_within(&blocks, 60, 0);
+        assert!(body_of(&outs[0].markdown).starts_with("| c00 | c01"));
+        // a piece that cuts the row leaves the separator to the row's last piece
+        assert!(
+            !body_of(&outs[0].markdown).contains("---"),
+            "{}",
+            outs[0].markdown
+        );
+
+        // without max_tokens, chunk_tokens caps it the same way
+        let outs = read_all(&[], &blocks, opts(60));
+        let mut all = String::new();
+        for o in &outs {
+            let body = body_of(&o.markdown);
+            assert!(estimate(body) <= 60, "{} tokens: {body:?}", estimate(body));
+            all.push_str(body);
+            all.push('\n');
+        }
+        assert_eq!(all.matches(&"---|".repeat(30)).count(), 1, "{all}");
+        assert!(
+            all.contains("c29\n|\n|---|") && all.contains("| d29 |"),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn tiny_remainder_stops_the_read_instead_of_overshooting() {
+        // B-201 P4, D-226 (2): the last token cannot hold `## ` plus a word
+        let blocks = vec![
+            heading(1, "Aaaa"),
+            heading(2, "Bbbb"),
+            heading(3, "Cccc"),
+            para(4, &words("w", 50)),
+        ];
+        let outs = read_within(&blocks, 5, 0);
+        assert_eq!(outs.len(), 4, "{:?}", outs.iter().map(|o| &o.markdown));
+        assert_eq!(body_of(&outs[0].markdown), "## Aaaa");
+        assert_eq!(body_of(&outs[1].markdown), "## Bbbb");
+        // the stop: nothing returned, truncated, a cursor for the position
+        let stop = &outs[2];
+        assert_eq!(body_of(&stop.markdown), "", "{}", stop.markdown);
+        let c = stop.cursor.clone().expect("a cursor at the stop");
+        // the same max_tokens ends at once, with no cursor
+        assert_eq!(body_of(&outs[3].markdown), "", "{}", outs[3].markdown);
+        assert!(outs[3].cursor.is_none());
+        // a larger max_tokens continues from the stop, with the budget spent so far
+        let more = read(
+            &[],
+            &blocks,
+            &ReadOpts {
+                cursor: Some(c),
+                max_tokens: Some(20),
+                ..opts(0)
+            },
+        );
+        let body = body_of(&more.markdown);
+        assert!(body.starts_with("## Cccc\n\nw00"), "{body:?}");
+        assert!(estimate(body) <= 15, "{} tokens: {body:?}", estimate(body));
+
+        // a code block whose fence lines do not fit stops too
+        let blocks = vec![
+            main_block(para(1, "intro words")),
+            code_block(2, "let a = 1;"),
+        ];
+        let outs = read_within(&blocks, 4, 0);
+        assert!(outs.iter().all(|o| !o.markdown.contains('`')), "{outs:?}");
+    }
+
+    #[test]
+    fn tiny_chunk_tokens_still_make_progress() {
+        // without max_tokens an empty chunk always takes one piece
+        let blocks = vec![code_block(1, "let a = 1;\nlet b = 2;")];
+        let outs = read_all(&[], &blocks, opts(1));
+        let joined: String = outs
+            .iter()
+            .map(|o| {
+                body_of(&o.markdown)
+                    .trim_start_matches("```\n")
+                    .trim_end_matches("\n```")
+                    .to_string()
+            })
+            .collect();
+        let squeeze = |s: &str| s.split_whitespace().collect::<String>();
+        assert_eq!(squeeze(&joined), "leta=1;letb=2;", "{outs:?}");
+        // with a large max_tokens the same tiny chunks go on to the end
+        let outs = read_all(
+            &[],
+            &blocks,
+            ReadOpts {
+                max_tokens: Some(10_000),
+                ..opts(1)
+            },
+        );
+        assert!(outs
+            .last()
+            .is_some_and(|o| o.cursor.is_none() && o.remaining.is_empty()));
+        assert!(
+            !outs.iter().any(|o| o.markdown.contains("truncated")),
+            "{outs:?}"
+        );
+    }
+
+    #[test]
+    fn outline_label_is_the_scrubbed_body_heading() {
+        // D-226 (3): spans joined as in the body, then scrubbed; link syntax dropped
+        let mut pw = row(5, "textbox", "Password");
+        pw.state.input_type = Some("password".into());
+        pw.state.value = Some(FieldValue::Text("hunter2pass".into()));
+        let btn = row(8, "button", "Buy now");
+        let blocks = vec![
+            para(1, &words("a", 80)),
+            heading(2, "x"),
+            block(
+                3,
+                0,
+                BlockKind::Heading,
+                vec![text("Your hunter"), text("2pass here")],
+            ),
+            para(4, &words("b", 20)),
+            block(
+                5,
+                0,
+                BlockKind::Heading,
+                vec![text("Plans "), link("", btn.elem()), text(" [x](#8)")],
+            ),
+            para(6, &words("c", 20)),
+        ];
+        let rows = [pw, btn];
+        let whole = read(&rows, &blocks, &opts(0)).markdown;
+        assert!(whole.contains("## Your *** here"), "{whole}");
+        let out = read(&rows, &blocks, &opts(20));
+        let labels: Vec<&str> = out.remaining.iter().map(|e| e.heading.as_str()).collect();
+        assert!(labels.contains(&"## Your *** here"), "{labels:?}");
+        assert!(labels.contains(&"## Plans Buy now (x)(#8)"), "{labels:?}");
+        let squeezed: String = out.markdown.split_whitespace().collect();
+        assert!(!squeezed.contains("hunter2pass"), "{}", out.markdown);
     }
 }

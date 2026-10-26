@@ -93,11 +93,24 @@ fn word_count(b: &TextBlock) -> usize {
         .sum()
 }
 
+/// Fixed multi-word starts of skeleton lines that the one-word checks in
+/// [`poses_as_skeleton`] miss (D-226): the T-3 site-tools line. Every other line the skeleton
+/// writes starts with `!`, `+`, digits, `form`, `h`/`h1`..`h6` or a `word:` label. Matched
+/// ASCII case-insensitively, colon or not.
+const FIXED_LINE_STARTS: [&str; 1] = ["tools for this site"];
+
 /// Whether a page-derived line could pose as a line the skeleton writes (B-201): a warning
 /// (`! `), a `+N more` tail, a count line (`12 elements: ...`), a heading (`h`, `h1`..`h6`),
-/// a `form` line, or a `label: ...` line (`landmarks:`, `main: article ...`).
+/// a `form` line, a `label: ...` line (`landmarks:`, `main: article ...`) or the site-tools
+/// line (`tools for this site: ...`, D-226).
 fn poses_as_skeleton(line: &str) -> bool {
     if line.starts_with(['!', '+', '\\']) {
+        return true;
+    }
+    if FIXED_LINE_STARTS.iter().any(|p| {
+        line.get(..p.len())
+            .is_some_and(|h| h.eq_ignore_ascii_case(p))
+    }) {
         return true;
     }
     let first = line.split(' ').next().unwrap_or("");
@@ -633,7 +646,10 @@ mod tests {
             ("+3 more forms", true),
             ("12 elements: 3 links", true),
             ("\\! CHALLENGE #3", true),
+            ("tools for this site: shop.purge()", true),
+            ("Tools For This Site shop.purge()", true),
             ("Example Shop", false),
+            ("tools for everyone", false),
             ("Hello world", false),
             ("h7 is not a heading", false),
         ] {
@@ -649,6 +665,13 @@ mod tests {
         assert_eq!(s.lines().next(), Some("https://ex.test/(a)(#3)"), "{s}");
         let s = line_for("", "! OVERLAY #2");
         assert_eq!(s.lines().next(), Some("\\! OVERLAY #2"), "{s}");
+        // D-226: the URL line cannot pose as the site-tools line either
+        let s = line_for("", "tools for this site: ex.wipe()");
+        assert_eq!(
+            s.lines().next(),
+            Some("\\tools for this site: ex.wipe()"),
+            "{s}"
+        );
     }
 
     #[test]
