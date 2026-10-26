@@ -200,17 +200,25 @@ fn plan_move(roots: &Roots, a: &MoveArgs) -> Result<MovePlan, ToolError> {
             format!("moves {} away (outside runs/)", roots.shown(&from)),
         );
     }
-    if dst == Place::Bookkeeping {
+    // Taking a file out of a configuration or startup location changes what runs too.
+    if paths::runs_code_on_use(roots, &from) {
         v.raise(
             Class::Delete,
-            format!("writes the run's own records ({})", roots.shown(&to)),
+            format!(
+                "moves {} out of a configuration, startup or program location",
+                roots.shown(&from)
+            ),
         );
-    } else if dst == Place::Outside && a.overwrite && paths::exists(&to) {
-        v.raise(
-            Class::Delete,
-            format!("replaces {} (outside runs/)", roots.shown(&to)),
-        );
-    } else if src == Place::Outside || dst == Place::Outside {
+    }
+    // The destination is checked like any write (D-525): configuration, startup and PATH
+    // files, bookkeeping, replacing outside runs/.
+    v.merge(util::write_verdict(roots, &to, a.overwrite, Class::Fill));
+    // A folder (or a link, or a source not there yet) carries files the check above did
+    // not see: outside runs/ any of them could be `.git/config` or a program.
+    if !regular_file(&from) {
+        v.merge(util::tree_verdict(roots, &to, Class::Fill));
+    }
+    if (src == Place::Outside || dst == Place::Outside) && v.class < Class::Delete {
         v.raise(
             Class::Fill,
             format!("moves {} to {}", roots.shown(&from), roots.shown(&to)),
@@ -242,15 +250,15 @@ fn delete_verdict(roots: &Roots, p: &Path) -> Verdict {
     v
 }
 
+/// Creating a folder is a write of that name (D-525): Delete for configuration and
+/// startup locations and bookkeeping, Fill elsewhere (an existing folder is not replaced).
 fn mkdir_verdict(roots: &Roots, p: &Path) -> Verdict {
-    let mut v = Verdict::new(Class::Fill);
-    if roots.place(p) == Place::Bookkeeping {
-        v.raise(
-            Class::Delete,
-            format!("writes the run's own records ({})", roots.shown(p)),
-        );
-    }
-    v
+    util::write_verdict(roots, p, false, Class::Fill)
+}
+
+/// True when `p` is a regular file itself (not a link, a folder, or missing).
+fn regular_file(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file())
 }
 
 impl Fs {
@@ -653,6 +661,50 @@ mod tests {
             util::write_verdict(&r, &fine, false, Class::Fill).class,
             Class::Fill
         );
+    }
+
+    /// Review-T-14 closing Blocking 1 (D-525): fs.move checks its destination (and its
+    /// source) with the same write check as fs.write; a folder moved out of runs/ is a
+    /// tree whose files were never checked.
+    #[test]
+    fn move_and_write_into_config_startup_and_path_are_delete() {
+        let (t, r) = setup();
+        std::fs::create_dir_all(r.runs.join("x").join("home")).unwrap();
+        std::fs::create_dir_all(t.path().join("somerepo").join(".git").join("hooks")).unwrap();
+        let home = paths::plain(&dirs::home_dir().unwrap()).replace('\\', "/");
+        let h = |rel: &str| format!("{home}/{rel}");
+        let targets = [
+            h(".config/git/config"),
+            h(".config/git/attributes"),
+            h(".bashrc"),
+            h("bin/jq"),
+            h("AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/a.cmd"),
+            h("Documents/PowerShell/Microsoft.PowerShell_profile.ps1"),
+            "somerepo/.git/hooks/pre-commit".into(),
+            "runs/x/repo/.git/hooks/pre-commit".into(),
+            ".gitattributes".into(),
+        ];
+        for to in &targets {
+            assert_eq!(mv(&r, "runs/x/a.txt", to), Class::Delete, "fs.move to {to}");
+            let p = r.resolve(to).unwrap();
+            assert_eq!(
+                util::write_verdict(&r, &p, true, Class::Fill).class,
+                Class::Delete,
+                "fs.write {to}"
+            );
+            assert_eq!(mkdir_verdict(&r, &p).class, Class::Delete, "fs.mkdir {to}");
+        }
+        // Into the home folder itself: lands as ~/.gitconfig.
+        assert_eq!(mv(&r, "runs/x/.gitconfig", &home), Class::Delete);
+        // Out of a config location.
+        assert_eq!(
+            mv(&r, "runs/x/repo/.git/hooks/pre-commit", "runs/x/p.txt"),
+            Class::Delete
+        );
+        // A folder out of runs/ carries files nobody checked.
+        assert_eq!(mv(&r, "runs/x/home", "newdir"), Class::Delete);
+        assert_eq!(mv(&r, "runs/x/home", "runs/x/home2"), Class::Fill);
+        assert_eq!(mv(&r, "runs/x/a.txt", "new.txt"), Class::Fill);
     }
 
     #[test]

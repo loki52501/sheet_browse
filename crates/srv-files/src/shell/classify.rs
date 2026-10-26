@@ -26,10 +26,18 @@
 //! * Delete: deleting, replacing or moving away anything outside `runs/` (or a run's
 //!   bookkeeping, or a file with other hard links), discarding git work, rewriting remote
 //!   history, HTTP DELETE, and everything not listed.
+//!
+//! D-525: every written path goes through [`util::write_verdict`] (configuration,
+//! startup and PATH files are Delete anywhere); a tree whose file names are not known in
+//! advance (`cp -r`, a moved folder, `tar -x`, `unzip`, `git clone`, `git worktree add`,
+//! `gh ... clone/download`, `curl -O`, `wget` without `-O`) goes through
+//! [`util::tree_verdict`] (Delete outside `runs/`); and git (or gh, which runs git) in a
+//! folder inside `runs/` is Delete except `git clone`/`git init`, because a repository
+//! there may have been planted with its own `.git/config` (core.fsmonitor, hooks).
 
 use super::lex::{self, Simple, Word};
 use crate::paths::{self, Place, Roots};
-use crate::util::Verdict;
+use crate::util::{self, Verdict};
 use harness_core::Class;
 use std::path::{Path, PathBuf};
 
@@ -1115,13 +1123,6 @@ struct Env<'a> {
 }
 
 impl Env<'_> {
-    /// Every candidate folder is scratch.
-    fn cwd_scratch(&self) -> Option<bool> {
-        self.cwds
-            .as_ref()
-            .map(|c| c.iter().all(|d| self.roots.place(d) == Place::Scratch))
-    }
-
     /// Another command in the line may create links inside `runs/` before this one runs
     /// (pipelines and `&` run out of order), so a path in `runs/` cannot be checked now.
     fn links_elsewhere(&self) -> bool {
@@ -1649,7 +1650,7 @@ fn program(env: &mut Env, name: &str, args: &[Word], v: &mut Verdict) {
         "curl" => curl(env, args, v),
         "wget" => wget(env, args, v),
         "git" => git(env, args, v),
-        "gh" => gh(args, v),
+        "gh" => gh(env, args, v),
         "find" => find(args, v),
         _ => v.raise(
             Class::Delete,
@@ -2103,45 +2104,20 @@ fn write_target(env: &Env, w: &Word, truncate: bool, v: &mut Verdict) {
                 Class::Delete,
                 format!("cannot tell what this writes: {why}"),
             ),
-            Target::Path(p) if paths::runs_code_on_use(&p) => config_write(env, &p, v),
-            Target::Path(p) if paths::hard_linked(&p) => v.raise(
-                Class::Delete,
-                format!(
-                    "writes {}, a file with other hard links (they may be outside runs/)",
-                    env.roots.shown(&p)
-                ),
-            ),
-            Target::Path(p) => match env.roots.place(&p) {
-                Place::Scratch => {
-                    scratch_ok(env, &p, v);
-                }
-                Place::Bookkeeping => v.raise(
-                    Class::Delete,
-                    format!("writes the run records at {}", env.roots.shown(&p)),
-                ),
-                Place::Outside if truncate && paths::exists(&p) => v.raise(
-                    Class::Delete,
-                    format!("replaces {} (outside runs/)", env.roots.shown(&p)),
-                ),
-                Place::Outside => v.raise(
-                    Class::Fill,
-                    format!("writes {} (outside runs/)", env.roots.shown(&p)),
-                ),
-            },
+            Target::Path(p) => write_path(env, &p, truncate, v),
         }
     }
 }
 
-/// Git hooks and config, `.gitattributes`, `.curlrc`...: allowed programs run what these
-/// say (core.fsmonitor on `git status`, a pre-commit hook on `git commit`).
-fn config_write(env: &Env, p: &Path, v: &mut Verdict) {
-    v.raise(
-        Class::Delete,
-        format!(
-            "writes {}, which git, curl or wget read as configuration that can run programs",
-            env.roots.shown(p)
-        ),
-    );
+/// Writing the resolved file `p`: [`util::write_verdict`], the one check every tool's
+/// writes go through (D-525), then the line-wide link check for scratch.
+fn write_path(env: &Env, p: &Path, replaces: bool, v: &mut Verdict) {
+    let w = util::write_verdict(env.roots, p, replaces, Class::Read);
+    if w.class == Class::Read {
+        // Read means scratch: another command in the line may still plant a link there.
+        scratch_ok(env, p, v);
+    }
+    v.merge(w);
 }
 
 /// A path the command creates or touches without removing content (mkdir, touch).
@@ -2153,35 +2129,36 @@ fn create_target(env: &Env, w: &Word, what: &str, v: &mut Verdict) {
                 Class::Delete,
                 format!("cannot tell what {what} changes: {why}"),
             ),
-            Target::Path(p) if paths::runs_code_on_use(&p) => config_write(env, &p, v),
-            Target::Path(p) => match env.roots.place(&p) {
-                Place::Scratch => {
-                    scratch_ok(env, &p, v);
-                }
-                Place::Bookkeeping => v.raise(
-                    Class::Delete,
-                    format!("{what} on the run records at {}", env.roots.shown(&p)),
-                ),
-                Place::Outside => v.raise(
-                    Class::Fill,
-                    format!("{what} {} (outside runs/)", env.roots.shown(&p)),
-                ),
-            },
+            Target::Path(p) => write_path(env, &p, false, v),
         }
     }
 }
 
-/// Every candidate folder `dest` (or the working folder) is scratch.
-fn dest_scratch(env: &Env, dest: Option<&Word>) -> bool {
-    match dest {
-        Some(w) => {
-            let ts = resolve(env, w, false);
-            !ts.is_empty()
-                && ts
-                    .iter()
-                    .all(|t| matches!(t, Target::Path(p) if env.roots.place(p) == Place::Scratch))
+/// A folder the command fills with files whose names it does not know in advance (an
+/// archive extracted, a tree copied, a repository cloned, a download named by the
+/// server): [`util::tree_verdict`] for `dest`, or for every working folder.
+fn tree_target(env: &Env, dest: Option<&Word>, what: &str, v: &mut Verdict) {
+    let dirs: Vec<Target> = match dest {
+        Some(w) => resolve(env, w, false),
+        None => match &env.cwds {
+            Some(c) => c.iter().cloned().map(Target::Path).collect(),
+            None => vec![Target::Unknown(
+                "the working folder, which the classifier cannot follow".into(),
+            )],
+        },
+    };
+    if dirs.is_empty() {
+        v.raise(Class::Delete, format!("cannot tell where {what} writes"));
+    }
+    for t in dirs {
+        match t {
+            Target::Path(p) => v.merge(util::tree_verdict(env.roots, &p, Class::Read)),
+            Target::Null => v.raise(Class::Delete, format!("{what} into a device")),
+            Target::Unknown(why) => v.raise(
+                Class::Delete,
+                format!("cannot tell where {what} writes: {why}"),
+            ),
         }
-        None => env.cwd_scratch() == Some(true),
     }
 }
 
@@ -2610,8 +2587,33 @@ fn move_or_copy(env: &Env, p: &Parsed, is_move: bool, v: &mut Verdict) {
             return;
         }
     };
+    // -T: DST is the destination itself, never DST/<name> (`cp -rT a b` copies a's
+    // contents into b).
+    let no_target_dir = p.has(&["-T", "--no-target-directory"]);
+    if no_target_dir && (p.value(&["-t", "--target-directory"]).is_some() || srcs.len() != 1) {
+        v.raise(
+            Class::Delete,
+            format!("{what} -T with -t or several sources"),
+        );
+        return;
+    }
+    // A copy that takes trees (or links as links) carries files whose names this check
+    // does not see (D-525).
+    let tree_copy = !is_move
+        && p.has(&[
+            "-r",
+            "-R",
+            "-a",
+            "-d",
+            "-P",
+            "--recursive",
+            "--archive",
+            "--no-dereference",
+        ]);
     let dst_is_dir = paths::is_dir(&dst_path);
     for s in srcs {
+        // `SRC/.` names SRC's contents: they land in DST itself.
+        let contents = s.text == "." || s.text.ends_with("/.") || s.text.ends_with("\\.");
         for st in resolve(env, s, true) {
             let src = match st {
                 Target::Path(p) => p,
@@ -2624,15 +2626,11 @@ fn move_or_copy(env: &Env, p: &Parsed, is_move: bool, v: &mut Verdict) {
                     continue;
                 }
             };
-            let fin = match (dst_is_dir, src.file_name()) {
+            let fin = match (dst_is_dir && !no_target_dir && !contents, src.file_name()) {
                 (true, Some(n)) => dst_path.join(n),
                 _ => dst_path.clone(),
             };
             let sp = env.roots.place(&src);
-            let dp = env.roots.place(&fin);
-            if paths::runs_code_on_use(&fin) {
-                config_write(env, &fin, v);
-            }
             if is_move && (sp == Place::Bookkeeping || env.roots.runs.starts_with(&src)) {
                 v.raise(
                     Class::Delete,
@@ -2647,24 +2645,24 @@ fn move_or_copy(env: &Env, p: &Parsed, is_move: bool, v: &mut Verdict) {
                     format!("moves {} away (outside runs/)", env.roots.shown(&src)),
                 );
             }
-            match dp {
-                // Into runs/: a move from outside was raised above; a copy only reads.
-                Place::Scratch => {
-                    scratch_ok(env, &fin, v);
-                }
-                Place::Bookkeeping => v.raise(
+            if is_move && paths::runs_code_on_use(env.roots, &src) {
+                v.raise(
                     Class::Delete,
-                    format!("writes the run records at {}", env.roots.shown(&fin)),
-                ),
-                Place::Outside if !no_clobber && paths::exists(&fin) => v.raise(
-                    Class::Delete,
-                    format!("replaces {} (outside runs/)", env.roots.shown(&fin)),
-                ),
-                Place::Outside => v.raise(
-                    Class::Fill,
-                    format!("{what} to {} (outside runs/)", env.roots.shown(&fin)),
-                ),
+                    format!(
+                        "moves {} out of a configuration, startup or program location",
+                        env.roots.shown(&src)
+                    ),
+                );
             }
+            // A folder, a link kept as a link, or a source not there yet (made earlier in
+            // the line) is a tree: outside runs/ any file in it could be `.git/config`,
+            // `.bashrc` or a program on PATH, or replace a file there.
+            let regular = std::fs::symlink_metadata(&src).is_ok_and(|m| m.is_file());
+            if !regular && (is_move || tree_copy) {
+                v.merge(util::tree_verdict(env.roots, &fin, Class::Read));
+            }
+            // Into runs/: a move from outside was raised above; a copy only reads.
+            write_path(env, &fin, !no_clobber, v);
         }
     }
 }
@@ -2986,6 +2984,17 @@ fn gzip(env: &Env, name: &str, args: &[Word], v: &mut Verdict) {
     }
     let keep = p.has(&["-k", "--keep"]);
     let force = p.has(&["-f", "--force"]);
+    let recursive = p.has(&["-r", "--recursive"]);
+    let decompress = p.has(&["-d", "--decompress", "--uncompress"])
+        || matches!(name, "gunzip" | "bunzip2" | "unxz");
+    let suffix = match p.value(&["-S", "--suffix"]) {
+        Some(s) if !s.is_static() => {
+            v.raise(Class::Delete, format!("{name} -S decided at run time"));
+            return;
+        }
+        Some(s) => Some(s.text.clone()),
+        None => None,
+    };
     for t in p.ops {
         if keep && !force {
             create_target(env, t, name, v);
@@ -2993,7 +3002,57 @@ fn gzip(env: &Env, name: &str, args: &[Word], v: &mut Verdict) {
             // The input is removed (or, with -f, an existing output replaced).
             delete_target(env, t, v);
         }
+        // The output is a write of its own (D-525): beside the input, named from it.
+        if recursive {
+            tree_target(env, Some(t), name, v);
+            continue;
+        }
+        for r in resolve(env, t, true) {
+            if let Target::Path(input) = r {
+                if let Some(out) = zip_output(&input, name, decompress, suffix.as_deref()) {
+                    write_path(env, &out, force, v);
+                }
+            }
+        }
     }
+}
+
+/// The file gzip, bzip2 or xz writes for `input`: the suffix added, or (decompressing)
+/// removed; `None` when a decompressor would skip the name.
+fn zip_output(input: &Path, prog: &str, decompress: bool, suffix: Option<&str>) -> Option<PathBuf> {
+    let file = input.file_name()?.to_string_lossy().into_owned();
+    let default = match prog {
+        "bzip2" | "bunzip2" => ".bz2",
+        "xz" | "unxz" => ".xz",
+        _ => ".gz",
+    };
+    if !decompress {
+        return Some(input.with_file_name(format!("{file}{}", suffix.unwrap_or(default))));
+    }
+    let lower = file.to_ascii_lowercase();
+    let mut cands: Vec<(String, &str)> = vec![];
+    if let Some(s) = suffix {
+        cands.push((s.to_ascii_lowercase(), ""));
+    }
+    cands.push((default.to_string(), ""));
+    if default == ".gz" {
+        for s in ["-gz", ".z", "_z", "-z", ".zip"] {
+            cands.push((s.to_string(), ""));
+        }
+        cands.push((".tgz".to_string(), ".tar"));
+        cands.push((".taz".to_string(), ".tar"));
+    }
+    if default == ".bz2" {
+        cands.push((".tbz2".to_string(), ".tar"));
+        cands.push((".tbz".to_string(), ".tar"));
+    }
+    if default == ".xz" {
+        cands.push((".txz".to_string(), ".tar"));
+    }
+    cands.into_iter().find_map(|(s, add)| {
+        (!s.is_empty() && lower.ends_with(&s) && lower.len() > s.len())
+            .then(|| input.with_file_name(format!("{}{add}", &file[..file.len() - s.len()])))
+    })
 }
 
 fn tar(env: &Env, args: &[Word], v: &mut Verdict) {
@@ -3104,9 +3163,12 @@ fn tar(env: &Env, args: &[Word], v: &mut Verdict) {
     if p.has(&["-O", "--to-stdout"]) {
         return;
     }
-    let dest = p.value(&["-C", "--directory"]);
-    if !dest_scratch(env, dest) {
-        v.raise(Class::Delete, "tar -x can replace files outside runs/");
+    let dests = p.values(&["-C", "--directory"]);
+    if dests.is_empty() {
+        tree_target(env, None, "tar -x", v);
+    }
+    for d in dests {
+        tree_target(env, Some(d), "tar -x", v);
     }
 }
 
@@ -3125,8 +3187,12 @@ fn unzip(env: &Env, args: &[Word], v: &mut Verdict) {
     if p.has(&["-l", "-v", "-t", "-Z", "-c", "-z"]) {
         return;
     }
-    if !dest_scratch(env, p.value(&["-d"])) {
-        v.raise(Class::Delete, "unzip can replace files outside runs/");
+    let dests = p.values(&["-d"]);
+    if dests.is_empty() {
+        tree_target(env, None, "unzip", v);
+    }
+    for d in dests {
+        tree_target(env, Some(d), "unzip", v);
     }
 }
 
@@ -3405,9 +3471,10 @@ fn curl(env: &Env, args: &[Word], v: &mut Verdict) {
         };
         write_target(env, &w, true, v);
     }
-    // curl -O replaces a file of the same name: outside runs/ that is Delete.
-    if p.has(&["-O", "--remote-name", "--remote-name-all"]) && !dest_scratch(env, output_dir) {
-        v.raise(Class::Delete, "curl -O may replace a file outside runs/");
+    // curl -O names the file after the URL and replaces one of the same name: outside
+    // runs/ that is Delete (D-525: a name the classifier does not check).
+    if p.has(&["-O", "--remote-name", "--remote-name-all"]) {
+        tree_target(env, output_dir, "curl -O", v);
     }
 }
 
@@ -3498,24 +3565,63 @@ fn wget(env: &Env, args: &[Word], v: &mut Verdict) {
     ) {
         (Some(o), _) if o.text == "-" && o.is_static() => {}
         (Some(o), _) => write_target(env, o, true, v),
-        (None, Some(d)) => create_target(env, d, "wget downloads into", v),
-        (None, None) => {
-            let bookkeeping = env
-                .cwds
-                .as_ref()
-                .is_some_and(|c| c.iter().any(|d| env.roots.place(d) == Place::Bookkeeping));
-            match env.cwd_scratch() {
-                Some(true) => {}
-                Some(false) if !bookkeeping => {
-                    v.raise(Class::Fill, "wget saves a file in the working folder")
+        // Without -O the file is named after the URL: that name is checked like any write;
+        // a name the server picks (--content-disposition) or that cannot be read off the
+        // URL makes it a tree (D-525). wget never replaces here (it adds .1).
+        (None, d) => {
+            let names: Option<Vec<String>> = if p.has(&["--content-disposition"]) {
+                None
+            } else {
+                p.ops
+                    .iter()
+                    .map(|u| {
+                        if u.is_static() {
+                            url_file_name(&u.text)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            let Some(names) = names.filter(|n| !n.is_empty()) else {
+                tree_target(env, d, "wget", v);
+                return;
+            };
+            let dirs: Vec<Target> = match d {
+                Some(w) => resolve(env, w, false),
+                None => match &env.cwds {
+                    Some(c) => c.iter().cloned().map(Target::Path).collect(),
+                    None => vec![Target::Unknown("the working folder".into())],
+                },
+            };
+            for t in dirs {
+                match t {
+                    Target::Path(dir) => {
+                        for n in &names {
+                            write_path(env, &dir.join(n), false, v);
+                        }
+                    }
+                    _ => v.raise(Class::Delete, "cannot tell where wget saves"),
                 }
-                _ => v.raise(
-                    Class::Delete,
-                    "wget saves a file where the classifier cannot tell",
-                ),
             }
         }
     }
+}
+
+/// The file name wget gives a download of `url`: its last path segment, `index.html` for
+/// a folder. `None` when the name is not plain (an encoded or dot name, a separator).
+fn url_file_name(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
+    let path = rest.split_once('/').map_or("", |(_, p)| p);
+    let name = path.rsplit('/').next().unwrap_or("");
+    if name.is_empty() {
+        return Some("index.html".into());
+    }
+    let plain = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_.+,=@~".contains(c));
+    (plain && name != "." && name != "..").then(|| name.to_string())
 }
 
 fn find(args: &[Word], v: &mut Verdict) {
@@ -3848,6 +3954,159 @@ const GIT_LOG: Flags = Flags {
     num: true,
 };
 
+/// Why git (or gh) in the current folders may run a repository planted inside runs/:
+/// a folder inside runs/ (the runs root and bookkeeping included), a folder the
+/// classifier cannot follow, or a `.git` file above the folder pointing into runs/.
+fn repo_in_runs(env: &Env) -> Option<String> {
+    let Some(cwds) = &env.cwds else {
+        return Some(
+            "runs in a folder the classifier cannot follow, which may be a repository inside runs/"
+                .into(),
+        );
+    };
+    for cwd in cwds {
+        if cwd.starts_with(&env.roots.runs) {
+            return Some(format!(
+                "runs in {}, inside runs/, where a repository may carry its own config (core.fsmonitor, hooks, drivers) that git would run",
+                env.roots.shown(cwd)
+            ));
+        }
+        if let Some(Repo { git_dir, .. }) = find_repo(cwd) {
+            if git_dir.starts_with(&env.roots.runs) {
+                return Some(format!(
+                    "the repository of {} lives inside runs/ ({})",
+                    env.roots.shown(cwd),
+                    env.roots.shown(&git_dir)
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// A repository found from a folder: its working tree root and its git folder.
+struct Repo {
+    root: PathBuf,
+    git_dir: PathBuf,
+}
+
+/// Walks up from `dir` to the first `.git` (a folder, or a file `gitdir: <path>`), as git
+/// does without GIT_DIR (which the runner removes).
+fn find_repo(dir: &Path) -> Option<Repo> {
+    let mut cur = Some(dir);
+    while let Some(d) = cur {
+        let dot = d.join(".git");
+        match std::fs::metadata(&dot) {
+            Ok(m) if m.is_dir() => {
+                return Some(Repo {
+                    root: d.to_path_buf(),
+                    git_dir: std::fs::canonicalize(&dot).unwrap_or(dot),
+                })
+            }
+            Ok(_) => {
+                let text = std::fs::read_to_string(&dot).unwrap_or_default();
+                let target = text
+                    .lines()
+                    .next()
+                    .and_then(|l| l.strip_prefix("gitdir:"))
+                    .map(str::trim)
+                    .unwrap_or("");
+                let git_dir =
+                    paths::resolve(d, &paths::msys_drive(target)).unwrap_or_else(|_| dot.clone());
+                return Some(Repo {
+                    root: d.to_path_buf(),
+                    git_dir,
+                });
+            }
+            Err(_) => cur = d.parent(),
+        }
+    }
+    None
+}
+
+/// The working tree root of the current folders' repository when it is the home folder
+/// (or above it), or a folder where configuration or startup files live.
+fn config_worktree(env: &Env) -> Option<PathBuf> {
+    let homes: Vec<PathBuf> = dirs::home_dir()
+        .into_iter()
+        .map(|h| std::fs::canonicalize(&h).unwrap_or(h))
+        .collect();
+    for cwd in env.cwds.as_ref()? {
+        let Some(Repo { root, .. }) = find_repo(cwd) else {
+            continue;
+        };
+        if homes.iter().any(|h| h.starts_with(&root))
+            || paths::runs_code_on_use(env.roots, &root.join("x"))
+        {
+            return Some(root);
+        }
+    }
+    None
+}
+
+/// Why `git add` may stage a repository planted inside runs/ as a submodule (D-525): a
+/// later `git status` in the outer repository runs `git status` inside it, with its
+/// config. Only when the outer repository's tree holds runs/ and the add can reach it:
+/// a pathspec inside runs/ or above it, or `-A` with no pathspec, while runs/ is not
+/// ignored by the root `.gitignore` (or `-f` overrides that).
+fn adds_runs(env: &Env, p: &Parsed) -> Option<String> {
+    let runs = &env.roots.runs;
+    let cwds = env.cwds.as_ref()?;
+    let roots: Vec<PathBuf> = cwds
+        .iter()
+        .filter_map(|c| find_repo(c).map(|r| r.root))
+        .filter(|r| runs.starts_with(r))
+        .collect();
+    if roots.is_empty() {
+        return None;
+    }
+    let why = "git add can stage a repository inside runs/ as a submodule, whose own config a later git status runs";
+    if p.has(&["--pathspec-from-file"]) {
+        return Some(why.into());
+    }
+    let mut reaches = p.ops.is_empty() && p.has(&["-A", "--all"]);
+    for op in &p.ops {
+        if op.text.starts_with(':') || !op.is_static() {
+            reaches = true;
+            continue;
+        }
+        for t in resolve(env, op, true) {
+            match t {
+                Target::Path(q) => reaches |= q.starts_with(runs) || runs.starts_with(&q),
+                Target::Null => {}
+                Target::Unknown(_) => reaches = true,
+            }
+        }
+    }
+    let ignored = !p.has(&["-f", "--force"]) && roots.iter().all(|r| runs_ignored(r, runs));
+    (reaches && !ignored).then(|| why.to_string())
+}
+
+/// True when `root/.gitignore` ignores `runs` by a plain line (`runs/`, `/runs`, ...) and
+/// no negation line could bring part of it back.
+fn runs_ignored(root: &Path, runs: &Path) -> bool {
+    let Ok(rel) = runs.strip_prefix(root) else {
+        return false;
+    };
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    let Ok(text) = std::fs::read_to_string(root.join(".gitignore")) else {
+        return false;
+    };
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let name = rel.rsplit('/').next().unwrap_or(&rel);
+    if lines.iter().any(|l| l.starts_with('!') && l.contains(name)) {
+        return false;
+    }
+    lines.iter().any(|l| {
+        let l = l.trim_end_matches('/');
+        let anchored = l.strip_prefix('/');
+        match anchored {
+            Some(a) => a == rel,
+            None => l == rel || (!rel.contains('/') && l == name),
+        }
+    })
+}
+
 /// git config keys that make git run a program.
 fn git_config_runs(kv: &str) -> bool {
     let key = kv.split('=').next().unwrap_or(kv).to_ascii_lowercase();
@@ -3922,6 +4181,28 @@ fn git(outer: &Env, args: &[Word], v: &mut Verdict) {
         .iter()
         .find(|a| !a.text.starts_with('-'))
         .map(|a| a.text.as_str());
+    // D-525: a repository inside runs/ may have been planted (an archive, a copy, a
+    // download, in this line or an earlier call) with a `.git/config` whose
+    // core.fsmonitor, hooks or drivers git runs; only creating one there is safe.
+    if !matches!(s, "clone" | "init" | "version" | "help") {
+        if let Some(why) = repo_in_runs(env) {
+            v.raise(Class::Delete, format!("git {s}: {why}"));
+            return;
+        }
+        // A repository whose working tree is the home folder (a dotfiles repository) or
+        // a configuration folder: updating it can write startup files.
+        if may_link("git", args) {
+            if let Some(root) = config_worktree(env) {
+                v.raise(
+                    Class::Delete,
+                    format!(
+                        "git {s} writes the working tree of {}, which holds configuration or startup files",
+                        env.roots.shown(&root)
+                    ),
+                );
+            }
+        }
+    }
     let parse =
         |f: &Flags, v: &mut Verdict| flags_or_delete(&format!("git {s}"), f, rest, false, v);
     match s {
@@ -3970,6 +4251,23 @@ fn git(outer: &Env, args: &[Word], v: &mut Verdict) {
                     create_target(env, d, "git format-patch -o", v);
                 }
                 if !p.has(&["--stdout"]) {
+                    // The patches are NNNN-<subject>.patch files in that folder: checked
+                    // like any write there (D-525).
+                    let dirs: Vec<Target> = match p.value(&["--output-directory"]) {
+                        Some(d) => resolve(env, d, false),
+                        None => env
+                            .cwds
+                            .iter()
+                            .flatten()
+                            .cloned()
+                            .map(Target::Path)
+                            .collect(),
+                    };
+                    for t in dirs {
+                        if let Target::Path(d) = t {
+                            write_path(env, &d.join("0001-patch.patch"), true, v);
+                        }
+                    }
                     v.raise(Class::Fill, "git format-patch writes patch files");
                 }
             }
@@ -4427,7 +4725,10 @@ fn git(outer: &Env, args: &[Word], v: &mut Verdict) {
                 exact: &[],
                 num: false,
             };
-            if parse(&F, v).is_some() {
+            if let Some(p) = parse(&F, v) {
+                if let Some(why) = adds_runs(env, &p) {
+                    v.raise(Class::Delete, why);
+                }
                 v.raise(Class::Fill, "git add changes the index");
             }
         }
@@ -4934,9 +5235,8 @@ fn git(outer: &Env, args: &[Word], v: &mut Verdict) {
                 num: false,
             };
             if let Some(p) = parse(&F, v) {
-                if let Some(dest) = p.ops.get(1) {
-                    create_target(env, dest, "git clone into", v);
-                }
+                // The cloned files are a tree (D-525): outside runs/ Delete.
+                tree_target(env, p.ops.get(1).copied(), "git clone", v);
                 v.raise(Class::Fill, "git clone creates a repository");
             }
         }
@@ -4960,7 +5260,28 @@ fn git(outer: &Env, args: &[Word], v: &mut Verdict) {
         }
         "worktree" => match first_op {
             Some("list") => {}
-            Some("add") => v.raise(Class::Fill, "git worktree add creates a working tree"),
+            Some("add") => {
+                // `git worktree add [-b x] <path> [<commit>]`: the tree goes to <path>.
+                let mut ops = rest.iter().skip_while(|a| a.text != "add").skip(1);
+                let mut path = None;
+                while let Some(a) = ops.next() {
+                    match a.text.as_str() {
+                        "-b" | "-B" | "--reason" => {
+                            ops.next();
+                        }
+                        t if t.starts_with('-') => {}
+                        _ => {
+                            path = Some(a);
+                            break;
+                        }
+                    }
+                }
+                match path {
+                    Some(p) => tree_target(env, Some(p), "git worktree add", v),
+                    None => v.raise(Class::Delete, "git worktree add without a path"),
+                }
+                v.raise(Class::Fill, "git worktree add creates a working tree");
+            }
             _ => v.raise(
                 Class::Delete,
                 "git worktree remove/prune/move deletes or moves a working tree",
@@ -5321,7 +5642,60 @@ const GH_FLAGS: &[&str] = &[
     "--force",
 ];
 
-fn gh(args: &[Word], v: &mut Verdict) {
+fn gh(env: &Env, args: &[Word], v: &mut Verdict) {
+    let mut g = Verdict::new(Class::Read);
+    gh_command(args, &mut g);
+    let refused = g.class >= Class::Delete;
+    v.merge(g);
+    if refused {
+        return;
+    }
+    let group = args.first().map(|a| a.text.as_str()).unwrap_or("");
+    let action = args.get(1).map(|a| a.text.as_str()).unwrap_or("");
+    let clone = action == "clone" && matches!(group, "repo" | "gist");
+    // gh runs git in the working folder to find the repository (D-525).
+    if !clone
+        && !matches!(
+            group,
+            "" | "help" | "version" | "--version" | "--help" | "search"
+        )
+    {
+        if let Some(why) = repo_in_runs(env) {
+            v.raise(Class::Delete, format!("gh {group} runs git, which {why}"));
+            return;
+        }
+    }
+    // Where clones and downloads land (D-525): trees whose names gh picks.
+    let value = |names: &[&str]| -> Option<&Word> {
+        args.iter().enumerate().rev().find_map(|(i, a)| {
+            let t = a.text.as_str();
+            names
+                .iter()
+                .find_map(|n| if t == *n { args.get(i + 1) } else { None })
+        })
+    };
+    if clone {
+        // `gh repo clone <repo> [<dir>]`.
+        let dir = args.get(3).filter(|a| !a.text.starts_with('-'));
+        tree_target(env, dir, &format!("gh {group} clone"), v);
+    } else if action == "download" {
+        if let Some(out) = value(&["-O", "--output"]) {
+            if !(out.is_static() && out.text == "-") {
+                write_target(env, out, true, v);
+            }
+        } else {
+            tree_target(
+                env,
+                value(&["-D", "--dir"]),
+                &format!("gh {group} download"),
+                v,
+            );
+        }
+    }
+}
+
+/// The class of a gh command line from its group and action (without the folder checks).
+fn gh_command(args: &[Word], v: &mut Verdict) {
     if args.iter().any(may_be_option) {
         v.raise(
             Class::Delete,

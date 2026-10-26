@@ -181,8 +181,13 @@ fn text_diff(roots: &Roots, a: TextOpts, pa: &Path, pb: &Path) -> Result<ToolOut
     if cut {
         let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
         let path = util::fresh_name(&roots.files, &format!("diff-{stamp}"), "diff");
+        // The one write check every sink goes through (D-525): files/ must still be scratch.
         let saved = std::fs::create_dir_all(&roots.files)
-            .and_then(|_| std::fs::write(&path, harness_core::scrub(&unified)));
+            .map_err(|e| e.to_string())
+            .and_then(|_| util::own_output_ok(roots, &path))
+            .and_then(|_| {
+                std::fs::write(&path, harness_core::scrub(&unified)).map_err(|e| e.to_string())
+            });
         match saved {
             Ok(()) => {
                 out.push_str(&format!(

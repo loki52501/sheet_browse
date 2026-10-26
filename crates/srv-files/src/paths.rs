@@ -17,7 +17,8 @@
 use harness_core::run::is_run_id;
 use harness_core::{ToolCtx, ToolError};
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
+use std::sync::OnceLock;
 
 /// Entries of a run folder that are never scratch (H-3, H-4, the FileAsker channel).
 const BOOKKEEPING: [&str; 4] = ["asks", "ledger.jsonl", "report.md", "prompt.md"];
@@ -145,7 +146,7 @@ pub fn place(roots: &Roots, p: &Path) -> Place {
 /// Dot folders that hold configuration a later program runs code from, wherever they are
 /// (project-local ones included): git hooks and config, cargo runners and aliases, the
 /// XDG config tree (`~/.config/git/config`, `~/.config/git/attributes`), ssh, editors,
-/// git hook managers.
+/// git hook managers. `start menu` holds the machine-wide Startup folder too.
 const CODE_DIRS: &[&str] = &[
     ".git",
     ".cargo",
@@ -156,67 +157,202 @@ const CODE_DIRS: &[&str] = &[
     ".devcontainer",
     ".github",
     ".local",
+    "start menu",
 ];
 
-/// Folders below the home folder whose files run at login or app start on Windows
-/// (`AppData\...\Startup`, the PowerShell profiles in `Documents`).
-const CODE_HOME_DIRS: &[&str] = &["appdata", "windowspowershell", "powershell", "start menu"];
+/// Folders below the home folder whose files a program loads at login or start (D-525):
+/// app configuration (`AppData\Roaming`), the per-user programs folder on PATH
+/// (`AppData\Local\Microsoft\WindowsApps`).
+const CODE_HOME_PREFIXES: &[&[&str]] = &[
+    &["appdata", "roaming"],
+    &["appdata", "local", "microsoft", "windowsapps"],
+];
+
+/// Folder names below the home folder that hold startup items or PowerShell profiles
+/// (`Documents\WindowsPowerShell`, `Documents\PowerShell`, a redirected `Documents` too).
+const CODE_HOME_NAMES: &[&str] = &["startup", "start menu"];
+const PROFILE_DIRS: &[&str] = &["windowspowershell", "powershell"];
 
 /// True when writing `p` can make a program run code later, so the write is Delete
-/// wherever it is (D-523 (8), D-524):
+/// wherever it is (D-523 (8), D-524, narrowed by D-525):
 /// * any dotfile (`.gitattributes`, `.gitmodules`, `.gitconfig`, `.curlrc`, `.wgetrc`,
 ///   `.bashrc`, `.profile`, `.zshrc`, `.npmrc`, `.netrc`, `.envrc`, ...) and the Windows
-///   `_netrc` / `_curlrc` spellings;
-/// * anything inside a [`CODE_DIRS`] folder;
-/// * below the home folder: anything inside any dot folder, and the [`CODE_HOME_DIRS`];
-/// * a file in a folder on `PATH` (a planted `git` would replace the real one).
+///   `_netrc` / `_curlrc` spellings, anywhere;
+/// * anything inside a [`CODE_DIRS`] folder. For a path inside the base folder (the one
+///   that holds `runs/`) only the part below the base counts: the user chose where the
+///   base is, so a base below `~/.wt` or `~/.local/src` does not make every write ask;
+/// * below the home folder, for paths outside the base folder (or every path when the
+///   base is the home folder or above it): a top-level dot folder (`~/.x/...`), the
+///   [`CODE_HOME_PREFIXES`], a [`CODE_HOME_NAMES`] folder, `Documents\<profile dir>`;
+/// * a file in a folder on the PATH that bash, the cmd fallback or this server use
+///   ([`path_dirs`]), or any file at all when that PATH has a relative entry.
 ///
-/// Fails closed: this over-matches (a dotfile inside `runs/` is Delete too) rather than
-/// keep a list of the startup files each program reads.
-pub fn runs_code_on_use(p: &Path) -> bool {
+/// Fails closed: a dotfile inside `runs/` is Delete too, rather than keep a list of the
+/// startup files each program reads.
+pub fn runs_code_on_use(roots: &Roots, p: &Path) -> bool {
+    code_path(roots, p, homes(), path_dirs())
+}
+
+/// [`runs_code_on_use`] with given home folders ([`lower_names`]) and search folders.
+pub fn code_path(roots: &Roots, p: &Path, homes: &[Vec<String>], path: &PathDirs) -> bool {
     let names = lower_names(p);
     let Some((file, dirs)) = names.split_last() else {
         return false;
     };
-    if (file.starts_with('.') && file != ".." && file.len() > 1)
-        || matches!(file.as_str(), "_netrc" | "_curlrc")
-        || dirs.iter().any(|d| CODE_DIRS.contains(&d.as_str()))
-    {
+    if dot_name(file) || matches!(file.as_str(), "_netrc" | "_curlrc") {
         return true;
     }
-    if let Some(home) = dirs::home_dir() {
-        let home = lower_names(&home);
-        if names.len() > home.len() && names[..home.len()] == home[..] {
-            let below = &names[home.len()..names.len() - 1];
-            if below
-                .iter()
-                .any(|d| (d.starts_with('.') && d != "..") || CODE_HOME_DIRS.contains(&d.as_str()))
-            {
-                return true;
-            }
+    let base = lower_names(&roots.base);
+    let in_base = names.len() > base.len() && names.starts_with(&base);
+    let below_base = if in_base { &dirs[base.len()..] } else { dirs };
+    if below_base.iter().any(|d| CODE_DIRS.contains(&d.as_str())) {
+        return true;
+    }
+    for home in homes {
+        let base_below_home = base.len() > home.len() && base.starts_with(home);
+        let in_home = names.len() > home.len() && names.starts_with(home);
+        if in_home && !(in_base && base_below_home) && home_code(&dirs[home.len()..]) {
+            return true;
         }
     }
-    on_path(&names[..names.len() - 1])
+    !dirs.is_empty() && path.contains(dirs)
 }
 
-/// The normal components of `p`, ASCII-lowercased (Windows paths are case-insensitive).
-fn lower_names(p: &Path) -> Vec<String> {
+fn dot_name(n: &str) -> bool {
+    n.starts_with('.') && n != "." && n != ".."
+}
+
+/// `below`: the folders between the home folder and the file.
+fn home_code(below: &[String]) -> bool {
+    below.first().is_some_and(|d| dot_name(d))
+        || CODE_HOME_PREFIXES.iter().any(|pre| {
+            below.len() >= pre.len() && below.iter().zip(pre.iter()).all(|(a, b)| a == b)
+        })
+        || below.iter().any(|d| CODE_HOME_NAMES.contains(&d.as_str()))
+        || below
+            .windows(2)
+            .any(|w| w[0] == "documents" && PROFILE_DIRS.contains(&w[1].as_str()))
+}
+
+/// The home folders' names, canonical where they exist: the user's profile folder and,
+/// when set to another folder, `HOME` (where git and Git Bash look for `~`).
+pub fn homes() -> &'static [Vec<String>] {
+    static HOMES: OnceLock<Vec<Vec<String>>> = OnceLock::new();
+    HOMES.get_or_init(|| {
+        let mut out: Vec<Vec<String>> = Vec::new();
+        let cands = [
+            dirs::home_dir(),
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(PathBuf::from)
+                .filter(|h| h.is_absolute()),
+        ];
+        for h in cands.into_iter().flatten() {
+            let n = lower_names(&canonical_or_absolute(&h));
+            if n.len() > 1 && !out.contains(&n) {
+                out.push(n);
+            }
+        }
+        out
+    })
+}
+
+/// The components of `p`, ASCII-lowercased (Windows paths are case-insensitive), the
+/// drive as `c:` whether or not the path is verbatim, and `.`/`..`/root dropped.
+pub(crate) fn lower_names(p: &Path) -> Vec<String> {
     p.components()
         .filter_map(|c| match c {
+            Component::Prefix(pre) => Some(match pre.kind() {
+                Prefix::Disk(d) | Prefix::VerbatimDisk(d) => {
+                    format!("{}:", (d as char).to_ascii_lowercase())
+                }
+                Prefix::UNC(s, h) | Prefix::VerbatimUNC(s, h) => format!(
+                    "//{}/{}",
+                    s.to_string_lossy().to_ascii_lowercase(),
+                    h.to_string_lossy().to_ascii_lowercase()
+                ),
+                _ => pre.as_os_str().to_string_lossy().to_ascii_lowercase(),
+            }),
             Component::Normal(n) => Some(n.to_string_lossy().to_ascii_lowercase()),
             _ => None,
         })
         .collect()
 }
 
-/// True when the folder whose components are `dir` is listed in `PATH`.
-fn on_path(dir: &[String]) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|entry| {
-        let entry = lower_names(&entry);
-        !entry.is_empty() && entry == dir
+/// `p` canonicalised (8.3 names expanded, junctions and links followed) when it exists,
+/// else made absolute (Win32 normalisation of `..`, trailing dots and spaces).
+fn canonical_or_absolute(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p)
+        .or_else(|_| std::path::absolute(p))
+        .unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// The folders where a bare program name is looked up, by any process this server starts.
+#[derive(Debug, Default)]
+pub struct PathDirs {
+    /// Each folder's [`lower_names`], canonical where it exists.
+    pub dirs: Vec<Vec<String>>,
+    /// The bash PATH still had a relative or empty entry (a folder relative to wherever
+    /// bash is at the time): then a file written anywhere could be run, so every write is
+    /// Delete. [`crate::shell`] removes such entries before bash starts, so this only
+    /// happens when bash adds one itself.
+    pub relative: bool,
+}
+
+impl PathDirs {
+    /// From folder lists: `absolute` as given, `relative` (from the harness PATH) joined to
+    /// `cwd`, the process that searches them being this server, whose folder is fixed.
+    pub fn from_entries(entries: &[PathBuf], cwd: Option<&Path>, relative: bool) -> PathDirs {
+        let mut dirs: Vec<Vec<String>> = Vec::new();
+        for e in entries {
+            let e = if e.is_absolute() {
+                e.clone()
+            } else if let Some(c) = cwd {
+                c.join(e)
+            } else {
+                continue;
+            };
+            let n = lower_names(&canonical_or_absolute(&e));
+            if !n.is_empty() && !dirs.contains(&n) {
+                dirs.push(n);
+            }
+        }
+        PathDirs { dirs, relative }
+    }
+
+    pub fn contains(&self, dir: &[String]) -> bool {
+        self.relative || self.dirs.iter().any(|d| d[..] == *dir)
+    }
+}
+
+/// The program search folders, computed once (D-525): this server's own PATH (the cmd
+/// fallback and the helpers it starts), with a relative or empty entry taken against its
+/// working folder; the folder of this executable (Windows searches it first); `~/bin`;
+/// and the PATH the runner's bash really has, which Git Bash builds by putting
+/// `/mingw64/bin`, `/usr/bin` and `$USERPROFILE/bin` in front ([`crate::shell::bash_path`]).
+pub fn path_dirs() -> &'static PathDirs {
+    static DIRS: OnceLock<PathDirs> = OnceLock::new();
+    DIRS.get_or_init(|| {
+        let mut entries: Vec<PathBuf> = Vec::new();
+        if let Some(p) = std::env::var_os("PATH") {
+            entries.extend(std::env::split_paths(&p));
+        }
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf))
+        {
+            entries.push(dir);
+        }
+        if let Some(h) = dirs::home_dir() {
+            entries.push(h.join("bin"));
+        }
+        let mut relative = false;
+        if let Some(b) = crate::shell::bash_path() {
+            entries.extend(b.dirs);
+            relative = b.relative;
+        }
+        let cwd = std::env::current_dir().ok();
+        PathDirs::from_entries(&entries, cwd.as_deref(), relative)
     })
 }
 
@@ -497,6 +633,123 @@ mod tests {
         {
             std::os::unix::fs::symlink(target, link).is_ok()
         }
+    }
+
+    /// Review-T-14 closing Blocking 5 (D-525): home rules hold outside the base folder
+    /// only, AppData counts only for Roaming and WindowsApps, and a base below a home dot
+    /// folder or `AppData\Local\Temp` does not make every write Delete. `home` stands in
+    /// for the home folder.
+    #[test]
+    fn home_rules_are_narrow_and_skip_the_base() {
+        let t = tempfile::tempdir().unwrap();
+        let mk = |base: &Path| {
+            let run = base.join("runs").join("2026-10-25T00-00-00-t");
+            std::fs::create_dir_all(run.join("files")).unwrap();
+            Roots::from_run_dir(&run).unwrap()
+        };
+        // Plain (not `\\?\`) so `a/b` joins split on `/` on Windows too.
+        let canon_home =
+            PathBuf::from(plain(&std::fs::canonicalize(t.path()).unwrap())).join("home");
+        let homes = vec![lower_names(&canon_home)];
+        let none = PathDirs::default();
+        let code = |r: &Roots, p: &Path| code_path(r, p, &homes, &none);
+        for base in [
+            canon_home.join(".wt").join("repo"),
+            canon_home.join(".local").join("src").join("repo"),
+            canon_home
+                .join("AppData")
+                .join("Local")
+                .join("Temp")
+                .join(".tmpab"),
+            canon_home.join("AppData").join("Roaming").join("proj"),
+        ] {
+            let r = mk(&base);
+            for ok in [
+                "runs/x/a.txt",
+                "runs/x/out/b.csv",
+                "notes.txt",
+                "src/main.rs",
+            ] {
+                assert!(
+                    !code(&r, &r.resolve(ok).unwrap()),
+                    "{} in {}",
+                    ok,
+                    base.display()
+                );
+            }
+            for bad in [
+                ".git/config",
+                "runs/x/.git/hooks/pre-commit",
+                ".gitattributes",
+                "runs/x/r/.config/git/config",
+                ".bashrc",
+            ] {
+                assert!(
+                    code(&r, &r.resolve(bad).unwrap()),
+                    "{} in {}",
+                    bad,
+                    base.display()
+                );
+            }
+            // Outside the base the home rules hold.
+            for bad in [
+                ".config/git/config",
+                ".ssh/config",
+                ".x/y/z.txt",
+                "AppData/Roaming/Code/User/settings.json",
+                "AppData/Local/Microsoft/WindowsApps/git.exe",
+                "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/a.cmd",
+                "Documents/PowerShell/Microsoft.PowerShell_profile.ps1",
+                "Documents/WindowsPowerShell/profile.ps1",
+                "OneDrive/Documents/WindowsPowerShell/profile.ps1",
+            ] {
+                assert!(
+                    code(&r, &canon_home.join(bad)),
+                    "{bad} with base {}",
+                    base.display()
+                );
+            }
+            for ok in [
+                "AppData/Local/Temp/x/a.txt",
+                "AppData/Local/Temp/.tmpzz/a.txt",
+                "Documents/report.docx",
+                "projects/startup-notes.txt",
+            ] {
+                assert!(
+                    !code(&r, &canon_home.join(ok)),
+                    "{ok} with base {}",
+                    base.display()
+                );
+            }
+        }
+        // With the base at the home folder itself the home rules still hold inside it.
+        let r = mk(&canon_home);
+        assert!(code(&r, &canon_home.join("AppData/Roaming/x/y.json")));
+        assert!(code(&r, &canon_home.join(".x/y.txt")));
+        assert!(!code(&r, &r.resolve("runs/x/a.txt").unwrap()));
+    }
+
+    /// D-525: a PATH folder (and, with a relative PATH entry, any folder) is Delete.
+    #[test]
+    fn path_folders_and_relative_entries() {
+        let (t, r) = setup();
+        let bin = t.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let dirs = PathDirs::from_entries(std::slice::from_ref(&bin), None, false);
+        let code = |p: &Path, d: &PathDirs| code_path(&r, p, &[], d);
+        assert!(code(&r.resolve("bin/jq").unwrap(), &dirs));
+        assert!(!code(&r.resolve("runs/x/jq").unwrap(), &dirs));
+        // An 8.3 or junction spelling of a PATH folder is the same folder once canonical.
+        let link = t.path().join("bin-link");
+        if make_link(&bin, &link) {
+            let via = PathDirs::from_entries(std::slice::from_ref(&link), None, false);
+            assert!(code(&r.resolve("bin/jq").unwrap(), &via));
+        }
+        let relative = PathDirs::from_entries(&[], None, true);
+        assert!(code(&r.resolve("runs/x/a.txt").unwrap(), &relative));
+        // A relative harness entry is taken against the server's own folder.
+        let from_cwd = PathDirs::from_entries(&[PathBuf::from("bin")], Some(t.path()), false);
+        assert!(code(&r.resolve("bin/jq").unwrap(), &from_cwd));
     }
 
     #[test]

@@ -89,18 +89,23 @@ pub fn recheck(ctx: &ToolCtx, v: &Verdict) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// The class of writing to `p`: inside runs/ nothing more than `floor`; bookkeeping is
-/// Delete; outside, replacing an existing file is Delete and anything else is Fill.
+/// Why writing `p` is Delete when [`crate::paths::runs_code_on_use`] holds.
+pub fn code_reason(roots: &Roots, p: &Path) -> String {
+    format!(
+        "writes {}, configuration, a startup file or a program folder that can make a program run code later",
+        roots.shown(p)
+    )
+}
+
+/// The class of writing the file `p`, for every tool that writes a named file (fs.write,
+/// fs.move both ends, fs.mkdir, docs `out`, csv.clean `out`, every shell target; D-525):
+/// configuration, startup and PATH files are Delete anywhere; inside runs/ nothing more
+/// than `floor`; bookkeeping is Delete; outside, replacing an existing file is Delete and
+/// anything else is Fill.
 pub fn write_verdict(roots: &Roots, p: &Path, replaces: bool, floor: Class) -> Verdict {
     let mut v = Verdict::new(floor);
-    if crate::paths::runs_code_on_use(p) {
-        v.raise(
-            Class::Delete,
-            format!(
-                "writes {}, configuration or a startup file that can make a program run code later",
-                roots.shown(p)
-            ),
-        );
+    if crate::paths::runs_code_on_use(roots, p) {
+        v.raise(Class::Delete, code_reason(roots, p));
         return v;
     }
     if crate::paths::hard_linked(p) {
@@ -130,6 +135,57 @@ pub fn write_verdict(roots: &Roots, p: &Path, replaces: bool, floor: Class) -> V
         ),
     }
     v
+}
+
+/// The class of writing files whose names are not known in advance into the folder
+/// `dir`: a recursive copy or a moved folder, an extracted archive, a clone, a download
+/// named by the server (D-525). Inside runs/ it is `floor` (a repository planted there is
+/// handled where git runs, see the shell classifier); a folder where configuration or
+/// startup files live, bookkeeping, or anywhere outside runs/ is Delete: any file of the
+/// tree could replace a file there or be `.git/config`, `.bashrc` or a program on PATH.
+pub fn tree_verdict(roots: &Roots, dir: &Path, floor: Class) -> Verdict {
+    let mut v = Verdict::new(floor);
+    let any_file = dir.join("x");
+    if crate::paths::runs_code_on_use(roots, dir)
+        || crate::paths::runs_code_on_use(roots, &any_file)
+    {
+        v.raise(
+            Class::Delete,
+            format!(
+                "writes files it cannot name in advance into {}, where configuration, startup files or programs live",
+                roots.shown(dir)
+            ),
+        );
+        return v;
+    }
+    match roots.place(dir) {
+        Place::Scratch => {}
+        Place::Bookkeeping => v.raise(
+            Class::Delete,
+            format!("writes files into the run's own records ({})", roots.shown(dir)),
+        ),
+        Place::Outside => v.raise(
+            Class::Delete,
+            format!(
+                "writes files it cannot name in advance into {} (outside runs/): any of them could replace a file or be configuration that runs a program",
+                roots.shown(dir)
+            ),
+        ),
+    }
+    v
+}
+
+/// A file this server names itself in this run's `files/` (the shell and diff overflow
+/// copies): resolved again (a link planted at `files/` is followed) and allowed only when
+/// writing it is plain scratch, the same check as every other write.
+pub fn own_output_ok(roots: &Roots, p: &Path) -> Result<(), String> {
+    let again = crate::paths::resolve(&roots.base, &crate::paths::plain(p))?;
+    let v = write_verdict(roots, &again, true, Class::Read);
+    if v.class == Class::Read {
+        Ok(())
+    } else {
+        Err(format!("not written: {}", v.why()))
+    }
 }
 
 /// Files under this run's folder, for `ToolOutput::files`.

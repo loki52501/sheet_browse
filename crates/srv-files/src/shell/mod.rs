@@ -98,7 +98,7 @@ impl Runner {
             Runner::Bash(b) => {
                 let mut c = tokio::process::Command::new(b);
                 c.args(["--noprofile", "--norc", "-c", line]);
-                sanitize_env(&mut c);
+                sanitize_env(c.as_std_mut());
                 Ok(c)
             }
             Runner::Fallback(_) if cfg!(windows) => {
@@ -111,35 +111,229 @@ impl Runner {
             Runner::Fallback(s) => {
                 let mut c = tokio::process::Command::new(s);
                 c.args(["-c", line]);
-                sanitize_env(&mut c);
+                sanitize_env(c.as_std_mut());
                 Ok(c)
             }
         }
     }
 }
 
-/// Removes inherited variables that make bash run code or resolve names other than the
-/// classifier assumed: a startup file (BASH_ENV, ENV), exported functions (BASH_FUNC_*,
-/// which can shadow `ls`), `cd` search paths, xtrace prompts and word splitting.
-fn sanitize_env(c: &mut tokio::process::Command) {
-    for k in [
-        "BASH_ENV",
-        "ENV",
-        "CDPATH",
-        "GLOBIGNORE",
-        "BASHOPTS",
-        "SHELLOPTS",
-        "PROMPT_COMMAND",
-        "PS4",
-        "IFS",
-    ] {
+/// Inherited variables removed before bash starts (D-523 (5), D-525): bash startup files
+/// and exported functions, `cd` search paths, xtrace prompts, word splitting; and every
+/// variable that points git, curl, wget or gh at configuration, a program or another
+/// repository than the classifier checked (a write to the file one names would otherwise
+/// be an ordinary write).
+const REMOVED_VARS: &[&str] = &[
+    "BASH_ENV",
+    "ENV",
+    "CDPATH",
+    "GLOBIGNORE",
+    "BASHOPTS",
+    "SHELLOPTS",
+    "PROMPT_COMMAND",
+    "PS4",
+    "IFS",
+    "XDG_CONFIG_HOME",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_PAGER",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_ASKPASS",
+    "GIT_PROXY_COMMAND",
+    "SSH_ASKPASS",
+    "PAGER",
+    "EDITOR",
+    "VISUAL",
+    "BROWSER",
+    "GH_PAGER",
+    "GH_EDITOR",
+    "GH_BROWSER",
+    "CURL_HOME",
+    "WGETRC",
+    "NETRC",
+];
+
+/// Prefixes of removed variables: exported bash functions (which can shadow `ls`), git
+/// configuration given by environment (`GIT_CONFIG`, `_GLOBAL`, `_SYSTEM`, `_NOSYSTEM`,
+/// `_COUNT`, `_KEY_n`, `_VALUE_n`, `_PARAMETERS`) and the ssh program (`GIT_SSH*`).
+const REMOVED_PREFIXES: &[&str] = &["BASH_FUNC_", "GIT_CONFIG", "GIT_SSH"];
+
+/// Cleans the environment bash starts with (see [`REMOVED_VARS`]) and keeps only
+/// absolute PATH entries: a relative or empty one is a folder relative to wherever bash
+/// is, so a file written anywhere could become a program (D-525).
+pub(crate) fn sanitize_env(c: &mut std::process::Command) {
+    sanitize_env_with(c, std::env::var_os("PATH"));
+}
+
+/// [`sanitize_env`] with a given harness PATH.
+fn sanitize_env_with(c: &mut std::process::Command, path: Option<std::ffi::OsString>) {
+    for k in REMOVED_VARS {
         c.env_remove(k);
     }
     for (k, _) in std::env::vars_os() {
-        if k.to_string_lossy().starts_with("BASH_FUNC_") {
+        let upper = k.to_string_lossy().to_ascii_uppercase();
+        if REMOVED_PREFIXES.iter().any(|p| upper.starts_with(p)) {
             c.env_remove(k);
         }
     }
+    if let Some(path) = path {
+        let kept: Vec<PathBuf> = std::env::split_paths(&path)
+            .filter(|e| e.is_absolute())
+            .collect();
+        if let Ok(joined) = std::env::join_paths(kept) {
+            c.env("PATH", joined);
+        }
+    }
+}
+
+/// The PATH the runner's bash runs with (see [`bash_path_of`]); `None` without bash.
+pub fn bash_path() -> Option<BashPath> {
+    match Runner::discover() {
+        Runner::Bash(b) => Some(bash_path_of(&b)),
+        Runner::Fallback(_) => None,
+    }
+}
+
+/// Folders bash looks programs up in.
+#[derive(Debug, Default)]
+pub struct BashPath {
+    /// Absolute folders, as Windows paths on Windows.
+    pub dirs: Vec<PathBuf>,
+    /// The PATH had a relative or empty entry (see [`crate::paths::PathDirs`]).
+    pub relative: bool,
+}
+
+/// Longest wait for the PATH probe; a bash that does not answer by then leaves the Git
+/// folders guessed from its location.
+const PROBE_CAP: Duration = Duration::from_secs(10);
+
+/// Asks `bash` (started as the runner starts it: `--noprofile --norc`, cleaned
+/// environment) for its PATH, converted to Windows folders by `cygpath -w -p` (else by
+/// mapping `/c/...` and the MSYS root by hand). Git Bash's `bin/bash.exe` puts
+/// `/mingw64/bin`, `/usr/bin` and `$USERPROFILE/bin` in front of the PATH it was given,
+/// so the harness PATH alone misses them (D-525). The Git folders next to `bash` are
+/// added whatever the probe says.
+pub fn bash_path_of(bash: &Path) -> BashPath {
+    bash_path_with(bash, std::env::var_os("PATH"))
+}
+
+/// [`bash_path_of`] for a given harness PATH.
+fn bash_path_with(bash: &Path, harness_path: Option<std::ffi::OsString>) -> BashPath {
+    let root = msys_root(bash);
+    let mut out = BashPath::default();
+    if let Some(r) = &root {
+        for sub in ["mingw64/bin", "usr/bin", "usr/local/bin", "bin", "cmd"] {
+            out.dirs.push(r.join(sub));
+        }
+    }
+    let mut c = std::process::Command::new(bash);
+    c.args([
+        "--noprofile",
+        "--norc",
+        "-c",
+        "printf '%s\\n' \"$PATH\"; cygpath -w -p \"$PATH\" 2>/dev/null; cygpath -w / 2>/dev/null",
+    ]);
+    sanitize_env_with(&mut c, harness_path);
+    let Some(text) = probe_output(c) else {
+        return out;
+    };
+    let mut lines = text.lines();
+    let posix = lines.next().unwrap_or("");
+    out.relative = posix
+        .split(':')
+        .any(|e| e.is_empty() || !e.starts_with('/'));
+    if !cfg!(windows) {
+        out.dirs.extend(
+            posix
+                .split(':')
+                .filter(|e| e.starts_with('/'))
+                .map(PathBuf::from),
+        );
+        return out;
+    }
+    let windows = lines.next().unwrap_or("").trim();
+    let root = lines
+        .next()
+        .map(|r| PathBuf::from(r.trim()))
+        .filter(|r| r.is_absolute())
+        .or(root);
+    if !windows.is_empty() {
+        out.dirs.extend(
+            windows
+                .split(';')
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute()),
+        );
+    } else {
+        for e in posix.split(':').filter(|e| e.starts_with('/')) {
+            let mapped = paths::msys_drive(e);
+            if Path::new(&mapped).is_absolute() {
+                out.dirs.push(PathBuf::from(mapped));
+            } else if let Some(r) = &root {
+                let rest = e.trim_start_matches('/');
+                // MSYS mounts /bin on /usr/bin.
+                let rest = rest
+                    .strip_prefix("bin")
+                    .map_or(rest.to_string(), |r| format!("usr/bin{r}"));
+                out.dirs.push(r.join(rest));
+            }
+        }
+    }
+    out
+}
+
+/// The MSYS root of a Git Bash `bash.exe`: `<Git>` for `<Git>/bin/bash.exe` and
+/// `<Git>/usr/bin/bash.exe`. `None` elsewhere.
+fn msys_root(bash: &Path) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let bin = bash.parent()?;
+    if !bin.file_name()?.eq_ignore_ascii_case("bin") {
+        return None;
+    }
+    let up = bin.parent()?;
+    if up.file_name()?.eq_ignore_ascii_case("usr") {
+        up.parent().map(Path::to_path_buf)
+    } else {
+        Some(up.to_path_buf())
+    }
+}
+
+/// Stdout of `c`, read to its end within [`PROBE_CAP`]; the process is killed after.
+fn probe_output(mut c: std::process::Command) -> Option<String> {
+    use std::io::Read;
+    c.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = c.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout.read_to_string(&mut s);
+        let _ = tx.send(s);
+    });
+    let got = rx.recv_timeout(PROBE_CAP).ok();
+    let _ = child.kill();
+    let _ = child.wait();
+    got
 }
 
 struct Shell {
@@ -343,6 +537,8 @@ fn save_whole(
     std::fs::create_dir_all(&roots.files).map_err(|e| e.to_string())?;
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     let path = util::fresh_name(&roots.files, &format!("shell-{stamp}"), "log");
+    // The one write check every sink goes through (D-525): files/ must still be scratch.
+    util::own_output_ok(roots, &path)?;
     std::fs::write(&path, s).map_err(|e| e.to_string())?;
     Ok(path)
 }
@@ -380,8 +576,90 @@ mod tests {
             .filter(|(_, v)| v.is_none())
             .map(|(k, _)| k.to_string_lossy().into_owned())
             .collect();
-        for k in ["BASH_ENV", "ENV", "CDPATH", "PS4", "IFS"] {
+        for k in [
+            "BASH_ENV",
+            "ENV",
+            "CDPATH",
+            "PS4",
+            "IFS",
+            // D-525: variables that point git, curl, wget at config or a program.
+            "XDG_CONFIG_HOME",
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_EXEC_PATH",
+            "GIT_EDITOR",
+            "GIT_PAGER",
+            "PAGER",
+            "CURL_HOME",
+            "WGETRC",
+            "NETRC",
+        ] {
             assert!(removed.iter().any(|r| r == k), "{k} not removed");
         }
+        assert!(!removed.iter().any(|r| r == "HOME"), "HOME is kept");
+    }
+
+    /// D-525: relative and empty PATH entries never reach bash.
+    #[test]
+    fn bash_path_keeps_only_absolute_entries() {
+        let abs = std::env::temp_dir();
+        let path =
+            std::env::join_paths([abs.clone(), PathBuf::from("rel"), PathBuf::new()]).unwrap();
+        let mut c = std::process::Command::new("bash");
+        sanitize_env_with(&mut c, Some(path));
+        let set = c
+            .get_envs()
+            .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+            .and_then(|(_, v)| v.map(|v| v.to_os_string()))
+            .expect("PATH set");
+        let kept: Vec<PathBuf> = std::env::split_paths(&set).collect();
+        assert_eq!(kept, vec![abs]);
+    }
+
+    /// Review-T-14 closing Blocking 4 (D-525): the PATH check uses the PATH bash really
+    /// has. Git Bash puts its own folders and `~/bin` in front of a harness PATH that
+    /// lacks them, and a folder on the harness PATH stays on it.
+    #[test]
+    fn bash_path_includes_what_git_bash_adds_and_a_planted_dir() {
+        let Runner::Bash(bash) = Runner::discover() else {
+            eprintln!("skipped: no bash on this machine");
+            return;
+        };
+        let planted = tempfile::tempdir().unwrap();
+        let system = if cfg!(windows) {
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or("C:\\Windows".into()))
+                .join("System32")
+        } else {
+            PathBuf::from("/usr/bin")
+        };
+        let harness = std::env::join_paths([system, planted.path().to_path_buf()]).unwrap();
+        let got = bash_path_with(&bash, Some(harness));
+        assert!(!got.relative, "{got:?}");
+        let dirs = paths::PathDirs::from_entries(&got.dirs, None, got.relative);
+        let names = |p: &Path| paths::lower_names(&std::fs::canonicalize(p).unwrap());
+        assert!(
+            dirs.contains(&names(planted.path())),
+            "planted dir missing: {got:?}"
+        );
+        if cfg!(windows) && msys_root(&bash).is_some() {
+            let home_bin = dirs::home_dir().unwrap().join("bin");
+            let home_bin_names = paths::lower_names(
+                &std::fs::canonicalize(&home_bin)
+                    .unwrap_or_else(|_| std::path::absolute(&home_bin).unwrap()),
+            );
+            assert!(
+                dirs.contains(&home_bin_names),
+                "Git Bash adds ~/bin: {got:?}"
+            );
+            let usr_bin = msys_root(&bash).unwrap().join("usr").join("bin");
+            assert!(dirs.contains(&names(&usr_bin)), "{got:?}");
+        }
+        // The process-wide set always has ~/bin, whatever PATH the harness started with.
+        let home_bin = dirs::home_dir().unwrap().join("bin");
+        let home_bin_names = paths::lower_names(
+            &std::fs::canonicalize(&home_bin)
+                .unwrap_or_else(|_| std::path::absolute(&home_bin).unwrap()),
+        );
+        assert!(paths::path_dirs().contains(&home_bin_names));
     }
 }

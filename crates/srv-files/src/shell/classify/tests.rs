@@ -423,7 +423,150 @@ fn git_classes() {
         class(&f, "git -C runs/x status && rm -rf a.txt"),
         Class::Delete
     );
-    assert_eq!(class(&f, "git -C runs/x status"), Class::Read);
+    assert_eq!(class(&f, "git -C runs/x status && cat x"), Class::Delete);
+    assert_eq!(class(&f, "git status && cat x"), Class::Read);
+}
+
+/// Review-T-14 closing Blocking 3 (D-525): a repository inside runs/ can be planted by
+/// Read-class steps (an archive, a copy, a download), and its `.git/config` runs on the
+/// next git call there; so git in runs/ is Delete, except creating a repository.
+#[test]
+fn git_in_runs_is_delete_one_line_and_two_calls() {
+    let f = fx();
+    // One line: extract, then git in the extracted folder.
+    assert_all(
+        &f,
+        &[
+            "tar -xf runs/x/a.tar -C runs/x/r && git -C runs/x/r status",
+            "unzip -o runs/x/a.zip -d runs/x/r && git -C runs/x/r diff",
+            "cp -r runs/x/payload runs/x/r && cd runs/x/r && git status",
+            "cd runs/x && git log",
+            "cd runs/x && gh pr list",
+            "cd $D && git status",
+        ],
+        Class::Delete,
+    );
+    // Two calls: the extract is Read, the git call after it is Delete.
+    assert_eq!(class(&f, "tar -xf runs/x/a.tar -C runs/x/r"), Class::Read);
+    let r = f.roots.runs.join("x").join("r");
+    std::fs::create_dir_all(r.join(".git")).unwrap();
+    std::fs::write(
+        r.join(".git").join("config"),
+        "[core]\n\tfsmonitor = rm -rf ../../file.txt\n",
+    )
+    .unwrap();
+    for line in [
+        "git -C runs/x/r status",
+        "git -C runs/x/r diff",
+        "git -C runs/x/r log --oneline",
+    ] {
+        let v = classify(&f.roots, &f.roots.base, line, false);
+        assert_eq!(v.class, Class::Delete, "{line}");
+        assert!(v.why().contains("inside runs/"), "{line}: {}", v.why());
+    }
+    let in_r = classify(&f.roots, &r, "git status", false);
+    assert_eq!(in_r.class, Class::Delete);
+    // Creating a repository there is fine: clone and init never run repo config.
+    assert!(class(&f, "git clone https://example.com/a.git runs/x/r2") < Class::Delete);
+    assert!(class(&f, "cd runs/x && git init fresh") < Class::Delete);
+    assert!(class(&f, "git --version") < Class::Delete);
+    // A `.git` file outside runs/ pointing into runs/ is the same repository.
+    let sub = f.roots.base.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(
+        sub.join(".git"),
+        format!(
+            "gitdir: {}\n",
+            paths::plain(&r.join(".git")).replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    assert_eq!(class(&f, "git -C sub status"), Class::Delete);
+    // Outside runs/ git is unchanged.
+    assert_eq!(class(&f, "git status"), Class::Read);
+}
+
+/// D-525: `git add` that can stage a planted repository in runs/ as a submodule (a later
+/// `git status` then runs inside it) is Delete unless runs/ is ignored.
+#[test]
+fn git_add_reaching_runs_is_delete() {
+    let f = fx();
+    std::fs::create_dir_all(f.roots.base.join(".git")).unwrap();
+    assert_eq!(class(&f, "git add -A"), Class::Delete);
+    assert_eq!(class(&f, "git add ."), Class::Delete);
+    assert_eq!(class(&f, "git add runs/x"), Class::Delete);
+    assert_eq!(class(&f, "git add x"), Class::Fill);
+    std::fs::write(f.roots.base.join(".gitignore"), "target/\nruns/\n").unwrap();
+    assert_eq!(class(&f, "git add -A"), Class::Fill);
+    assert_eq!(class(&f, "git add ."), Class::Fill);
+    assert_eq!(class(&f, "git add -f runs/x/r"), Class::Delete);
+}
+
+/// Review-T-14 closing Blocking 2 (D-525): a recursive copy writes SRC's tree, not
+/// DST/<name>; into a folder outside runs/ it is Delete, inside runs/ it is not.
+#[test]
+fn recursive_copies_and_extracts_outside_runs_are_delete() {
+    let f = fx();
+    let payload = f.roots.runs.join("x").join("payload");
+    std::fs::create_dir_all(payload.join(".git")).unwrap();
+    std::fs::write(payload.join(".git").join("config"), "[core]\n").unwrap();
+    std::fs::create_dir_all(f.roots.runs.join("x").join("home")).unwrap();
+    std::fs::create_dir_all(f.roots.base.join("somerepo")).unwrap();
+    let h = home(".");
+    let lines: Vec<String> = vec![
+        format!("cp -r runs/x/home/. {h}"),
+        format!("cp -a runs/x/home/. {h}"),
+        format!("cp -R runs/x/home/. {h}"),
+        format!("cp -rT runs/x/home {h}"),
+        format!("cp -r -T runs/x/home {h}"),
+        "cp -r runs/x/payload/. somerepo".into(),
+        "cp -r runs/x/payload somerepo".into(),
+        "cp -r runs/x/payload newdir".into(),
+        "cp -a runs/x/payload newdir".into(),
+        "mv runs/x/payload newdir".into(),
+        "tar -xf runs/x/a.tar -C somerepo".into(),
+        "tar -xf runs/x/a.tar".into(),
+        "unzip runs/x/a.zip -d somerepo".into(),
+        "git clone https://example.com/a.git".into(),
+        "git clone https://example.com/a.git somerepo2".into(),
+        "git worktree add ../wt-x".into(),
+        "gh repo clone a/b".into(),
+        "gh repo clone a/b somerepo2".into(),
+        "gh release download v1 -D somerepo".into(),
+        "gh run download 1".into(),
+        "wget --content-disposition https://example.com/x".into(),
+        "curl -O https://example.com/a".into(),
+    ];
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    assert_all(&f, &refs, Class::Delete);
+    // Inside runs/ a tree is scratch; a single file copy is checked by name.
+    assert_all(
+        &f,
+        &[
+            "cp -r runs/x/payload runs/x/r",
+            "cp -r runs/x/payload/. runs/x/r",
+            "cp -rT runs/x/payload runs/x/r",
+            "tar -xf runs/x/a.tar -C runs/x/r",
+            "unzip runs/x/a.zip -d runs/x/r",
+            "mv runs/x/payload runs/x/moved",
+            "wget https://example.com/a.csv -P runs/x",
+        ],
+        Class::Read,
+    );
+    assert!(class(&f, "gh release download v1 -D runs/x") < Class::Delete);
+    assert!(class(&f, "git clone https://example.com/a.git runs/x/r") < Class::Delete);
+    assert_eq!(class(&f, "cp -r runs/x/a.txt new.txt"), Class::Fill);
+    assert_eq!(class(&f, "wget https://example.com/a.csv"), Class::Fill);
+    // -T copies into the destination itself: a tree into a .git folder is Delete even
+    // inside runs/.
+    assert_eq!(
+        class(&f, "cp -rT runs/x/home runs/x/payload/.git"),
+        Class::Delete
+    );
+    assert_eq!(
+        class(&f, "tar -xf runs/x/a.tar -C runs/x/payload/.git"),
+        Class::Delete
+    );
 }
 
 #[test]
@@ -471,56 +614,105 @@ fn network_classes() {
     assert_eq!(class(&f, "gh auth status"), Class::Read);
 }
 
+/// An absolute path below the home folder, single-quoted for a command line (a `~` word
+/// is Delete on its own, so tests that use it prove nothing about the path rules).
+fn home(rel: &str) -> String {
+    let h = paths::plain(&dirs::home_dir().unwrap()).replace('\\', "/");
+    format!("'{h}/{rel}'")
+}
+
 #[test]
 fn writes_to_config_that_runs_programs_are_delete() {
     let f = fx();
-    assert_all(
-        &f,
-        &[
-            "echo x > .git/hooks/pre-commit",
-            "echo x >> .git/config",
-            "echo '* diff=x' >> .gitattributes",
-            "cp runs/x/a.txt .git/hooks/post-checkout",
-            "touch runs/x/.git/hooks/pre-commit",
-            "echo x > runs/x/repo/.git/config",
-            "echo x >> .curlrc",
-            "mv runs/x/a.txt .wgetrc",
-            // review-T-14 round 2: XDG git config and attributes, startup and rc files.
-            "echo x >> ~/.config/git/config",
-            "echo '* diff=x' >> ~/.config/git/attributes",
-            "echo x >> ~/.bashrc",
-            "echo x >> ~/.bash_profile",
-            "echo x >> ~/.profile",
-            "echo x >> ~/.zshrc",
-            "echo x >> ~/.ssh/authorized_keys",
-            "echo x >> ~/.ssh/config",
-            "echo x >> ~/.npmrc",
-            "echo x >> ~/.netrc",
-            "echo x >> ~/_netrc",
-            "echo x >> ~/.cargo/config.toml",
-            "echo x >> .cargo/config.toml",
-            "echo x >> .envrc",
-            "echo x >> ~/Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1",
-            "echo x > ~/AppData/Roaming/Microsoft/Windows/Start\\ Menu/Programs/Startup/a.cmd",
-        ],
-        Class::Delete,
+    let mut lines: Vec<String> = [
+        "echo x > .git/hooks/pre-commit",
+        "echo x >> .git/config",
+        "echo '* diff=x' >> .gitattributes",
+        "cp runs/x/a.txt .git/hooks/post-checkout",
+        "touch runs/x/.git/hooks/pre-commit",
+        "echo x > runs/x/repo/.git/config",
+        "echo x >> .curlrc",
+        "mv runs/x/a.txt .wgetrc",
+        "echo x >> .cargo/config.toml",
+        "echo x >> .envrc",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // review-T-14 round 2 and closing round: XDG git config and attributes, startup and
+    // rc files, by absolute path (D-525).
+    for (pre, rel) in [
+        ("echo x >>", ".config/git/config"),
+        ("echo '* diff=x' >>", ".config/git/attributes"),
+        ("echo x >>", ".bashrc"),
+        ("echo x >>", ".bash_profile"),
+        ("echo x >>", ".profile"),
+        ("echo x >>", ".zshrc"),
+        ("echo x >>", ".ssh/authorized_keys"),
+        ("echo x >>", ".ssh/config"),
+        ("echo x >>", ".npmrc"),
+        ("echo x >>", ".netrc"),
+        ("echo x >>", "_netrc"),
+        ("echo x >>", ".cargo/config.toml"),
+        (
+            "echo x >>",
+            "Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1",
+        ),
+        (
+            "echo x >",
+            "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/a.cmd",
+        ),
+        ("echo x >", "bin/jq"),
+        ("tee -a", ".config/git/config"),
+        ("touch", ".config/git/attributes"),
+        ("cp runs/x/a.txt", ".gitconfig"),
+        ("mv runs/x/a.txt", ".bashrc"),
+        ("sed -i s/a/b/", ".bashrc"),
+        ("mkdir -p", ".config/git/hooks"),
+    ] {
+        lines.push(format!("{pre} {}", home(rel)));
+    }
+    // Into the home folder itself: lands as ~/.gitconfig, ~/.bashrc.
+    let h = home(".");
+    lines.push(format!("cp runs/x/.gitconfig {h}"));
+    lines.push(format!("mv runs/x/.bashrc {h}"));
+    lines.push(format!("cp -t {h} runs/x/.gitconfig"));
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    assert_all(&f, &refs, Class::Delete);
+    // The reason names the path, not only git, curl or wget.
+    let v = classify(
+        &f.roots,
+        &f.roots.base,
+        &format!("echo x >> {}", home("bin/jq")),
+        false,
+    );
+    assert!(
+        v.why().contains("startup file or a program folder"),
+        "{}",
+        v.why()
     );
 }
 
 #[test]
 fn writes_into_a_path_folder_are_delete() {
-    let dir = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+    let f = fx();
+    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .find(|d| d.is_absolute() && d.is_dir());
-    let Some(dir) = dir else { return };
-    let target = dir.join("planted-by-test-git");
-    assert!(
-        crate::paths::runs_code_on_use(&target),
-        "{}",
-        target.display()
-    );
-    assert!(!crate::paths::runs_code_on_use(
+    if let Some(dir) = real {
+        let target = dir.join("planted-by-test-git");
+        assert!(
+            paths::runs_code_on_use(&f.roots, &target),
+            "{}",
+            target.display()
+        );
+    }
+    assert!(!paths::runs_code_on_use(
+        &f.roots,
         &std::env::temp_dir().join("no-path-dir-here").join("a.txt")
     ));
+    // ~/bin is on Git Bash's PATH whatever the harness PATH says (closing Blocking 4).
+    let jq = dirs::home_dir().unwrap().join("bin").join("jq");
+    assert!(paths::runs_code_on_use(&f.roots, &jq));
 }
 
 #[test]
