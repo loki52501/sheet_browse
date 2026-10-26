@@ -9,6 +9,8 @@ coder's gate results are in agent-memory/handoffs/T-20-rust-coder-2.yaml.
 
 - none
 
+## Round 1 Blocking, closed
+
 Round 1 Blocking 1 (strict 5 s cap) is closed:
 - `ANSWER_GRACE` is gone.
 - Every act call, wait and `Page.bringToFront` is capped at `t0 + cap`:

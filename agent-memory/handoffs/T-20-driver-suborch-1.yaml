@@ -1,0 +1,21 @@
+from: driver/suborch
+to: supreme, next driver session
+task: T-20
+date: "2026-10-26"
+state: "T-20 done on swarm/driver-T20 (main + swarm/driver-T18 + swarm/page bb520c8 merged locally, D-88): runtime install in world sb, minimal open(), act(id) actionability with B-4 #6 backoff and strict 5 s cap, Driver::act parses with sb_act and returns one StepResult per step. Review round 2 approve, no Blocking (bench/results/review-T-20.md); acceptance round 2 green, 18 rows (bench/results/accept-T-20.md); cargo test -j 2 --workspace --no-fail-fast: 941 passed, 0 failed, 5 ignored."
+not_done: "PR for T-20. Then T-21 (input synthesis, consequences, class check against ctx.class, @vault only inside ctx.resolve_into, scrolling) on swarm/driver-T21 from main + swarm/driver-T20, then T-22. Follow-up T-20b filed with review leftovers."
+gotchas:
+  - "merge_gate reads every non-empty line under '## Blocking' as an item: reviewers must put 'closed' notes in another section. I moved round 2's closure notes to '## Round 1 Blocking, closed' (text unchanged)."
+  - "B-606 says me scheduling is deferred to the user but its needs_user is still false; blockers.yaml is append-only so the suborch did not flip it. Supreme or the user should decide: one window per tab under me (D-605) can take the user's focus."
+  - "D-606 is a sub-orchestrator decision that replaced the coder's first-mutation wait; the reviewer notes the settle inside wait_slot is a no-op as capped. Supreme may amend D-606."
+  - "Real-Chromium timing tests (< 50 ms first answer) are sensitive to machine load; row 1 flaked once in 20. Run accept_t20 with --test-threads=1."
+decisions_made: [D-603, D-604, D-605, D-606, D-607]
+blockers_opened: [B-605, B-606, B-607]
+files_touched:
+  - crates/sb-driver/
+  - agent-memory/tasks.yaml
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - bench/results/review-T-20.md
+  - bench/results/accept-T-20.md
+verify: "cargo test -j 2 -p sb-driver -p sb-cdp -- --test-threads=1"

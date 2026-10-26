@@ -145,7 +145,7 @@ tasks:
   - id: T-20
     step: 6
     title: "act(id) in page + Rust retry/backoff/5 s cap; acceptance 2"
-    status: doing
+    status: done
     owner: driver/suborch
     claimed_at: "2026-10-26"
     branch: swarm/driver-T20
@@ -294,3 +294,11 @@ tasks:
     title: "review-T-18 leftovers: run the Unix Pipe launch on Linux (only compiled and clippy-checked); a real-Chromium test for getFrameTree seeding and prerender activation (restored me tab with iframes, with T-22 acceptance 4); session_events channel after detach; CdpError::Closed keeps the method; sweep stale profiles/bench-* after a crash; B-601 tab titles (T-22)."
     status: todo
     from: T-18
+  - id: T-20b
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T20b
+    title: "review-T-20 round 2 leftovers: D-606 settle inside wait_slot has no effect (drop it or let it run past the slot; supreme to amend D-606); skip the last wait when the next slot is at or past the deadline; D-607 first-paint wait costs 3 s on a page that never paints; open dropped during Target.createTarget leaks the tab; open accepts any URL scheme; dead NoBase path and unused force in based_ctx; a challenge overlay is retried as a cover; open can wait up to 3 x OPEN_CAP; row 1 < 50 ms flaked once in 20 (72 ms, cause unknown, diagnostics added). B-606 (me scheduling, newWindow focus) needs the user; B-607 is area page."
+    status: todo
+    from: T-20
