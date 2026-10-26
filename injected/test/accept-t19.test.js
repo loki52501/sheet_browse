@@ -61,10 +61,13 @@ const timedSettle = (o, opts) => o.ev(async (op) => {
 // ordinary field of the same form reads its text swap after that window. Test-only wait: the
 // window is a timestamp in injected.js with no event at its end, so the condition is the page
 // clock itself (2000 ms after the load event, which follows every parser insert, plus 50 ms).
-const pastBornWindow = (o) => o.page.waitForFunction(() => {
+// With since (a page performance.now() taken after a script added fields), 2050 ms after it:
+// D-443 (4) masks a field added next to a live password for 2 s from its add.
+const pastBornWindow = (o, since) => o.page.waitForFunction((s) => {
+  if (typeof s === "number") return performance.now() > s + 2050;
   const n = performance.getEntriesByType("navigation")[0];
   return !!n && n.loadEventEnd > 0 && performance.now() > n.loadEventEnd + 2050;
-}, null, { polling: 50, timeout: 15000 });
+}, typeof since === "number" ? since : null, { polling: 50, timeout: 15000 });
 
 const sig = (r) => `${r.role}|${r.name}|${r.form || ""}`;
 const stats = (xs) => ({
@@ -1340,9 +1343,14 @@ test("A14 D-435 (1)(2), D-437: SPA swap keeps unrelated pre-filled fields readab
   assert.deepEqual(facts.lens, Array(8).fill(secret.length), "the toggled fields carry the value");
   assert.deepEqual(facts.types, ["text", "text", "text"]);
   const r2 = await read("after");
+  // D-443 (4): the profile view and the re-rendered login form went into <main>, which still
+  // holds sensitive fields, so they read empty|filled for 2 s from their add; the D-435 (1)
+  // reads below come from r3, after that window (a field wrongly marked would stay filled)
+  await pastBornWindow(o, await o.page.evaluate(() => performance.now()));
+  const r3 = await read("after window");
   const reads = await o.ev(() => globalThis.__pwReads);
-  const blob = JSON.stringify([r1, r2]);
-  const df = dump("d435-canary", [r1, r2]);
+  const blob = JSON.stringify([r1, r2, r3]);
+  const df = dump("d435-canary", [r1, r2, r3]);
   assert.deepEqual(reads, {}, "world sb called the value getter of a sensitive field: " + JSON.stringify(reads));
   assert.equal(blob.includes(secret), false, "secret found in __sb output");
   for (let i = 0; i + 8 <= secret.length; i += 2) {
@@ -1361,7 +1369,16 @@ test("A14 D-435 (1)(2), D-437: SPA swap keeps unrelated pre-filled fields readab
   // D-435 (1): the swapped-in profile view and fields outside the swap read their values
   const READ = { dn: "Ada Lovelace", city: "London", bio: "Mathematician and writer", phone: "+44 20 7946 0000",
     "l-email": "ada@example.org", q: "pre-filled query", nick: "ada" };
-  for (const [id, text] of Object.entries(READ)) assert.deepEqual(kind(r2, id), { kind: "text", text }, "after " + id);
+  // tester-9 (round 4): q (in the header) and nick (parsed into the form, not re-added, the swaps
+  // come after its 2 s window) are not added next to a live password, so D-443 (4) does not
+  // cover them: they read their text right after the swaps, not only after the window
+  const UNTOUCHED = ["q", "nick"];
+  for (const [id, text] of Object.entries(READ)) {
+    const k2 = kind(r2, id);
+    if (UNTOUCHED.includes(id)) assert.deepEqual(k2, { kind: "text", text }, "after (untouched) " + id);
+    assert.ok(k2 && (k2.kind === "empty" || k2.kind === "filled" || (k2.kind === "text" && k2.text === text)), "after " + id + " " + kindOf(k2));
+    assert.deepEqual(kind(r3, id), { kind: "text", text }, "after window " + id);
+  }
   t.diagnostic(`ACCEPT A14 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""} absent from ${blob.length} bytes ` +
     `(dump ${path.basename(df)}); value-getter reads ${JSON.stringify(reads)}; filled after: t-type ${NEW.join(" ")}; read after: ${Object.keys(READ).join(" ")}`);
 });
@@ -1480,8 +1497,12 @@ test("A16 D-438: add-first rebuilds (later task, microtask, transitionend, overl
   for (const fn of ["addFirstTask", "addFirstMicro", "addFirstFade", "addFirstNeutral", "addFirstFar", "wrapCheckbox", "twoToOne"]) {
     await o.page.evaluate((f) => globalThis[f](), fn);
   }
+  const twoToOneAt = await o.page.evaluate(() => performance.now());
   await o.page.waitForFunction((ids) => ids.every((i) => !document.getElementById(i)), OLD, { timeout: 5000 });
   const after = await probe(NEW.concat(["promo"]));
+  // D-443 (4): #one went into <main>, which still held the rebuilt copies: the promo code reads
+  // empty|filled for 2 s from its add, so its D-437 control reads after that window
+  await pastBornWindow(o, twoToOneAt);
   const reads = await o.ev(() => globalThis.__pwReads);
   const promo = await o.ev(() => globalThis.__sb.state(document.getElementById("promo")).value);
   const leaked = (p, id) => !!(p.per[id] && (p.per[id].value || p.per[id].kind !== "filled"));
@@ -1586,4 +1607,304 @@ test("A17 D-439: a remove-first neutral rebuild into the same parent (microtask,
   for (const [id, text] of Object.entries(READ)) assert.deepEqual({ kind: r.per[id].kind, text: r.per[id].text }, { kind: "text", text }, "negative " + id);
   assert.deepEqual(leaks, [], "fields whose value sb read or emitted: " + leaks.join(", "));
   assert.equal(r.value || r.frag, false, "the value or a fragment is in __sb output");
+});
+
+// A19 (tester-9, round 4): A10 now waits out D-442's 2 s window before its swaps, so its leak
+// checks no longer run on a swap made while the parser-inserted fields are still remembered.
+// This runs A10's site handlers (show toggle, rebuild, wrapper, re-append, masking dropped) as
+// soon as the fields are filled after load, with the leak checks only (the Nickname over-mark
+// inside the window is D-442 (3)'s accepted cost and is A18's). Values are compared inside
+// world sb; only kinds, counts and booleans come back.
+test("A19 D-442, D-443: A10's password rebuilds within 2 s of load never read or emit the value", async (t) => {
+  const secret = process.env.SB_VAULT_CANARY || "sbpw" + crypto.randomBytes(12).toString("hex");
+  const o = await open("accept-pw.html", { base: null });
+  const OLD = ["p1", "p2", "m1", "m2", "ac", "nm", "r1", "w-in", "r3"];
+  const NEW = ["plain-copy", "wrap-copy", "appended-copy"];
+  await o.ev((ids) => {
+    const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    globalThis.__pwReads = {};
+    Object.defineProperty(HTMLInputElement.prototype, "value", {
+      configurable: true,
+      enumerable: d.enumerable,
+      get() {
+        if (ids.includes(this.id)) globalThis.__pwReads[this.id] = (globalThis.__pwReads[this.id] || 0) + 1;
+        return d.get.call(this);
+      },
+      set(v) {
+        d.set.call(this, v);
+      },
+    });
+  }, OLD.concat(NEW));
+  await o.ev(() => globalThis.__sb.walk({ base: 1 }));
+  for (const id of OLD) await o.page.fill("#" + id, secret);
+  await o.ev(() => globalThis.__sb.index());
+  await o.page.click("#btn-show");
+  await o.page.click("#btn-rebuild");
+  await o.page.click("#btn-wrap");
+  await o.page.click("#btn-append");
+  await o.page.evaluate(() => {
+    document.getElementById("m1").classList.remove("masked");
+    document.getElementById("m2").removeAttribute("style");
+    document.getElementById("ac").removeAttribute("autocomplete");
+  });
+  // an upper bound on the last swap's time; every field was inserted after time 0
+  const at = await o.page.evaluate(() => performance.now());
+  const facts = await o.page.evaluate((n) => n.map((i) => (document.getElementById(i) ? document.getElementById(i).value.length : -1)), NEW);
+  assert.deepEqual(facts, NEW.map(() => secret.length), "the rebuilt fields carry the value");
+  const r = await o.ev(async (a) => {
+    const sb = globalThis.__sb;
+    const out = [sb.walk({ dirty: true }), sb.index(), sb.text(), sb.text("f1"), sb.frames(),
+      sb.fingerprint("textbox \"Password one\" textbox \"Shown field\"")];
+    const kinds = {};
+    for (const id of a.ids) {
+      const el = document.getElementById(id);
+      const s = sb.state(el);
+      out.push([s, sb.name(el), await sb.act(sb.id(el))]);
+      kinds[id] = s && s.value ? s.value.kind + ("text" in s.value ? "+text" : "") : String(s && s.value);
+    }
+    out.push(await sb.settle({ cap: 400 }), sb.walk({}), sb.index(), sb.text());
+    const blob = JSON.stringify(out);
+    let frag = false;
+    for (let i = 0; i + 8 <= a.secret.length; i += 2) if (blob.includes(a.secret.slice(i, i + 8))) frag = true;
+    return { kinds, value: blob.includes(a.secret), frag, bytes: blob.length };
+  }, { ids: ["p1", "p2", "m1", "m2", "ac", "nm"].concat(NEW), secret });
+  const reads = await o.ev(() => globalThis.__pwReads);
+  t.diagnostic(`ACCEPT A19 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""}; last swap by ${Math.round(at)} ms ` +
+    `(${at <= 2000 ? "inside" : "outside"} the 2 s window); kinds ${JSON.stringify(r.kinds)}; value-getter reads ${JSON.stringify(reads)}; ` +
+    `value in output ${r.value || r.frag} (${r.bytes} bytes)`);
+  assert.deepEqual(reads, {}, "world sb called the value getter of a sensitive field: " + JSON.stringify(reads));
+  assert.equal(r.value || r.frag, false, "the value or a fragment is in __sb output");
+  for (const [id, k] of Object.entries(r.kinds)) assert.equal(k, "filled", "kind of " + id);
+});
+
+// A20 (tester-9, round 4): D-443 (1) and (4), independent of the coder's O1..O3. An add-first
+// show toggle with a JS-timed exit: the neutral copy is read while the password is still in the
+// page (right after the click, and right after settle() in the same evaluate) and after the
+// password goes. Controls: a field added next to a password that stays is masked, then reads
+// after 2 s; a field added to a box with no password reads at once. Values compared in world sb.
+test("A20 D-443: a copy read while the password is still there never reads the value; a field beside a live password is masked for 2 s only, one elsewhere reads at once", async (t) => {
+  const secret = process.env.SB_VAULT_CANARY || "sbpw" + crypto.randomBytes(12).toString("hex");
+  const o = await open("accept-d443.html");
+  await o.ev((ids) => {
+    const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    globalThis.__pwReads = {};
+    Object.defineProperty(HTMLInputElement.prototype, "value", {
+      configurable: true,
+      enumerable: d.enumerable,
+      get() {
+        if (ids.includes(this.id)) globalThis.__pwReads[this.id] = (globalThis.__pwReads[this.id] || 0) + 1;
+        return d.get.call(this);
+      },
+      set(v) {
+        d.set.call(this, v);
+      },
+    });
+  }, ["pw", "pw2", "copy-late"]);
+  await o.page.fill("#pw", secret);
+  await o.page.fill("#pw2", secret);
+  await o.ev(() => globalThis.__sb.index());
+  // one read in world sb: kinds (text only for the non-secret controls), whether the value or
+  // a fragment is anywhere in the output, and whether #pw is still in the page
+  const read = (settleFirst) => o.ev(async (a) => {
+    const sb = globalThis.__sb;
+    const out = [];
+    if (a.settleFirst) out.push(await sb.settle({ cap: 3000 }));
+    const present = !!document.getElementById("pw");
+    out.push(sb.walk({ dirty: true }), sb.index(), sb.text(), sb.text("f1"), sb.frames(),
+      sb.fingerprint("textbox \"Password\" textbox \"Visible entry\""));
+    const kinds = {};
+    for (const id of ["copy-late", "pw2", "beside", "away", "email"]) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      const s = sb.state(el);
+      out.push([s, sb.name(el), await sb.act(sb.id(el))]);
+      const v = s && s.value ? s.value : {};
+      kinds[id] = { kind: v.kind, text: a.plain.includes(id) ? v.text : ("text" in v ? "<has text>" : undefined) };
+    }
+    const blob = JSON.stringify(out);
+    let frag = false;
+    for (let i = 0; i + 8 <= a.secret.length; i += 2) if (blob.includes(a.secret.slice(i, i + 8))) frag = true;
+    return { present, kinds, leak: blob.includes(a.secret) || frag, bytes: blob.length };
+  }, { settleFirst, secret, plain: ["beside", "away", "email"] });
+  await o.page.click("#show");
+  const mid = await read(false);
+  const same = await read(true);
+  await o.page.waitForFunction(() => !document.getElementById("pw"), null, { timeout: 5000 });
+  const gone = await read(false);
+  await o.page.click("#beside-btn");
+  await o.page.click("#away-btn");
+  const addedAt = await o.page.evaluate(() => performance.now());
+  const near = await read(false);
+  await pastBornWindow(o, addedAt);
+  const late = await read(false);
+  const reads = await o.ev(() => globalThis.__pwReads);
+  const all = { mid, same, gone, near, late };
+  t.diagnostic(`ACCEPT A20 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""}; ` +
+    Object.entries(all).map(([k, r]) => `${k}: pw ${r.present ? "present" : "gone"} copy ${r.kinds["copy-late"] && r.kinds["copy-late"].kind} ` +
+      `beside ${r.kinds.beside ? r.kinds.beside.kind : "-"} away ${r.kinds.away ? r.kinds.away.kind : "-"} leak ${r.leak}`).join("; ") +
+    `; value-getter reads ${JSON.stringify(reads)}`);
+  assert.equal(mid.present, true, "the first read must overlap the password (the exit is 700 ms)");
+  assert.deepEqual(reads, {}, "world sb called the value getter of the password or its copy: " + JSON.stringify(reads));
+  for (const [k, r] of Object.entries(all)) {
+    assert.equal(r.leak, false, k + ": the value or a fragment is in __sb output");
+    assert.deepEqual(r.kinds["copy-late"], { kind: "filled" }, k + ": copy");
+    assert.deepEqual(r.kinds.pw2, { kind: "filled" }, k + ": pw2");
+    assert.deepEqual(r.kinds.email, { kind: "text", text: "ada@example.org" }, k + ": email (untouched, read at once)");
+  }
+  // D-443 (1): masked beside a live password; D-443 (4): for at most 2 s; elsewhere never
+  assert.ok(near.kinds.beside && ["empty", "filled"].includes(near.kinds.beside.kind) && near.kinds.beside.text === undefined, "beside, within 2 s: " + (near.kinds.beside && near.kinds.beside.kind));
+  assert.deepEqual(near.kinds.away, { kind: "text", text: "away text" }, "away, at once");
+  assert.deepEqual(late.kinds.beside, { kind: "text", text: "beside text" }, "beside, after 2 s");
+  assert.deepEqual(late.kinds.away, { kind: "text", text: "away text" }, "away, after 2 s");
+});
+
+// A21 (tester-9, round 4): review-T-19 round 8 Blocking (Y7 twin, Y6 clone and hide), D-444 (1).
+// The usual flow: type the password, click Show, settle(), read, and read again 2.1 s later.
+// The twin is in the page from load and only its display flips; the clone is added and the
+// password is hidden, not removed. Values compared in world sb; only kinds and booleans return.
+test("A21 D-444 (1): visibility-swap show toggles (a synced twin, clone and hide) never read or emit the value", async (t) => {
+  const secret = process.env.SB_VAULT_CANARY || "sbpw" + crypto.randomBytes(12).toString("hex");
+  const o = await open("accept-d444.html");
+  const IDS = ["pw-t", "twin-t", "pw-c", "clone-c"];
+  await o.ev((ids) => {
+    const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    globalThis.__pwReads = {};
+    Object.defineProperty(HTMLInputElement.prototype, "value", {
+      configurable: true,
+      enumerable: d.enumerable,
+      get() {
+        if (ids.includes(this.id)) globalThis.__pwReads[this.id] = (globalThis.__pwReads[this.id] || 0) + 1;
+        return d.get.call(this);
+      },
+      set(v) {
+        d.set.call(this, v);
+      },
+    });
+  }, IDS);
+  await o.page.fill("#pw-t", secret);
+  await o.page.fill("#pw-c", secret);
+  const synced = await o.page.evaluate(() => document.getElementById("twin-t").value.length);
+  assert.equal(synced, secret.length, "the twin carries the value");
+  await o.ev(() => globalThis.__sb.index());
+  const read = (settleFirst) => o.ev(async (a) => {
+    const sb = globalThis.__sb;
+    const out = [];
+    if (a.settleFirst) out.push(await sb.settle({ cap: 3000 }));
+    out.push(sb.walk({ dirty: true }), sb.index(), sb.text(), sb.text("f1"), sb.text("f2"), sb.frames(),
+      sb.fingerprint("textbox \"Visible entry\" textbox \"Shown entry\""));
+    const kinds = {};
+    for (const id of a.ids.concat(["user"])) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      const s = sb.state(el);
+      out.push([s, sb.name(el), await sb.act(sb.id(el))]);
+      const v = s && s.value ? s.value : {};
+      kinds[id] = id === "user" ? v.text : v.kind + ("text" in v ? "+text" : "");
+    }
+    const blob = JSON.stringify(out);
+    let frag = false;
+    for (let i = 0; i + 8 <= a.secret.length; i += 2) if (blob.includes(a.secret.slice(i, i + 8))) frag = true;
+    return { kinds, leak: blob.includes(a.secret) || frag };
+  }, { settleFirst, secret, ids: IDS });
+  await o.page.click("#show-t");
+  await o.page.click("#show-c");
+  const same = await read(true);
+  const next = await read(false);
+  await pastBornWindow(o, await o.page.evaluate(() => performance.now()));
+  const late = await read(false);
+  const reads = await o.ev(() => globalThis.__pwReads);
+  const all = { same, next, late };
+  t.diagnostic(`ACCEPT A21 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""}; ` +
+    Object.entries(all).map(([k, r]) => `${k}: twin ${r.kinds["twin-t"]} clone ${r.kinds["clone-c"]} leak ${r.leak}`).join("; ") +
+    `; value-getter reads ${JSON.stringify(reads)}`);
+  assert.deepEqual(reads, {}, "world sb called the value getter of a password, its twin or its clone: " + JSON.stringify(reads));
+  for (const [k, r] of Object.entries(all)) {
+    assert.equal(r.leak, false, k + ": the value or a fragment is in __sb output");
+    for (const id of ["twin-t", "clone-c"]) assert.ok(["empty", "filled"].includes(r.kinds[id]), k + ": " + id + " " + r.kinds[id]);
+    assert.equal(r.kinds.user, "ada", k + ": user (control) reads its text");
+  }
+});
+
+// A22 (tester-10, round 5): review-T-19 round 8 Y3, Y3x, Y3d (D-444 (2)) and Y5, Y5v (D-444 (3))
+// in Chromium. One page load per case; type the password, click Show, read as soon as the copy
+// is in the page (mid), after settle() in the same evaluate (same), again (next), and once the
+// page clock is 2.05 s past the last change (late). Values compared in world sb; only kinds
+// and booleans return.
+test("A22 D-444 (2)(3): a password moved or re-attached in its copy's batch, or replaced by a new password with its key, never lets the copy read or emit the value", async (t) => {
+  const secret = process.env.SB_VAULT_CANARY || "sbpw" + crypto.randomBytes(12).toString("hex");
+  const CASES = [
+    // [case, the old password leaves the page later (wait for it before the late read)]
+    ["y3", true],
+    ["y3x", true],
+    ["y3d", true],
+    ["y5", false],
+    ["y5v", false],
+  ];
+  const lines = [];
+  const fails = [];
+  for (const [k, removedLater] of CASES) {
+    const o = await open("accept-d444b.html");
+    const IDS = ["pw-" + k, "copy-" + k, "pw2-" + k];
+    await o.ev((ids) => {
+      const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+      globalThis.__pwReads = {};
+      Object.defineProperty(HTMLInputElement.prototype, "value", {
+        configurable: true,
+        enumerable: d.enumerable,
+        get() {
+          if (ids.includes(this.id)) globalThis.__pwReads[this.id] = (globalThis.__pwReads[this.id] || 0) + 1;
+          return d.get.call(this);
+        },
+        set(v) {
+          d.set.call(this, v);
+        },
+      });
+    }, IDS);
+    await o.page.fill("#pw-" + k, secret);
+    await o.ev(() => globalThis.__sb.index());
+    const read = (settleFirst) => o.ev(async (a) => {
+      const sb = globalThis.__sb;
+      const out = [];
+      if (a.settleFirst) out.push(await sb.settle({ cap: 3000 }));
+      const present = !!document.getElementById(a.ids[0]);
+      out.push(sb.walk({ dirty: true }), sb.index(), sb.text(), sb.text("f-" + a.k), sb.frames(),
+        sb.fingerprint("textbox \"Shown entry " + a.k + "\""));
+      const kinds = {};
+      for (const id of a.ids.concat(["user"])) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        const s = sb.state(el);
+        out.push([s, sb.name(el), await sb.act(sb.id(el))]);
+        const v = s && s.value ? s.value : {};
+        kinds[id] = id === "user" ? v.text : v.kind + ("text" in v ? "+text" : "");
+      }
+      const blob = JSON.stringify(out);
+      let frag = false;
+      for (let i = 0; i + 8 <= a.secret.length; i += 2) if (blob.includes(a.secret.slice(i, i + 8))) frag = true;
+      return { present, kinds, leak: blob.includes(a.secret) || frag };
+    }, { settleFirst, secret, ids: IDS, k });
+    await o.page.click("#show-" + k, { noWaitAfter: true });
+    await o.page.waitForFunction((id) => !!document.getElementById(id), "copy-" + k, { polling: "raf", timeout: 5000 });
+    const mid = await read(false);
+    const same = await read(true);
+    const next = await read(false);
+    if (removedLater) await o.page.waitForFunction((id) => !document.getElementById(id), "pw-" + k, { polling: "raf", timeout: 5000 });
+    await pastBornWindow(o, await o.page.evaluate(() => performance.now()));
+    const late = await read(false);
+    const reads = await o.ev(() => globalThis.__pwReads);
+    const all = { mid, same, next, late };
+    lines.push(`${k}: ` + Object.entries(all).map(([w, r]) => `${w} pw ${r.present ? "present" : "gone"} copy ${r.kinds["copy-" + k]}` +
+      (r.kinds["pw2-" + k] ? ` pw2 ${r.kinds["pw2-" + k]}` : "") + ` leak ${r.leak}`).join(", ") + `, getter ${JSON.stringify(reads)}`);
+    if (Object.keys(reads).length) fails.push(`${k}: world sb called a value getter ${JSON.stringify(reads)}`);
+    for (const [w, r] of Object.entries(all)) {
+      if (r.leak) fails.push(`${k} ${w}: the value or a fragment is in __sb output`);
+      if (!["empty", "filled"].includes(r.kinds["copy-" + k])) fails.push(`${k} ${w}: copy ${r.kinds["copy-" + k]}`);
+      if (r.kinds["pw2-" + k] && r.kinds["pw2-" + k].endsWith("+text")) fails.push(`${k} ${w}: new password ${r.kinds["pw2-" + k]}`);
+      if (r.kinds.user !== "ada") fails.push(`${k} ${w}: user (control) ${r.kinds.user}`);
+    }
+    // the moves must overlap the password, or the case does not test D-444 (2)
+    if (removedLater && !mid.present) fails.push(`${k}: the mid read did not overlap the password`);
+  }
+  t.diagnostic(`ACCEPT A22 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""}; ` + lines.join("; "));
+  assert.deepEqual(fails, []);
 });

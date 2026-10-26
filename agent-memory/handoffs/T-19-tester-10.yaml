@@ -1,0 +1,20 @@
+from: page/tester-10
+to: page/suborch
+task: T-19
+date: "2026-10-26"
+state: "Round-5 combined acceptance of T-19, pinned to 86cb048 (code 3253c83, D-444), in bench/results/accept-T-19.md. Verdict green: 35 rows (S1..S10, J1..J25), 35 pass, 0 fail, 0 not-run. merge_gate.check_accept returns None. Round 4's blocker (J24 A21, the Y6/Y7 visibility-swap leak) is fixed: A21 passed 6 of 6 (3 alone, 3 in full runs) with reads {} and twin and clone filled at same, next and late. J19: node --test injected/test/ 114/114 three times in a row (full-1..3). A18 alone passed 3 of 3 (6 of 6 with the full runs; inside 155..420 ms filled, late 2114..2251 ms text). A3b peaked at 3015.8 ms over 120 calls. sb-act: cargo test -p sb-act 145/145, clippy -D warnings and fmt --all --check clean (crates/ unchanged since a9e246a). 6 fresh SB_VAULT_CANARY values (full-1..3, A21 x3, A22 x3, and A4/A5/A10/A14 for a fresh dump-dir check) gave 0 hits in the TAP, runs/, injected/, bench/, agent-memory/, the dump dir and the TMP tree, and 0 fragment hits. New A22 (fixture accept-d444b.html) covers D-444 (2)(3) in Chromium: Y3, Y3x, Y3d, Y5, Y5v. It passed 6 of 6 at 86cb048, and it leaks in all 5 cases on a9e246a's injected.js. Mutants on snapshot copies: old, nomoved, nooutadd, nokeyfilter and notwin are all killed by A21 or A22 (5 of 5); the none baseline passes."
+not_done: "1) D-444's named open shapes (V5, X1, X1b, Y1, Y1g, V9 and the S.born cap, X2w, X2w0, X5, O4..O6, Y2c) are T-19b by decision and have no tester row. 2) accept-t19 still has no D-443 (2) or (3) row. 3) A18 asserts exactly filled inside the window. Relax it if B-415 is fixed without the over-mark. 4) D-444 (1)'s accepted cost (a visible field in the same parent as a display:none password reads empty or filled) is not exercised by any acceptance fixture. 5) Round 4's 8 D-443 mutants were not re-run at 86cb048 because D-444 does not touch those lines."
+gotchas:
+  - "A reviewer ran the full suite in this worktree during my run, and it rewrote os.tmpdir()/sb-accept-T-19-js (mtime 03:22). For the dump-dir canary check, run A4, A5, A10 and A14 with a fresh canary, then grep at once and check the mtimes (runs/tester-12/logs/dumps-c6.tap)."
+  - "A5 uses SB_VAULT_CANARY but does not print the (SB_VAULT_CANARY) marker, so the TAP shows 8 marker lines for 9 users."
+  - "In A22, hidden passwords (Y5 pw2) give state().value with no kind (reported as undefined). The test only fails a password whose kind carries text."
+  - "Mutants: runs/tester-12/mutate.py builds runs/tester-12/mut-<name> from the snapshot (exact one-occurrence string replacements, asserted). runs/js-coder-11/mut-* differ from 86cb048 by line endings, so diff them with --strip-trailing-cr."
+  - "Keep canary files in the session scratchpad, not runs/. The scripts runs/tester-12/cgrep.sh, full.sh and alone.sh read a canary file path and print only counts."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - injected/test/accept-t19.test.js
+  - bench/pages/accept-d444b.html
+  - bench/results/accept-T-19.md
+  - agent-memory/handoffs/T-19-tester-10.yaml
+verify: "git archive 86cb048 injected bench/pages into a fresh dir, copy in injected/test/accept-t19.test.js and bench/pages/accept-d444b.html, then with TMP=TEMP=TMPDIR=F:/sb-swarm/tmp-page NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules run node --test injected/test/ (114/114) and cargo test -p sb-act (145 passed); python -c \"import sys,pathlib; sys.path.insert(0,'scripts/swarm'); import merge_gate as g; print(g.check_accept(pathlib.Path('bench/results/accept-T-19.md').resolve()))\" prints None"
