@@ -101,7 +101,9 @@ tasks:
   - id: T-13
     step: 2
     title: "Seed tools/ashbyhq.com/list_jobs.js (@phase 1) and step-2 acceptance; ladder rungs 1, 2, 4"
-    status: todo
+    status: doing
+    owner: servers/suborch
+    claimed_at: 2026-10-25
     blocked_by: [T-12]
   - id: T-14
     step: 3
