@@ -222,7 +222,7 @@ impl Fetch {
         if let Some(why) = doc.challenge.clone() {
             return Ok(Loaded::Challenge(challenge_output(&final_url, &why)));
         }
-        let (folder, site_tools) = site::register(&self.web, ctx, &final_url).await;
+        let (folder, site_tools) = site::register(&self.web, ctx, &final_url, &doc.index).await;
         let page = Arc::new(Page {
             requested: url.to_string(),
             url: final_url.to_string(),

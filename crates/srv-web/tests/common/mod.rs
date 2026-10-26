@@ -110,6 +110,8 @@ impl Seen {
 pub struct Server {
     pub addr: SocketAddr,
     pub seen: Arc<Mutex<Vec<Seen>>>,
+    /// The routes answered; [`Server::set_routes`] swaps them (a page that changes).
+    routes: Arc<Mutex<Vec<Route>>>,
 }
 
 impl Server {
@@ -117,18 +119,24 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
-        let routes = Arc::new(routes);
+        let routes = Arc::new(Mutex::new(routes));
         let log = seen.clone();
+        let served = routes.clone();
         tokio::spawn(async move {
             while let Ok((sock, _)) = listener.accept().await {
-                let routes = routes.clone();
+                let routes = served.lock().unwrap().clone();
                 let log = log.clone();
                 tokio::spawn(async move {
                     let _ = serve_one(sock, &routes, &log).await;
                 });
             }
         });
-        Server { addr, seen }
+        Server { addr, seen, routes }
+    }
+
+    /// Answers with `routes` from the next connection on.
+    pub fn set_routes(&self, routes: Vec<Route>) {
+        *self.routes.lock().unwrap() = routes;
     }
 
     pub fn requests(&self) -> Vec<Seen> {

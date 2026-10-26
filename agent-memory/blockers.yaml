@@ -238,6 +238,16 @@ blockers:
     question: "For area core: harness-core test mcp_t07::file_asker_stderr_has_no_canary (crates/core/tests/mcp_t07.rs:1602) fails 3/3 when TEMP is a longer path (e.g. F:/sb-swarm/tmp-servers/t14acc-F) and passes with the default TEMP. The FileAsker stderr line 'ask: cannot create <temp path>\\asks: ...; skipped, nobody saw' is cut by the core line-length cap before 'nobody saw', so the assertion depends on the temp path length. Found by the T-14 acceptance re-run; no srv-files code involved."
     default_taken: "Not a servers fix. Core shortens the path in that line (or puts the fail-closed words first) so the cap never cuts them, or asserts on a prefix. Until then run the workspace suite with a short TEMP."
     needs_user: false
+  - id: B-560
+    task: T-13
+    question: "Live run 2026-10-26: ashbyhq.list_jobs works on jobs.ashbyhq.com/ashby and /linear, but fails on /openai because api.ashbyhq.com/posting-api/job-board/openai answers more than page.api's 5 MB cap (D-501; the answer carries descriptionHtml and descriptionPlain for every job, which the tool drops). Large boards therefore cannot be listed in Phase 1. Raise page.api's cap for JSON (the tool's output is capped at 64 KiB / 20 000 chars anyway), stream-parse and drop known-large fields, or accept?"
+    default_taken: "Accept for now: the 5 MB cap stays (W-2, D-501) and page.api reports a cut body as 'answered more than the 5 MB cap' instead of 'did not answer with JSON', so the model falls back to fetch/find in one turn. Proposed follow-up for the sub-orchestrator: a separate page.api cap (e.g. 32 MB, still bounded by the run's remaining wall time, D-64), since the bytes never reach the model."
+    needs_user: false
+  - id: B-561
+    task: T-13
+    question: "docs/03 T-4 says a fingerprint miss disables the tool 'for this run'. D-561 (T-13) re-registers a needs_repair or process-disabled tool within the same run when a later fetched page's fingerprint is not a miss, and repairs it on a clean run. Does that amendment of T-4 stand?"
+    default_taken: "Keep D-561: re-enabling only on a page whose fingerprint matches or partially matches is no capability gain (check_repair refuses header changes; the registry class floor holds, D-127), and it is what lets 'fixing the page flips it back via relocate with version = 2' happen without a restart. If supreme prefers the literal T-4 text, the same-run re-enable can be dropped; a needs_repair row from an earlier run still reaches relocate."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core
