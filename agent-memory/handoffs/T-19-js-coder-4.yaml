@@ -1,0 +1,22 @@
+from: page/js-coder-4
+to: page/suborch
+task: T-19
+date: "2026-10-25"
+state: "D-435 and D-436 applied in injected/injected.js (commit 343a533). (1) inheritSensitive: an added input/textarea inherits sensitivity only by a one-for-one swap (in one observer batch, one parent lost exactly one field, a sensitive one, and gained exactly one field, subtrees counted; covers replaceWith of the input or its wrapper and remove + append, B-414) or by a shared identity key: id, name, autocomplete token (not on/off/section-*/shipping/billing/home/work/mobile/fax/pager/webauthn), aria-label, placeholder, label text (el.labels when attached; wrapping label and label[for] in the removed subtree or the document when detached), aria-labelledby text, or the walked row name. Text keys share one namespace, folded lowercase, trailing colon/asterisk dropped, 120 chars. (2) S.gone keeps {t, keys} of removed sensitive fields for 2000 ms (inclusive), pruned on use, capped at 32, never a value (textOf skips field contents). fieldKeys errors fail closed (added field marked sensitive). (3) challengeWords: press (and|&) hold counts with S.chCtx or a human/robot/bot word. (4) challengeContext (D-436): CTX_SEL matches skip anything inside .grecaptcha-badge or [data-size=invisible]; response fields count; other matches count only if not button/input/a/label/form/main/body/html/select/textarea/option/script and displayed() (checkVisibility, jsdom ancestor fallback); frames count only if challengeFrameEl and not passiveFrame(fr, displayed(fr)). node --test injected/test/ 75/75 (65 before + 6 jsdom + 4 Chromium new), cargo test -p sb-act --test wire_from_injected 3/3, blockers shape ok."
+not_done: "1) Two existing assertions changed for D-435 (3): browser.test.js hold.html and accept-t19 A11 now expect the press-and-hold texts to be CHALLENGE while a widget is on the page (controls Files/Mic/Hold to talk/Start stay ordinary rows). Tester should re-run A11 and confirm. 2) B-414 is a default taken: the literal D-435 (1) 'single mutation record' would leak accept-pw.html #w-in (wrapper swap) and #r3 (remove + append) whose replacements share no identity; supreme/suborch to confirm or narrow. 3) Not covered by design: a neutral-identity rebuild split across batches (only identity keys are remembered), a rebuild later than 2 s, an add that precedes its removal in a later batch, un-observed open shadow roots and fields built detached. 4) The fail-closed catch around fieldKeys has no test (no input makes it throw). 5) Reviewer-8 note 3 left: otp and ssn in SENSITIVE_NAME_RE over-match (footprint, businessName)."
+gotchas:
+  - "A walked field's row name is a key, so a key test must add the old field after the base walk, or every key mutant survives through the row name."
+  - "jsdom arrays come from another realm: compare with same() (JSON), not assert.deepEqual, even for an empty array."
+  - "jsdom clock: performance.now is an own property you can redefine on win.performance; freeze it (t0 + offset) so the 2000 ms boundary is exact under load. In Chromium redefine performance.now inside world sb (its own wrapper), which leaves the page's clock alone."
+  - "Bash heredocs with nested quotes in JS fail in this harness; the write guard blocks files outside the worktree (F:/sb-swarm/tmp-page included). Put scratch scripts under runs/ and use Edit for test files."
+  - "A full mutation pass over jsdom + browser + accept-t19 takes about 2.5 min per mutant; run jsdom-only loops with --test-name-pattern for key-level mutants."
+decisions_made: []
+blockers_opened: [B-414]
+files_touched:
+  - injected/injected.js
+  - injected/test/jsdom.test.js
+  - injected/test/browser.test.js
+  - injected/test/accept-t19.test.js
+  - agent-memory/blockers.yaml
+  - agent-memory/handoffs/T-19-js-coder-4.yaml
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page node --test injected/test/ && cargo test -p sb-act --test wire_from_injected"
