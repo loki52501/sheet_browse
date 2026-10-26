@@ -405,7 +405,8 @@ async fn fs_delete_inside_runs_runs_outside_asks() {
     assert!(out.text.starts_with("deleted"), "{}", out.text);
     assert!(!e.p("runs/tmp/a.txt").exists());
     assert!(e.asker.cards().is_empty());
-    assert_eq!(e.last_tool_class(), Some(Class::Fill));
+    // D-523 (S3): the same class as shell("rm -rf runs/x").
+    assert_eq!(e.last_tool_class(), Some(Class::Read));
 
     let out = e.ok("fs.delete", json!({"path": "notes.txt"})).await;
     assert!(out.text.starts_with("skipped"), "{}", out.text);
@@ -927,7 +928,8 @@ async fn r1_fs_case_and_dotdot_variants_classed_by_real_target() {
         assert!(out.text.starts_with("deleted"), "{}", out.text);
         assert!(!e.p("runs/tmp/a.txt").exists());
         assert_eq!(e.asker.cards().len(), n, "no ask inside runs/");
-        assert_eq!(e.last_tool_class(), Some(Class::Fill));
+        // D-523 (S3): fs.delete inside runs/ is Read, like shell rm there.
+        assert_eq!(e.last_tool_class(), Some(Class::Read));
     }
 }
 

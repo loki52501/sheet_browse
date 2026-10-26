@@ -12,6 +12,12 @@
 //! Anything it does not understand is an error, and an error classifies as Delete
 //! (fail closed, D-520): `case`'s `;;`, an unterminated quote or substitution, a
 //! here-document without its end line.
+//!
+//! Some constructs are refused outright because bash evaluates text inside them as
+//! arithmetic, and arithmetic expands array subscripts, which run `$(..)` (D-523):
+//! `$((..))`, `$[..]`, `((..))`, `${..}` other than a plain name with a default,
+//! alternative, length or pattern operator, function definitions, and unquoted
+//! here-document bodies with `$(`, backticks, `$[` or `${`.
 
 /// One unquoted word.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -20,6 +26,8 @@ pub struct Word {
     pub text: String,
     /// Some part is decided only at run time.
     pub dynamic: bool,
+    /// A run-time part is unquoted, so bash splits and globs it into any number of words.
+    pub split: bool,
     /// Contains an unquoted `*`, `?` or `[`.
     pub glob: bool,
     /// Contains an unquoted brace expansion (`{a,b}`, `{1..3}`).
@@ -87,6 +95,8 @@ struct Lexer {
     subs: Vec<String>,
     cur: Option<Word>,
     heredocs: Vec<HereDoc>,
+    /// Inside double quotes (expansions there do not split).
+    in_dq: bool,
 }
 
 /// Parses `src` (see the module docs).
@@ -98,6 +108,7 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
         subs: Vec::new(),
         cur: None,
         heredocs: Vec::new(),
+        in_dq: false,
     };
     lx.run()?;
     let structured = lx.toks.iter().any(|t| {
@@ -124,9 +135,22 @@ impl Lexer {
     }
 
     fn finish(&mut self) {
-        if let Some(w) = self.cur.take() {
+        if let Some(mut w) = self.cur.take() {
+            // A lone `[` or `[[` matches no file (an unclosed bracket is literal): it is
+            // the test command, not a glob (S5).
+            if !w.dynamic && (w.text == "[" || w.text == "[[") {
+                w.glob = false;
+            }
             self.toks.push(Tok::Word(w));
         }
+    }
+
+    /// Marks the current word as decided at run time.
+    fn dynamic(&mut self) {
+        let split = !self.in_dq;
+        let w = self.word();
+        w.dynamic = true;
+        w.split |= split;
     }
 
     fn sep(&mut self, op: &'static str) {
@@ -211,6 +235,15 @@ impl Lexer {
                     self.i += 1;
                 }
                 '(' => {
+                    if self.peek(1) == Some('(') {
+                        return Err("arithmetic ((..)) is not allowed".into());
+                    }
+                    let next = (self.i + 1..self.c.len())
+                        .map(|k| self.c[k])
+                        .find(|c| !matches!(c, ' ' | '\t'));
+                    if next == Some(')') {
+                        return Err("function definitions and empty arrays are not allowed".into());
+                    }
                     self.sep("(");
                     self.i += 1;
                 }
@@ -280,6 +313,13 @@ impl Lexer {
     }
 
     fn double_quoted(&mut self) -> Result<(), String> {
+        self.in_dq = true;
+        let r = self.double_quoted_body();
+        self.in_dq = false;
+        r
+    }
+
+    fn double_quoted_body(&mut self) -> Result<(), String> {
         self.word().quoted = true;
         self.i += 1;
         loop {
@@ -352,16 +392,16 @@ impl Lexer {
         match self.peek(1) {
             Some('(') => {
                 if self.peek(2) == Some('(') {
-                    // $(( arithmetic )): no command runs, but the value is dynamic.
-                    let (end, _) = self.balanced(self.i + 1)?;
-                    self.i = end;
-                } else {
-                    let (end, body) = self.balanced(self.i + 1)?;
-                    self.subs.push(body);
-                    self.i = end;
+                    // Arithmetic expands array subscripts, and a subscript runs `$(..)`,
+                    // also from a variable's value (B1, D-523).
+                    return Err("arithmetic $((..)) is not allowed".into());
                 }
-                self.word().dynamic = true;
+                let (end, body) = self.balanced(self.i + 1)?;
+                self.subs.push(body);
+                self.i = end;
+                self.dynamic();
             }
+            Some('[') => return Err("arithmetic $[..] is not allowed".into()),
             Some('{') => {
                 let end = self.find_char(self.i + 2, '}').ok_or("unterminated ${")?;
                 let body: String = self.c[self.i + 2..end].iter().collect();
@@ -369,7 +409,13 @@ impl Lexer {
                 if body.contains("$(") || body.contains('`') {
                     return Err("command substitution inside ${..} is not parsed".into());
                 }
-                self.word().dynamic = true;
+                if !plain_expansion(&body) {
+                    return Err(
+                        "${..} with a subscript, substring, indirection or transform is not allowed"
+                            .into(),
+                    );
+                }
+                self.dynamic();
                 self.i = end + 1;
             }
             Some('\'') => {
@@ -382,7 +428,7 @@ impl Lexer {
                         Some(_) => j += 1,
                     }
                 }
-                self.word().dynamic = true;
+                self.dynamic();
                 self.i = j + 1;
             }
             Some('"') => self.i += 1,
@@ -391,11 +437,11 @@ impl Lexer {
                 while matches!(self.peek(0), Some(c) if c.is_ascii_alphanumeric() || c == '_') {
                     self.i += 1;
                 }
-                self.word().dynamic = true;
+                self.dynamic();
             }
             Some('@' | '*' | '#' | '?' | '$' | '!' | '-') => {
                 self.i += 2;
-                self.word().dynamic = true;
+                self.dynamic();
             }
             _ => {
                 self.word().text.push('$');
@@ -425,7 +471,7 @@ impl Lexer {
             }
         }
         self.subs.push(body);
-        self.word().dynamic = true;
+        self.dynamic();
         self.i = j + 1;
         Ok(())
     }
@@ -436,7 +482,7 @@ impl Lexer {
         if self.peek(1) == Some('(') {
             let (end, body) = self.balanced(self.i + 1)?;
             self.subs.push(body);
-            self.word().dynamic = true;
+            self.dynamic();
             self.i = end;
             return Ok(());
         }
@@ -538,8 +584,15 @@ impl Lexer {
                 if check == d.delim {
                     break;
                 }
-                if !d.quoted && (line.contains("$(") || line.contains('`')) {
-                    return Err("here-document substitutes a command".into());
+                if !d.quoted
+                    && (line.contains("$(")
+                        || line.contains('`')
+                        || line.contains("$[")
+                        || line.contains("${"))
+                {
+                    return Err(
+                        "an unquoted here-document with $(, `, $[ or ${ is not allowed".into(),
+                    );
                 }
                 if end >= self.c.len() {
                     return Err("here-document without its end line".into());
@@ -548,6 +601,38 @@ impl Lexer {
         }
         Ok(())
     }
+}
+
+/// The body of `${..}` is a plain name or special parameter, optionally with a length
+/// `#` in front, followed by nothing or by a default, alternative, error, pattern-removal,
+/// replacement or case operator. Substrings (`:N`), subscripts (`[..]`), indirection
+/// (`!`), transforms (`@P` runs prompt expansion) and `:=` assignment are not plain.
+fn plain_expansion(body: &str) -> bool {
+    let b = body
+        .strip_prefix('#')
+        .filter(|r| !r.is_empty())
+        .unwrap_or(body);
+    let name_len = if b.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+        b.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(b.len())
+    } else if b.starts_with(|c: char| c.is_ascii_digit()) {
+        b.find(|c: char| !c.is_ascii_digit()).unwrap_or(b.len())
+    } else if b.starts_with(['@', '*', '#', '?', '$', '!', '-']) {
+        1
+    } else {
+        return false;
+    };
+    let rest = &b[name_len..];
+    if rest.is_empty() {
+        return true;
+    }
+    if body.starts_with('#') && body.len() > 1 {
+        // `${#x}` takes no operator.
+        return false;
+    }
+    [":-", ":+", ":?", "-", "+", "?", "#", "%", "/", "^", ","]
+        .iter()
+        .any(|op| rest.starts_with(op))
 }
 
 /// Groups tokens into simple commands.
@@ -674,6 +759,54 @@ mod tests {
         let w = &p.commands[0].words;
         assert!(w[1].glob && w[2].tilde && w[3].brace && w[4].dynamic && w[5].dynamic);
         assert!(!parse("rm '*'").unwrap().commands[0].words[1].glob);
+    }
+
+    #[test]
+    fn refuses_arithmetic_and_complex_expansions() {
+        for src in [
+            "echo $((1+2))",
+            "echo \"$((x))\"",
+            "((x=1))",
+            "echo $[1]",
+            "echo ${a[0]}",
+            "echo ${x:1}",
+            "echo ${x:$y}",
+            "echo ${!x}",
+            "echo ${x@P}",
+            "echo ${x:=y}",
+            "echo ${#x:-y}",
+            "f() { ls; }",
+            "f ( ) { ls; }",
+            "a=()",
+            "cat <<E\n$((1))\nE\n",
+            "cat <<E\n${x}\nE\n",
+        ] {
+            assert!(parse(src).is_err(), "{src}");
+        }
+        for src in [
+            "echo ${x}",
+            "echo ${x:-d}",
+            "echo ${#x}",
+            "echo ${x%.txt}",
+            "echo ${x//a/b}",
+            "echo ${1}",
+            "echo ${#}",
+            "( (cd x) )",
+            "cat <<'E'\n$((1))\nE\n",
+        ] {
+            assert!(parse(src).is_ok(), "{src}");
+        }
+    }
+
+    #[test]
+    fn brackets_are_commands_and_splitting_is_tracked() {
+        let p = parse("[ -f x ] && [[ -d y ]]").unwrap();
+        assert!(p.commands[0].words[0].is_static());
+        assert!(p.commands[1].words[0].is_static());
+        let p = parse("echo $x \"$y\" a\"$z\"b").unwrap();
+        let w = &p.commands[0].words;
+        assert!(w[1].split && !w[2].split && !w[3].split);
+        assert!(w[2].dynamic && w[3].dynamic);
     }
 
     #[test]

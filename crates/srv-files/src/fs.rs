@@ -1,9 +1,11 @@
 //! F-1 `fs.read`, `fs.write`, `fs.glob`, `fs.move`, `fs.mkdir`, `fs.delete`.
 //!
-//! Classes (D-520): reads are Read. Writes are Fill, raised to Delete when they delete,
-//! replace or move away something outside `runs/` (or touch a run's bookkeeping, see
-//! [`crate::paths`]). Moving a file from outside `runs/` into it is Delete too: from
-//! there it could be deleted without asking. Every call rechecks its class against the
+//! Classes (D-520, D-523): reads are Read. Writes are Fill, raised to Delete when they
+//! delete, replace or move away something outside `runs/` (or touch a run's bookkeeping,
+//! see [`crate::paths`], or a file with other hard links). Moving a file from outside
+//! `runs/` anywhere is Delete: into `runs/` it could then be deleted without asking, and
+//! elsewhere it is gone from where it was. `fs.delete` inside `runs/` is Read, the class
+//! `shell("rm -rf runs/x")` has (S3, B-520). Every call rechecks its class against the
 //! approved one before it acts.
 
 use crate::paths::{self, Place, Roots};
@@ -101,8 +103,8 @@ pub fn tools() -> Vec<ToolSpec> {
         ),
         spec(
             "fs.delete",
-            "Delete a file, or a folder with recursive=true. Inside runs/ it just runs; anywhere else it is class Delete and asks first.",
-            Class::Fill,
+            "Delete a file, or a folder with recursive=true. Inside runs/ it just runs (class Read, like shell rm there); anywhere else it is class Delete and asks first.",
+            Class::Read,
             Op::Delete,
             json!({"type":"object","properties":{
                 "path":{"type":"string"},
@@ -191,6 +193,12 @@ fn plan_move(roots: &Roots, a: &MoveArgs) -> Result<MovePlan, ToolError> {
                 roots.shown(&from)
             ),
         );
+    } else if src == Place::Outside {
+        // S4, D-520 (3): moving away outside scratch.
+        v.raise(
+            Class::Delete,
+            format!("moves {} away (outside runs/)", roots.shown(&from)),
+        );
     }
     if dst == Place::Bookkeeping {
         v.raise(
@@ -216,10 +224,10 @@ fn plan_move(roots: &Roots, a: &MoveArgs) -> Result<MovePlan, ToolError> {
 }
 
 fn delete_verdict(roots: &Roots, p: &Path) -> Verdict {
-    let mut v = Verdict::new(Class::Fill);
+    let mut v = Verdict::new(Class::Read);
     match roots.place(p) {
         Place::Scratch => v.raise(
-            Class::Fill,
+            Class::Read,
             format!("deletes {} (in runs/)", roots.shown(p)),
         ),
         Place::Bookkeeping => v.raise(
@@ -582,4 +590,88 @@ fn delete(roots: &Roots, a: DeleteArgs) -> Result<ToolOutput, ToolError> {
         consequences: json!({"deleted": roots.shown(&p)}),
         ..ToolOutput::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup() -> (tempfile::TempDir, Roots) {
+        let t = tempfile::tempdir().unwrap();
+        let run = t.path().join("runs").join("2026-10-25T00-00-00-t");
+        std::fs::create_dir_all(run.join("files")).unwrap();
+        std::fs::create_dir_all(t.path().join("runs").join("x")).unwrap();
+        std::fs::write(t.path().join("file.txt"), "keep").unwrap();
+        std::fs::write(t.path().join("runs").join("x").join("a.txt"), "a").unwrap();
+        let roots = Roots::from_run_dir(&run).unwrap();
+        (t, roots)
+    }
+
+    fn mv(roots: &Roots, from: &str, to: &str) -> Class {
+        let a = MoveArgs {
+            from: from.into(),
+            to: to.into(),
+            overwrite: false,
+        };
+        plan_move(roots, &a).unwrap().verdict.class
+    }
+
+    #[test]
+    fn delete_inside_runs_is_read_like_shell_rm_s3() {
+        let (_t, r) = setup();
+        let p = r.resolve("runs/x/a.txt").unwrap();
+        assert_eq!(delete_verdict(&r, &p).class, Class::Read);
+        let p = r.resolve("file.txt").unwrap();
+        assert_eq!(delete_verdict(&r, &p).class, Class::Delete);
+    }
+
+    #[test]
+    fn moving_away_outside_runs_is_delete_s4() {
+        let (_t, r) = setup();
+        assert_eq!(mv(&r, "file.txt", "other.txt"), Class::Delete);
+        assert_eq!(mv(&r, "file.txt", "runs/x/"), Class::Delete);
+        assert_eq!(mv(&r, "runs/x/a.txt", "runs/x/b.txt"), Class::Fill);
+        assert_eq!(mv(&r, "runs/x/a.txt", "new.txt"), Class::Fill);
+    }
+
+    #[test]
+    fn writing_config_that_runs_programs_is_delete() {
+        let (_t, r) = setup();
+        for p in [
+            ".git/hooks/pre-commit",
+            "runs/x/.git/config",
+            ".gitattributes",
+            "runs/x/.GIT/hooks/post-checkout",
+            ".curlrc",
+        ] {
+            let path = r.resolve(p).unwrap();
+            let v = util::write_verdict(&r, &path, false, Class::Fill);
+            assert_eq!(v.class, Class::Delete, "{p}");
+        }
+        let fine = r.resolve("runs/x/git-notes.txt").unwrap();
+        assert_eq!(
+            util::write_verdict(&r, &fine, false, Class::Fill).class,
+            Class::Fill
+        );
+    }
+
+    #[test]
+    fn hard_linked_targets_are_delete_b7() {
+        let (_t, r) = setup();
+        let h = r.runs.join("x").join("h");
+        if std::fs::hard_link(r.base.join("file.txt"), &h).is_err() {
+            eprintln!("skipped: no hard links on this file system");
+            return;
+        }
+        let write = |append: bool| util::write_verdict(&r, &h, !append, Class::Fill).class;
+        assert_eq!(write(false), Class::Delete);
+        assert_eq!(write(true), Class::Delete);
+        assert_eq!(delete_verdict(&r, &h).class, Class::Delete);
+        assert_eq!(mv(&r, "runs/x/h", "runs/x/h2"), Class::Delete);
+        let plain = r.runs.join("x").join("a.txt");
+        assert_eq!(
+            util::write_verdict(&r, &plain, true, Class::Fill).class,
+            Class::Fill
+        );
+    }
 }

@@ -145,22 +145,22 @@ pub async fn run(
     let mut r2 = tokio::spawn(pump(child.stderr.take(), err));
 
     let exit = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(status) => Exit {
-            code: status?.code(),
+        Ok(status) => status.map(|s| Exit {
+            code: s.code(),
             timed_out: false,
-        },
+        }),
         Err(_) => {
             tree.kill(&mut child).await;
             let _ = tokio::time::timeout(KILL_WAIT, child.wait()).await;
-            Exit {
+            Ok(Exit {
                 code: None,
                 timed_out: true,
-            }
+            })
         }
     };
-    // A call's processes end with the call: anything it left running in the background
-    // (`cmd &`, a pipeline stage Git Bash does not parent to bash) is killed too, so no
-    // orphan keeps the output pipes open.
+    // A call's processes end with the call, on every path (a failed wait included):
+    // anything it left running in the background (`cmd &`, a pipeline stage Git Bash
+    // does not parent to bash) is killed too, so no orphan keeps the output pipes open.
     tree.kill(&mut child).await;
     let drained = tokio::time::timeout(DRAIN_CAP, async {
         let _ = (&mut r1).await;
@@ -171,7 +171,7 @@ pub async fn run(
         r1.abort();
         r2.abort();
     }
-    Ok(exit)
+    exit
 }
 
 async fn pump<R: AsyncRead + Unpin>(src: Option<R>, tap: Arc<Mutex<Tap>>) {
@@ -249,6 +249,8 @@ impl Tree {
 /// Windows Job Objects. Git Bash (MSYS2) starts pipeline stages and background commands
 /// as processes whose Windows parent is not the bash that ran them, so `taskkill /T` on
 /// bash misses them; a job holds every process created inside it, however it was started.
+/// The job is set to kill its processes when its last handle closes, so a crashed server
+/// leaves no tree behind (S10).
 #[cfg(windows)]
 mod winjob {
     use std::ffi::c_void;
@@ -256,12 +258,57 @@ mod winjob {
 
     pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
     pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
 
     type Handle = *mut c_void;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimitInformation {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct IoCounters {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
+    }
+
+    /// JOBOBJECT_EXTENDED_LIMIT_INFORMATION.
+    #[repr(C)]
+    #[derive(Default)]
+    struct ExtendedLimitInformation {
+        basic: BasicLimitInformation,
+        io: IoCounters,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
 
     #[link(name = "kernel32")]
     extern "system" {
         fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
+        fn SetInformationJobObject(
+            job: Handle,
+            class: i32,
+            info: *const c_void,
+            length: u32,
+        ) -> i32;
         fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
         fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
         fn CloseHandle(handle: Handle) -> i32;
@@ -289,6 +336,17 @@ mod winjob {
             // a null job handle is checked before use and the job handle is closed on drop.
             unsafe {
                 let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+                if !job.is_null() {
+                    let mut info = ExtendedLimitInformation::default();
+                    info.basic.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                    // Best effort: without the limit the explicit kills still run.
+                    SetInformationJobObject(
+                        job,
+                        JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                        (&info as *const ExtendedLimitInformation).cast(),
+                        std::mem::size_of::<ExtendedLimitInformation>() as u32,
+                    );
+                }
                 let job = if job.is_null() {
                     None
                 } else if AssignProcessToJobObject(job, process) == 0 {
@@ -352,6 +410,26 @@ pub fn find_program(name: &str, skip: impl Fn(&Path) -> bool) -> Option<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S10: closing the job (the server dropping it, or dying) kills what runs in it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn closing_the_job_kills_the_tree() {
+        let mut cmd = Command::new("ping");
+        cmd.args(["-n", "60", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(winjob::CREATE_NO_WINDOW | winjob::CREATE_SUSPENDED);
+        let mut child = cmd.spawn().unwrap();
+        let tree = Tree::attach(&child);
+        assert!(tree.job.is_some(), "job created and assigned");
+        drop(tree);
+        // ping alone would run for about 60 s; the cap only bounds a failing test.
+        let waited = tokio::time::timeout(Duration::from_secs(20), child.wait()).await;
+        // Kill-on-close reports exit code 0, so the proof is that it ended long before 60 s.
+        waited.expect("the job's close killed the process").unwrap();
+    }
 
     #[test]
     fn tap_keeps_head_and_tail() {

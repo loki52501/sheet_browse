@@ -106,11 +106,16 @@ impl Place {
     }
 }
 
-/// See the module docs. `p` must come from [`resolve`].
+/// See the module docs. `p` must come from [`resolve`]. A file with more than one hard
+/// link is outside: its other names may be outside `runs/`, and writing it writes them
+/// (B7, D-523).
 pub fn place(roots: &Roots, p: &Path) -> Place {
     let Ok(rest) = p.strip_prefix(&roots.runs) else {
         return Place::Outside;
     };
+    if hard_linked(p) {
+        return Place::Outside;
+    }
     let comps: Vec<String> = rest
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
@@ -135,6 +140,85 @@ pub fn place(roots: &Roots, p: &Path) -> Place {
         }
     }
     Place::Scratch
+}
+
+/// True when writing `p` can make an allowed program run code later: anything inside a
+/// `.git` folder (hooks, config: core.fsmonitor, diff.external), `.gitattributes` and
+/// `.gitmodules` (textconv and filter drivers), and the rc files curl and wget read
+/// (D-523). Such writes are Delete wherever they are.
+pub fn runs_code_on_use(p: &Path) -> bool {
+    let names: Vec<String> = p
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect();
+    let Some((file, dirs)) = names.split_last() else {
+        return false;
+    };
+    dirs.iter().any(|n| n == ".git")
+        || matches!(
+            file.as_str(),
+            ".git"
+                | ".gitattributes"
+                | ".gitmodules"
+                | ".gitconfig"
+                | ".curlrc"
+                | "_curlrc"
+                | ".wgetrc"
+        )
+}
+
+/// True when `p` is an existing file (links followed) with more than one hard link, or
+/// a file whose link count cannot be read (fail closed). Folders are never hard-linked.
+pub fn hard_linked(p: &Path) -> bool {
+    match std::fs::metadata(p) {
+        Ok(m) if m.is_file() => link_count(p, &m).is_none_or(|n| n > 1),
+        _ => false,
+    }
+}
+
+#[cfg(unix)]
+fn link_count(_p: &Path, m: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(m.nlink())
+}
+
+/// `nNumberOfLinks` from GetFileInformationByHandle (std's `number_of_links` is unstable).
+#[cfg(windows)]
+fn link_count(p: &Path, _m: &std::fs::Metadata) -> Option<u64> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ByHandleFileInformation {
+        attributes: u32,
+        creation: [u32; 2],
+        last_access: [u32; 2],
+        last_write: [u32; 2],
+        volume_serial: u32,
+        size_high: u32,
+        size_low: u32,
+        number_of_links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFileInformationByHandle(
+            file: *mut std::ffi::c_void,
+            info: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+    // Access 0: metadata only, so a file another process holds open still answers; std
+    // shares read, write and delete by default.
+    let f = std::fs::OpenOptions::new().access_mode(0).open(p).ok()?;
+    let mut info = ByHandleFileInformation::default();
+    // SAFETY: a live file handle owned by `f` and a correctly laid out out-struct.
+    let ok = unsafe { GetFileInformationByHandle(f.as_raw_handle() as *mut _, &mut info) };
+    (ok != 0).then_some(u64::from(info.number_of_links))
 }
 
 /// True when `p` exists (a broken link counts).

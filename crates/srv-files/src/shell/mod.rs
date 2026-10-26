@@ -1,6 +1,8 @@
 //! F-2 `shell(cmd, cwd, timeout)`: class from the command ([`classify`]), run through
-//! bash (Git Bash on Windows) or, when there is none, cmd.exe; the process tree is killed
-//! at the timeout. The model gets at most 20 000 chars (head and tail); when more was
+//! bash (Git Bash on Windows) with a cleaned environment. Without bash on Windows only a
+//! single plain command runs, as argv without cmd.exe; anything else is refused with
+//! "shell needs Git Bash; set SB_BASH" (B9, D-523). The process tree is killed at the
+//! timeout. The model gets at most 20 000 chars (head and tail); when more was
 //! printed, the whole output, scrubbed, is saved in this run's `files/` and its path is in
 //! the text.
 
@@ -34,7 +36,8 @@ const SAVE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub enum Runner {
     Bash(PathBuf),
-    /// cmd.exe (Windows without bash) or `sh` elsewhere.
+    /// No bash: on Windows (the path is cmd.exe, never used to run a line) only plain
+    /// argv commands run; elsewhere `sh`.
     Fallback(PathBuf),
 }
 
@@ -87,23 +90,54 @@ impl Runner {
         matches!(self, Runner::Fallback(_)) && cfg!(windows)
     }
 
-    fn command(&self, line: &str) -> tokio::process::Command {
+    /// The process for `line`. Without bash on Windows nothing goes through cmd.exe,
+    /// whose quoting this classifier does not read (B9): a single plain command runs as
+    /// argv directly, anything else is refused.
+    fn command(&self, line: &str) -> Result<tokio::process::Command, ToolError> {
         match self {
             Runner::Bash(b) => {
                 let mut c = tokio::process::Command::new(b);
                 c.args(["--noprofile", "--norc", "-c", line]);
-                c
+                sanitize_env(&mut c);
+                Ok(c)
             }
-            Runner::Fallback(s) if cfg!(windows) => {
-                let mut c = tokio::process::Command::new(s);
-                c.args(["/D", "/S", "/C", line]);
-                c
+            Runner::Fallback(_) if cfg!(windows) => {
+                let argv = classify::plain_argv(line)
+                    .ok_or_else(|| ToolError::Failed(classify::CMD_EXE_REFUSED.into()))?;
+                let mut c = tokio::process::Command::new(&argv[0]);
+                c.args(&argv[1..]);
+                Ok(c)
             }
             Runner::Fallback(s) => {
                 let mut c = tokio::process::Command::new(s);
                 c.args(["-c", line]);
-                c
+                sanitize_env(&mut c);
+                Ok(c)
             }
+        }
+    }
+}
+
+/// Removes inherited variables that make bash run code or resolve names other than the
+/// classifier assumed: a startup file (BASH_ENV, ENV), exported functions (BASH_FUNC_*,
+/// which can shadow `ls`), `cd` search paths, xtrace prompts and word splitting.
+fn sanitize_env(c: &mut tokio::process::Command) {
+    for k in [
+        "BASH_ENV",
+        "ENV",
+        "CDPATH",
+        "GLOBIGNORE",
+        "BASHOPTS",
+        "SHELLOPTS",
+        "PROMPT_COMMAND",
+        "PS4",
+        "IFS",
+    ] {
+        c.env_remove(k);
+    }
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("BASH_FUNC_") {
+            c.env_remove(k);
         }
     }
 }
@@ -157,6 +191,9 @@ impl Shell {
                 text::one_line(&roots.shown(&cwd), 300)
             )));
         }
+        if self.runner.is_cmd_exe() && classify::plain_argv(&a.cmd).is_none() {
+            return Err(ToolError::Failed(classify::CMD_EXE_REFUSED.into()));
+        }
         let v = classify::classify(roots, &cwd, &a.cmd, self.runner.is_cmd_exe());
         Ok((cwd, v))
     }
@@ -195,7 +232,7 @@ impl ToolHandler for Shell {
             .reopen()
             .map_err(|e| ToolError::Failed(format!("temp file: {e}")))?;
         let tap = Tap::shared(KEEP_BYTES, Some(log));
-        let mut cmd = self.runner.command(&a.cmd);
+        let mut cmd = self.runner.command(&a.cmd)?;
         cmd.current_dir(paths::plain(&cwd));
         let started = Instant::now();
         let exit = proc::run(
@@ -308,4 +345,43 @@ fn save_whole(
     let path = util::fresh_name(&roots.files, &format!("shell-{stamp}"), "log");
     std::fs::write(&path, s).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_exe_fallback_runs_only_plain_argv_b9() {
+        let r = Runner::Fallback(PathBuf::from("cmd.exe"));
+        for line in [
+            "echo ' & del file.txt & '",
+            "dir && del file.txt",
+            "echo %PATH%",
+        ] {
+            let e = r.command(line).expect_err(line).to_string();
+            assert!(e.contains("Git Bash") && e.contains("SB_BASH"), "{e}");
+        }
+        let c = r.command("git status --short").unwrap();
+        let std = c.as_std();
+        assert_eq!(std.get_program(), "git");
+        let args: Vec<_> = std.get_args().collect();
+        assert_eq!(args, ["status", "--short"]);
+    }
+
+    #[test]
+    fn bash_env_is_cleaned() {
+        let r = Runner::Bash(PathBuf::from("bash"));
+        let c = r.command("ls").unwrap();
+        let removed: Vec<String> = c
+            .as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        for k in ["BASH_ENV", "ENV", "CDPATH", "PS4", "IFS"] {
+            assert!(removed.iter().any(|r| r == k), "{k} not removed");
+        }
+    }
 }

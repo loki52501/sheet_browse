@@ -93,6 +93,27 @@ pub fn recheck(ctx: &ToolCtx, v: &Verdict) -> Result<(), ToolError> {
 /// Delete; outside, replacing an existing file is Delete and anything else is Fill.
 pub fn write_verdict(roots: &Roots, p: &Path, replaces: bool, floor: Class) -> Verdict {
     let mut v = Verdict::new(floor);
+    if crate::paths::runs_code_on_use(p) {
+        v.raise(
+            Class::Delete,
+            format!(
+                "writes {}, which git, curl or wget read as configuration that can run programs",
+                roots.shown(p)
+            ),
+        );
+        return v;
+    }
+    if crate::paths::hard_linked(p) {
+        // Writing one name writes every other, wherever it is (B7, D-523).
+        v.raise(
+            Class::Delete,
+            format!(
+                "writes {}, a file with other hard links (they may be outside runs/)",
+                roots.shown(p)
+            ),
+        );
+        return v;
+    }
     match roots.place(p) {
         Place::Scratch => {}
         Place::Bookkeeping => v.raise(

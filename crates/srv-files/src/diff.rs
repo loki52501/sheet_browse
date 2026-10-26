@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 /// Largest file `diff` loads.
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// How long the line diff may search for a minimal result.
+const DIFF_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 /// Keys and changed rows listed in a table diff.
 const KEYS_SHOWN: usize = 10;
 const ROWS_SHOWN: usize = 20;
@@ -83,7 +85,17 @@ impl ToolHandler for Diff {
         let pa = roots.resolve(&a.a)?;
         let pb = roots.resolve(&a.b)?;
         match a.mode.as_deref().unwrap_or("text") {
-            "text" => text_diff(&roots, &a, &pa, &pb),
+            "text" => {
+                // Up to 16 MiB a side: off the async threads, and the diff itself has a
+                // deadline after which `similar` falls back to a coarser result (S6).
+                let opts = TextOpts {
+                    context: a.context,
+                    max_chars: a.max_chars,
+                };
+                tokio::task::spawn_blocking(move || text_diff(&roots, opts, &pa, &pb))
+                    .await
+                    .map_err(|e| ToolError::Failed(format!("diff: {e}")))?
+            }
             "table" => {
                 let ta = load_table(&pa, a.sheet.as_deref()).await?;
                 let tb = load_table(&pb, a.sheet.as_deref()).await?;
@@ -121,13 +133,21 @@ fn read_text(p: &Path) -> Result<String, ToolError> {
     Ok(s.strip_prefix('\u{FEFF}').map(str::to_string).unwrap_or(s))
 }
 
-fn text_diff(roots: &Roots, a: &Args, pa: &Path, pb: &Path) -> Result<ToolOutput, ToolError> {
+/// The text-mode arguments (owned, for the blocking task).
+struct TextOpts {
+    context: Option<usize>,
+    max_chars: Option<usize>,
+}
+
+fn text_diff(roots: &Roots, a: TextOpts, pa: &Path, pb: &Path) -> Result<ToolOutput, ToolError> {
     let max = util::limit("max_chars", a.max_chars, READ_DEFAULT_CHARS, MAX_CHARS)?;
     let left = read_text(pa)?;
     let right = read_text(pb)?;
     let sa = roots.shown(pa);
     let sb = roots.shown(pb);
-    let d = similar::TextDiff::from_lines(&left, &right);
+    let d = similar::TextDiff::configure()
+        .timeout(DIFF_DEADLINE)
+        .diff_lines(&left, &right);
     let (mut plus, mut minus) = (0usize, 0usize);
     for op in d.ops() {
         for change in d.iter_changes(op) {

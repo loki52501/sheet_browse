@@ -8,13 +8,16 @@
 //!   workbook with formulas is written, the xlsx skill's own `scripts/recalc.py` runs
 //!   (it needs LibreOffice; when that is missing the reply says the formulas were not
 //!   recalculated).
-//! * docx: `pandoc -t markdown` to read and `pandoc -f markdown` to write, as the docx
-//!   skill documents.
+//! * docx: `pandoc -t markdown-raw_html` to read and `pandoc -f markdown` to write, as
+//!   the docx skill documents, with `--sandbox` (pandoc 2.15+), an empty working folder,
+//!   and for docx.write a Lua filter that drops images (a local path or URL in the
+//!   model's markdown would otherwise be read or fetched into the document; S8).
 //!
 //! Configuration: SB_PYTHON, SB_PANDOC, SB_SKILLS_DIR (the folder holding `pdf/`,
-//! `xlsx/`, `docx/`, `pptx/`), else found on PATH and under the Claude Code synced skills
-//! folder. A missing program or Python package is an error that names it and how to get
-//! it, never a panic. Written documents go to this run's `files/` unless `out` says
+//! `xlsx/`, `docx/`, `pptx/`), else found on PATH and under the Claude Code skills folder
+//! (`$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`; S7). A missing program, Python
+//! package or skills folder is an error or note that names it and how to get it, never
+//! a panic. Written documents go to this run's `files/` unless `out` says
 //! otherwise; replacing a file outside `runs/` asks first.
 
 use crate::csv::Table;
@@ -36,9 +39,15 @@ const OPS_PY: &str = include_str!("docs_ops.py");
 const OP_TIMEOUT: Duration = Duration::from_secs(120);
 /// Largest reply read from a helper.
 const REPLY_MAX: usize = 32 * 1024 * 1024;
-/// Where Claude Code keeps synced skills on this machine (searched when SB_SKILLS_DIR is
-/// unset).
-const SYNCED_SKILLS: &str = "E:/apps/Claude/claude-code/skills/synced";
+/// How deep under `<Claude config>/skills` the skills folder is looked for.
+const SKILLS_DEPTH: usize = 3;
+/// Folders looked at while searching for it.
+const SKILLS_SCAN_MAX: usize = 500;
+/// The first pandoc with `--sandbox`.
+const PANDOC_SANDBOX: (u32, u32) = (2, 15);
+/// A Lua filter for docx.write: an image in the model's markdown would make pandoc read a
+/// local file or fetch a URL into the document, so images become a marker (S8).
+const NO_IMAGES_LUA: &str = "function Image(el) return pandoc.Str('[image omitted]') end\n";
 
 /// Where the helpers are. `None` fields are looked up (see the module docs).
 #[derive(Debug, Clone, Default)]
@@ -80,25 +89,89 @@ impl DocsConfig {
             .or_else(|| proc::find_program("pandoc", |_| false))
     }
 
-    /// The folder holding `pdf/`, `xlsx/`, `docx/`, `pptx/` skills.
+    /// The folder holding `pdf/`, `xlsx/`, `docx/`, `pptx/` skills: SB_SKILLS_DIR, else
+    /// the first folder (breadth first, sorted) up to [`SKILLS_DEPTH`] below the Claude
+    /// Code skills folder ([`claude_skills_root`]) that holds `xlsx/SKILL.md` or
+    /// `pdf/SKILL.md`. No machine-specific path is built in (S7).
     pub fn skills(&self) -> Option<PathBuf> {
         if let Some(s) = &self.skills {
             return Some(s.clone());
         }
-        let mut cands: Vec<PathBuf> = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(SYNCED_SKILLS) {
-            let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-            dirs.sort();
-            cands.extend(dirs);
-        }
-        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
-        if let Some(h) = home {
-            cands.push(PathBuf::from(h).join(".claude").join("skills"));
-        }
-        cands.into_iter().find(|d| {
-            d.join("xlsx").join("SKILL.md").is_file() || d.join("pdf").join("SKILL.md").is_file()
-        })
+        find_skills(&claude_skills_root()?)
     }
+}
+
+/// `<CLAUDE_CONFIG_DIR or ~/.claude>/skills`.
+pub fn claude_skills_root() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+        .map(|c| c.join("skills"))
+}
+
+fn find_skills(root: &Path) -> Option<PathBuf> {
+    let holds = |d: &Path| {
+        d.join("xlsx").join("SKILL.md").is_file() || d.join("pdf").join("SKILL.md").is_file()
+    };
+    let mut level = vec![root.to_path_buf()];
+    let mut seen = 0;
+    for _ in 0..=SKILLS_DEPTH {
+        let mut next = Vec::new();
+        for d in &level {
+            seen += 1;
+            if seen > SKILLS_SCAN_MAX {
+                return None;
+            }
+            if holds(d) {
+                return Some(d.clone());
+            }
+            if let Ok(rd) = std::fs::read_dir(d) {
+                let mut sub: Vec<PathBuf> = rd
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                    .map(|e| e.path())
+                    .collect();
+                sub.sort();
+                next.extend(sub);
+            }
+        }
+        level = next;
+    }
+    None
+}
+
+/// Whether `pandoc` knows `--sandbox` (2.15+), asked once per program (capped like every
+/// helper run).
+async fn pandoc_has_sandbox(pandoc: &Path) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&b) = seen.lock().unwrap_or_else(|e| e.into_inner()).get(pandoc) {
+        return b;
+    }
+    let mut cmd = tokio::process::Command::new(pandoc);
+    cmd.arg("--version");
+    let b = match run_capture(cmd, None).await {
+        Ok((out, _, exit)) if exit.code == Some(0) => {
+            pandoc_version(&out).is_some_and(|v| v >= PANDOC_SANDBOX)
+        }
+        _ => false,
+    };
+    seen.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(pandoc.to_path_buf(), b);
+    b
+}
+
+/// `(major, minor)` from `pandoc --version` ("pandoc 2.12", "pandoc.exe 3.1.9").
+fn pandoc_version(out: &str) -> Option<(u32, u32)> {
+    let v = out.lines().next()?.split_whitespace().nth(1)?;
+    let mut parts = v.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,7 +286,7 @@ pub fn tools_with(cfg: DocsConfig) -> Vec<ToolSpec> {
         ),
         (
             Op::DocxRead,
-            "Text of a .docx as markdown (pandoc -t markdown). At most max_chars (default 8000) from offset.",
+            "Text of a .docx as markdown without raw HTML (pandoc -t markdown-raw_html). At most max_chars (default 8000) from offset.",
             Class::Read,
             read_props(json!({})),
         ),
@@ -335,8 +408,32 @@ impl Docs {
         let Some(pandoc) = self.cfg.pandoc() else {
             return Err(self.missing("pandoc (install it or set SB_PANDOC)"));
         };
-        let mut cmd = tokio::process::Command::new(pandoc);
+        // S8: no file reads or fetches beyond the input (pandoc 2.15+); docx.write also
+        // drops images through a Lua filter, which older pandoc honours too.
+        let sandbox = pandoc_has_sandbox(&pandoc).await;
+        let mut cmd = tokio::process::Command::new(&pandoc);
+        if sandbox {
+            cmd.arg("--sandbox");
+        }
+        let _filter = if self.op == Op::DocxWrite {
+            let f = tempfile::Builder::new()
+                .suffix(".lua")
+                .tempfile()
+                .and_then(|mut f| {
+                    std::io::Write::write_all(&mut f, NO_IMAGES_LUA.as_bytes())?;
+                    Ok(f)
+                })
+                .map_err(|e| ToolError::Failed(format!("{}: temp file: {e}", self.op.name())))?;
+            cmd.arg(format!("--lua-filter={}", crate::paths::plain(f.path())));
+            Some(f)
+        } else {
+            None
+        };
         cmd.args(args);
+        // An empty working folder: relative resource paths find nothing.
+        let cwd = tempfile::tempdir()
+            .map_err(|e| ToolError::Failed(format!("{}: temp folder: {e}", self.op.name())))?;
+        cmd.current_dir(cwd.path());
         let (out, err, exit) = run_capture(cmd, stdin).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 self.missing("pandoc (install it or set SB_PANDOC)")
@@ -590,7 +687,8 @@ impl Docs {
                 self.pandoc(
                     &[
                         "-t".into(),
-                        "markdown".into(),
+                        // No raw HTML for the model (rule 5, S8).
+                        "markdown-raw_html".into(),
                         "--wrap=none".into(),
                         ps.clone(),
                     ],
@@ -614,7 +712,10 @@ impl Docs {
     /// Runs the xlsx skill's recalc.py on `out`; returns a note for the model.
     async fn recalc(&self, out: &Path) -> String {
         let Some(skills) = self.cfg.skills() else {
-            return "formulas not recalculated: the xlsx skill folder was not found (set SB_SKILLS_DIR)".into();
+            let root = claude_skills_root()
+                .map(|r| crate::paths::plain(&r))
+                .unwrap_or_else(|| "the Claude config folder (no home folder)".into());
+            return format!("formulas not recalculated: no folder holding xlsx/SKILL.md was found under {root}; set SB_SKILLS_DIR to the folder that holds the xlsx skill");
         };
         let script = skills.join("xlsx").join("scripts").join("recalc.py");
         if !script.is_file() {
@@ -663,4 +764,73 @@ impl Docs {
 
 fn str_of(v: &Value, k: &str) -> String {
     v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pandoc_versions() {
+        assert_eq!(pandoc_version("pandoc 2.12\nCompiled with"), Some((2, 12)));
+        assert_eq!(pandoc_version("pandoc.exe 3.1.9\n"), Some((3, 1)));
+        assert_eq!(pandoc_version("pandoc 3\n"), Some((3, 0)));
+        assert_eq!(pandoc_version("garbage"), None);
+        assert!(pandoc_version("pandoc 2.12").unwrap() < PANDOC_SANDBOX);
+        assert!(pandoc_version("pandoc 2.15").unwrap() >= PANDOC_SANDBOX);
+    }
+
+    #[test]
+    fn skills_are_found_below_the_claude_folder_s7() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("skills");
+        assert_eq!(find_skills(&root), None);
+        let synced = root.join("synced").join("a");
+        std::fs::create_dir_all(synced.join("xlsx")).unwrap();
+        std::fs::write(synced.join("xlsx").join("SKILL.md"), "x").unwrap();
+        assert_eq!(find_skills(&root), Some(synced));
+        std::fs::create_dir_all(root.join("pdf")).unwrap();
+        std::fs::write(root.join("pdf").join("SKILL.md"), "x").unwrap();
+        assert_eq!(find_skills(&root), Some(root.clone()), "nearest first");
+    }
+
+    /// S8: the filter docx.write passes keeps pandoc from reading a local image or URL.
+    #[test]
+    fn docx_write_filter_drops_images_s8() {
+        let Some(pandoc) = DocsConfig::from_env().pandoc() else {
+            eprintln!("skipped: no pandoc (set SB_PANDOC)");
+            return;
+        };
+        let t = tempfile::tempdir().unwrap();
+        let lua = t.path().join("f.lua");
+        std::fs::write(&lua, NO_IMAGES_LUA).unwrap();
+        let img = t.path().join("secret.png");
+        std::fs::write(&img, "not really a png").unwrap();
+        let md = format!(
+            "# T\n\n![alt]({}) and ![web](https://example.invalid/x.png)\n",
+            crate::paths::plain(&img).replace('\\', "/")
+        );
+        let mut child = std::process::Command::new(pandoc)
+            .args(["-f", "markdown", "-t", "markdown"])
+            .arg(format!("--lua-filter={}", crate::paths::plain(&lua)))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(child.stdin.as_mut().unwrap(), md.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("image omitted"), "{text}");
+        assert!(
+            !text.contains("secret.png") && !text.contains("example.invalid"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn no_machine_path_is_built_in_s7() {
+        let src = include_str!("docs.rs");
+        assert!(!src.contains(concat!("E:", "/apps")));
+    }
 }
