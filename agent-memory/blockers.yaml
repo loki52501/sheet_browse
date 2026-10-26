@@ -114,6 +114,11 @@ blockers:
     question: "Left after the B-32 rounds (91f9e46, 0994380): (P4) when max_tokens leaves fewer characters than a block's fixed overhead (code fence lines, a table header separator), the reader must still make progress and the returned piece can exceed the remainder by that overhead; (P5) the skeleton URL line still uses the plain clean, so a URL can carry a `[a](#3)` look-alike, and a page title starting with `! ` or `landmarks:` can pose as a skeleton line."
     default_taken: "P5 fixed in the same change (skeleton.rs escape_lead: link_text on the URL line, a leading backslash on a title or URL line that starts like a skeleton line). P4 is not a blocker for T-12: it overshoots by a few tokens at most and only on a tiny remainder; area sheet fixes it before step 3 (live browser readers) by dropping an overhead-only piece when the remainder cannot hold it (return truncated)."
     needs_user: false
+  - id: B-202
+    task: T-10
+    question: "Review round 5 should-fix 2: a table header separator cannot be split, so without max_tokens a page with thousands of empty columns sets the chunk size (3000 columns gave a 3002-token chunk holding only the separator). max_tokens still holds."
+    default_taken: "Not a T-12 blocker. Area sheet caps rendered table width (columns beyond a fixed limit folded into one `+N columns` cell) before step 3 (live browser readers)."
+    needs_user: false
 
 interface_changes:
   - id: B-200
