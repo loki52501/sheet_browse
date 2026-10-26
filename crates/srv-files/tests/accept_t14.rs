@@ -812,6 +812,273 @@ async fn docs_docx_write_then_read() {
     assert!(out.text.contains("Some *text*."), "{}", out.text);
 }
 
+// ---- acceptance round 1 (tester): rows not fully asserted above ----
+
+/// The ask outcome as it lands in the ledger (store rows and the jsonl mirror).
+fn ask_rows(e: &Env, mode: LedgerMode) -> usize {
+    e.core_events()
+        .iter()
+        .filter(|x| x.mode == Some(mode) && x.class == Some(Class::Delete))
+        .count()
+}
+
+#[tokio::test]
+async fn r1_shell_rm_file_skip_timeout_proceed_and_ledger() {
+    assert!(
+        has_bash(),
+        "this acceptance row needs bash; it must not pass silently"
+    );
+    let cases = [
+        (
+            Some(AskOutcome::AnsweredSkip),
+            LedgerMode::AnsweredSkip,
+            "answered_skip",
+            true,
+        ),
+        (None, LedgerMode::TimeoutSkip, "timeout_skip", true),
+        (
+            Some(AskOutcome::AnsweredProceed),
+            LedgerMode::AnsweredProceed,
+            "answered_proceed",
+            false,
+        ),
+    ];
+    for (answer, mode, mode_s, kept) in cases {
+        let asker = match answer {
+            Some(a) => ScriptedAsker::with([a]),
+            None => ScriptedAsker::new(),
+        };
+        let e = env(asker).await;
+        std::fs::write(e.p("file.txt"), "data").unwrap();
+        let out = e.ok("shell", json!({"cmd": "rm file.txt"})).await;
+        let cards = e.asker.cards();
+        assert_eq!(cards.len(), 1, "{mode_s}: the card was shown");
+        assert_eq!(cards[0].class, Class::Delete, "{mode_s}");
+        assert_eq!(cards[0].on_timeout, OnTimeout::Skip, "{mode_s}: H-1.3");
+        assert!(
+            cards[0].what.contains("file.txt"),
+            "{mode_s}: {}",
+            cards[0].what
+        );
+        assert_eq!(e.p("file.txt").exists(), kept, "{mode_s}: file state");
+        assert_eq!(
+            ask_rows(&e, mode),
+            1,
+            "{mode_s}: ask outcome row {:?}",
+            e.core_events()
+        );
+        let jsonl = std::fs::read_to_string(e.run.ledger_jsonl()).unwrap();
+        assert!(
+            jsonl.contains(mode_s),
+            "{mode_s}: jsonl mirror has the outcome"
+        );
+        let tools = e.tool_events();
+        if kept {
+            assert!(out.text.starts_with("skipped"), "{mode_s}: {}", out.text);
+            assert!(tools.is_empty(), "{mode_s}: the tool did not run");
+        } else {
+            assert!(out.text.starts_with("exit: 0"), "{mode_s}: {}", out.text);
+            assert_eq!(tools.len(), 1, "{mode_s}: one tool event");
+            assert_eq!(tools[0].tool, "shell");
+            assert_eq!(tools[0].class, Some(Class::Delete));
+            assert!(tools[0].ok);
+            assert!(jsonl.contains("\"shell\""), "tool event mirrored");
+        }
+    }
+}
+
+#[tokio::test]
+async fn r1_fs_case_and_dotdot_variants_classed_by_real_target() {
+    let e = env(ScriptedAsker::new()).await;
+    std::fs::write(e.p("notes.txt"), "keep").unwrap();
+    std::fs::create_dir_all(e.p("runs/x")).unwrap();
+    let mut outside = vec![
+        "RUNS/../notes.txt",
+        "Runs/X/../../notes.txt",
+        "runs/./x/./../../notes.txt",
+    ];
+    if cfg!(windows) {
+        outside.push("runs\\..\\notes.txt");
+        outside.push("RUNS\\X\\..\\..\\NOTES.TXT");
+    }
+    for (i, p) in outside.iter().enumerate() {
+        let out = e.ok("fs.delete", json!({ "path": p })).await;
+        assert!(out.text.starts_with("skipped"), "{p}: {}", out.text);
+        assert_eq!(e.asker.cards().len(), i + 1, "{p} asked");
+        assert_eq!(e.asker.cards()[i].class, Class::Delete, "{p}");
+        assert!(e.p("notes.txt").exists(), "{p}");
+    }
+    if has_bash() {
+        let n = e.asker.cards().len();
+        let out = e
+            .ok("shell", json!({"cmd": "rm -f RUNS/../notes.txt"}))
+            .await;
+        assert!(out.text.starts_with("skipped"), "{}", out.text);
+        assert_eq!(e.asker.cards().len(), n + 1);
+        assert!(e.p("notes.txt").exists());
+    }
+    // A case variant whose real target is inside runs/ is inside (Windows is case-insensitive).
+    #[cfg(windows)]
+    {
+        std::fs::create_dir_all(e.p("runs/tmp")).unwrap();
+        std::fs::write(e.p("runs/tmp/a.txt"), "a").unwrap();
+        let n = e.asker.cards().len();
+        let out = e.ok("fs.delete", json!({"path": "RUNS/TMP/A.TXT"})).await;
+        assert!(out.text.starts_with("deleted"), "{}", out.text);
+        assert!(!e.p("runs/tmp/a.txt").exists());
+        assert_eq!(e.asker.cards().len(), n, "no ask inside runs/");
+        assert_eq!(e.last_tool_class(), Some(Class::Fill));
+    }
+}
+
+#[tokio::test]
+async fn r1_shell_full_output_saved_under_run_files() {
+    assert!(
+        has_bash(),
+        "this acceptance row needs bash; it must not pass silently"
+    );
+    let e = env(ScriptedAsker::new()).await;
+    let out = e.ok("shell", json!({"cmd": "seq 1 30000"})).await;
+    assert!(out.text.chars().count() <= 20_000 + 400, "capped");
+    assert_eq!(out.files.len(), 1);
+    let saved = std::fs::canonicalize(&out.files[0]).unwrap();
+    let files_dir = std::fs::canonicalize(e.run.dir.join("files")).unwrap();
+    assert!(
+        saved.starts_with(&files_dir),
+        "saved under runs/<id>/files: {saved:?} vs {files_dir:?}"
+    );
+    let body = std::fs::read_to_string(&saved).unwrap();
+    let expect: String = (1..=30000).map(|i| format!("{i}\n")).collect();
+    assert_eq!(body, expect, "saved whole");
+}
+
+/// Every file under `dir`, recursively.
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn r1_vault_canary_echoed_by_shell_never_leaves() {
+    assert!(
+        has_bash(),
+        "this acceptance row needs bash; it must not pass silently"
+    );
+    let e = env(ScriptedAsker::new()).await;
+    let secret = canary();
+    std::env::set_var("SB_T14_CANARY_ECHO", &secret);
+    std::fs::write(e.p("runs/c.txt"), format!("tok={secret}\n")).unwrap();
+    // Positive control: the child really sees the canary (so absence below is scrubbing).
+    let bash = match Runner::discover() {
+        Runner::Bash(b) => b,
+        _ => unreachable!(),
+    };
+    let raw = std::process::Command::new(&bash)
+        .args(["-c", "echo \"$SB_T14_CANARY_ECHO\""])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&raw.stdout).contains(&secret),
+        "control: env var reaches bash"
+    );
+    let cmds = [
+        "echo \"$SB_T14_CANARY_ECHO\"",
+        "cat runs/c.txt",
+        "echo \"$SB_T14_CANARY_ECHO\"; seq 1 30000; echo \"$SB_T14_CANARY_ECHO\" >&2",
+        "echo \"$SB_T14_CANARY_ECHO\" | tr a-z A-Z | tr A-Z a-z",
+    ];
+    let mut leaks = Vec::new();
+    let mut saved = 0;
+    for cmd in cmds {
+        let out = e.ok("shell", json!({ "cmd": cmd })).await;
+        if out.text.contains(&secret) {
+            leaks.push(format!("text of {cmd:?}"));
+        }
+        if out.summary.as_deref().unwrap_or("").contains(&secret) {
+            leaks.push(format!("summary of {cmd:?}"));
+        }
+        if out.consequences.to_string().contains(&secret) {
+            leaks.push(format!("consequences of {cmd:?}"));
+        }
+        if !out.text.contains("@vault(t14)") {
+            leaks.push(format!("no @vault(t14) marker in {cmd:?} (did it echo?)"));
+        }
+        for f in &out.files {
+            saved += 1;
+            if std::fs::read_to_string(f).unwrap().contains(&secret) {
+                leaks.push(format!("saved log {f:?}"));
+            }
+        }
+    }
+    assert!(saved >= 1, "the long command saved its full log");
+    for (id, ev) in e.store.ledger() {
+        if serde_json::to_string(&ev).unwrap().contains(&secret) {
+            leaks.push(format!("ledger row {id:?}"));
+        }
+    }
+    let jsonl = std::fs::read_to_string(e.run.ledger_jsonl()).unwrap();
+    if jsonl.contains(&secret) {
+        leaks.push("ledger.jsonl".into());
+    }
+    let mut all = Vec::new();
+    walk(&e.base().join("runs"), &mut all);
+    for f in all {
+        if f.ends_with("c.txt") {
+            continue; // the fixture the test planted
+        }
+        if let Ok(b) = std::fs::read(&f) {
+            if String::from_utf8_lossy(&b).contains(&secret) {
+                leaks.push(format!("runs file {f:?}"));
+            }
+        }
+    }
+    // Never print the canary itself: only where it leaked.
+    assert!(leaks.is_empty(), "canary leaked: {leaks:?}");
+}
+
+#[tokio::test]
+#[ignore = "needs Python 3 with openpyxl (set SB_PYTHON); run with --ignored"]
+async fn r1_docs_xlsx_round_trip_strict() {
+    let e = env(ScriptedAsker::new()).await;
+    let out = e
+        .ok(
+            "xlsx.write",
+            json!({"sheets": [{"name": "Tools", "rows": [["tool", "price"], ["a", 3], ["b", 4]]}]}),
+        )
+        .await;
+    assert!(out.text.starts_with("wrote: "), "{}", out.text);
+    let rel = format!("runs/{}/files/workbook.xlsx", e.run.id);
+    let out = e.ok("xlsx.read", json!({ "path": rel })).await;
+    assert!(out.text.contains("## Tools"), "{}", out.text);
+    assert!(out.text.contains("a | 3"), "{}", out.text);
+    assert!(out.text.contains("b | 4"), "{}", out.text);
+}
+
+#[tokio::test]
+#[ignore = "needs Python 3 with python-pptx (set SB_PYTHON); run with --ignored"]
+async fn r1_docs_pptx_write() {
+    let e = env(ScriptedAsker::new()).await;
+    let out = e
+        .ok(
+            "pptx.write",
+            json!({"title": "Deck", "slides": [{"title": "One", "bullets": ["a", "b"]}]}),
+        )
+        .await;
+    assert!(out.text.starts_with("wrote: "), "{}", out.text);
+    let deck = e.run.dir.join("files").join("deck.pptx");
+    let bytes = std::fs::read(&deck).unwrap();
+    assert!(bytes.starts_with(b"PK"), "a zip container");
+    assert!(bytes.len() > 1000);
+}
+
 #[tokio::test]
 async fn vault_canary_never_leaves_through_fs_read() {
     let e = env(ScriptedAsker::new()).await;
