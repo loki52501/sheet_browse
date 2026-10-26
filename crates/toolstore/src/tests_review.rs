@@ -28,6 +28,8 @@ struct Store {
     /// When set, the next `tool_health_set` first turns this file into a directory, so a
     /// rollback that writes the file back fails too (a fault injected after the archive move).
     block_path: Mutex<Option<PathBuf>>,
+    /// When set, `tool_health` fails (a memory error while loading, D-315).
+    fail_get: AtomicBool,
 }
 
 impl Store {
@@ -96,6 +98,9 @@ impl MemoryStore for Store {
         Ok(LedgerId(l.len() as i64))
     }
     async fn tool_health(&self, domain: &str) -> Result<Vec<ToolHealth>> {
+        if self.fail_get.load(Ordering::SeqCst) {
+            return Err(MemoryError::Invalid("tool_health refused (test)".into()));
+        }
         Ok(self
             .health
             .lock()
@@ -1175,4 +1180,129 @@ async fn sweep_records_a_failed_delete_and_goes_on() {
     assert!(failed[0]
         .result_summary
         .contains("_archive/luma.com/a.1.js"));
+}
+
+// ---------------------------------------------------------------- B-33 (3): live loader
+
+fn names(tools: &[Tool]) -> Vec<&str> {
+    tools.iter().map(|t| t.namespaced.as_str()).collect()
+}
+
+/// D-315: a retired row whose file is still in place (its archive step failed) is not
+/// loaded; the file is reported as skipped with the retired version. The sync `load`, which
+/// does not read `tools.health`, still lists it.
+#[tokio::test]
+async fn load_live_skips_a_retired_row_whose_file_is_in_place() {
+    let (_dir, ts) = luma();
+    let store = Store::default();
+    store.put(row(ToolStatus::Retired, 3));
+    let file = ts.try_tool_path("luma.com", "register").unwrap();
+    assert!(file.is_file());
+    let r = ts.scan_live(&store, "luma.com", "/").await.unwrap();
+    assert!(r.tools.is_empty(), "{:?}", names(&r.tools));
+    assert_eq!(r.skipped, vec![(file, "retired (v3)".to_string())]);
+    assert!(ts
+        .load_live(&store, "https://luma.com/x", "/x")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(names(&ts.load("luma.com", "/").unwrap()), ["luma.register"]);
+}
+
+/// D-315: every status other than retired, and no row at all, still loads.
+#[tokio::test]
+async fn load_live_keeps_every_status_but_retired() {
+    let (_dir, ts) = luma();
+    for status in [
+        None,
+        Some(ToolStatus::Ephemeral),
+        Some(ToolStatus::Saved),
+        Some(ToolStatus::Repaired),
+        Some(ToolStatus::NeedsRepair),
+        Some(ToolStatus::Ask),
+    ] {
+        let store = Store::default();
+        if let Some(st) = status {
+            store.put(row(st, 2));
+        }
+        let r = ts.scan_live(&store, "luma.com", "/").await.unwrap();
+        assert_eq!(names(&r.tools), ["luma.register"], "{status:?}");
+        assert!(r.skipped.is_empty(), "{status:?}: {:?}", r.skipped);
+    }
+}
+
+/// D-315: a retired site tool no longer shadows the `_generic` tool of the same name; a
+/// row in another folder (`_generic/register` retired) does not hide the site tool.
+#[tokio::test]
+async fn retired_site_tool_lets_the_generic_one_load() {
+    let (dir, ts) = luma();
+    put(dir.path(), "_generic/register.js", REGISTER);
+    let store = Store::default();
+    store.put(row(ToolStatus::Retired, 1));
+    let r = ts.scan_live(&store, "luma.com", "/").await.unwrap();
+    assert_eq!(names(&r.tools), ["generic.register"]);
+    assert_eq!(r.tools[0].domain, GENERIC);
+    assert_eq!(r.skipped.len(), 1, "{:?}", r.skipped);
+    assert_eq!(r.skipped[0].1, "retired (v1)");
+    // Sync load: the site file still shadows the generic one.
+    assert_eq!(names(&ts.load("luma.com", "/").unwrap()), ["luma.register"]);
+
+    // The other way round: only the generic row is retired, the site tool loads.
+    let store = Store::default();
+    store.put(ToolHealth {
+        domain: GENERIC.into(),
+        ..row(ToolStatus::Retired, 4)
+    });
+    let r = ts.scan_live(&store, "luma.com", "/").await.unwrap();
+    assert_eq!(names(&r.tools), ["luma.register"]);
+}
+
+/// D-315: a retired `_generic` row is skipped on every site and on `_generic` itself.
+#[tokio::test]
+async fn retired_generic_row_is_skipped() {
+    let (dir, ts) = luma();
+    let paginate = dir.path().join("_generic/paginate.js");
+    put(
+        dir.path(),
+        "_generic/paginate.js",
+        &REGISTER.replace("@name register", "@name paginate"),
+    );
+    let store = Store::default();
+    store.put(ToolHealth {
+        domain: GENERIC.into(),
+        name: "paginate".into(),
+        ..row(ToolStatus::Retired, 2)
+    });
+    for domain in ["luma.com", "example.org", GENERIC] {
+        let r = ts.scan_live(&store, domain, "/").await.unwrap();
+        assert!(
+            !names(&r.tools).contains(&"generic.paginate"),
+            "{domain}: {:?}",
+            names(&r.tools)
+        );
+        assert!(
+            r.skipped
+                .contains(&(paginate.clone(), "retired (v2)".to_string())),
+            "{domain}: {:?}",
+            r.skipped
+        );
+    }
+    assert_eq!(
+        names(&ts.load_live(&store, "luma.com", "/").await.unwrap()),
+        ["luma.register"]
+    );
+}
+
+/// D-315: a memory error while reading `tools.health` is an error, never an unfiltered list.
+#[tokio::test]
+async fn load_live_fails_closed_on_a_memory_error() {
+    let (_dir, ts) = luma();
+    let store = Store::default();
+    store.fail_get.store(true, Ordering::SeqCst);
+    for domain in ["luma.com", GENERIC] {
+        let r = ts.load_live(&store, domain, "/").await;
+        assert!(matches!(r, Err(StoreError::Memory(_))), "{domain}: {r:?}");
+        let r = ts.scan_live(&store, domain, "/").await;
+        assert!(matches!(r, Err(StoreError::Memory(_))), "{domain}: {r:?}");
+    }
 }
