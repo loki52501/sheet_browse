@@ -1,0 +1,25 @@
+from: rust-coder-1 (area core)
+to: next
+task: T-05
+date: "2026-10-23"
+state: "harness_core::vault implemented per H-2, I-4, D-101, D-102 in commit 49cce85. Vault::open (age x25519 file holding a TOML map name = {value, kind}; missing file opens empty without touching the key), in_memory, set (temp file + fsync + rename; generates the identity into the key source only when neither the vault file nor an identity exists), names, resolve_into (exact-capacity Zeroizing<String>, so no unzeroed realloc copies), scrub (aho-corasick leftmost-longest over raw, JSON-escaped, JSON-escaped-twice, ASCII-only JSON, and percent-encoded spellings: NON_ALPHANUMERIC, encodeURIComponent, form-urlencoded, with upper and lower hex), install_global, global scrub, vault_refs. 11 vault unit tests, 37 tests total in harness-core; fmt and clippy -D warnings clean."
+not_done: "Nothing in T-05. The H-2 acceptance (plant @vault(test), grep stdout, ledger, DB and runs/) belongs to the tester once mcp/ledger exist. The keychain path (KeySource::Keychain) is not exercised by tests, on purpose: tests never touch the real keychain."
+gotchas:
+  - "New public items (additive, not in I-4): vault::default_path() reads SB_VAULT_PATH, else <config_dir>/sheetbrowse/vault.toml.age; vault::default_key() returns Keychain{service: sheetbrowse, account: vault}. Use these in `harness vault set` and bootstrap."
+  - "keyring 4.x is a wrapper around keyring-core. The default `v1` feature picks Windows Credential Manager, macOS Keychain or zbus Secret Service per target, so no target-specific features are needed (keyring 3 silently used a mock store without features; 4 does not)."
+  - "toml is 1.x and dirs is 7.x now; age is 0.12 (x25519::Identity::to_string returns a SecretString, needs age::secrecy::ExposeSecret)."
+  - "std cannot rewrite a panic payload. The panic hook prints the scrubbed message itself (default-hook format, via eprint! so test capture works) when the message contains a vault value, and calls the previous hook only for clean messages. A custom previous hook therefore never sees a dirty panic."
+  - "set() rejects names outside [A-Za-z0-9_.-]+ with VaultError::BadReference(byte offset in the name), because such a name could never be referenced as @vault(name). A dedicated BadName variant would need interface_changes; not proposed, judged not worth a contract change."
+  - "Malformed refs: BadReference carries the byte offset of the '@' in '@vault('. vault_refs lists every occurrence, duplicates included."
+  - "Only vault::tests::global_scrub_before_and_after_install touches the process-wide slot. If another test in harness-core calls install_global, the 'before install' assertion becomes order-dependent; keep install_global out of other unit tests or move them to an integration test binary."
+  - "Empty values are never scrubbed (D-102 says non-empty) but resolve to an empty string."
+  - "The aho-corasick automaton and toml/serde_json intermediate buffers hold value bytes that are not zeroized; values themselves, decrypted plaintext and serialized TOML are Zeroizing."
+  - "Committed the whole workspace Cargo.toml, which also carried area core-pg's uncommitted workspace deps (fastembed, pgvector, sqlx) and their Cargo.lock entries; unused workspace deps are harmless."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/src/vault.rs
+  - crates/core/Cargo.toml
+  - Cargo.toml
+  - Cargo.lock
+verify: "cargo test -p harness-core vault::"

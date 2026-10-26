@@ -1,0 +1,17 @@
+from: rust-coder (T-07 round 4)
+to: core sub-orchestrator, then T-07 reviewer and tester
+task: T-07
+date: "2026-10-25"
+state: "The three items carried since review-T-07 round 1 are closed in bfa2df9 (D-127; D-124 was taken by T-08, D-125 and D-126 by T-03/T-04). (1) ToolRegistry keeps a class floor per name (highest class ever registered, shared by clones, kept after remove); add and new register max(floor, class), and the new handler, description and schema still replace the old ones. Keep-max over refuse because add returns () in I-2. (2) One core stop per stopped call: while the handler runs, ToolCtx::ask holds the first stop it hits (Challenge card or gate Stop) instead of writing it; a later one goes to stderr. Handler returned stopped: tool event (mode stop, handler why), then one trailing core stop carrying the held stop (element filled from the handler's) or the handler's stop. Otherwise (ok, error, panic): the held stop is written right before the tool event, the same order as before. An ask from classify writes at once. Writing at once and skipping the trailing stop was rejected: ledger::report would take a later same-(tool,args) gate stop as the trailing one and drop that call's listing. (3) serve_io uses read_line_capped (fill_buf/consume, cancel safe) with MAX_LINE_BYTES = 8 MiB, newline not counted. A longer line is dropped as it streams (buf freed), answered -32600 with id null, and reading continues; an over-long last line with no newline is answered too. -32600, not -32700, because the line was never parsed. No pub signature changed (MAX_LINE_BYTES is pub(crate)). Tests: mcp_t07_r4 13 pass (registry floor, dispatch gates at the floor, one core stop shapes plus report.md listing counts, resume relisting, scrubbed trailing stop, 8 MiB boundary, -32600, EOF case); lib unit test capped_reads_are_bounded_and_cancel_safe. With SB_VAULT_CANARY set: mcp_t07 33, mcp_t07_r3 7, accept_t07 10, accept_t07_r2 15 (1 ignored), accept_t06_r2 11, lib 125 all pass; harness step1_accept 7 pass on Postgres 5433 (shared tree with the T-08/T-09 uncommitted edits). clippy -p harness-core --all-targets -D warnings clean."
+not_done: "B-175 (core_pg::bootstrap accepts an SB_RUN_ID with no runs row), not in this brief. The ledger.rs module header (T-06 owner) still says a mid-call challenge adds a core stop before the tool event; it now does so only when the handler did not return stopped. report() handles both shapes, so only the text is stale. The I-2 note in interfaces.yaml could mention the registry floor and the line cap (supreme)."
+gotchas:
+  - "The Bash tool collapses a doubled backslash in heredoc text, so an escaped newline in a non-raw Python string becomes a real newline. Use raw strings (r-prefixed) when scripting edits to .rs files."
+  - "Decision ids are taken fast by parallel coders: grep agent-memory and the other swarm branches right before you append."
+  - "step1_accept takes about 4 to 5 minutes from a cold target dir; run it in the background."
+decisions_made: [D-127]
+blockers_opened: []
+files_touched:
+  - crates/core/src/mcp.rs
+  - crates/core/tests/mcp_t07_r4.rs
+  - agent-memory/decisions.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/tmp-core/target-t07r4 cargo test -p harness-core --test mcp_t07_r4 --test mcp_t07 --test mcp_t07_r3 --test accept_t07 --test accept_t07_r2"

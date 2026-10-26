@@ -210,9 +210,10 @@ impl From<Mode> for LedgerMode {
     }
 }
 
-/// Normalised `memory.contacts.person` key (see [`Contact`]).
+/// Normalised `memory.contacts.person` key (see [`Contact`]). ASCII case folding only (D-62):
+/// Unicode lowercasing would fold look-alikes such as U+212A KELVIN SIGN into a known contact.
 pub fn contact_key(person: &str) -> String {
-    person.trim().to_lowercase()
+    person.trim().to_ascii_lowercase()
 }
 
 /// `ledger.events.id`, returned by `append` so the jsonl mirror can carry it.
@@ -427,6 +428,14 @@ mod tests {
     fn ts_now_fits_timestamptz() {
         assert_eq!(ts_now().timestamp_subsec_nanos() % 1_000, 0);
         assert_eq!(contact_key("  Vasanth@Example.COM "), "vasanth@example.com");
+    }
+
+    #[test]
+    fn contact_key_does_not_fold_look_alikes() {
+        // U+212A KELVIN SIGN lowercases to 'k' under Unicode rules (D-62).
+        let look_alike = "\u{212A}ate@example.com";
+        assert_ne!(contact_key(look_alike), contact_key("kate@example.com"));
+        assert_eq!(contact_key(look_alike), look_alike);
     }
 
     #[test]

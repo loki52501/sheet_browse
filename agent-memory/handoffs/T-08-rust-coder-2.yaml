@@ -1,0 +1,31 @@
+from: rust-coder (core, T-08 round 2)
+to: core/suborch, then reviewer and tester
+task: T-08
+date: "2026-10-25"
+state: "Every review-T-08 item is addressed in 4620fb3, with D-124 and B-195 in 71acaef. Blocking: cli::execute installs the vault for every command except `vault set`. When the vault cannot be opened the command fails closed and prints nothing. Should fix 1: vault set uses Vault::open_for_set. Should fix 4: ClaudeLauncher caps a `claude -p` session at max_session (SB_SESSION_CAP_SECS, default 3600 s). Past the cap it kills the session (taskkill /T on Windows) and returns a LaunchError, so the run is recorded failed. stdout is capped at 1 MiB plus 64 KiB of slack, scrubbed, then cut. Should fix 5: when a step after the schedule row fails, schedule add ends its own run failed and still calls notify_changed. Should fix 7: harnessd wraps the launcher in daemon::ReopenVault, which re-opens the vault in the new provided method Launcher::before_run. If that fails, the firing returns SchedError::BeforeRun and nothing is written. B-192: every session gets --disallowedTools Bash(harness ask:*) Bash(harness gate:*) Bash(harness vault:*). Tests: t08.rs adds `harness run` via Ctx.launcher, D-79 (library and binary stderr) and schedule add failing after the row. The new t08_vault.rs is its own binary, run one test at a time because the scrubber is global. It covers schedule list, tools health and the error line as @vault(test), fail-closed on a bad vault, open_for_set repair, and scrubbing of prompt.md, runs.prompt, slug, launcher stdin, answer.md and report. It also checks the real argv of the session, a hung session killed at its cap, answer capping without part of a value, and harnessd scrubbing a value added after it started. cargo test -p harness is fully green: accept_t08 18, accept_t09 1, step1_accept 7, t08 10, t08_vault 6, vault_cli_repair_t05_r4 1, lib 6. sched:: unit tests 8. clippy -p harness --all-targets -D warnings is clean. clippy -p harness-core is clean on a clean HEAD worktree with this sched.rs. In the shared tree it fails only on MAX_LINE_BYTES dead code in the T-07 coder's uncommitted mcp.rs. No SB_VAULT_CANARY in any test log."
+not_done: "1. Reviewer pass on 4620fb3 (sched.rs, crates/harness). 2. Supreme: B-195 (Launcher::before_run, SchedError::BeforeRun) into I-13. B-192 can be closed with D-124 (5). 3. A live `claude` session was not run (rule 1). The first real harnessd run should confirm two things: that claude accepts `-p --disallowedTools <3 rules>` with the prompt on stdin, and that the interactive form `claude <prompt> --disallowedTools ...` keeps the prompt as the positional argument. 4. T-16 watch and reflect are unchanged."
+gotchas:
+  - "The process-wide scrubber (vault::install_global) is shared by every test in a test binary. Tests that install a vault with values must live in their own binary and hold a lock (t08_vault.rs LOCK), or a parallel test that installs an empty vault races them."
+  - "The binary cannot use a non-empty vault in tests: Env::from_env always takes the keychain key (D-1). So the binary error path is tested at library level, with main.rs's exact scrub(format!(\"{e:#}\"))."
+  - "--disallowedTools takes a variadic list, so in interactive mode the prompt goes before it, or the list would swallow the prompt. accept_t08.rs had exact argv asserts (\"-p\", \" -h\"). I changed only those three lines to the B-192 argv."
+  - "On Windows, killing claude.cmd kills only cmd.exe and leaves node running, hence taskkill /F /T before child.kill(). After a kill the launcher drops the stdout reader instead of waiting for EOF, because a surviving grandchild can hold the pipe open."
+  - "schedule_add is now private to cli; it was pub but not in B-185's list. execute installs the vault before it runs."
+  - "`cargo fmt -p harness-core` reformats other coders' in-progress files (vault.rs, mcp.rs). Run rustfmt on your own files only. I ran it once by mistake while vault.rs was mid-edit by T-05; it changed formatting only, and T-05 has committed since."
+  - "vault_cli_repair_t05_r4.rs (T-05 tester) now builds its broken vault with the age and toml dev-dependencies. SB_T05R4_EXPORT is no longer needed and the ignore is gone. Its assertions are unchanged; SB_VAULT_CANARY falls back to a fresh value when it is unset."
+decisions_made: [D-124]
+blockers_opened: [B-195]
+files_touched:
+  - crates/core/src/sched.rs
+  - crates/harness/Cargo.toml (dev-deps age, toml)
+  - Cargo.lock
+  - crates/harness/src/cli.rs
+  - crates/harness/src/daemon.rs
+  - crates/harness/src/launcher.rs
+  - crates/harness/src/bin/harnessd.rs
+  - crates/harness/tests/t08.rs
+  - crates/harness/tests/t08_vault.rs
+  - crates/harness/tests/accept_t08.rs (3 argv assertions, B-192)
+  - crates/harness/tests/vault_cli_repair_t05_r4.rs (self-contained fixture, ignore removed)
+  - agent-memory/decisions.yaml (D-124)
+  - agent-memory/blockers.yaml (B-195 under interface_changes)
+verify: "cargo test -p harness --no-fail-fast"

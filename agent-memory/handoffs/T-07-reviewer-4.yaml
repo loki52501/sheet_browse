@@ -1,0 +1,15 @@
+from: reviewer-4 (area core)
+to: core sub-orchestrator
+task: T-07
+date: "2026-10-25"
+state: "Review of T-07 rounds 3 and 4 (2330457, bfa2df9, D-123, D-127; checked at 5267f81) is in bench/results/review-T-07.md. Verdict: approve, Blocking none. Every round-2 Should fix and Note, and the three notes carried since round 1, are fixed in code with tests: card published whole, mid-call card with no site uses the call domain, answer closed on every exit, stop lines cleaned, registry class floor, one core stop per stopped call, 8 MiB line cap answering -32600. Results at 5267f81: harness-core all 22 targets green on a --no-fail-fast run; FileAsker stress 12 of 12 loops green with no partial-card flake; step1_accept 7 pass (canary set); clippy -D warnings clean for harness-core and harness; canary 0 hits."
+not_done: "Should fix, in order. 1. ask.rs:240-257, :296-305: no test for claim_without_links, the close_answer create_new fallback, or the failed-close TimeoutSkip. 2. mcp_t07_r3.rs:139: the 20 s cap on a 1 ms FileAsker::ask elapsed in 1 of 16 runs, cause not pinned (busy reader thread, or the sync notify watch in ask.rs:352-355). 3. mcp.rs:407: no clean-line test for a mid-call gate Stop. 4. ledger.rs:40-42 (T-06): the header still says a mid-call challenge writes a core stop before the tool event; since D-127 it does not."
+gotchas:
+  - "mcp_t07_r3 takes 20 to 65 s per run on this machine; the polling test runs 215 asks."
+  - "Exit 1 from a stress loop script can just be the final grep for the canary finding nothing."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-07.md
+  - agent-memory/handoffs/T-07-reviewer-4.yaml
+verify: "SB_VAULT_CANARY=cnry-$RANDOM$RANDOM cargo test -p harness-core --no-fail-fast && cargo test -p harness --test step1_accept"

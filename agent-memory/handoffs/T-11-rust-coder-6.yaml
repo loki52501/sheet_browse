@@ -1,0 +1,26 @@
+from: rust-coder-6 (area store)
+to: store sub-orchestrator
+task: T-11
+date: "2026-10-25"
+state: "D-78 follow-up batch done in one commit on swarm/store, each change with a test that was seen failing with the change mutated out and passing with it restored. (1) D-312: domain::valid_name accepts only [a-z0-9_-]+ (device-name and 100-byte rules kept), so check_tool_id and every path builder and mutator refuse an upper-case name; header::parse_header refuses an @name that is not [a-z0-9_]+; ToolStore::reforge refuses a new spec whose @name differs from the name argument with StoreError::Invariant and writes nothing (no file, row or ledger). The check runs after check_repair, so a plain rename still gets check_repair's logged 'renamed' refusal; the new check catches a hand-edited old file whose @name already differed from its file name. sweep's valid_name filter now also skips legacy upper-case rows (never acted on). (2) D-313: check_repair refuses an @kind change either way and an @phase lowering 2 -> 1; 1 -> 2 passes. (3) B-31 item 3: g4_no_new_vault_key now feeds the canary. The re-forged login carries a new @vault(luma_otp_seed) plus that key's value (the canary) as a trace line, the canary sweep runs over rows, ledger, the reforge result and every file under the tools root before the refusal is asserted, and with the vault-key check disabled for that key the test fails with 'vault canary leaked'. (4) D-314: archive runs through a private archive_with(.., set_mtime) seam; if set_mtime fails after the rename it renames back and returns the error (both errors named if the rename back fails too). (5) D-72: tool_path/archive_path are #[deprecated]; every test uses try_*; tests_review::deprecated_path_builders_return_the_empty_path_on_bad_input is the one #[allow(deprecated)] test. No caller outside toolstore exists. lifecycle new_row now uses try_tool_path. (6) D-59/B-300: fingerprint ROLE_ALIASES deleted; role_matches (same signature) matches on equality, alias_for(row) == item, or aria_roles(item) contains row. One test per old alias. roles.txt disagrees with the old map in two places and sb-sheet wins: input no longer covers spinbutton (roles.txt has number/spinbutton), and checkbox no longer covers switch (roles.txt has switch). Also added crates/toolstore/tests/contract_paths.rs (pr-ready step 4) importing every I-7/I-12 path except the two deprecated builders. cargo test -p toolstore: 112 lib + 29 accept_t11 + 1 contract_paths pass; cargo test --workspace green; clippy --workspace --all-targets -D warnings and fmt clean; merge_gate.py store prints gate ok."
+not_done: "Nothing from the brief. Left for the area or supreme: (a) accept-T-11.md and review-T-11.md describe the previous commit; a tester and reviewer pass on this commit is needed before the PR. (b) The vault canary is still not planted as a real vault value (core T-05 Vault::in_memory is todo!()). (c) A pre-existing message bug in lifecycle.rs reforge undo: the double-failure format string has a run of spaces between 'failed' and 'too' (a lost line continuation). Not touched here because it was not in the brief."
+gotchas:
+  - "In this worktree, Python heredocs through the Bash tool turned backslash escapes in Rust string literals into real newlines, so exact-match replacements silently failed. Use the Edit tool for any text containing backslashes."
+  - "Writes outside the worktree (the session scratchpad included) are blocked by guard_write; keep temporary files under target/tmp."
+  - "A PostToolUse hook runs rustfmt after every Rust edit, so re-read a file before an Edit that targets a region it may have reformatted."
+  - "agent-memory/decisions.yaml shows as modified with an empty diff (line endings); it was not staged."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/toolstore/src/archive.rs
+  - crates/toolstore/src/domain.rs
+  - crates/toolstore/src/fingerprint.rs
+  - crates/toolstore/src/header.rs
+  - crates/toolstore/src/invariants.rs
+  - crates/toolstore/src/lib.rs
+  - crates/toolstore/src/lifecycle.rs
+  - crates/toolstore/src/tests_review.rs
+  - crates/toolstore/tests/accept_t11.rs
+  - crates/toolstore/tests/contract_paths.rs
+  - agent-memory/handoffs/T-11-rust-coder-6.yaml
+verify: "cargo test -p toolstore"

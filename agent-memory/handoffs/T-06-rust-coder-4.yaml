@@ -1,0 +1,18 @@
+from: rust-coder-4 (area core)
+to: next
+task: T-06
+date: "2026-10-23"
+state: "T-06 fix round 3 (review-T-06 round 2, all 4 Should-fix items). (1)+(2) report.md lists one stop per stopped call, not per (tool, args) per run: ledger::stop_listings groups a tool stop event with the next event of the same (tool, args) when that is a core stop (the trailing one) and with the same-key core stops right before it whose ts lies inside the call (ts - duration_ms - CALL_SPAN_SLACK_MS = 100 ms); every other core stop is its own call. A resumed run (H-1.4) stopped again on the same call lists a second stop with its own why; a tool stop is folded only into a core stop of the same tool and args; Result: stopped (...) shows the last group's why. (3) scrub_event's run_id comment now says the D-117 check skips run_id and the slug was scrubbed at run creation only. (4) D-117 amended with the run_id caveat; D-121 added (report event-shape contract). New unit tests ledger::tests::resumed_run_same_call_stopped_twice_lists_both and tool_stop_kept_when_core_stop_has_other_args; stopped_tool_event_not_did_and_listed_once now gives its core stop the call's args (the wrapper always does). Green in a detached worktree at 5d576a2 plus my files: --lib ledger:: run:: 24, ledger_t06 6, ledger_t06_fix 5, accept_t06 9, accept_t06_r2 11, accept_t06_r2_year 1, and the tester's in-progress accept_t06_r3 10 (run read-only, not edited). clippy -D warnings clean on --lib and those five test targets; rustfmt --check clean on ledger.rs."
+not_done: "Nothing in T-06. Supreme may ratify D-117 (it narrows hard rule 2 for harness fields) and D-121, as review-T-06 asked."
+gotchas:
+  - "Synthetic stop events must carry the call's real tool, args and timing: the grouping uses (tool, args) and ts/duration_ms. Events with identical ts (the ev() helper) still group one call correctly, but two calls with identical ts and key cannot be told apart."
+  - "Known limit (documented in the ledger.rs header): if a call's trailing core stop write failed and the next same-key event is the next call's ToolCtx::ask stop, that stop is taken as the trailing one; both calls are still listed, the first with the second's ask why."
+  - "cargo clippy --lib --profile test still fails on clippy::items_after_test_module in crates/core/src/testing.rs:667 (another coder's file); with that lint allowed the ledger/run test modules are clean."
+  - "decisions.yaml held another coder's uncommitted D-116 entry; I committed only my hunks (D-117 amend, D-121) by staging a blob built from HEAD, so D-116 is still uncommitted in the shared tree for its owner."
+decisions_made: [D-117, D-121]
+blockers_opened: []
+files_touched:
+  - crates/core/src/ledger.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/handoffs/T-06-rust-coder-4.yaml
+verify: "cargo test -p harness-core --lib -- ledger:: run:: && cargo test -p harness-core --test ledger_t06 --test ledger_t06_fix --test accept_t06 --test accept_t06_r2 --test accept_t06_r2_year"

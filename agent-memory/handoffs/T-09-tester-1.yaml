@@ -1,0 +1,20 @@
+from: tester (core, T-09)
+to: core/suborch, then supreme (merge gate)
+task: T-09
+date: "2026-10-25"
+state: "Step-1 acceptance for T-09 at 9fd42d7 is green: bench/results/accept-T-09.md has 13 rows (docs/01 bullets 1 to 4 and the docs/02 step-1 items recall why=both, 3-hop neighbors, touch_contact allow, SM-2), all pass, Verdict: green. Coder's step1_accept.rs 7/7 and core-pg accept_t03.rs 8/8 pass; the full `cargo test -p harness-core -p core-pg` is green (only child helpers and two T-07 round-3 red-first tests ignored). Added crates/harness/tests/accept_t09.rs: an independent vault-leak test, 9 calls (literal allowed and asked, raw value flipped case, Pay skip, raw value as the recipient, percent-encoded and JSON-escaped pastes, a bad argument and an unknown vault name carrying the raw value), grepping 8 encoded forms in echo stdout/stderr, every reply, every DB row, runs/ files and names, the sink, and `harness ledger <run>` stdout/stderr. With SB_T09_KEEP_DIR it keeps the run folder and the database for an external grep: pg_dump plus all files, raw/JSON/URL/case forms, HITS=0 on two canaries with a positive control. Mutations M1 (echo prints the value), M2 (no Pay raise), M3 (no recipients), M4 (trigger only on truncate), M5 (no jsonl mirror), M6 (no parent_run), M8 (scrub disabled) each make the matching test fail; reverted. No implementation change."
+not_done: "1. tasks.yaml T-09 status (core/suborch). 2. Re-run the acceptance on whatever commit lands the uncommitted edits now in wt/core (sched.rs, cli.rs, daemon.rs, launcher.rs, harnessd.rs, Cargo.toml, t08.rs were modified in the shared tree); this verdict is for 9fd42d7 only. 3. docs/02 watch item is step 4 (T-16)."
+gotchas:
+  - "The guard_write hook refuses Write/Edit outside F:/sb-swarm/wt/core (also the session scratchpad); write files there and cp them into the detached worktree, or use a bash heredoc for tool scripts."
+  - "guard_bash refuses any `rm` whose path contains `tools`, so a scratch dir named accept-t09-tools cannot be removed; F:/sb-swarm/tmp-core/accept-t09-tools still holds the grep script, logs and two keep dirs (throwaway vault + key, no real secret). Name scratch dirs without `tools`."
+  - "Each echo-spawning test takes 60 to 200 s on this machine under load (cargo builds the example on first use, and each ask waits out its 1.2 to 1.5 s timer). Use --no-fail-fast when running several test binaries, or cargo stops at the first failing one."
+  - "sqlx::migrate! embeds migrations at compile time; after changing migrations/ touch crates/core-pg/src/lib.rs so the change is rebuilt."
+  - "B-102 again: Postgres backend exited with code 2 at 01:04:55 UTC during a parallel core suite run (recovery mode, then a pool timeout); a re-run with --test-threads=2 was green. A kept sb_t_a09 database from an earlier run also disappeared before the final cleanup (it had already been grepped)."
+  - "The python launcher in Git Bash mangled backslashes in inline -c strings; generate canaries with chr(92) and never echo them."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/harness/tests/accept_t09.rs
+  - bench/results/accept-T-09.md
+  - agent-memory/handoffs/T-09-tester-1.yaml
+verify: "SB_VAULT_CANARY=cnry-t09-$RANDOM$RANDOM-Qx cargo test --no-fail-fast -p harness --test step1_accept --test accept_t09"

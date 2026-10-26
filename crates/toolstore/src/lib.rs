@@ -74,7 +74,8 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Memory(#[from] harness_core::memory::MemoryError),
-    /// T-9 / G-4: a repair or forge tried to lower `@gate`, drop `?s`, add a vault key or widen `@match`.
+    /// T-9 / G-4: a repair or forge tried to lower `@gate`, drop `?s`, add a vault key, widen
+    /// `@match`, rename the tool, change `@kind` or lower `@phase` (D-312, D-313).
     #[error("invariant violated: {0}")]
     Invariant(String),
     /// The git commit helper refused (no task id, path outside the tools root) or git failed.

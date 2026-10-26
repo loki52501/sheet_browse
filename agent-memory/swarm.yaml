@@ -12,8 +12,8 @@ areas:
     tasks: [T-03, T-04, T-05, T-06, T-07, T-08, T-09]
     later: {wave: 3, tasks: [T-16]}
     docs: [docs/01-HARNESS-CORE.md, docs/02-MEMORY.md]
-    status: not_started
-    merged: false
+    status: in_progress
+    merged: true   # 960c7b1, 2026-10-25 20:40: D-87 merge (review approved, cargo test --workspace 704 passed 0 failed 5 ignored); red acceptance rows -> follow-up tasks
   sheet:
     wave: 1
     crates: [sb-sheet]
@@ -26,8 +26,8 @@ areas:
     crates: [toolstore]
     tasks: [T-11]
     docs: [docs/03-TOOL-STORE.md]
-    status: pr_open
-    merged: true   # f493fd3, 2026-10-23 17:33: gate ok T-11, cargo test --workspace 135 passed 0 failed
+    status: pr_open   # D-78 follow-up batch ready to merge 2026-10-25 (handoffs/T-11-store-suborch-3.yaml)
+    merged: true   # f493fd3, 2026-10-23 17:33: gate ok T-11, cargo test --workspace 135 passed 0 failed; follow-up (D-78 batch) 83bfdb5, 2026-10-25 19:17: gate ok T-11, 271 passed 0 failed
   page:
     wave: 1
     crates: [injected, sb-act]
@@ -57,9 +57,9 @@ areas:
 waves:
   "0": done
   "1": open
-  "2": "not started"
+  "2": open
   "3": "not started"
   "4": "not started: Phase 1 baseline T-17, then T-27 T-28 T-29"
 
-pr_rule: "local-only repo (D-46): an area PR is its branch with areas.<area>.status pr_open on that branch plus a final handoff"
-merge_rule: "review report has no Blocking items AND accept report green for claimed tasks AND no leak hook fired AND cargo test --workspace passes on the merge commit"
+pr_rule: "D-86/D-91: one GitHub PR per task, branch swarm/<area>-T<nn>, gh pr create --base main --head <branch>; areas push their branches, the supreme pushes main after every merge (supersedes D-46)"
+merge_rule: "D-87: review report has no Blocking items AND cargo test --workspace passes on the merge commit AND no leak hook fired; a red acceptance item becomes a follow-up task (T-xxb), never a block; supreme reviews are non-blocking; at most two review rounds (D-89)"

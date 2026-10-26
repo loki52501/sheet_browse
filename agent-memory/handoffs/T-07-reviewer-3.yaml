@@ -1,0 +1,15 @@
+from: reviewer-3 (area core)
+to: core sub-orchestrator
+task: T-07
+date: "2026-10-25"
+state: "Re-review of T-07 round 2 (8cdb1ed, checked at 15e09d3) is in bench/results/review-T-07.md. Verdict: approve, Blocking none. All 3 round-1 blocking items and every should-fix item are resolved with tests, except bootstrap, which is deferred as B-175 (core-pg). Results: mcp_t07 33 pass + 1 ignored child, accept_t07 10, lib mcp::/ask:: 11. clippy -D warnings and fmt --check are clean on harness-core. The random canary had 0 hits."
+not_done: "Should fix, in order. 1. ask.rs:166-189: write_card claims <n>.json with create_new and writes the bytes afterwards, so readers see an empty card. In a stress loop, 15 of 40 runs failed with 'EOF while parsing a value' in a7_file_asker_* and mcp_t07 file_asker_*. Publish the card as temp file + hard_link (reuse claim). 2. mcp.rs:329: a mid-call Call.domain is card.site only. Store classified.domain in CallInfo and use it when site is None, so that site-scoped stop or strict rules still apply; add a test."
+gotchas:
+  - "The card race shows up only under load. Repeat `cargo test -p harness-core --test accept_t07 --test mcp_t07 -- file_asker` about 40 times to see it."
+  - "The handoff T-07-rust-coder-2 says the gate treats empty Send recipients as all known. It treats them as Send(new) with no proceed (gate.rs:430-457). The behaviour is right; the wording is wrong."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-07.md
+  - agent-memory/handoffs/T-07-reviewer-3.yaml
+verify: "SB_VAULT_CANARY=cnry-$RANDOM$RANDOM cargo test -p harness-core --test mcp_t07 --test accept_t07 && cargo test -p harness-core --lib -- mcp:: ask::"

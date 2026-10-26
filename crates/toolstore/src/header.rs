@@ -5,6 +5,7 @@
 //! (`@name @kind @gate @expects @forged @phase`) may appear once; `@match` and
 //! `@fingerprint` may repeat and accumulate. Missing `@name`, `@kind` or `@gate` is an error.
 //! Missing `@match` means `/*`; missing `@phase` means 2 (needs the browser), the safe side.
+//! `@name` is lower case `[a-z0-9_]+` (D-312).
 
 use harness_core::Class;
 use std::fmt;
@@ -155,6 +156,14 @@ fn is_ident(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// D-312: a tool `@name` is lower case, `[a-z0-9_]+`, so it is one file on a case-insensitive
+/// volume and one `tools.health` row.
+fn is_tool_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
 fn set_once<T>(slot: &mut Option<T>, key: &str, v: T) -> Result<(), String> {
     if slot.is_some() {
         return Err(format!("@{key} given twice"));
@@ -179,8 +188,8 @@ pub fn parse_header(src: &str) -> Result<ToolHeader, String> {
         match key {
             "name" => {
                 let n = first_token(value);
-                if !is_ident(n) {
-                    return Err(format!("@name {n:?} is not [A-Za-z0-9_]+"));
+                if !is_tool_name(n) {
+                    return Err(format!("@name {n:?} is not [a-z0-9_]+ (D-312)"));
                 }
                 set_once(&mut name, key, n.to_string())?;
             }
@@ -490,6 +499,7 @@ export default function (page, args) {
         assert!(parse_header("// @name x\n// @kind reader\n// @gate Huge\n").is_err());
         assert!(parse_header("// @name x y\n// @kind reader\n// @gate Read\n").is_ok());
         assert!(parse_header("// @name x-y\n// @kind reader\n// @gate Read\n").is_err());
+        assert!(parse_header("// @name x_1\n// @kind reader\n// @gate Read\n").is_ok());
         assert!(parse_header("// @name x\n// @name y\n// @kind reader\n// @gate Read\n").is_err());
         assert!(parse_header("// @name x\n// @kind reader\n// @gate Read\n// @phase 3\n").is_err());
         assert!(parse_header(
@@ -498,6 +508,19 @@ export default function (page, args) {
         .is_err());
         assert!(parse_header("garbage\n// @name x\n// @kind reader\n// @gate Read\n").is_err());
         assert!(parse_header("").is_err());
+    }
+
+    #[test]
+    fn upper_case_name_is_refused() {
+        // D-312: `Register.js` and `register.js` are one file on NTFS and default macOS.
+        for n in ["Register", "listJobs", "X"] {
+            let src = format!("// @name {n}\n// @kind reader\n// @gate Read\n");
+            let err = parse_header(&src).unwrap_err();
+            assert!(
+                err.contains("@name") && err.contains("[a-z0-9_]+"),
+                "{n}: {err}"
+            );
+        }
     }
 
     #[test]

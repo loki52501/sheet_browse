@@ -1,0 +1,19 @@
+from: core/suborch
+to: next
+task: T-03
+date: "2026-10-23"
+state: "Restart at 17:54 after the 13:50 stop. WIP recovered as 2628379 (red-first tests ignored), main merged as 2181b08. By 19:20 HEAD 374290c (tree bf309d4, cargo test --workspace exit 0, 53 binaries ok) holds: T-03 round 3 + B-175 (10cb4b5), T-04 round 3 + public gate::clean_card (bae6c45), T-05 round 3 (bed9d02, accept 31ed232 red on r3_6 only), T-06 rounds 2-3 (60217eb, 66b19c1; review round 2 approve, accept f41df32 green -> T-06 done), T-07 round 2 (8cdb1ed), T-08 (b7aa4f4; it reverted four files by committing a stale index, repaired in 374290c). Decisions D-116..D-121 recorded. Uncommitted in the shared tree: migrations/0002_edges_dst.sql (D-114 named it, no commit ever carried it; core-pg tests green with it), the blockers.yaml D-75 repair, this handoff, review-T-05.md (round 3 approve) and review-T-06.md (round 2 approve). The dotpals hook refused their commit because the T-05 round-4 coder's unfinished vault tests were the last failing run. Running at 19:25: T-05 round-4 coder (review-T-05 round 3 should-fix 1-3 + red-first r3_6), reviewers for T-03/T-04 round 3, T-07 round 2 and T-08, testers for the same three, and the T-09 coder (echo server + step-1 acceptance tests, D-122 for its location)."
+not_done: "1. When T-05 round 4 lands and a test run is green: commit migrations/0002_edges_dst.sql (message drafted: 'migrations: 0002_edges_dst.sql ... (T-03; M-3, D-114)'), then the agent-memory files and the two reviews. 2. git merge main (2d966c0 drops union for blockers.yaml, D-75); run merge_gate.check_blockers_shape as supreme's 18:20 note says. 3. Act on each review/accept result: loop coder -> reviewer -> tester until no Blocking and green. 4. T-05 round 4: re-review + re-accept. 5. T-09: tester runs the full step-1 acceptance with SB_VAULT_CANARY (stdout, ledger table, DB, jsonl, runs/). 6. tasks.yaml: T-03..T-09 done. 7. swarm.yaml areas.core.status pr_open + final handoff (D-46, no remote)."
+gotchas:
+  - "The dotpals PreToolUse hook refuses git commit when the last test run in this session (subagents included) failed, or a file changed after it. Known-red tests are kept as #[ignore = \"red-first ...\"] and removed by the round that fixes them."
+  - "Coders that build a commit from a separate or stale index revert other coders' commits (b7aa4f4 did). Briefs now say: commit from current HEAD with git commit -- <paths>. Check git show --stat of every coder commit for files outside its paths."
+  - "The shared tree often does not compile while coders work; reviewers, testers and coders verify in detached worktrees under F:/sb-swarm/tmp-core with their own CARGO_TARGET_DIR. The write hook only allows writes inside the worktree, so new files are written in place and copied into the checkout."
+  - "Resuming a finished subagent with SendMessage fails (no transcript); spawn a fresh one with a brief that points at the previous handoff."
+  - "Decision ids taken this round: D-116 T-08, D-117 T-06, D-118 T-05, D-119 T-07, D-120 T-03/T-04, D-121 T-06 report shapes, D-122 T-09."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/handoffs/T-03-suborch-2.yaml
+  - agent-memory/blockers.yaml
+  - migrations/0002_edges_dst.sql
+verify: "git log --oneline main..swarm/core; cargo test --workspace -q"

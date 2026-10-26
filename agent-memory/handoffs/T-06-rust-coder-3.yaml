@@ -1,0 +1,22 @@
+from: rust-coder-3 (area core)
+to: next
+task: T-06
+date: "2026-10-23"
+state: "T-06 fix round 2 in commit 60217eb (decision D-117 in f2dea11). (1) D-117: Ledger::write's fail-closed check now covers only the data fields (server, tool, args, result_summary, consequences, why), each serialized exactly as in the jsonl line; a top-level null field is skipped. Harness-generated fields (id, run_id, ts, class, mode, duration_ms, ok) and key names / JSON punctuation are not checked, so a vault value equal to the year (or a duration, a mode, a key name) no longer makes every write fail Unscrubbable. Data fields still fail closed (e.g. a value spanning an args key and its value). (2) report.md: the first core stop of a (tool, args) pair is listed once; later core stops of the same pair and any tool stop event whose tool has a core stop are skipped. A mid-call challenge (ToolCtx::ask core stop + tool stop event + second core stop) now shows one 'stopped at'; Result: uses the first core stop's why. (3) is_failure excludes core events (core allow/ask decisions are never failures). Header contract in ledger.rs updated. accept_t06_r2 (11) and accept_t06_r2_year (1) un-ignored and green; ledger_t06 (6), ledger_t06_fix (5), accept_t06 (9), --lib ledger:: run:: (22) green; clippy -D warnings clean on --lib plus those five test targets; rustfmt --check clean on my files. Review-T-06 (round 1) items: both Blocking and all Should-fix items are fixed in 5bf1f37 or here; the only one not done literally is 'write the report event shapes into decisions.yaml' (they live in the ledger.rs and mcp.rs headers; no free decision id was assigned for it)."
+not_done: "Nothing in T-06. Optional: supreme may give the ledger.rs header's event-shape contract (report inputs, Read heuristic, stop listing) its own decision id so T-07/T-09 are bound by decisions.yaml, as review-T-06 suggested."
+gotchas:
+  - "The shared worktree often does not compile (four coders editing gate.rs, vault.rs, mcp.rs, testing.rs at once). I verified in a throwaway detached worktree under F:/sb-swarm/tmp-core/t06wt with CARGO_TARGET_DIR=F:/sb-swarm/tmp-core/t06target, copying only my files in; removed afterwards. Use `git worktree add --detach` the same way if the shared tree is red."
+  - "`cargo fmt -p harness-core` formats every file in the crate, including other coders' in-progress files (it touched mcp.rs once in this round). Use `rustfmt --edition 2021 <your files>` instead."
+  - "My decisions.yaml commit f2dea11 also carried the T-05 coder's uncommitted D-118 text and D-102 note (they were on disk in the same file); their content is intact, they will just find nothing left to commit for it."
+  - "cargo clippy --lib --profile test currently fails on clippy::items_after_test_module in crates/core/src/testing.rs:1313 (another coder's file), not in ledger.rs."
+  - "D-117 known limit (documented in ledger.rs): a vault value that contains the JSON glue between two top-level fields (\",\"why\":\") is not seen across that boundary; harness fields may textually contain a coincidental short value."
+  - "Stop dedupe keys on (tool, args): two genuinely different stopped calls with the same tool and identical args show as one listing."
+decisions_made: [D-117]
+blockers_opened: []
+files_touched:
+  - crates/core/src/ledger.rs
+  - crates/core/tests/ledger_t06_fix.rs
+  - crates/core/tests/accept_t06_r2.rs
+  - crates/core/tests/accept_t06_r2_year.rs
+  - agent-memory/decisions.yaml
+verify: "cargo test -p harness-core --lib ledger:: run:: && cargo test -p harness-core --test ledger_t06 --test ledger_t06_fix --test accept_t06 --test accept_t06_r2 --test accept_t06_r2_year"

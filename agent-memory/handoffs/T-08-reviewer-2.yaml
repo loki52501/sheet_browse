@@ -1,0 +1,15 @@
+from: reviewer-2 (area core)
+to: core/sub-orchestrator, then supreme (B-195, B-192 scope) and tester
+task: T-08
+date: "2026-10-25"
+state: "Round 2 review of T-08 (71acaef, 4620fb3, 6a98d8e) at 6a98d8e in detached worktree tmp-core/wt-review-t08r2. fmt clean, clippy -p harness -p harness-core --all-targets -D warnings clean, cargo test -p harness --no-fail-fast green (lib 6, accept_t08 18, step1_accept 7, t08 10, t08_vault 6, vault_cli_repair_t05_r4 1), cargo test -p harness-core --lib sched:: green (8), canary absent from all logs. Every round-1 blocking and should-fix item is resolved with a test that fails on revert. accept_t08.rs changed only three exact argv asserts (B-192), nothing weakened. Verdict approve. Report: bench/results/review-T-08.md."
+not_done: "Should fix (tests only): 1. t08_vault.rs answer-cap test never puts a vault value across max_answer_bytes itself, so cut-then-scrub would pass; add that case. 2. hung-session test passes even if kill_session is a no-op (kill_on_drop) and does not check the process is gone or exercise taskkill /T through a .cmd shim. Supreme: B-195 into I-13; before closing B-192 note that Bash prefix denials are bypassable (full path, cmd /c, writing the ask answer file directly), so rule-4 self-approval is not closed by the deny list."
+gotchas:
+  - "A cold cargo test -p harness in a fresh target dir took about 10 minutes including clippy; run it in the background."
+  - "t08_vault.rs relies on one process-wide scrubber; keep vault-installing tests in that binary behind LOCK."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-08.md
+  - agent-memory/handoffs/T-08-reviewer-2.yaml
+verify: "cargo test -p harness --no-fail-fast && cargo test -p harness-core --lib sched::"
