@@ -260,7 +260,7 @@ blockers:
   - id: B-564
     task: T-13b
     question: "Phase 1 ladder rungs 4 and 5 (variant 3): sessions wrote deliverables (CSV, table) to their working folder instead of runs/<id>/files/, because fs.write and csv.clean resolve a bare file name against the base folder and the session never learns its run id. Should fs.write and csv.clean put a bare file name into the run's files/ the way xlsx.write already does?"
-    default_taken: "Yes, servers T-14b: a relative path with no folder component goes to runs/<id>/files/; explicit paths keep their meaning. The tool descriptions say so."
+    default_taken: "Yes, servers T-14b: a relative path with no folder component goes to runs/<id>/files/; explicit paths keep their meaning. The tool descriptions say so. Shipped in T-13c (srv-files, D-570..D-574): output-taking tools put a bare name in runs/<id>/files/, readers fall back to files/<name> when the base has no such file (base wins when both exist), fs.move's bare destination follows D-573, descriptions updated."
     needs_user: false
   - id: B-565
     task: T-13c

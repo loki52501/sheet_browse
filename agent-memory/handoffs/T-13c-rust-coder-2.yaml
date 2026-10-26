@@ -1,0 +1,25 @@
+from: rust-coder-2 (servers, srv-files part of T-13c)
+to: servers sub-orchestrator, then tester
+task: T-13c
+date: "2026-10-26"
+state: "B-564 shipped in srv-files (D-570..D-574). Output-taking tools resolve a bare file name to runs/<id>/files/<name> via Roots::resolve_out (fs.write incl. append; csv.clean out and docs out already did); './name', 'folder/name' and absolute paths keep their meaning. Readers (fs.read, fs.delete, fs.move from, csv.clean path, diff a/b, pdf.read, xlsx.read, docx.read, md.to_pdf path) use Roots::resolve_existing: base first, then files/<name> for a bare name the base lacks; base wins when both exist and fs.read appends a one-line note naming the files/ copy (Roots::shadowed). fs.move's bare 'to' follows D-573 (files/ for a source in runs/, base folder of that name moved into, rename in base for an outside source; D-523 classes unchanged). fs classify and call share one fs::Plan (D-572). Descriptions updated (fs.write, fs.read, fs.move, fs.delete, diff, docs reader path, csv.clean leads with dedupe and names rules.key). fmt --all --check, clippy -p srv-files --all-targets -D warnings, and cargo test -p srv-files green: lib 59, accept_t13c 6, accept_t14 22 (+4 ignored, needs Python packages), history 1, contract 2."
+not_done: "1. fs.glob still resolves patterns against the base folder only (a session finds its files with runs/*/files/*); not in the brief. 2. fs.mkdir with a bare name stays in the base folder by design (D-570). 3. bench/results/accept-T-14.md row 9 still says 'fs.write rung9.txt'; the test now uses './rung9.txt' (a bare name would land in files/), the tester or suborch should update that row's wording. 4. Shell targets (cp/mv/redirections) are unchanged: shell cwd decides. 5. The Phase 1 ladder rungs 4/3 and 5/3 need a re-run by the tester; rung 1 (launcher instructions) is core's."
+gotchas:
+  - "Existing tests that meant 'outside runs/' with a bare name had to become './name' (accept_t14 keep.txt and rung9, fs unit test runs/x/home -> ./newdir). Any future test that wants the base folder must use ./ or a folder part."
+  - "paths::is_bare treats a trailing separator ('archive/') and a leading '~' as not bare; on Windows 'C:x' and 'a\\b' are not bare, on Unix 'a\\b' is one name."
+  - "accept_t14 --ignored: docs_pdf_write_then_read and docs_docx_write_then_read pass here; r1_docs_xlsx_round_trip_strict and r1_docs_pptx_write fail only because openpyxl and python-pptx are not installed on this machine."
+  - "Shared target dir: run 'cargo clean -p srv-files' before a final run; use 'cargo fmt -p srv-files', not --all, while srv-web is being edited on the same branch."
+decisions_made: [D-570, D-571, D-572, D-573, D-574]
+blockers_opened: []
+files_touched:
+  - crates/srv-files/src/paths.rs
+  - crates/srv-files/src/fs.rs
+  - crates/srv-files/src/csv.rs
+  - crates/srv-files/src/diff.rs
+  - crates/srv-files/src/docs.rs
+  - crates/srv-files/tests/accept_t13c.rs
+  - crates/srv-files/tests/accept_t14.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/handoffs/T-13c-rust-coder-2.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -p srv-files -j 2"

@@ -232,9 +232,10 @@ pub fn tools() -> Vec<ToolSpec> {
 
 /// The document tools with explicit helper locations (tests).
 pub fn tools_with(cfg: DocsConfig) -> Vec<ToolSpec> {
+    let in_path = json!({"type":"string","description":"input file; a bare name not found next to runs/ is read from this run's files/"});
     let read_props = |extra: Value| {
         let mut p = json!({
-            "path":{"type":"string"},
+            "path":in_path,
             "offset":{"type":"integer","minimum":0},
             "max_chars":{"type":"integer","minimum":1,"maximum":MAX_CHARS}
         });
@@ -262,7 +263,7 @@ pub fn tools_with(cfg: DocsConfig) -> Vec<ToolSpec> {
             Op::MdToPdf,
             "Render a markdown file to PDF (same renderer as pdf.write). Default out: files/<name>.pdf.",
             Class::Fill,
-            json!({"type":"object","properties":{"path":{"type":"string"},"title":{"type":"string"},"out":out},
+            json!({"type":"object","properties":{"path":in_path,"title":{"type":"string"},"out":out},
                 "required":["path"],"additionalProperties":false}),
         ),
         (
@@ -575,7 +576,7 @@ impl ToolHandler for Docs {
         let roots = Roots::of(ctx)?;
         if self.op.output().is_none() {
             let a: ReadArgs = parse(args)?;
-            let p = roots.resolve(&a.path)?;
+            let p = roots.resolve_existing(&a.path)?;
             return Ok(Classified {
                 class: Some(Class::Read),
                 values: vec![("path".into(), roots.shown(&p))],
@@ -607,7 +608,7 @@ impl ToolHandler for Docs {
                     .await?;
             }
             Op::MdToPdf => {
-                let src = roots.resolve(a.path.as_deref().unwrap_or(""))?;
+                let src = roots.resolve_existing(a.path.as_deref().unwrap_or(""))?;
                 self.py(json!({"op":"md.to_pdf","out":out_s,"path":crate::paths::plain(&src),"title":a.title}))
                     .await?;
             }
@@ -656,7 +657,7 @@ impl ToolHandler for Docs {
 impl Docs {
     async fn read(&self, roots: &Roots, a: ReadArgs) -> Result<ToolOutput, ToolError> {
         let max = util::limit("max_chars", a.max_chars, READ_DEFAULT_CHARS, MAX_CHARS)?;
-        let p = roots.resolve(&a.path)?;
+        let p = roots.resolve_existing(&a.path)?;
         if !p.is_file() {
             return Err(ToolError::Args(format!(
                 "{} is not a file",

@@ -32,7 +32,7 @@ const CELLS_SHOWN: usize = 6;
 pub fn tools() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "diff".into(),
-        description: "Compare two files. mode=text (default): unified diff of lines. mode=table: CSV/TSV/xlsx rows matched by key columns (default the first column), reporting rows added, removed and the cells that changed.".into(),
+        description: "Compare two files. mode=text (default): unified diff of lines. mode=table: CSV/TSV/xlsx rows matched by key columns (default the first column), reporting rows added, removed and the cells that changed. A bare name not found next to runs/ is read from this run's files/.".into(),
         class: Class::Read,
         args: json!({"type":"object","properties":{
             "a":{"type":"string"},
@@ -67,8 +67,8 @@ impl ToolHandler for Diff {
     async fn classify(&self, ctx: &ToolCtx, args: &Value) -> Result<Classified, ToolError> {
         let roots = Roots::of(ctx)?;
         let a: Args = parse(args)?;
-        let pa = roots.resolve(&a.a)?;
-        let pb = roots.resolve(&a.b)?;
+        let pa = roots.resolve_existing(&a.a)?;
+        let pb = roots.resolve_existing(&a.b)?;
         Ok(Classified {
             class: Some(Class::Read),
             values: vec![
@@ -82,8 +82,8 @@ impl ToolHandler for Diff {
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput, ToolError> {
         let roots = Roots::of(ctx)?;
         let a: Args = parse(&args)?;
-        let pa = roots.resolve(&a.a)?;
-        let pb = roots.resolve(&a.b)?;
+        let pa = roots.resolve_existing(&a.a)?;
+        let pb = roots.resolve_existing(&a.b)?;
         match a.mode.as_deref().unwrap_or("text") {
             "text" => {
                 // Up to 16 MiB a side: off the async threads, and the diff itself has a
