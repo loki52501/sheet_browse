@@ -1,112 +1,131 @@
 # review: T-14 srv-files
 
-Round 1 (commit 81b6bf6): request changes, B1-B9 (shell classifier failed open) + S1-S10.
-Round 2 (this file): fixes in f9a9079, decision D-523 (allowlist classifier, fail closed by
-construction).
+History:
+- Round 1 (81b6bf6): request changes. B1-B9 (shell classifier failed open), S1-S10.
+- Round 2 (f9a9079, D-523 allowlist classifier): request changes. B1-B9 closed. Blocking:
+  `~/.config/git/config` and `~/.config/git/attributes` writes were Fill (auto-allowed),
+  then a Read-class git runs their programs. Should fix: startup/rc files, .netrc, PATH.
+- Closing round (this file, head c6e28e3, D-524): `paths::runs_code_on_use` widened to
+  dotfiles, CODE_DIRS, home dot folders / AppData / PowerShell / Start Menu, PATH folders.
 
-Scope: `git diff main...HEAD` on swarm/servers-T14. B1-B9 and the new bypass hunt were
-re-run by calling `srv_files::shell::classify::classify` from a throwaway crate outside the
-worktree (classification only; nothing was executed against files). Unit tests (47) and
-`accept_t14` (21 pass, 4 docs ignored) are green under `CARGO_TARGET_DIR=F:/sb-swarm/target-servers -j 2`.
+Method: probes call the committed `srv_files::shell::classify::classify`,
+`paths::runs_code_on_use` and the fs/docs/csv `ToolHandler::classify` from a throwaway crate
+in the session scratchpad (classification only, nothing executed against real files).
+`cargo test -p srv-files` is green with this machine's `TEMP=F:\sb-swarm\tmp-servers`
+(48 unit, accept_t14 21 pass / 4 ignored); clippy `-D warnings` and fmt clean.
 
 ## Blocking
 
-- **Rule 4: the user-global git config `~/.config/git/config` is Fill, not Delete.**
-  `paths::runs_code_on_use` (`crates/srv-files/src/paths.rs:149-171`) matches the basename
-  `.gitconfig` and any `.git/` directory component, but not the XDG location
-  `$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`). Probe:
-  `echo x >> ~/.config/git/config` classifies Fill. git reads this file on every
-  invocation, so an allowlisted Read-class `git status` / `git log` / `git diff` then runs
-  whatever it sets (`core.fsmonitor`, `core.pager`, `alias.*`, `[diff].textconv`). Because
-  Fill is `Mode::Allow` by default (`crates/core/src/gate.rs:360`), this write is
-  auto-allowed with no ask. This directly misses D-523(8), which makes git config Delete
-  "because allowlisted git ... run what these say." Same gap on `fs.write` (shares
-  `util::write_verdict`, `crates/srv-files/src/util.rs:94-100`).
-- **Rule 4: the global gitattributes `~/.config/git/attributes` is Fill, not Delete.**
-  Same function, same cause (`crates/srv-files/src/paths.rs:160-170`). Probe:
-  `echo x >> ~/.config/git/attributes` is Fill. A global `* diff=x` / `filter=x` entry runs
-  a program on the next allowlisted `git diff` / `git log -p`. The repo-local
-  `.gitattributes` is correctly Delete; the XDG global one slips to auto-allow Fill. Add a
-  regression test (the round-1 `writes_to_config_that_runs_programs_are_delete` set covers
-  `.git/`, `.gitattributes`, `.curlrc`, `.wgetrc` but not these XDG forms).
+- **Rule 4: `fs.move` never calls `runs_code_on_use` on its destination.**
+  `crates/srv-files/src/fs.rs:171-220` (`plan_move`). Probes, all Fill (auto-allowed):
+  `fs.move runs/x/a.txt -> C:/Users/Admin/.config/git/config`, `-> ~/.config/git/attributes`,
+  `-> ~/.bashrc`, `runs/x/.gitconfig -> ~` (lands as `~/.gitconfig`),
+  `-> somerepo/.git/hooks/pre-commit`, `-> runs/x/repo/.git/hooks/pre-commit`,
+  `-> C:/Users/Admin/bin/jq`. This is the round-2 Blocking item on a call site the fix
+  missed (D-523 (8) already required it for .git). Route the final `to` through
+  `util::write_verdict`/`runs_code_on_use` and add the probes above as a test.
+- **Rule 4: `cp -r SRC/. DST` and `cp -T` are classed as if they wrote `DST/<basename>`, but
+  they write SRC's contents into DST.** `crates/srv-files/src/shell/classify.rs:2591-2630`
+  (`fin = dst_path.join(src.file_name())`; `runs/x/home/.` resolves to `runs/x/home`, and
+  `-T` is accepted but ignored). Probes, all Fill: `cp -r runs/x/home/. C:/Users/Admin`
+  (writes `~/.config/git/config`, `~/.bashrc`), `cp -a ...`, `cp -R ...`,
+  `cp -rT runs/x/home C:/Users/Admin`, `cp -r runs/x/payload/. somerepo` (writes
+  `somerepo/.git/config`; the next `git -C somerepo status` is Read and runs its
+  `core.fsmonitor`). The same hole also turns "replaces an existing file outside runs/"
+  (Delete, D-520) into Fill for every file inside the copied tree. A recursive copy whose
+  destination is an existing folder outside runs/ (or any `-T`) should be Delete unless
+  every file of the source tree is checked; `cp -r` into runs/ is unaffected.
+- **Rule 4: an archive extracted inside runs/ can plant `.git/config` and the next Read-class
+  git runs it, with no ask at any step.** `tar -xf runs/x/a.tar -C runs/x/r && git -C
+  runs/x/r status` classifies Read as one line; `unzip [-o] runs/x/a.zip -d runs/x/r` is Read;
+  the download into runs/ is Read. An archive entry `.git/config` with `core.fsmonitor`
+  (or `.gitattributes` + `.git/config` driver) runs on `git status`/`git diff`. D-523 (8)
+  states writes inside a `.git` folder are Delete "in or out of runs/"; extraction writes
+  them at Read. Pre-dates this commit (round 2 missed it); T-14b lists "hooks/drivers
+  already present in a repo" but this is planted by the agent itself through Read steps.
+  Fix options: list the archive at classify time and raise to Delete if any entry hits
+  `runs_code_on_use` (fail closed when it cannot be listed), or make the bash runner pass
+  git a neutralising config for runs/ repos (e.g. `GIT_CONFIG_COUNT` with
+  `core.fsmonitor=false`, `core.hooksPath` to an empty folder, `diff.external=`,
+  `core.pager=cat`), or have supreme ratify the residual explicitly in decisions.yaml.
+- **Rule 4: the PATH check reads the harness's own PATH, not the PATH bash runs with.**
+  `crates/srv-files/src/paths.rs:212-221`. `Runner::discover` picks
+  `Program Files/Git/bin/bash.exe`, a wrapper that prepends `/mingw64/bin:/usr/bin:$USERPROFILE/bin`
+  to the child PATH (verified: launched with `PATH=C:\WINDOWS\system32;C:\WINDOWS`, bash
+  sees `/mingw64/bin:/usr/bin:/c/Users/Admin/bin:...`). The registry PATH on this machine
+  has no `C:\Users\Admin\bin`, so a harness started from PowerShell / Claude Code does
+  not see it: under that PATH `echo x > C:/Users/Admin/bin/jq` (also `gh`, `zip`) is Fill.
+  `jq`, `gh`, `zip`, and the System32 tools in FREE (`nslookup`, `ping`, `where`, ...) are
+  not in Git's folders, so `~/bin` wins and the next Read-class `jq . file` runs the
+  planted file. Take the PATH from the runner (ask bash once at discover, cache it) or add
+  `<home>/bin` and the Git folders when the runner is Git Bash; test with a PATH that
+  lacks `~/bin`.
+- **Acceptance is red on a stock Windows machine.** `CODE_HOME_DIRS` holds `appdata`
+  (`paths.rs:163`) and the home rule matches every ancestor (`paths.rs:187-197`), so every
+  write anywhere under `%USERPROFILE%\AppData` (default `%TEMP%`) is Delete, runs/
+  included. With `TEMP=TMP=C:\Users\Admin\AppData\Local\Temp`: 7 unit tests fail
+  (`fs::tests::hard_linked_targets_are_delete_b7`,
+  `writing_config_that_runs_programs_is_delete`, `shell::classify::tests::network_classes`,
+  `redirections`, `edits_moves_copies`, `read_only_controls_stay_below_delete`,
+  `writes_into_a_path_folder_are_delete`) and 4 of accept_t14 fail
+  (`fs_read_write_glob_move_mkdir`, `csv_clean_dedupes_normalises_and_flags`,
+  `docs_missing_helper_is_a_clear_error`, `docs_xlsx_round_trip_or_names_what_is_missing`).
+  Probe with the base under AppData Temp: `echo x > runs/x/a.txt`, `cp runs/x/a.txt
+  runs/x/b.txt` and `echo x > notes.txt` are all Delete. The same happens for a repo below
+  any home dot folder (`~/.wt/...`, `/home/u/.local/src/...`): every runs/ write asks. Apply
+  the ancestor rules only to the part of the path below the runs root (for scratch) and
+  match the specific config locations (`~/.config/git/*`, AppData Startup, PowerShell
+  profile) rather than any ancestor named AppData.
 
 ## Should fix
 
-- **Rule 4 judgment (the item the brief asked me to rule on): appending to shell/login
-  startup and autorun files outside runs/ is Fill, and Fill auto-allows.** Confirmed Fill
-  (no ask) for `~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.zshrc`, the PowerShell
-  profile, a `.cmd` under the `Startup` folder, `~/.ssh/authorized_keys`, `~/.ssh/config`,
-  `~/.npmrc`, `~/.cargo/config.toml`, and direnv `.envrc`. My judgment: these are exactly
-  "a line that makes a later step run attacker-chosen code, outside runs/," so by the same
-  principle D-523(8) applies to git/curl/wget config they should be Delete. The reason they
-  are not strictly a rule break today is that D-523 deliberately keeps "create/append to a
-  literal path outside runs/" at Fill, and the harness runs its own bash with
-  `--noprofile --norc`, so the harm lands on the human's later sessions rather than on the
-  harness itself. Because Fill auto-proceeds, a persistence/backdoor append happens with no
-  ask. Extend the `runs_code_on_use` Delete set to these, or have supreme explicitly ratify
-  Fill for them in D-523.
-- **`~/.netrc` / `_netrc` are Fill** (`crates/srv-files/src/paths.rs:160-170`). curl, wget
-  and git read this for credentials; altering it steers allowlisted `curl`/`wget` auth.
-  Consider adding it to the Delete set.
-- **S2 build tools:** `cargo build`/`npm test`/`make` etc. are Delete, only `--version`
-  (and `go/cargo/docker version`) is Read (`classify.rs:1689-1700`). Sound. B-520/B-521 are
-  answered in D-523; supreme should close them.
-- **PATH-planted program residual (already noted in the handoff, not newly broken):**
-  `echo x >> ~/bin/git` is Fill, and a later bare `git ...` is classified as the real git.
-  A program planted on PATH outside runs/ is out of the classifier's model. Document the
-  assumption (PATH is trusted) or guard writes to PATH dirs.
+- Shell regression tests for D-524 that use `~/...` are vacuous: the shell classifier makes
+  any `~` word Unknown, hence Delete (`classify.rs:1959-1961`), so
+  `writes_to_config_that_runs_programs_are_delete` (`shell/classify/tests.rs:475-506`) would
+  pass without the fix. Use absolute home paths (`dirs::home_dir().join(".config/git/config")`)
+  and add `fs.move`/`fs.write` cases.
+- `config_write` reason still says "which git, curl or wget read as configuration"
+  (`classify.rs:2137-2145`) for PATH programs, startup files and `.env` in runs/; reuse the
+  `util.rs:99` wording.
+- `on_path` compares components only: PATH entries spelled with 8.3 names
+  (`C:\PROGRA~1\...`) or that are junctions/symlinks never match the canonical target;
+  relative PATH entries are ignored; the drive prefix is dropped (`lower_names`), which only
+  over-matches (`D:/Users/Admin/AppData/x` counts as home).
+- `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `CURL_HOME`, `WGETRC`,
+  `NETRC` are not set here and cannot be set from a line (prefix assignment and `export` of
+  them are Delete, verified), but if the harness inherits one, writes to the file it names
+  are Fill (`echo x >> D:/cfg/git/config` is Fill). Either strip them in `sanitize_env`
+  or add their targets to `runs_code_on_use`.
+- Over-match noted in D-524 is real: `echo x > runs/x/.env` and any `.github`/`.vscode`
+  file inside runs/ are Delete. Acceptable fail-closed, but it costs an ask per write.
 
 ## Notes
 
-- **B1-B9 are closed.** Every round-1 probe now classifies Delete, verified directly against
-  the committed classifier and asserted in `crates/srv-files/src/shell/classify/tests.rs`
-  (`round1_blocking_probes_are_delete`, `round1_b9_cmd_exe_runs_only_plain_commands`). The
-  tests assert the class, not merely "no panic." Spot checks that pass: `$(( $(rm) ))`,
-  `let 'x[$(rm)]'`, `exec -a`, `history -w`, `xargs`, `find -exec`, `ln`/`cp -l/-s`,
-  `--upload-pack/--receive-pack/--template/-c`, cmd.exe single-quote injection.
-- **Allowlist design holds** against the forms I probed: redirection variants
-  (`>|`, `<>`, `&>`, `2>`, `>&`, fd-dup, `{fd}>`), `~`/glob/brace targets, process
-  substitution `<(..)`/`>(..)`, coproc, `source`/`.`, `alias`/`shopt`, function defs,
-  heredocs with `$(`, `[[ ]]` arithmetic, `set -o`, `sed w/e`, `awk system()/print >`,
-  `tar --to-command`/`-x` outside -C, `unzip` outside -d, `zip -m`, `curl -K/-O`,
-  `wget -r/-N/-e`, `git` program-running options and history-rewriting subcommands, `gh`
-  non-group first words / `auth token` / `config set`, quoting tricks (`"rm"`, `\rm`,
-  `r''m`, `RM.EXE`, unicode `ｒｍ`), `cp`/`mv` overwriting an existing outside file,
-  bookkeeping deletes, and the cmd.exe fallback (only a single plain argv command runs).
-- **S3/S4 fixed and consistent:** `fs.delete` inside runs/ is Read, shell `rm` inside runs/
-  is Read (`fs.rs:228-245`, `classify.rs` delete_target). `fs.move`/shell `mv` of a source
-  outside runs/ is Delete (`fs.rs:186-202`). Acceptance:
-  `fs_delete_inside_runs_runs_outside_asks`, `r1_fs_case_and_dotdot_variants_...`.
-- **B7 links:** `paths::hard_linked` makes a file with >1 link (or an unreadable count)
-  Outside for `fs.write/delete/move` and every shell target; `links_elsewhere()` makes
-  scratch targets Delete when another command in the same line extracts/clones/copies a
-  tree. TOCTOU between classify and the syscall is narrowed by `util::recheck` re-resolving
-  (which re-runs `place`/`hard_linked`) but a link/junction swapped between recheck and the
-  syscall remains an inherent residual; `fs_junction_out_of_runs_is_outside` covers the
-  classify-time junction case.
-- **S6/S7/S8/S10 fixed:** diff runs in `spawn_blocking` with a `similar` timeout
-  (`diff.rs:90-149`); no machine path, skills under `$CLAUDE_CONFIG_DIR/skills` or
-  `~/.claude/skills` (`docs.rs:104-106`); pandoc gets `--sandbox` on 2.15+, an image-dropping
-  Lua filter on docx.write, and `-t markdown-raw_html` on docx.read (`docs.rs:11-13,
-  407-427, 688-691`); the job sets `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and the tree is
-  killed on every exit path (`proc.rs:147-169, 262, 341`).
-- **Sanitized bash env (beyond-brief):** `sanitize_env` strips `BASH_ENV`, `ENV`, `CDPATH`,
-  `GLOBIGNORE`, `BASHOPTS`, `SHELLOPTS`, `PROMPT_COMMAND`, `PS4`, `IFS` and every
-  `BASH_FUNC_*` (`shell/mod.rs:118-140`); bash runs `--noprofile --norc`. Sound.
-- **Rules 2 and 5 unchanged and intact:** shell output is capped and the full stream is
-  scrubbed before it is saved to `files/`; `r1_vault_canary_echoed_by_shell_never_leaves`
-  and `vault_canary_never_leaves_through_fs_read` assert the canary never reaches text, the
-  saved file or the ledger. No resolved vault value appears in any new reason string.
-- **Commit ids:** F-1..F-3, F-5, D-523 as claimed; the diff matches (shell allowlist,
-  link counts, cmd fallback, pandoc sandbox).
+- Round-2 Blocking on the direct shell and `fs.write` paths is closed: `echo x >>`
+  (absolute, `/c/...`, mixed case, `.config.`, trailing dot, trailing space),
+  `tee -a`, `sed -i`, `touch`, `cp` file to `~/.gitconfig` (direct, into `~`, `~/`,
+  `-t ~`), `mv runs/x/.bashrc ~`, `mv runs/x/home/.config ~` are Delete; `fs.write` to
+  `~/.config/git/config`, `~/.config/git/attributes`, `~/bin/jq` is Delete. `$HOME/...`
+  and `~/...` in shell are Delete (run-time word). `git config ...`, `tar -x -C ~`,
+  `unzip -d ~` are Delete. Junctions resolve to their target before the check.
+- Regressions with the base on F: (this worktree under `.wt/`, not below home): none.
+  `echo x > runs/x/a.txt`, `rm -rf runs/x`, `cp runs/x/a.txt runs/x/b.txt`,
+  `mkdir -p runs/x/out`, `git status`, `jq . runs/x/a.txt` are Read; `echo x > notes.txt`
+  and `fs.write notes.txt` are Fill. `.wt` only matters if the tree is below home (see
+  Blocking).
+- D-524 entry in `agent-memory/decisions.yaml` (appended outside the write hook): valid
+  YAML, keys `id/text/why` like its neighbours, ids unique (146), ASCII only, no secrets or
+  paths; harmless.
+- Hard rules 1, 2, 3, 5, 6, 7: nothing new in c6e28e3 touches them. Reason strings carry
+  paths only, no resolved values.
+- Commit ids F-1, F-2, D-524 match the diff.
 
 ## Verdict
 
-Request changes. B1-B9 are genuinely closed and the allowlist is a strong, fail-closed
-design. The two Blocking items are a single implementation gap: `runs_code_on_use` does not
-recognise the XDG git config/attributes paths, so writing `~/.config/git/config` or
-`~/.config/git/attributes` is auto-allowed Fill even though an allowlisted Read-class git
-command then executes what they contain. Fix those (and ideally the Should-fix startup-file
-set, or get D-523 to ratify Fill for it) with a regression test, and this is an approve.
+Request changes. The widened `runs_code_on_use` closes the round-2 cases on the shell
+redirection and `fs.write` paths, but `fs.move` skips it entirely, `cp -r SRC/.`/`cp -T`
+misplace the destination, extraction inside runs/ still plants git config at Read, the PATH
+check uses the wrong PATH for Git Bash, and the AppData ancestor match makes acceptance fail
+on a default Windows `%TEMP%`.
 
 Verdict: request changes
