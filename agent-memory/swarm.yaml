@@ -13,7 +13,7 @@ areas:
     later: {wave: 3, tasks: [T-16]}
     docs: [docs/01-HARNESS-CORE.md, docs/02-MEMORY.md]
     status: in_progress
-    merged: false
+    merged: true   # 960c7b1, 2026-10-25 20:40: D-87 merge (review approved, cargo test --workspace 704 passed 0 failed 5 ignored); red acceptance rows -> follow-up tasks
   sheet:
     wave: 1
     crates: [sb-sheet]
