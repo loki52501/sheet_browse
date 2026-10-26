@@ -1,0 +1,20 @@
+from: tester-1 (driver area, T-21 round 1)
+to: driver/suborch, then rust-coder for T-21 round 2 and reviewer
+task: T-21
+date: "2026-10-26"
+state: "Acceptance round 1 against 4064360 (implementation 8deaa56): bench/results/accept-T-21.md has 15 rows, 13 pass, 2 fail, Verdict red. New crates/sb-driver/tests/accept_t21_tester.rs (10 tests, public API, real chromium-1248). Pass: opened tab 2 in the same result (and tab 3 from window.open), alert paused with no later step and resume, confirm accept/dismiss, prompt with text, downloads with hostile page names (..\\..\\, %2F, %5C, <a download>, CON.txt, [x](#12) fences) asked first and landing only in runs/<id>/files, allow=false not fetched, no-op NoVisibleChange, Navigated + B-8 diff, typing incl. @vault into text and password fields with a canary sweep (results, errors, diff, ledger, run dir, test home after shutdown, logs, working tree: 0 hits), select/check/Enter-on-form=Submit/scroll, upload refusals incl. a mklink /J junction and a file symlink, gate counters (Submit under Fill, CHALLENGE row with no scroll or mouse), escaping and caps, no new sleeps, 8 of 8 mutations red and restored, accept_t18 and accept_t20 green. FAIL row 10 (row10b): a click on an element in a same-origin iframe that sits below the fold is dispatched off-screen (viewport y 926 with innerHeight 428) and reported Ok + NoVisibleChange. In-page act() checks inViewport against the frame's own viewport, and ACT_FN adds frameElement offsets without scrolling the frame into the top viewport or checking the summed point. FAIL row 14b: workspace 979 passed, 3 failed, 5 ignored (row10b; accept_t20 row1b 76.6 ms flake under load, green alone 3/3; harness-core vault_scrub_t05_fix fails with any all-alphanumeric SB_VAULT_CANARY, pre-existing, crates/core untouched)."
+not_done: "1. Row 10b needs a code fix (actionable.rs ACT_FN and/or injected act()): scroll the frame element into view in each ancestor, or check the summed point against the top viewport and retry or fail with 'outside the viewport'. Then rerun row10a and row10b. 2. Notes, not rows: NoVisibleChange is reported for a frame click that changed the parent document (consequences read only the step frame's index, T-22 frame merging); Driver::tabs() returns the canary in a GET-form URL (unscrubbed outside act); Driver::download returns a PathBuf with the raw page name. 3. vault_scrub_t05_fix canary sensitivity belongs to area core (T-05); not filed as a blocker by the tester."
+gotchas:
+  - "Hooks refuse Write outside the worktree (the scratchpad included). Put helper scripts in target/scratch/<you>/ (git-ignored); bash redirects of logs to the scratchpad still work."
+  - "Use a canary with a '-' in it: harness-core vault_scrub_t05_fix fails when SB_VAULT_CANARY is all alphanumeric, which turns the workspace run red for a reason unrelated to the task."
+  - "An element id becomes a window property: a page counter named window.later on a page with id=later reads back the element. Name counters so they do not collide with ids."
+  - "Scroll is Navigate (docs/01), above Fill: sc() under a Fill ctx is stopped by the gate, and sc(#N) on a node that is not an index row is Submit (D-402). Scroll tests need a Navigate ctx and an indexed target."
+  - "Headless viewport here is 428 px high: anything placed lower than that is below the fold."
+  - "The scratchpad is shared across tester sessions; count only your own logs when grepping for the canary."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-driver/tests/accept_t21_tester.rs
+  - bench/results/accept-T-21.md
+  - agent-memory/handoffs/T-21-tester-1.yaml
+verify: "SB_VAULT_CANARY=sbcanary-<unique> cargo test -j 2 -p sb-driver --test accept_t21_tester -- --test-threads=1 --nocapture"
