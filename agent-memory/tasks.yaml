@@ -163,7 +163,7 @@ tasks:
   - id: T-22
     step: 6
     title: "registry complete + settle(); acceptance 4, 5"
-    status: doing
+    status: done
     owner: driver/suborch
     claimed_at: "2026-10-26"
     branch: swarm/driver-T22
@@ -325,3 +325,11 @@ tasks:
     title: "review-T-21 round 2 leftovers: (1) closed shadow roots: k#/t# on a closed host with focus inside passes the exact-focus check (rule 4 residual, review asks supreme whether to escalate); fail closed with a DOM.describeNode pierce check plus a test; (2) live test of the D-615 delegatesFocus exception (text accepted, password refused); (3) mock-CDP unit tests for the non-2xx re-fetch refusal and the file: scheme refusal; (4) until T-22 network settle, no NoVisibleChange for frame-0 steps classed Submit or higher; (5) take the event mark before the open-dialog check at the top of the act loop (act.rs:304/320); (6) tabs()/frames() rely on core install_global and have no cut-prefix rule (B-613)."
     status: todo
     from: T-21
+  - id: T-22b
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T22b
+    title: "accept-T-22 round 3 row 18 and review-T-22 round 2 leftovers: (1) re-run rows 03 and 13b on a quiet host; three single overruns of the 3 s + 40 ms bound (row13b2 no-nav 3.053 s, row03d w(3s) EventSource 3.083 s, row03f open() 3.042 s) happened only while the host was memory-starved; decide whether real-browser wall-clock bounds belong in the default workspace run or behind a timing gate, since they can make cargo test --workspace flaky on a loaded host; (2) D-625 counts every in-flight request with no age limit, so a page holding a long-poll (Gmail channel, docs/07 mail path) never reports settled: supreme to rule, with a long-poll fixture; (3) D-626 says the post-commit walk ends by commit + 3 s but open() calls based_ctx with OPEN_CAP; bind it; (4) D-627 hidden-page window can still report NoVisibleChange (POST_FN should return hidden and suppress the claim); (5) the gap-count test can pass with the counter off; (6) B-615 same-origin child frames in settle, B-616 worker requests, B-617 page-side mutation counter; (7) D-629 trade-off: a multi-frame program whose last step fails before input after the previous window deadline drops another frame's diff rows."
+    status: todo
+    from: T-22

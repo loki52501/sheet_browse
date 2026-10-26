@@ -1,0 +1,23 @@
+from: driver/suborch
+to: supreme, next driver session
+task: T-22
+date: "2026-10-26"
+state: "Wave 2 for area driver is complete: T-18 (PR #3), T-20 (PR #6), T-21 (PR #11), T-22 (this branch) all done, areas.driver.status pr_open, merge_gate.py driver prints 'gate ok for driver: T-18 T-20 T-21 T-22' on swarm/driver-T22. T-22: network-aware settle (D-620, D-625), act window and open() under one deadline (D-626, D-629), merged index() with every row field scrubbed, opaque and challenge frames refused at call time and never walked (D-628), close(), fresh tabs() titles escaped (D-622). Review round 2 approve, no Blocking (bench/results/review-T-22.md). Acceptance round 3 red on one row only (row 18: three single timing overruns of 2 to 43 ms past the 3 s + 40 ms bound on a memory-starved host, not repeated; filed as T-22b); every other row passes. Coder's workspace run at 146afc0: 1059 passed, 0 failed, 5 ignored."
+not_done: "Merge order for supreme: #3 (T-18), page #10, #6 (T-20), #11 (T-21), then T-22; each driver PR carries the earlier ones (D-88 local merges). Wave 3 (T-23..T-26: sb-mcp, read on live index, sb-media, scheduling and recovery) waits for supreme to open it. Follow-ups filed: T-18b, T-18c, T-20b, T-21b, T-22b."
+gotchas:
+  - "Real-browser wall-clock tests (accept_t20 row1b, accept_t22 rows 03 and 13b) use 40 to 50 ms tolerances and can fail when the host is starved (other worktrees' Chrome processes, memory commit limit). If cargo test --workspace flakes at merge, re-run those binaries alone before treating it as a defect; T-22b asks whether they belong behind a timing gate."
+  - "D-625 (sub-orchestrator ruling) makes settled false whenever any tracked request is in flight, so long-poll pages such as Gmail never report settled. Fail-safe but costs turns on the docs/07 mail path; T-22b item 2 asks supreme to rule."
+  - "B-606 needs the user: one window per tab (D-605) under the me profile can take the user's focus."
+  - "Rule 4 residual for supreme: focus inside a closed shadow root passes the exact-focus check (T-21b item 1)."
+  - "A merge conflict inside 'cmd | tail' hides the failure; 8e7fe97 was committed with conflict markers in tasks.yaml and e47a911 fixes it. Check git status after every merge before committing."
+decisions_made: [D-620, D-621, D-622, D-623, D-624, D-625, D-626, D-627, D-628, D-629]
+blockers_opened: [B-615, B-616, B-617]
+files_touched:
+  - crates/sb-driver/
+  - agent-memory/tasks.yaml
+  - agent-memory/swarm.yaml
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - bench/results/review-T-22.md
+  - bench/results/accept-T-22.md
+verify: "SB_VAULT_CANARY=sbcanary-<unique-with-dash> cargo test -j 2 -p sb-driver -p sb-cdp -- --test-threads=1"
