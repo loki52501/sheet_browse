@@ -1,4 +1,5 @@
-//! Scheduler (H-5, D-106, D-107, D-116). Owned by area core (T-08; watch and reflect are T-16).
+//! Scheduler (H-5, D-106, D-107, D-116, D-140). Owned by area core (T-08; watch and reflect
+//! fire since T-16).
 //! The row types are contract and live in `memory` (D-48).
 //!
 //! * Cron expressions are 5-field standard cron, parsed with `croner`, evaluated in UTC (D-107).
@@ -48,7 +49,7 @@ const DB_RETRY_MIN: Duration = Duration::from_millis(500);
 pub enum SchedError {
     #[error("cron {cron:?}: {why}")]
     BadCron { cron: String, why: String },
-    /// watch and reflect schedules are stored, but only T-16 (wave 3) runs them.
+    /// Not returned since T-16 (watch and reflect fire); kept so existing matchers compile.
     #[error("schedule kind {0} is not in Phase 1 (T-16)")]
     NotInPhase1(&'static str),
     #[error(transparent)]
@@ -229,6 +230,10 @@ pub struct LaunchRequest<'a> {
     pub runs_root: &'a Path,
     /// Already scrubbed (vault values appear only as `@vault(name)`).
     pub prompt: &'a str,
+    /// The schedule that fired this run (`None` for `harness run` and tests). A launcher reads
+    /// its `kind` and `watch_target`, e.g. to tell a watch session where to write the
+    /// watched state (T-16, I-13 proposal B-197).
+    pub schedule: Option<&'a Schedule>,
 }
 
 /// How the session ended. `code: None` means it was killed by a signal.
@@ -345,13 +350,9 @@ fn mark_failed(report: &str, why: &str) -> String {
 impl Runner {
     /// Fires a schedule (H-5): `schedule_fired` first (so a failing firing never repeats at
     /// once), then [`Runner::execute`] with `parent_run` = the schedule's run.
-    /// watch and reflect are [`SchedError::NotInPhase1`] (T-16).
+    /// Every kind fires (T-16, D-140); the launcher sees the schedule in
+    /// [`LaunchRequest::schedule`]. A reflect row launches like cron until harness handles it.
     pub async fn fire(&self, s: &Schedule) -> Result<Finished> {
-        match s.kind {
-            ScheduleKind::Cron => {}
-            ScheduleKind::Watch => return Err(SchedError::NotInPhase1("watch")),
-            ScheduleKind::Reflect => return Err(SchedError::NotInPhase1("reflect")),
-        }
         self.store.schedule_fired(s.id, self.clock.now()).await?;
         self.execute(RunSpec {
             prompt: &s.prompt,
@@ -409,6 +410,7 @@ impl Runner {
                 run: &folder,
                 runs_root: &self.runs_root,
                 prompt: &prompt,
+                schedule: spec.schedule,
             })
             .await;
         let launch_problem = match launched {
@@ -582,21 +584,6 @@ impl Scheduler {
         for s in list {
             if !s.enabled || book.is_running(s.id) {
                 continue;
-            }
-            match s.kind {
-                ScheduleKind::Cron => {}
-                ScheduleKind::Watch | ScheduleKind::Reflect => {
-                    let kind = if s.kind == ScheduleKind::Watch {
-                        "watch"
-                    } else {
-                        "reflect"
-                    };
-                    book.warn_once(
-                        s.id,
-                        format!("kind {kind} is not in Phase 1 (T-16); skipped"),
-                    );
-                    continue;
-                }
             }
             let cron = match parse_cron(&s.cron) {
                 Ok(c) => c,
@@ -927,31 +914,41 @@ mod tests {
         assert!(store.run_get(&f.run).await.unwrap().unwrap().strict);
     }
 
+    /// T-16 (D-140): watch and reflect rows fire like cron rows.
     #[tokio::test]
-    async fn watch_and_reflect_are_not_phase1() {
+    async fn watch_and_reflect_fire() {
         let tmp = Tmp::new();
         let store = Arc::new(MemStore::new());
+        let launcher = FakeLauncher::ok();
         let r = runner(
             store.clone(),
-            FakeLauncher::ok(),
+            launcher.clone(),
             Arc::new(ManualClock::new(t(12, 0, 0))),
             &tmp.0,
         );
-        let mut s = cron_row("*/1 * * * *", "watch it", None);
-        s.kind = ScheduleKind::Watch;
-        assert!(matches!(
-            r.fire(&s).await,
-            Err(SchedError::NotInPhase1("watch"))
-        ));
-        s.kind = ScheduleKind::Reflect;
-        assert!(matches!(
-            r.fire(&s).await,
-            Err(SchedError::NotInPhase1("reflect"))
-        ));
+        for (kind, prompt) in [
+            (ScheduleKind::Watch, "watch it"),
+            (ScheduleKind::Reflect, "reflect"),
+        ] {
+            let mut s = cron_row("*/1 * * * *", prompt, None);
+            s.kind = kind;
+            s.id = store.schedule_add(s.clone()).await.unwrap();
+            let f = r.fire(&s).await.unwrap();
+            assert_eq!(f.schedule, Some(s.id));
+            assert!(f.folder.join("report.md").is_file());
+        }
+        let prompts: Vec<String> = launcher
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, p)| p.clone())
+            .collect();
+        assert_eq!(prompts, ["watch it", "reflect"]);
     }
 
     /// The loop: waits for a change, computes the next due minute, fires once per advance,
-    /// skips watch and disabled rows, and coalesces missed occurrences into one firing.
+    /// skips disabled rows, and coalesces missed occurrences into one firing.
     #[tokio::test]
     async fn loop_fires_on_deadline_and_wakes_on_change() {
         let tmp = Tmp::new();
@@ -971,10 +968,7 @@ mod tests {
             let _ = stop_rx.await;
         }));
 
-        // Rows the loop must not fire.
-        let mut w = cron_row("*/1 * * * *", "watch", None);
-        w.kind = ScheduleKind::Watch;
-        store.schedule_add(w).await.unwrap();
+        // A row the loop must not fire.
         let mut off = cron_row("*/1 * * * *", "off", None);
         off.enabled = false;
         store.schedule_add(off).await.unwrap();

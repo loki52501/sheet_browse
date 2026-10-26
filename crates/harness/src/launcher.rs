@@ -317,6 +317,7 @@ mod tests {
                 run: &run,
                 runs_root: tmp.path(),
                 prompt: "say hi",
+                schedule: None,
             })
             .await
             .unwrap_err();
@@ -334,6 +335,7 @@ mod tests {
             run: &run,
             runs_root: tmp.path(),
             prompt: "-h say hi",
+            schedule: None,
         };
         let deny = [
             "--disallowedTools",
