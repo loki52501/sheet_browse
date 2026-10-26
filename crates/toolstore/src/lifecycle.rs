@@ -39,6 +39,8 @@ pub enum SweepAction {
         domain: String,
         name: String,
         version: i32,
+        /// Where the file went; `None` when there was no file or the archive step failed
+        /// (D-316: the row is retired anyway and the next sweep archives the file).
         archived: Option<PathBuf>,
         why: String,
     },
@@ -260,9 +262,15 @@ impl ToolStore {
         Ok(h)
     }
 
-    /// Marks the row retired, persists it, then moves the file to the archive and writes the
-    /// ledger. The row goes first so a failed move is recoverable: a retired row whose file is
-    /// still in place is archived by the next [`ToolStore::sweep`].
+    /// Marks the row retired, persists it, then moves the file to the archive and writes an
+    /// ok:true `tools.retire` event. The row goes first so a failed move is recoverable: a
+    /// retired row whose file is still in place is archived by the next [`ToolStore::sweep`]
+    /// (and never loaded by [`ToolStore::load_live`], D-315).
+    ///
+    /// D-316: when the archive step fails, the retire still happened (the row says retired),
+    /// so the ok:true `tools.retire` event is written with `archived: null` and
+    /// `archive_failed: <path>`, then an ok:false `tools.archive` event naming the error, and
+    /// the result is `Ok(None)`. Only a bad id or a memory error returns `Err`.
     async fn retire(
         &self,
         store: &dyn MemoryStore,
@@ -275,7 +283,24 @@ impl ToolStore {
         h.status = ToolStatus::Retired;
         h.why = Some(why.clone());
         store.tool_health_set(h.clone()).await?;
-        let archived = self.archive_with(&h.domain, &h.name, h.version, set_mtime)?;
+        let archived = match self.archive_with(&h.domain, &h.name, h.version, set_mtime) {
+            Ok(a) => a,
+            Err(e @ StoreError::Memory(_)) => return Err(e),
+            Err(e) => {
+                let path = self.try_tool_path(&h.domain, &h.name)?;
+                let rel = self.rel(&path);
+                let summary = format!(
+                    "retired {}/{}; archive of {rel} failed, retried at the next sweep",
+                    h.domain, h.name
+                );
+                let cons = json!({"archived": null, "archive_failed": rel});
+                self.ledger(store, "retire", h, at, summary, cons, Some(why))
+                    .await?;
+                self.ledger_failed(store, "archive", h, at, &path, &e)
+                    .await?;
+                return Ok(None);
+            }
+        };
         let summary = match &archived {
             Some(p) => format!(
                 "retired {}/{}, archived to {}",
@@ -300,7 +325,10 @@ impl ToolStore {
     ///   status repaired;
     /// - `Failed`: fails += 1, streak reset, why;
     /// - `FingerprintMiss` / `ExpectsMiss`: as `Failed`, and status needs_repair;
-    /// - needs_repair with fails >= 5 and not pinned: retired, file archived;
+    /// - needs_repair with fails >= 5 and not pinned: retired, file archived; when the archive
+    ///   step fails the result is still `Ok` with the row retired, the ledger gets an ok:true
+    ///   `tools.retire` and an ok:false `tools.archive` event, and the next sweep archives the
+    ///   file (D-316);
     /// - `ask` (raised floor, T-5, D-310) is left only by [`ToolStore::confirm`]: every
     ///   outcome updates counters (and Relocated the fingerprint) but the status stays `ask`;
     /// - `Relocated` on a retired tool is refused.
@@ -308,6 +336,16 @@ impl ToolStore {
         &self,
         store: &dyn MemoryStore,
         result: ToolRunResult,
+    ) -> Result<ToolHealth, StoreError> {
+        self.record_with(store, result, &touch).await
+    }
+
+    /// [`ToolStore::record`] with the archive's set-mtime step as a seam (tests).
+    pub(crate) async fn record_with(
+        &self,
+        store: &dyn MemoryStore,
+        result: ToolRunResult,
+        set_mtime: SetMtime<'_>,
     ) -> Result<ToolHealth, StoreError> {
         let ToolRunResult {
             domain,
@@ -383,7 +421,7 @@ impl ToolStore {
         if h.status == ToolStatus::NeedsRepair && h.fails >= MISSES_TO_RETIRE && !pinned {
             let last = h.why.clone().unwrap_or_default();
             let why = format!("retired after {} misses; last {last}", h.fails);
-            self.retire(store, &mut h, why, at, &touch).await?;
+            self.retire(store, &mut h, why, at, set_mtime).await?;
         }
         store.tool_health_set(h.clone()).await?;
         Ok(h)
@@ -553,8 +591,11 @@ impl ToolStore {
     ///
     /// A file step that fails for one tool or file (archive, delete) does not stop the sweep:
     /// it is written to the ledger as an `ok: false` event and retried at the next sweep, and
-    /// the other tools and domains are still swept. A failed retire leaves the row retired
-    /// with its file in place, which the next sweep archives. Memory errors still return.
+    /// the other tools and domains are still swept. A retire whose archive step fails is still
+    /// a retire (D-316): the row is saved retired, the ledger gets an ok:true `tools.retire`
+    /// and an ok:false `tools.archive` event, the action is `SweepAction::Retired` with
+    /// `archived: None`, and the next sweep archives the file in place. Memory errors still
+    /// return.
     pub async fn sweep(
         &self,
         store: &dyn MemoryStore,
@@ -604,18 +645,13 @@ impl ToolStore {
                         } else {
                             continue;
                         };
-                        let archived = match self
+                        // D-316: a failed archive step is handled inside retire (Ok(None)
+                        // plus an ok:false tools.archive event). What is left is a memory
+                        // error, or a bad id that try_tool_path above already refused; both
+                        // stop the sweep.
+                        let archived = self
                             .retire(store, &mut h, why.clone(), now, set_mtime)
-                            .await
-                        {
-                            Ok(a) => a,
-                            Err(e @ StoreError::Memory(_)) => return Err(e),
-                            Err(e) => {
-                                self.ledger_failed(store, "retire", &h, now, &path, &e)
-                                    .await?;
-                                continue;
-                            }
-                        };
+                            .await?;
                         store.tool_health_set(h.clone()).await?;
                         done.push(SweepAction::Retired {
                             domain: domain.clone(),

@@ -1,0 +1,15 @@
+from: reviewer (area store)
+to: store sub-orchestrator, then rust-coder and tester
+task: T-11b
+date: "2026-10-25"
+state: "Round 1 review of swarm/store-T11b (955326d, 9ef13ef, 6a447e4) written to bench/results/review-T-11b.md: 0 blocking, 3 should-fix, Verdict: approve. B-33 items 1-3 implemented per D-315/D-316; hard rules clean; existing I-7/I-12 signatures unchanged; sweep's `?` verified equivalent to the old Memory arm (BadPath unreachable, try_tool_path checks the same id first, rows filtered by domain equality)."
+not_done: "Should-fix for the coder, in order: (1) a test where only the site folder's tools.health read fails (the current fail-closed test cannot catch a site-read unwrap_or_default; the tester's accept_t11b does); (2) typed pins for scan_live/load_live in contract_paths; (3) assert consequences.get(\"archived\") == Some(&Null), not [\"archived\"].is_null(). Follow-up suggestion before T-28: reforge does not refuse a retired row, and since D-316 a retired row with its file in place is a normal state."
+gotchas:
+  - "The store worktree is shared with the tester: while reviewing, loader.rs carried an uncommitted mutation (site-folder read unwrap_or_default) and tests/accept_t11b.rs was untracked. cargo test -p toolstore results taken then reflect the mutation, not HEAD. Commit only explicit paths."
+  - "serde_json Value[\"missing\"] is Null, so is_null() asserts do not prove a key is present."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-11b.md
+  - agent-memory/handoffs/T-11b-reviewer-1.yaml
+verify: "tail -n 1 bench/results/review-T-11b.md (Verdict: approve); merge_gate.py reads the Blocking section and that line"

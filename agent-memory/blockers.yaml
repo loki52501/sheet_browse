@@ -14,6 +14,11 @@
 # proposals item:         reflect writes forge proposals, _generic merges, pinned-tool retirements
 
 blockers:
+  - id: B-34
+    task: T-11b
+    question: "review-T-11b round 1 note, outside the T-11b diff: ToolStore::reforge (lifecycle.rs, reforge) has no check for a retired row. Since D-316 a retired row whose file is still in place (failed archive) is a normal state, and a reforge of it archives the old file, writes the new one and sets the row repaired at version+1, reviving a retired tool without register_forged (record(Relocated) on a retired row is already refused, IC-304). Also from the same review: SweepAction::Retired { archived: None } means both 'no file' and 'archive failed'; only the ledger tells them apart."
+    default_taken: "Not a T-11b blocker (gate checks still apply to the reforged tool). Area store refuses a reforge of a retired row (StoreError::Invariant, logged to tools.health.why like the other refusals; forge again goes through register_forged) as T-11c, with B-33 item 4, before toolforge T-28. SweepAction stays as is (frozen, D-90); callers read the ledger."
+    needs_user: false
   - id: B-33
     task: T-11
     question: "Supreme second-opinion review of the store D-78 follow-up (merged 83bfdb5; 0 blocking) left items for toolstore. (1) sweep logs a failed archive as an ok:false tools.retire event while retire() has already saved the row Retired, so the ledger never gets an ok:true retire for that tool and its only retire event contradicts the row (lifecycle.rs 210, 277, 614). (2) tests/contract_paths.rs does not name ToolStore::tool_path or archive_path from outside the crate (only an in-crate test does), so they could become pub(crate) unnoticed, and it does not pin ApiFetch::api(&self, &str, Duration) or the root fn fingerprint. (3) note, safety-relevant: a retire whose archive step fails leaves the retired tool's file in tools/<domain>/, where the loader still finds it. (4) notes: relocate keeps its own name-synonym table beside sb_sheet::data::synonyms (fingerprint.rs 26); tools with upper-case names written before D-312 become orphans nothing retires or reports; a file step that keeps failing appends an ok:false event every sweep with no dedup."
@@ -240,5 +245,10 @@ interface_changes:
     interface: "harness_core::sched (I-13 draft, D-80)"
     change: "Additive: trait Launcher gains a provided method fn before_run(&self) -> Result<(), LaunchError> (default Ok); Runner::execute calls it first, before the prompt is scrubbed, and when it fails returns the new variant SchedError::BeforeRun(LaunchError) without creating a folder or runs row. Existing Launcher impls compile unchanged; a match on SchedError without a wildcard arm needs the new arm (none in the workspace). The harness crate adds daemon::ReopenVault (harnessd's launcher wrapper that re-opens the vault in before_run) and launcher::{DISALLOWED_TOOLS, DEFAULT_SESSION_CAP, SESSION_CAP_VAR, DEFAULT_MAX_ANSWER_BYTES, ANSWER_SCRUB_SLACK, parse_session_cap, session_cap_from_env, answer_text}, with ClaudeLauncher fields max_session and max_answer_bytes (D-124)."
     why: "review-T-08 should-fix 7: harnessd must scrub a vault value added after it started, and the prompt is scrubbed inside Runner::execute, so the re-open has to happen there, before anything is written. Default until supreme answers: as implemented in T-08 round 2."
+  - id: IC-305
+    from: store
+    interface: I-7
+    change: "Additive, per D-315 (B-33 (3)): toolstore::ToolStore::{scan_live(&self, store: &dyn MemoryStore, domain: &str, path: &str) -> Result<LoadReport, StoreError>, load_live(&self, store: &dyn MemoryStore, domain: &str, path: &str) -> Result<Vec<Tool>, StoreError>} (async). They skip tools whose tools.health row is retired. Behaviour per D-316: a retire whose archive fails is an ok:true tools.retire plus an ok:false tools.archive event, and record() returns Ok for it. Proposed for wave 4: #[deprecated] on the sync load/scan in favour of the live pair."
+    why: "Runtime callers (srv-web T-13, sb-mcp, toolforge) must not serve a retired tool whose file is still in place; load cannot see tools.health without MemoryStore. Default until supreme answers: callers use load_live; load/scan stay for tests and offline tooling."
 
 proposals:

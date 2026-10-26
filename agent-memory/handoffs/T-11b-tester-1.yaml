@@ -1,0 +1,17 @@
+from: tester (area store)
+to: store sub-orchestrator, then reviewer
+task: T-11b
+date: "2026-10-25"
+state: "Acceptance round 1 green, bench/results/accept-T-11b.md. New crates/toolstore/tests/accept_t11b.rs (9 tests, public API, own fake MemoryStore with per-folder tool_health failure) covers B-33 items 1-3, D-315, D-316: retired row with file in place skipped as `retired (v<N>)`, other statuses and no row load, retired site tool no longer shadows _generic, retired _generic row skipped, memory error is Err for site, _generic or both, record and sweep retire with a failed archive (ledger ok:true retire with archive_failed, ok:false archive, next sweep ok:true archive), success path one ok:true retire with the path. 13 temporary src mutations each turned the matching tests red, all restored. Gates: fmt check clean, clippy -p toolstore --all-targets -D warnings clean, cargo test -p toolstore 122+41+9+4 passed, cargo test --workspace -j 2 --no-fail-fast 722 passed 0 failed 5 ignored (all outside toolstore), step1_accept 7 passed in 95 s. merge_gate.py store prints `gate ok for store: T-11`."
+not_done: "Nothing for T-11b. B-33 item 4 (relocate synonym table, pre-D-312 upper-case orphans, no dedup of repeated ok:false file events) stays with toolforge T-28. Callers (srv-web T-13, sb-mcp, toolforge) still to switch to load_live (D-315)."
+gotchas:
+  - "A portable way to make archive fail from outside the crate: write a regular file at tools/_archive; create_dir_all then fails after the stamp and the tool file stays. sweep tolerates it (swept_domains skips a non-dir _archive)."
+  - "cargo test --workspace -j 2 --no-fail-fast run with run_in_background and no timeout wrapper finished with exit 0; step1_accept alone takes about 95 s. Wait on the log with `timeout 590 tail -f log | grep -m1 ^exit=` in a loop."
+  - "merge_gate.py judges swarm.yaml's area task T-11, not T-11b."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/toolstore/tests/accept_t11b.rs
+  - bench/results/accept-T-11b.md
+  - agent-memory/handoffs/T-11b-tester-1.yaml
+verify: "cargo test -p toolstore --test accept_t11b"

@@ -1,0 +1,19 @@
+from: rust-coder (area store), round 2
+to: store sub-orchestrator, then reviewer and tester
+task: T-11b
+date: "2026-10-25"
+state: "Round 2 in one commit c899d29 on swarm/store-T11b. Review race note fixed: scan_dir now only collects per folder (in file-name order) the skipped files and the parsed, @match-fitting candidates; a single finish() pass applies the retired filter and the site-shadows-generic dedupe. scan_live reads both folders' files first (read_folders), then the site rows (not for _generic) and the _generic rows, then runs finish(); sync scan uses the same read_folders + finish with no rows, so its output (tools and skipped, same order) is unchanged. scan_live doc rewritten (files before rows, why that closes the window). Kept: retired site tool does not shadow _generic; retired _generic row skipped; memory error on either folder's read is Err; `retired (v<N>)` in skipped. New lib test tests_review::scan_live_reads_files_before_rows: the fake store writes a new tool file inside tool_health; the scan must not serve it, the next scan must. Should-fix 3: archived asserts are now `consequences.get(\"archived\") == Some(&Value::Null)` in tests_review.rs, accept_t11.rs and both sites in accept_t11b.rs. Gates green: cargo fmt --all -- --check, cargo clippy -p toolstore --all-targets -D warnings, cargo test -p toolstore (lib 123, accept_t11 41, accept_t11b 9, contract_paths 4)."
+not_done: "cargo test --workspace not run by the coder (low memory; the orchestrator runs it). Callers still to switch to load_live when they land (D-315); IC-305 is supreme's; B-33 item 4 is for toolforge T-28; reviewer note on reforge of a retired row is a follow-up before T-28."
+gotchas:
+  - "Mutation proofs, each restored byte-identical from a scratch copy: (a) old order (read_folders moved after both tool_health reads) turns scan_live_reads_files_before_rows red; (b) tester's M1 (`retired(..).filter(|_| false)` in finish) turns accept_t11b red on 5 of 9: r1_retired_row_with_file_in_place_is_skipped_and_reported, r2_retired_site_tool_does_not_shadow_the_generic_one, r2_retired_generic_row_is_skipped, r4_r5_record_retire_with_failed_archive, r4_r5_sweep_retire_with_failed_archive."
+  - "A file-first read leaves only the inherent window: a retire that commits after the row read is after this call (the file seen is the pre-retire state). No test can distinguish that, by design."
+  - "clippy type_complexity fires on an array of (Vec<Scanned>, &dyn Fn(&str) -> Option<i32>); a `type Retired<'a>` alias fixes it."
+  - "Python pathlib write_text on Windows writes CRLF; the repo is LF. Use write_bytes or sed -i 's/\r$//' after."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/toolstore/src/loader.rs
+  - crates/toolstore/src/tests_review.rs
+  - crates/toolstore/tests/accept_t11.rs
+  - crates/toolstore/tests/accept_t11b.rs
+verify: "cargo test -p toolstore"
