@@ -260,6 +260,17 @@ blockers:
     question: "For T-22 (B-4 #8 and #9): the consequence window settles on the DOM only and compares only the step frame's index. A submit click whose XHR outlasts the 500 ms window, or a frame click that changes its parent, can read as 'no visible change'. What should the window do?"
     default_taken: "T-21: a step in a frame other than 0 never reports NoVisibleChange (D-617). A frame-0 Submit step whose request is still in flight after 500 ms still can (review-T-21 should-fix 7, left for T-22). Proposed for T-22: network in-flight tracking in settle(), and the parent and top frames' indexes in the window and the diff (frame merging), after which D-617 can be lifted."
     needs_user: false
+  - id: B-615
+    task: T-22
+    question: "Driver::settle (and open's and w(d)'s settle) awaits frame 0's DOM only; the network part covers the whole tab (its OOPIFs included). Should settle also await the DOM of same-origin child frames?"
+    default_taken: "Frame 0 only (D-620): one in-page call per pass. An SPA that renders inside a same-origin iframe is still covered when its rendering follows a request (the network part waits for it). Proposed for T-23 if read() on framed pages needs it: run the in-page settle in every readable frame concurrently (one round trip in parallel) and take the latest."
+    needs_user: false
+  - id: B-616
+    task: T-22
+    question: "Requests made by workers (dedicated, shared, service workers) come on worker sessions, which the driver attaches and resumes but does not track or Network-enable. Should settle count them?"
+    default_taken: "Not counted (D-620): a fetch a page awaits is made by the page itself in nearly every SPA, and a service worker that answers a page fetch shows as the page's request. Counting worker requests would need Network.enable on every worker session and an owner map from worker to tab. Revisit if a bench task settles too early behind a worker fetch."
+    needs_user: false
+
 interface_changes:
   - id: B-401
     from: page/suborch

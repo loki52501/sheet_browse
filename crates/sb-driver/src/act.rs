@@ -7,7 +7,10 @@
 //! step's in-page op in the same round trip, the input (B-4 #7, pipelined), and the
 //! consequence window (B-4 #9): the input's replies (or a dialog, which blocks them), then
 //! one in-page `settle()` capped at 500 ms that also returns the index, which is the next
-//! step's live index and the diff's after side (B-8). Network settle is T-22.
+//! step's live index and the diff's after side (B-8). T-22 (B-614, D-620): while a request
+//! the step started is in flight the window waits for it (a condition, at most 3 s from the
+//! input) before that call, and a step whose request is still in flight at the end never
+//! reports "no visible change".
 //!
 //! Page strings are kept raw while the program runs. When it ends, every raw page string
 //! (consequences, diff row names) is scrubbed against the values of the vault keys the
@@ -22,6 +25,7 @@ use crate::input::{
 };
 use crate::runtime::{CallError, OBJECT_GROUP};
 use crate::scrub::{scrub_with, spellings};
+use crate::settle::Pass;
 use crate::{
     ActResult, Consequence, Driver, DriverError, SettleOpts, StepOutcome, StepResult, TabId,
     ToolCtx,
@@ -234,6 +238,8 @@ struct Captured {
     /// A dialog is open: the page is paused and the program stops after this step.
     paused: bool,
     failed: Option<String>,
+    /// A request the step started was still in flight when the window ended (D-620).
+    net_busy: bool,
 }
 
 /// What a step's consequence window watches: the tab, its session, the step's frame, the
@@ -252,6 +258,7 @@ struct Post {
     settled: Option<bool>,
     index: Option<Vec<IndexRow>>,
     doc: Option<String>,
+    net_busy: bool,
 }
 
 /// Index state of one program run.
@@ -402,7 +409,10 @@ impl Driver {
                                 // Only the step frame's index is compared: a step in a frame
                                 // can change its parent, so it never claims no change (D-617;
                                 // frame merging is T-22).
+                                // A request the step started still in flight: its effect may
+                                // not be in the page yet (B-614, D-620).
                                 let quiet = frame == 0
+                                    && !c.net_busy
                                     && consequences.is_empty()
                                     && c.failed.is_none()
                                     && moved != Some(true)
@@ -651,7 +661,12 @@ impl Driver {
     /// `fut`, unless a dialog opens on the tab first (after `mark`): then `None` and `fut`
     /// is dropped (a dialog blocks the page, so the input's reply and in-page calls would
     /// wait for the user's answer). Woken by every event the observer applies.
-    async fn or_dialog<T>(&self, tab: TabId, mark: u64, fut: impl Future<Output = T>) -> Option<T> {
+    pub(crate) async fn or_dialog<T>(
+        &self,
+        tab: TabId,
+        mark: u64,
+        fut: impl Future<Output = T>,
+    ) -> Option<T> {
         let mut changed = self.changed.clone();
         tokio::pin!(fut);
         loop {
@@ -671,26 +686,47 @@ impl Driver {
         }
     }
 
-    /// The settle-and-index call in the step's frame, capped at the window.
-    async fn post_step(&self, tab: TabId, frame: u32) -> Result<Post, DriverError> {
-        let cap_ms = u64::try_from(WINDOW.as_millis()).unwrap_or(500);
-        let opts = json!({"quiet": SettleOpts::default().quiet_ms, "cap": cap_ms});
-        let deadline = Instant::now() + WINDOW + WINDOW_GRACE;
-        match self
-            .call_sb_doc(tab, frame, POST_FN, &[opts], deadline)
-            .await
-        {
-            Ok((v, doc)) => Ok(Post {
-                settled: v.get("settled").and_then(Value::as_bool),
-                index: v.get("index").and_then(|ix| rows(ix, frame)),
-                doc: Some(doc),
-            }),
+    /// The settle-and-index call in the step's frame, capped at the window; while a request
+    /// the step started (after `mark`) is in flight, the call waits for it first, at most
+    /// until `t0` + [`NAV_CAP`] (D-620).
+    async fn post_step(
+        &self,
+        tab: TabId,
+        frame: u32,
+        mark: u64,
+        t0: Instant,
+    ) -> Result<Post, DriverError> {
+        let pass = Pass {
+            decl: POST_FN,
+            quiet_ms: SettleOpts::default().quiet_ms,
+            per_call: Some(WINDOW),
+            grace: Some(WINDOW_GRACE),
+            at_least_once: true,
+        };
+        match self.net_settle(tab, frame, mark, t0 + NAV_CAP, pass).await {
+            Ok(s) => {
+                let (settled, index, doc) = match s.last {
+                    Some((v, doc)) => (
+                        Some(s.settled),
+                        v.get("index").and_then(|ix| rows(ix, frame)),
+                        Some(doc),
+                    ),
+                    None => (None, None, None),
+                };
+                Ok(Post {
+                    settled,
+                    index,
+                    doc,
+                    net_busy: s.net_busy,
+                })
+            }
             Err(e) => {
                 call_failure(e, "settle", frame)?;
                 Ok(Post {
                     settled: None,
                     index: None,
                     doc: None,
+                    net_busy: self.net_state(tab, mark).0,
                 })
             }
         }
@@ -717,7 +753,10 @@ impl Driver {
             None => {}
             Some(Err(why)) => c.failed = Some(tidy_why(&why, 0, &[])),
             Some(Ok(())) => {
-                let mut post = match self.or_dialog(tab, mark, self.post_step(tab, frame)).await {
+                let mut post = match self
+                    .or_dialog(tab, mark, self.post_step(tab, frame, mark, t0))
+                    .await
+                {
                     Some(p) => Some(p?),
                     None => None,
                 };
@@ -737,13 +776,17 @@ impl Driver {
                     .as_ref()
                     .is_some_and(|p| p.doc != self.sb_key(tab, frame))
                 {
-                    post = match self.or_dialog(tab, mark, self.post_step(tab, frame)).await {
+                    post = match self
+                        .or_dialog(tab, mark, self.post_step(tab, frame, mark, t0))
+                        .await
+                    {
                         Some(p) => Some(p?),
                         None => None,
                     };
                 }
                 if let Some(p) = post {
                     c.settled = p.settled;
+                    c.net_busy = p.net_busy;
                     if p.doc.is_some() && p.doc == self.sb_key(tab, frame) {
                         c.after = p.index;
                     }

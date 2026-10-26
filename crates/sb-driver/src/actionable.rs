@@ -9,6 +9,7 @@
 //! The act loop that uses it is in `act.rs` (T-21).
 
 use crate::runtime::CallError;
+use crate::settle::{Pass, SETTLE_FN};
 use crate::{Driver, DriverError, Profile, SettleOpts, StepOutcome, TabId};
 use sb_act::{Scroll, Step};
 use sb_sheet::ElemRef;
@@ -183,13 +184,6 @@ const TAB_NOT_VISIBLE: &str = "the tab is not visible";
 /// fails the step with this.
 pub(crate) const TAB_HIDDEN_ME: &str =
     "the tab is not visible (its window is hidden or minimized; profile me never brings it to front)";
-
-/// `w(..)` and the wait between attempts: settle in the page with a cap.
-const SETTLE_FN: &str = "function (opts) {
-  const sb = globalThis.__sb;
-  if (!sb) return { why: 'no runtime' };
-  return sb.settle(opts);
-}";
 
 /// The slot of retry number `retry` (0-based), after the previous answer: D-603, D-606.
 pub(crate) fn backoff(retry: usize) -> Duration {
@@ -671,31 +665,39 @@ impl Driver {
         Ok(())
     }
 
-    /// `w(d)`: settle in the page with `d` as the cap (B-7; network settle is T-22). A page
-    /// that does not answer by `d` plus [`W_GRACE`] fails the step, not the program.
+    /// `w(d)`: settle (B-4 #8, the DOM in the page and the requests that start meanwhile,
+    /// D-620) with `d` as the cap (B-7). A page that does not answer by `d` plus [`W_GRACE`]
+    /// fails the step, not the program.
     pub(crate) async fn wait_step(&self, tab: TabId, d: Duration) -> Result<StepEnd, DriverError> {
-        let cap_ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
-        let opts = json!({"quiet": SettleOpts::default().quiet_ms, "cap": cap_ms});
-        let deadline = Instant::now() + d + W_GRACE;
-        let v = match self.call_sb(tab, 0, SETTLE_FN, &[opts], deadline).await {
-            Ok(v) => v,
+        let mark = self.events_mark();
+        let deadline = Instant::now() + d;
+        let pass = Pass {
+            decl: SETTLE_FN,
+            quiet_ms: SettleOpts::default().quiet_ms,
+            per_call: None,
+            grace: Some(W_GRACE),
+            at_least_once: false,
+        };
+        match self.net_settle(tab, 0, mark, deadline, pass).await {
+            Ok(s) => match &s.last {
+                // The network never went idle within `d`: waited out, not settled.
+                None => Ok((StepOutcome::Ok, Some(false))),
+                Some((v, _)) if v.get("settled").and_then(Value::as_bool).is_none() => Ok((
+                    StepOutcome::Failed {
+                        why: "settle gave no answer".into(),
+                    },
+                    None,
+                )),
+                Some(_) => Ok((StepOutcome::Ok, Some(s.settled))),
+            },
             Err(CallError::Deadline) | Err(CallError::Driver(DriverError::Timeout(_))) => {
                 let why = format!(
                     "the page did not answer within {} ms",
                     (d + W_GRACE).as_millis()
                 );
-                return Ok((StepOutcome::Failed { why }, None));
+                Ok((StepOutcome::Failed { why }, None))
             }
-            Err(e) => return Err(e.into_driver("w()")),
-        };
-        match v.get("settled").and_then(Value::as_bool) {
-            Some(s) => Ok((StepOutcome::Ok, Some(s))),
-            None => Ok((
-                StepOutcome::Failed {
-                    why: "settle gave no answer".into(),
-                },
-                None,
-            )),
+            Err(e) => Err(e.into_driver("w()")),
         }
     }
 }

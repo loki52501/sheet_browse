@@ -392,16 +392,54 @@ impl Registry {
         tab
     }
 
-    /// Remove a tab with every session that belongs to it.
+    /// Remove a tab with every session that belongs to it (its OOPIFs' too), their runtime
+    /// installs, and prerenders attached under it.
     fn remove_tab(&mut self, tab: TabId) {
         if let Some(t) = self.tabs.remove(&tab) {
             if self.by_target.get(&t.target_id) == Some(&tab) {
                 self.by_target.remove(&t.target_id);
             }
         }
-        self.sessions.retain(|_, o| match o {
-            Owner::Tab(t) | Owner::Oopif(t, _) => *t != tab,
-        });
+        let gone: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| matches!(o, Owner::Tab(t) | Owner::Oopif(t, _) if *t == tab))
+            .map(|(s, _)| s.clone())
+            .collect();
+        for s in &gone {
+            self.sessions.remove(s);
+            self.installed.remove(s);
+        }
+        self.pending.retain(|_, p| p.parent != Some(tab));
+    }
+
+    /// `Driver::close` when the browser's detach did not come in time: the tab goes now, and
+    /// later events of its sessions are ignored.
+    pub(crate) fn forget_tab(&mut self, tab: TabId) {
+        self.remove_tab(tab);
+    }
+
+    /// Every session that speaks for the tab: its page session and its OOPIFs'.
+    pub(crate) fn sessions_of(&self, tab: TabId) -> Vec<String> {
+        self.sessions
+            .iter()
+            .filter(|(_, o)| matches!(o, Owner::Tab(t) | Owner::Oopif(t, _) if *t == tab))
+            .map(|(s, _)| s.clone())
+            .collect()
+    }
+
+    /// A title read from the browser (`Target.getTargets`, B-601): Chromium sends no
+    /// `Target.targetInfoChanged` when `document.title` changes, but its target list has
+    /// the current title.
+    pub(crate) fn set_title(&mut self, target: &str, title: &str) {
+        if let Some(t) = self
+            .by_target
+            .get(target)
+            .copied()
+            .and_then(|tab| self.tabs.get_mut(&tab))
+        {
+            t.title = title.to_string();
+        }
     }
 
     fn detached(&mut self, sid: &str) {
@@ -1142,6 +1180,46 @@ mod tests {
             &json!({"targetInfo": {"targetId": "T1", "type": "page", "title": "Inbox (3)", "url": "https://mail.test/"}}),
         );
         assert_eq!(r.tabs()[0], (t, "about:blank".into(), "Inbox (3)".into()));
+    }
+
+    #[test]
+    fn forgetting_a_tab_drops_its_sessions_installs_and_prerenders() {
+        let mut r = Registry::new();
+        let t = attach_page(&mut r, "S1", "T1", None);
+        let other = attach_page(&mut r, "S2", "T2", None);
+        attach_frame(&mut r, "S1", "F1", "T1");
+        attach(
+            &mut r,
+            Some("S1"),
+            "O1",
+            json!({"targetId": "F1", "type": "iframe", "url": "https://b.test/"}),
+            true,
+        );
+        attach(
+            &mut r,
+            Some("S1"),
+            "P1",
+            json!({"targetId": "TP", "type": "page", "subtype": "prerender"}),
+            true,
+        );
+        r.set_installed("S1");
+        r.set_installed("O1");
+        let mut sessions = r.sessions_of(t);
+        sessions.sort();
+        assert_eq!(sessions, ["O1", "S1"]);
+        r.set_title("T1", "Fresh");
+        assert_eq!(r.tabs()[0].2, "Fresh");
+        r.forget_tab(t);
+        assert!(!r.has_tab(t));
+        for s in ["S1", "O1", "P1"] {
+            assert!(!r.tracks(s), "{s}");
+            assert!(!r.installed(s), "{s}");
+        }
+        assert!(r.sessions_of(t).is_empty());
+        assert!(r.has_tab(other));
+        // A title for a gone target changes nothing.
+        r.set_title("T1", "late");
+        assert_eq!(r.tabs().len(), 1);
     }
 
     #[test]

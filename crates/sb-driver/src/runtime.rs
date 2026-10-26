@@ -85,7 +85,7 @@ pub(crate) const OBJECT_GROUP: &str = "sb-driver";
 pub(crate) const PAINT_CAP_MS: u32 = 3000;
 
 /// A document, by its `sb` context: the context's uniqueId, else session and id.
-fn doc_key(c: &ExecContext) -> String {
+pub(crate) fn doc_key(c: &ExecContext) -> String {
     match &c.unique_id {
         Some(u) => u.clone(),
         None => format!("{}:{}", c.session, c.id),
@@ -129,6 +129,11 @@ impl Bases {
                 f.docs -= 1;
             }
         }
+    }
+
+    /// A closed tab's frames (T-22 `close`).
+    pub(crate) fn forget_tab(&mut self, tab: TabId) {
+        self.frames.retain(|(t, _), _| *t != tab);
     }
 
     fn mark(&mut self, tab: TabId, frame: u32, key: String) {

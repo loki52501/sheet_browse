@@ -4,6 +4,10 @@
 //! downloads (stopped by `Browser.setDownloadBehavior(deny)` at launch, so nothing lands
 //! before [`crate::Driver::download`]). An act step marks the log's sequence number before
 //! its input and reads what happened after it.
+//!
+//! T-22 (B-4 #8): the same store tracks requests in flight ([`Net`]), from
+//! `Network.requestWillBeSent` to `Network.loadingFinished` or `loadingFailed`, so settle can
+//! wait for the network without a round trip (`settle.rs`, D-620).
 
 use crate::{lock, Driver, DriverError, Registry, TabId};
 use serde_json::{json, Value};
@@ -12,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
+use tokio::time::Instant;
 
 /// Log entries kept (a step reads only what came after its mark).
 const LOG_CAP: usize = 512;
@@ -71,6 +76,66 @@ pub(crate) struct Events {
     log: VecDeque<Logged>,
     dialogs: HashMap<String, OpenDialog>,
     downloads: VecDeque<Stopped>,
+    net: Net,
+}
+
+/// Requests in flight at most (a page with more is not settling anyway); past it the
+/// oldest is forgotten, which can only end a settle earlier, never hold it (D-620).
+const NET_CAP: usize = 2048;
+
+/// Request types that may never finish and so never hold settle (D-620): streams
+/// (EventSource, WebSocket, Media), fire-and-forget reports and speculative loads.
+const NET_IGNORED: [&str; 6] = [
+    "EventSource",
+    "WebSocket",
+    "Media",
+    "Ping",
+    "CSPViolationReport",
+    "Prefetch",
+];
+
+/// One request in flight (B-4 #8).
+#[derive(Debug, Clone)]
+pub(crate) struct Req {
+    /// The flattened session it was announced on (the tab's, or an OOPIF's).
+    pub session: String,
+    /// The CDP frame id that started it.
+    pub frame: String,
+    /// Its place in the event order: it counts for a settle whose mark is below this.
+    pub seq: u64,
+    pub at: Instant,
+    /// A navigation request: it ends at the commit (or the download) of its frame.
+    pub document: bool,
+}
+
+/// Network requests in flight, fed by the observer in wire order (B-4 #8, D-620).
+#[derive(Debug, Default)]
+pub(crate) struct Net {
+    inflight: HashMap<String, Req>,
+    /// The seq of the last counted request start, by session.
+    last_start: HashMap<String, u64>,
+}
+
+impl Net {
+    fn drop_documents(&mut self, frame: &str) {
+        self.inflight
+            .retain(|_, r| !(r.document && r.frame == frame));
+    }
+
+    fn forget_session(&mut self, sid: &str) {
+        self.inflight.retain(|_, r| r.session != sid);
+        self.last_start.remove(sid);
+    }
+
+    /// Requests in flight now.
+    pub(crate) fn inflight(&self) -> impl Iterator<Item = &Req> {
+        self.inflight.values()
+    }
+
+    /// (session, seq of its last counted request start).
+    pub(crate) fn starts(&self) -> impl Iterator<Item = (&String, u64)> {
+        self.last_start.iter().map(|(s, q)| (s, *q))
+    }
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
@@ -169,10 +234,73 @@ impl Events {
             "Target.detachedFromTarget" => {
                 if let Some(sid) = s(p, "sessionId") {
                     self.dialogs.remove(sid);
+                    self.net.forget_session(sid);
+                }
+            }
+            "Network.requestWillBeSent" => self.request_started(session, p),
+            "Network.loadingFinished" | "Network.loadingFailed" => {
+                if let Some(id) = s(p, "requestId") {
+                    self.net.inflight.remove(id);
                 }
             }
             _ => {}
         }
+        // A navigation request ends at its frame's commit, or when it turned into a download
+        // (its loadingFinished may come long after, or never for a denied download).
+        match method {
+            "Page.frameNavigated" => {
+                if let Some(f) = p.get("frame").and_then(|f| s(f, "id")) {
+                    self.net.drop_documents(f);
+                }
+            }
+            "Page.downloadWillBegin" | "Browser.downloadWillBegin" => {
+                if let Some(f) = s(p, "frameId") {
+                    self.net.drop_documents(f);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `Network.requestWillBeSent`: a new request in flight, unless its type never holds
+    /// settle (D-620). A redirect reuses its request id and keeps its first place.
+    fn request_started(&mut self, session: Option<&str>, p: &Value) {
+        let (Some(sid), Some(id)) = (session, s(p, "requestId")) else {
+            return;
+        };
+        if self.net.inflight.contains_key(id) {
+            return;
+        }
+        let kind = s(p, "type").unwrap_or("Other");
+        if NET_IGNORED.contains(&kind) {
+            return;
+        }
+        self.seq += 1;
+        let req = Req {
+            session: sid.to_string(),
+            frame: s(p, "frameId").unwrap_or_default().to_string(),
+            seq: self.seq,
+            at: Instant::now(),
+            document: kind == "Document",
+        };
+        self.net.last_start.insert(sid.to_string(), self.seq);
+        self.net.inflight.insert(id.to_string(), req);
+        if self.net.inflight.len() > NET_CAP {
+            let oldest = self
+                .net
+                .inflight
+                .iter()
+                .min_by_key(|(_, r)| r.seq)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                self.net.inflight.remove(&k);
+            }
+        }
+    }
+
+    /// The network side of the store.
+    pub(crate) fn net(&self) -> &Net {
+        &self.net
     }
 
     /// An event that names its frame instead of carrying it in a frame object: logged under
@@ -205,6 +333,12 @@ impl Events {
 
     pub(crate) fn forget_dialog(&mut self, session: &str) {
         self.dialogs.remove(session);
+    }
+
+    /// A session that is gone (a closed tab's): its dialog and its requests.
+    pub(crate) fn forget_session(&mut self, session: &str) {
+        self.dialogs.remove(session);
+        self.net.forget_session(session);
     }
 
     pub(crate) fn download(&self, guid: &str) -> Option<&Stopped> {
@@ -836,5 +970,106 @@ mod tests {
             &json!({ "message": long }),
         );
         assert_eq!(e.dialog("S").unwrap().text.chars().count(), RAW_CAP);
+    }
+
+    fn sent(e: &mut Events, sid: &str, id: &str, kind: &str, frame: &str) {
+        e.apply(
+            Some(sid),
+            "Network.requestWillBeSent",
+            &json!({"requestId": id, "type": kind, "frameId": frame,
+                    "request": {"url": "http://a/x", "method": "GET"}}),
+        );
+    }
+
+    fn ids(e: &Events) -> Vec<String> {
+        let mut v: Vec<String> = e
+            .net()
+            .inflight()
+            .map(|r| format!("{}:{}", r.session, r.frame))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// B-4 #8, D-620: requests in flight from requestWillBeSent to loadingFinished or
+    /// loadingFailed; streams are never tracked; a redirect keeps its first place; a
+    /// navigation request ends at its frame's commit or download; a detached session's
+    /// requests go.
+    #[test]
+    fn requests_in_flight_follow_the_network_events() {
+        let mut e = Events::default();
+        let m0 = e.mark();
+        sent(&mut e, "S", "1", "XHR", "T");
+        assert!(e.mark() > m0, "a counted start moves the mark");
+        let first = e.net().inflight().next().unwrap().seq;
+        sent(&mut e, "S", "1", "XHR", "T");
+        assert_eq!(
+            e.net().inflight().next().unwrap().seq,
+            first,
+            "a redirect keeps its place"
+        );
+        for kind in NET_IGNORED {
+            sent(&mut e, "S", &format!("x-{kind}"), kind, "T");
+        }
+        assert_eq!(ids(&e), ["S:T"], "streams and pings never hold settle");
+        sent(&mut e, "S", "2", "Fetch", "F");
+        sent(&mut e, "S", "3", "Document", "T");
+        sent(&mut e, "S", "4", "Document", "F");
+        sent(&mut e, "O", "5", "Script", "G");
+        assert_eq!(ids(&e).len(), 5);
+        e.apply(
+            Some("S"),
+            "Network.loadingFinished",
+            &json!({"requestId": "1"}),
+        );
+        e.apply(
+            Some("S"),
+            "Network.loadingFailed",
+            &json!({"requestId": "2", "errorText": "net::ERR_ABORTED"}),
+        );
+        assert_eq!(ids(&e), ["O:G", "S:F", "S:T"]);
+        // The main frame's document committed: its navigation request is done.
+        e.apply(
+            Some("S"),
+            "Page.frameNavigated",
+            &json!({"frame": {"id": "T", "url": "http://a/"}}),
+        );
+        assert_eq!(ids(&e), ["O:G", "S:F"]);
+        // Frame F's navigation became a (denied) download.
+        e.apply(
+            None,
+            "Browser.downloadWillBegin",
+            &json!({"guid": "g", "url": "http://a/f", "frameId": "F"}),
+        );
+        assert_eq!(ids(&e), ["O:G"]);
+        let starts: Vec<&String> = e.net().starts().map(|(s, _)| s).collect();
+        assert_eq!(starts.len(), 2);
+        e.apply(
+            None,
+            "Target.detachedFromTarget",
+            &json!({"sessionId": "O"}),
+        );
+        assert!(ids(&e).is_empty());
+        assert!(e.net().starts().all(|(s, _)| s != "O"));
+        // No session (the browser's): not a page request.
+        e.apply(
+            None,
+            "Network.requestWillBeSent",
+            &json!({"requestId": "9", "type": "XHR"}),
+        );
+        assert!(ids(&e).is_empty());
+    }
+
+    #[test]
+    fn the_request_table_is_bounded_oldest_first() {
+        let mut e = Events::default();
+        for i in 0..(NET_CAP + 5) {
+            sent(&mut e, "S", &i.to_string(), "Image", "T");
+        }
+        assert_eq!(e.net().inflight().count(), NET_CAP);
+        let oldest = e.net().inflight().map(|r| r.seq).min().unwrap();
+        assert_eq!(oldest, 6, "the five oldest went first");
+        e.forget_session("S");
+        assert_eq!(e.net().inflight().count(), 0);
     }
 }
