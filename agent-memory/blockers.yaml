@@ -267,6 +267,11 @@ blockers:
     question: "Phase 1 ladder rungs 4 and 5 (variant 3): sessions wrote deliverables (CSV, table) to their working folder instead of runs/<id>/files/, because fs.write and csv.clean resolve a bare file name against the base folder and the session never learns its run id. Should fs.write and csv.clean put a bare file name into the run's files/ the way xlsx.write already does?"
     default_taken: "Yes, servers T-14b: a relative path with no folder component goes to runs/<id>/files/; explicit paths keep their meaning. The tool descriptions say so."
     needs_user: false
+  - id: B-199
+    task: T-05c
+    question: "For area driver: sb-driver test chromium_driver::bench_headless_launch_registry_and_cleanup (crates/sb-driver/tests/chromium_driver.rs:231) fails about 1 run in 2 on this machine under load ('bench profile ... not removed'); it passed on the next run with no code change. Seen in core's `cargo test --workspace -j 2` on swarm/core-T05c (main 14587a3 merged). It makes the D-87 workspace gate flaky for every area."
+    default_taken: "Not a core fix. Core lists it in its PR bodies as a known flake and reruns that test binary once. Proposed for driver: wait for the browser process tree to exit (condition with a cap, rule 6) before asserting the profile folder is gone, or retry the removal on Windows sharing violations."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core
