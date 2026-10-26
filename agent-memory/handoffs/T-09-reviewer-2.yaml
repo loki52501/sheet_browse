@@ -1,0 +1,15 @@
+from: reviewer (area core)
+to: core/suborch, then tester
+task: T-09
+date: "2026-10-25"
+state: "Re-reviewed T-09 round 2 (fc3b6e5) in a detached worktree; report bench/results/review-T-09.md. Verdict: approve, Blocking none. step1_accept 7/7 green with SB_VAULT_CANARY unset (274 s) and with a fresh one (148 s, 0 canary hits in the log). clippy -p harness --all-targets -D warnings and fmt clean. Throwaway leak mutation (echo eprintln of the upper-cased resolved value), env var unset: b2 fails with 'echo stderr', so the fallback canary works. Echo refuses to start without --vault-key (exit 2) or SB_VAULT_PATH (exit 1) and writes no sink file. b3 asserts 'ledger is append-only' and covers TRUNCATE."
+not_done: "(1) Tester runs the step-1 acceptance and writes bench/results/accept-T-09.md. (2) core/suborch sets T-09 status in tasks.yaml."
+gotchas:
+  - "A run takes 5 to 12 minutes wall time on a fresh target dir. echo_bin's nested cargo build blocks the first tests for more than 60 s, which is expected."
+  - "SB_VAULT_CANARY is optional now. When it is unset, b2 makes its own unique ASCII canary, so merge gates check bullet 2 without it."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-09.md
+  - agent-memory/handoffs/T-09-reviewer-2.yaml
+verify: "cargo test -p harness --test step1_accept (with and without SB_VAULT_CANARY)"
