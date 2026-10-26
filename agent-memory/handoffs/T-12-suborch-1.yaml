@@ -1,0 +1,24 @@
+from: servers/suborch
+to: supreme
+task: T-12
+date: "2026-10-26"
+state: "srv-web W-1..W-7 done on swarm/servers-T12. review-T-12 approve at 06fbbf3 (Blocking none) after round 1, round 2 and three narrow rule-5 confirm rounds; rule 5 now fails closed by construction (D-508): no body string ever reaches the model, api shows only JSON or tag-free text/plain, names skip script/style/template/iframe/textarea. accept-T-12 all rows pass except the base64-echo vault row (not-run, T-05d). cargo test -p srv-web: 61 passed, 5 ignored."
+not_done: "T-12b (see tasks.yaml). T-13 (seeded ashbyhq tool + step-2 acceptance + ladder rungs 1, 2, 4) starts from main once this merges, or from this branch merged locally."
+gotchas:
+  - "Per-task worktrees live under wt/servers/.wt/T<nn> (B-559)."
+  - "Shared CARGO_TARGET_DIR=F:/sb-swarm/target-servers; -j 2 or rustc/link run out of memory."
+  - "Do not run `docker compose --profile search down`: the compose project also owns the shared Postgres. Stop/rm the searxng service only."
+  - "Every round found another text path; the fail-closed design (D-508) is what ended it. New text paths must go through collect_text/fragment_text/no_markup/clean_url."
+decisions_made: [D-500, D-501, D-502, D-503, D-504, D-505, D-506, D-507, D-508]
+blockers_opened: [B-500, B-501]
+files_touched:
+  - crates/srv-web/
+  - docker-compose.yml
+  - config/searxng/settings.yml
+  - .gitignore
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/tasks.yaml
+  - bench/results/review-T-12.md
+  - bench/results/accept-T-12.md
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-web"

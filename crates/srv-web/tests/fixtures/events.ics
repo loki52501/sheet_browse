@@ -1,0 +1,18 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//srv-web fixture//EN
+X-WR-CALNAME:Example Meetups
+BEGIN:VEVENT
+UID:1@example.org
+DTSTART:20261105T180000Z
+SUMMARY:Rust meetup
+URL:https://events.example.org/rust
+LOCATION:Main hall
+DESCRIPTION:Talks and pizza
+END:VEVENT
+BEGIN:VEVENT
+UID:2@example.org
+DTSTART;VALUE=DATE:20261201
+SUMMARY:Holiday
+END:VEVENT
+END:VCALENDAR
