@@ -200,10 +200,11 @@ tasks:
   - id: T-04b
     step: follow-up
     wave: 2
-    owner: core
+    owner: core/suborch
     branch: swarm/core-T04b
     title: "T-04 red acceptance rows: B-190/D-120 (1) accepted domain is the UTS-46 non-transitional A-label a URL host carries; MemStore D-115 Vasnth example (bench/results/accept-T-04.md)."
-    status: todo
+    status: doing
+    claimed_at: "2026-10-25"
     from: T-04
   - id: T-05b
     step: follow-up
