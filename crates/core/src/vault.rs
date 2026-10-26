@@ -30,8 +30,8 @@
 //!
 //! Value rules (D-118): `set` refuses, and `open` refuses a file holding, a non-empty
 //! value shorter than [`MIN_VALUE_CHARS`] characters (`ValueTooShort`), or one that
-//! occurs, in any ASCII case, inside `@vault(` or inside `@vault(n)` for any entry name
-//! `n` (`ValueInLiteral`). Matched case-insensitively, a very short value (a middle
+//! occurs, in any ASCII case, inside `@vault(`, inside `@vault(n)` for any entry name `n`,
+//! or inside either withheld-output marker scrub can return (`ValueInLiteral`). Matched case-insensitively, a very short value (a middle
 //! initial, a state code) hits ordinary words everywhere and protects almost nothing,
 //! and a value inside a literal could not be told from it. Empty values are allowed and
 //! scrub nothing. Both errors name the entry, never the value, and tell the user to run
@@ -81,11 +81,12 @@ pub enum VaultError {
         "vault entry {name:?} is shorter than {min} characters; a value that short cannot be scrubbed without destroying ordinary text; give it a longer value with `harness vault set {name}`"
     )]
     ValueTooShort { name: String, min: usize },
-    /// The value of entry `name` occurs, in some ASCII case, inside `@vault(` or inside
-    /// the `@vault(n)` of an entry `n`, where scrub could not tell it from the literal
-    /// (D-118). The name only; `n` is not named either.
+    /// The value of entry `name` occurs, in some ASCII case, inside `@vault(`, inside
+    /// the `@vault(n)` of an entry `n`, where scrub could not tell it from the literal, or
+    /// inside a withheld-output marker, which scrub would then rewrite (D-118 (3b)). The
+    /// name only; `n` is not named either.
     #[error(
-        "the value of vault entry {name:?} occurs inside `@vault(` or inside an entry's @vault(name) reference, where scrub cannot find it; give it another value with `harness vault set {name}`, or give the new entry another name"
+        "the value of vault entry {name:?} occurs inside `@vault(`, inside an entry's @vault(name) reference or inside the scrubber's `[output withheld: ...]` notice, where scrub cannot find it; give it another value with `harness vault set {name}`, or give the new entry another name"
     )]
     ValueInLiteral { name: String },
     /// The scrub automaton could not be built; `set` wrote nothing (D-118).
@@ -131,8 +132,10 @@ fn contains_ascii_ci(hay: &str, needle: &str) -> bool {
 /// The D-118 value rules: `ValueTooShort` for a value under the floor, then
 /// `ValueInLiteral` for a value any of whose scrub spellings lies, in some ASCII case,
 /// inside `@vault(` or inside `@vault(n)` for an entry name `n` (every name, with a value
-/// or not). Scrub drops such a match as part of the literal, so the value could hide
-/// there. The first offending entry is named.
+/// or not), or inside either withheld marker ([`SCRUB_WITHHELD`], [`SCRUB_UNSETTLED`]).
+/// Scrub drops a match inside a literal as part of it, so the value could hide there; a
+/// value inside a marker would be scrubbed out of the marker itself, so the fail-closed
+/// output would change on every pass. The first offending entry is named.
 fn check_entries(entries: &BTreeMap<String, Entry>, check: Check<'_>) -> Result<(), VaultError> {
     let involves = |n: &str| match check {
         Check::All => true,
@@ -143,7 +146,9 @@ fn check_entries(entries: &BTreeMap<String, Entry>, check: Check<'_>) -> Result<
             check_value(name, &e.value)?;
         }
     }
-    let mut every = vec![REF_OPEN.to_owned()];
+    let mut every: Vec<String> = [REF_OPEN, SCRUB_WITHHELD, SCRUB_UNSETTLED]
+        .map(str::to_owned)
+        .into();
     every.extend(entries.keys().map(|n| vault_literal(n)));
     let own: Vec<String> = match check {
         Check::All => Vec::new(),
@@ -287,7 +292,8 @@ impl Vault {
     /// Opens and decrypts `path` (`vault.toml.age`).
     /// A missing file opens as an empty vault without touching the key (D-101).
     /// A file holding a value under [`MIN_VALUE_CHARS`] characters is `ValueTooShort`, one
-    /// holding a value that occurs inside a vault literal is `ValueInLiteral` (both name
+    /// holding a value that occurs inside a vault literal or a withheld marker is
+    /// `ValueInLiteral` (both name
     /// the entry and tell the user to run `harness vault set <name>`), and a scrubber that
     /// cannot be built is `ScrubUnavailable` (D-118).
     pub fn open(path: &Path, key: &KeySource) -> Result<Vault, VaultError> {
@@ -358,7 +364,8 @@ impl Vault {
     /// `name` must be `[A-Za-z0-9_.-]+` so that `@vault(name)` can reference it; otherwise
     /// `BadReference(byte offset of the first bad char in name)`. A non-empty `value`
     /// under [`MIN_VALUE_CHARS`] characters is `ValueTooShort`, and a value that occurs
-    /// inside a vault literal (or a name whose literal holds another entry's value) is
+    /// inside a vault literal or a withheld marker (or a name whose literal holds another
+    /// entry's value) is
     /// `ValueInLiteral`; both are refused before the file or key is touched when this
     /// handle's entries already show it (D-118). On a vault from `open` every entry of the
     /// re-read file is checked, except that the entry being set replaces a same-name entry
@@ -1842,6 +1849,49 @@ mod tests {
             msg.contains("\"pw\"") && msg.contains("harness vault set pw"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn set_and_open_refuse_values_inside_the_withheld_markers() {
+        // D-118 (3b), review-T-05 round 5: a value inside a marker would be scrubbed out of
+        // the fail-closed output itself.
+        let mut v = vault_with(&[("test", canary())]);
+        for value in [
+            "withheld",
+            "OUTPUT WITHHELD",
+            "put withh",
+            "Scrubber Unavailable",
+            "did not settle",
+            "settle]",
+            "[output",
+        ] {
+            match v.set("w", value, EntryKind::Personal) {
+                Err(VaultError::ValueInLiteral { name }) => assert_eq!(name, "w", "{value:?}"),
+                other => panic!("{value:?}: expected ValueInLiteral, got {other:?}"),
+            }
+        }
+        assert_eq!(v.names().len(), 1, "a refused set changed the vault");
+        // Words that only resemble the markers are fine, and the markers survive scrub.
+        v.set("w", "settled", EntryKind::Personal).unwrap();
+        v.set("u", "outputs", EntryKind::Personal).unwrap();
+        for marker in [SCRUB_WITHHELD, SCRUB_UNSETTLED] {
+            assert_eq!(v.scrub(marker), marker);
+        }
+        // open refuses a file holding one and names its entry.
+        let dir = TempDir::new();
+        let path = dir.0.join("vault.toml.age");
+        let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+        Vault::open(&path, &key)
+            .unwrap()
+            .set("test", &canary(), EntryKind::Secret)
+            .unwrap();
+        write_raw(&path, &key, &[("test", &canary()), ("note", "Not Settle")]);
+        match Vault::open(&path, &key) {
+            Err(e @ VaultError::ValueInLiteral { .. }) => {
+                assert!(e.to_string().contains("harness vault set note"), "{e}");
+            }
+            other => panic!("expected ValueInLiteral, got {other:?}"),
+        }
     }
 
     /// Writes `entries` to `path` as an older build or a hand edit could have.
