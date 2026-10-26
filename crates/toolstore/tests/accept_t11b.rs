@@ -483,7 +483,11 @@ async fn r4_r5_record_retire_with_failed_archive() {
         r.args,
         json!({"domain": "luma.com", "name": "register", "version": 1})
     );
-    assert!(r.consequences["archived"].is_null(), "{r:?}");
+    assert_eq!(
+        r.consequences.get("archived"),
+        Some(&serde_json::Value::Null),
+        "{r:?}"
+    );
     assert!(
         r.consequences.as_object().unwrap().contains_key("archived"),
         "{r:?}"
@@ -576,7 +580,11 @@ async fn r4_r5_sweep_retire_with_failed_archive() {
     assert_eq!(ev.len(), 2, "{ev:#?}");
     let (r, a) = (&ev[0], &ev[1]);
     assert_eq!((r.tool.as_str(), r.ok), ("tools.retire", true), "{r:?}");
-    assert!(r.consequences["archived"].is_null(), "{r:?}");
+    assert_eq!(
+        r.consequences.get("archived"),
+        Some(&serde_json::Value::Null),
+        "{r:?}"
+    );
     assert_eq!(r.consequences["archive_failed"], "luma.com/list_events.js");
     assert_eq!((a.tool.as_str(), a.ok), ("tools.archive", false), "{a:?}");
     assert_eq!(a.consequences["failed"], "luma.com/list_events.js");

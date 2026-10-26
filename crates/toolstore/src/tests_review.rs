@@ -30,6 +30,9 @@ struct Store {
     block_path: Mutex<Option<PathBuf>>,
     /// When set, `tool_health` fails (a memory error while loading, D-315).
     fail_get: AtomicBool,
+    /// When set, the next `tool_health` call first writes this file (path, source): a tool
+    /// file that changes while the rows are being read (D-315 read order).
+    late_file: Mutex<Option<(PathBuf, String)>>,
 }
 
 impl Store {
@@ -98,6 +101,9 @@ impl MemoryStore for Store {
         Ok(LedgerId(l.len() as i64))
     }
     async fn tool_health(&self, domain: &str) -> Result<Vec<ToolHealth>> {
+        if let Some((p, src)) = self.late_file.lock().unwrap().take() {
+            fs::write(p, src).unwrap();
+        }
         if self.fail_get.load(Ordering::SeqCst) {
             return Err(MemoryError::Invalid("tool_health refused (test)".into()));
         }
@@ -891,7 +897,11 @@ fn assert_retired_with_failed_archive(store: &Store, name: &str, rel: &str, err:
     let r = &ev[retire[0]];
     assert!(r.ok, "{r:?}");
     assert_eq!(r.server, "core");
-    assert!(r.consequences["archived"].is_null(), "{r:?}");
+    assert_eq!(
+        r.consequences.get("archived"),
+        Some(&serde_json::Value::Null),
+        "{r:?}"
+    );
     assert_eq!(r.consequences["archive_failed"], rel, "{r:?}");
     assert!(r.result_summary.contains(rel), "{r:?}");
     assert!(
@@ -1421,5 +1431,44 @@ async fn load_live_fails_closed_on_a_memory_error() {
         assert!(matches!(r, Err(StoreError::Memory(_))), "{domain}: {r:?}");
         let r = ts.scan_live(&store, domain, "/").await;
         assert!(matches!(r, Err(StoreError::Memory(_))), "{domain}: {r:?}");
+    }
+}
+
+/// D-315 read order: `scan_live` reads every tool file before any `tools.health` row. Retire
+/// saves the row before it moves the file, so with files first a retire that commits before
+/// the row read is always filtered, even when its archive then fails. The fake writes a new
+/// tool file inside the row read: with rows first (the round 1 order) that file was read
+/// after the rows and served, which is the window a retire-with-failed-archive could use.
+#[tokio::test]
+async fn scan_live_reads_files_before_rows() {
+    let (dir, ts) = luma();
+    let late = dir.path().join("luma.com/late.js");
+    let late_src = REGISTER.replace("@name register", "@name late");
+    for domain in ["luma.com", GENERIC] {
+        let store = Store::default();
+        let target = if domain == GENERIC {
+            dir.path().join("_generic/late.js")
+        } else {
+            late.clone()
+        };
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        *store.late_file.lock().unwrap() = Some((target.clone(), late_src.clone()));
+        let r = ts.scan_live(&store, domain, "/").await.unwrap();
+        assert!(store.late_file.lock().unwrap().is_none(), "{domain}");
+        assert!(target.is_file(), "{domain}");
+        assert!(
+            !r.tools.iter().any(|t| t.header.name == "late"),
+            "{domain}: a file written during the row read was served: {:?}",
+            names(&r.tools)
+        );
+        assert!(r.skipped.is_empty(), "{domain}: {:?}", r.skipped);
+        // The next call sees it: the file is a valid tool that fits the path.
+        let r = ts.scan_live(&store, domain, "/").await.unwrap();
+        assert!(
+            r.tools.iter().any(|t| t.header.name == "late"),
+            "{domain}: {:?}",
+            names(&r.tools)
+        );
+        fs::remove_file(&target).unwrap();
     }
 }

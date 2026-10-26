@@ -2772,7 +2772,11 @@ async fn d314_failed_retire_does_not_stop_sweep_and_next_sweep_archives() {
     );
     assert!(r.ok, "{r:?}");
     assert_eq!(r.args["name"], "list_events");
-    assert!(r.consequences["archived"].is_null(), "{r:?}");
+    assert_eq!(
+        r.consequences.get("archived"),
+        Some(&serde_json::Value::Null),
+        "{r:?}"
+    );
     assert_eq!(
         r.consequences["archive_failed"], "luma.com/list_events.js",
         "{r:?}"
