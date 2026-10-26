@@ -26,7 +26,7 @@ areas:
     crates: [toolstore]
     tasks: [T-11]
     docs: [docs/03-TOOL-STORE.md]
-    status: pr_open
+    status: pr_open   # D-78 follow-up batch ready to merge 2026-10-25 (handoffs/T-11-store-suborch-3.yaml)
     merged: true   # f493fd3, 2026-10-23 17:33: gate ok T-11, cargo test --workspace 135 passed 0 failed
   page:
     wave: 1
