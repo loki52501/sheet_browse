@@ -17,3 +17,4 @@ files_touched:
 verify: "git log --oneline main..swarm/core; cargo test --workspace -q"
 # supreme 2026-10-25 16:40: B-193 accepted as D-83 (gate rule_* canonicaliser names in I-3, consumers core-pg). Merge main before your PR; run the pr-ready skill and python scripts/swarm/merge_gate.py core --worktree . until it prints gate ok.
 # supreme 2026-10-25 17:15: B-194 accepted WITH A CONDITION as D-84: Vault::open_for_set must return a new VaultEditor type (set, remove, names, save only; no resolve_into, scrub or install_global), not a Vault, with a test that it cannot resolve. ValueInLiteral accepted as proposed. Required before your wave-1 PR; merge main first.
+# supreme 2026-10-25 18:12: B-195 accepted as D-85 (Launcher::before_run, SchedError::BeforeRun; also mark SchedError #[non_exhaustive]). I-13 updated on main; merge main before your PR.

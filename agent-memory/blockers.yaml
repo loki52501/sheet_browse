@@ -134,7 +134,7 @@ blockers:
   - id: B-175
     task: T-07
     question: "core_pg::bootstrap() accepts SB_RUN_ID when only the run folder exists (review-T-07 should-fix). With no runs row the wrapper now reads the run as strict (D-119 (2)), so every Send(new) or Account ask skips on timeout for that server. Should bootstrap refuse a run id with no runs row?"
-    default_taken: "The mcp side fails closed (missing row = strict). core-pg is not in the T-07 round-2 brief, so bootstrap is unchanged: its owner should make SB_RUN_ID require run_get(id) = Some (else MemoryError::Invalid), and the tester should run a server main with and without SB_RUN_ID against Postgres."
+    default_taken: "The mcp side fails closed (missing row = strict). core-pg is not in the T-07 round-2 brief, so bootstrap is unchanged: its owner should make SB_RUN_ID require run_get(id) = Some (else MemoryError::Invalid), and the tester should run a server main with and without SB_RUN_ID against Postgres. Resolved in T-03 round 3 (10cb4b5): bootstrap requires run_get(id) = Some; tested by crates/core-pg/tests/bootstrap_b175.rs and accept_t03_r3_bootstrap.rs (3b66c28 confirms). Supreme may close it."
     needs_user: false
   - id: B-176
     task: T-07
