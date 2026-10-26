@@ -1,9 +1,12 @@
 //! `harnessd` (H-5 Phase 1): the long-running scheduler. Fires due schedules as fresh
 //! `claude -p` sessions with a run folder (D-106, D-107, D-116). Ctrl-C stops scheduling and
-//! waits for running firings to write their report; a second Ctrl-C exits at once.
+//! waits for running firings to write their report (each `claude -p` session is capped at
+//! `SB_SESSION_CAP_SECS`, default one hour, so the wait is bounded); a second Ctrl-C exits at
+//! once.
 
 use clap::Parser;
-use harness::daemon::Daemon;
+use harness::daemon::{Daemon, ReopenVault};
+use harness::launcher::session_cap_from_env;
 use harness::{ClaudeLauncher, Env};
 use harness_core::sched::SystemClock;
 use std::sync::Arc;
@@ -19,9 +22,15 @@ struct Args {}
 async fn run() -> anyhow::Result<()> {
     let _ = Args::parse();
     let env = Env::from_env()?;
+    // Fail closed at startup; every firing re-opens the vault again (ReopenVault, D-124).
     env.install_vault()?;
+    let mut claude = ClaudeLauncher::print(env.claude.clone());
+    claude.max_session = session_cap_from_env()?;
     let store = Arc::new(env.connect().await?);
-    let launcher = Arc::new(ClaudeLauncher::print(env.claude.clone()));
+    let launcher = Arc::new(ReopenVault {
+        env: env.clone(),
+        inner: Arc::new(claude),
+    });
     let daemon = Daemon::new(
         store,
         launcher,

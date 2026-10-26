@@ -3,25 +3,20 @@
 //! `harness vault set <name>`. This checks that the command they name repairs a vault file
 //! that `Vault::open` refuses. Written by the tester.
 //!
-//! This crate has no `age` dependency, so the broken vault file (with `test` = the canary
-//! and a 2-character `st`) is written by the core test `r4_5_export_broken_vault_for_cli`:
-//!
-//! ```text
-//! SB_VAULT_CANARY=<unique> SB_T05R4_EXPORT=<new dir> \
-//!   cargo test -p harness-core --test vault_accept_t05_r4 r4_5_export_broken_vault_for_cli
-//! SB_VAULT_CANARY=<same> SB_T05R4_EXPORT=<same dir> \
-//!   cargo test -p harness --test vault_cli_repair_t05_r4 -- --include-ignored
-//! ```
+//! The broken vault file (with `test` = the canary and a 2-character `st`) is written by
+//! the test itself with `age` (a dev-dependency), as the core test
+//! `r4_5_export_broken_vault_for_cli` writes it: `Vault::set` for `test`, then the file
+//! re-encrypted with `st` added. The canary is `SB_VAULT_CANARY`, or a fresh one when unset.
 //!
 //! The test deletes the directory when it ends. No assertion message formats a value.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
 use harness::cli::{execute, Cli, Ctx};
 use harness::Env;
-use harness_core::vault::{KeySource, Vault, VaultError};
+use harness_core::vault::{EntryKind, KeySource, Vault, VaultError};
 use zeroize::Zeroizing;
 
 struct RemoveOnDrop(PathBuf);
@@ -31,16 +26,60 @@ impl Drop for RemoveOnDrop {
     }
 }
 
+fn canary() -> String {
+    std::env::var("SB_VAULT_CANARY")
+        .ok()
+        .filter(|c| c.chars().count() >= 8)
+        .unwrap_or_else(|| {
+            format!(
+                "sbcanary-t05r4-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )
+        })
+}
+
+/// Re-encrypts the vault at `path` with exactly `entries` (name, value, kind), as an older
+/// build or a hand edit could have written it, with the identity `Vault::set` stored.
+fn write_vault_file(path: &Path, key_file: &Path, entries: &[(&str, &str, &str)]) {
+    let text = std::fs::read_to_string(key_file).unwrap();
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .unwrap();
+    let id: age::x25519::Identity = line.parse().unwrap();
+    let mut t = toml::Table::new();
+    for (name, value, kind) in entries {
+        let mut e = toml::Table::new();
+        e.insert("value".into(), toml::Value::String((*value).into()));
+        e.insert("kind".into(), toml::Value::String((*kind).into()));
+        t.insert((*name).into(), toml::Value::Table(e));
+    }
+    let toml_text = toml::to_string(&t).unwrap();
+    let ct = age::encrypt(&id.to_public(), toml_text.as_bytes()).unwrap();
+    std::fs::write(path, ct).unwrap();
+}
+
 #[tokio::test]
-#[ignore = "red-first T-05 round 5: harness vault set opens with Vault::open, which refuses the file the hint tells it to repair; call Vault::open_for_set in cli.rs vault_set (also needs SB_T05R4_EXPORT, see the header)"]
 async fn vault_set_cli_repairs_a_short_entry_open_refuses() {
-    let dir = PathBuf::from(
-        std::env::var_os("SB_T05R4_EXPORT").expect("SB_T05R4_EXPORT is not set; see the header"),
-    );
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
     let _cleanup = RemoveOnDrop(dir.clone());
-    let canary = std::env::var("SB_VAULT_CANARY").expect("SB_VAULT_CANARY is not set");
+    let canary = canary();
     let path = dir.join("vault.toml.age");
-    let key = KeySource::IdentityFile(dir.join("vault.key"));
+    let key_file = dir.join("vault.key");
+    let key = KeySource::IdentityFile(key_file.clone());
+    let mut v = Vault::open(&path, &key).unwrap();
+    v.set("test", &canary, EntryKind::Secret).unwrap();
+    drop(v);
+    write_vault_file(
+        &path,
+        &key_file,
+        &[("test", &canary, "secret"), ("st", "Q\u{2603}", "personal")],
+    );
     // The fixture is what the hint is about: open refuses it and names st.
     match Vault::open(&path, &key) {
         Err(VaultError::ValueTooShort { name, .. }) => assert_eq!(name, "st"),

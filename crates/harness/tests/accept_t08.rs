@@ -782,7 +782,11 @@ async fn acc4_schedule_add_fires_with_real_harness_and_harnessd() {
     // D-116 (7) through the real binary: `claude -p`, prompt on stdin, SB_RUN_ID, absolute
     // SB_RUNS_ROOT (harnessd got the relative "runs"), stdout in files/answer.md.
     let argv = std::fs::read_to_string(calls.join(format!("{}.argv", run.0))).unwrap();
-    assert_eq!(argv, "-p", "claude argv");
+    assert_eq!(
+        argv,
+        "-p\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
+        "claude argv (B-192 denials)"
+    );
     let stdin = std::fs::read_to_string(calls.join(format!("{}.stdin", run.0))).unwrap();
     assert_eq!(stdin, "say hi");
     let envs = std::fs::read_to_string(calls.join(format!("{}.env", run.0))).unwrap();
@@ -1514,7 +1518,11 @@ async fn child_claude_launcher_stdin_scrub() {
     assert_eq!(f.status, RunStatus::Done, "{:?}", f.launch_problem);
     let scrubbed = "--version\nsay \"hi\" & | ^ %PATH% to @vault(test) and @vault(test)";
     let argv = std::fs::read_to_string(calls.join(format!("{}.argv", f.run.0))).unwrap();
-    assert_eq!(argv, "-p", "the prompt must not be in argv");
+    assert_eq!(
+        argv,
+        "-p\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
+        "the prompt must not be in argv (B-192 denials)"
+    );
     let stdin = std::fs::read_to_string(calls.join(format!("{}.stdin", f.run.0))).unwrap();
     assert_eq!(stdin, scrubbed);
     let envs = std::fs::read_to_string(calls.join(format!("{}.env", f.run.0))).unwrap();
@@ -1551,7 +1559,11 @@ async fn child_claude_launcher_stdin_scrub() {
         .unwrap();
     assert!(exit.success());
     let argv = std::fs::read_to_string(calls.join(format!("{}.argv", run.id.0))).unwrap();
-    assert_eq!(argv, " -h");
+    assert_eq!(
+        argv,
+        " -h\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
+        "B-192 denials after the prompt"
+    );
     println!("child ok, run {}", f.run);
 }
 

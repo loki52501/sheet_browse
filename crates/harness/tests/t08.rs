@@ -625,3 +625,255 @@ async fn harness_binary_schedule_add_and_list() {
     assert_eq!(bad.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&bad.stderr).starts_with("harness: "));
 }
+
+// ------------------------------------------------------------------ round 2 (review-T-08)
+
+/// Exits with `code`, recording each request. Never calls a model (rule 1).
+struct ExitLauncher {
+    code: Option<i32>,
+    seen: Mutex<Vec<(RunId, String)>>,
+}
+
+#[async_trait]
+impl Launcher for ExitLauncher {
+    async fn launch(&self, req: LaunchRequest<'_>) -> Result<LaunchExit, LaunchError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((req.run.id.clone(), req.prompt.to_owned()));
+        Ok(LaunchExit { code: self.code })
+    }
+}
+
+/// Should fix 6: `harness run` (H-7) through the Ctx.launcher seam: strict on the row,
+/// parent_run from SB_RUN_ID, and the printed status and report line.
+#[tokio::test]
+async fn harness_run_uses_the_launcher_seam() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store: Arc<dyn MemoryStore> = Arc::new(harness_core::testing::MemStore::new());
+    let mut e = env(tmp.path(), "postgres://unused");
+    let parent = RunId("2026-10-25T08-00-00-plan-week".into());
+    e.run_id = Some(parent.clone());
+    let launcher = Arc::new(ExitLauncher {
+        code: Some(0),
+        seen: Mutex::new(vec![]),
+    });
+    let c = Ctx {
+        launcher: Some(launcher.clone()),
+        ..ctx(e.clone(), store.clone())
+    };
+    let out = run_cli(&c, &["run", "say hi", "--strict"]).await.unwrap();
+    let seen = launcher.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    let (id, prompt) = &seen[0];
+    assert_eq!(prompt, "say hi");
+    let dir = e.runs_root.join(&id.0);
+    assert_eq!(
+        out,
+        format!(
+            "run {id}: done\nreport: {}\n",
+            dir.join("report.md").display()
+        )
+    );
+    let row = store.run_get(id).await.unwrap().expect("runs row");
+    assert!(row.strict);
+    assert_eq!(row.parent_run.as_ref(), Some(&parent));
+    assert_eq!(row.status, RunStatus::Done);
+    assert!(dir.join("report.md").is_file());
+
+    // A session that exits non-zero: the run is failed and the line says why.
+    let failing = Arc::new(ExitLauncher {
+        code: Some(3),
+        seen: Mutex::new(vec![]),
+    });
+    let mut e2 = e.clone();
+    e2.run_id = None;
+    let c = Ctx {
+        launcher: Some(failing.clone()),
+        ..ctx(e2, store.clone())
+    };
+    let out = run_cli(&c, &["run", "again"]).await.unwrap();
+    let id = failing.seen.lock().unwrap()[0].0.clone();
+    assert!(
+        out.starts_with(&format!(
+            "run {id}: failed (session exited with code 3)\nreport: "
+        )),
+        "{out}"
+    );
+    let row = store.run_get(&id).await.unwrap().unwrap();
+    assert!(!row.strict);
+    assert_eq!(row.parent_run, None);
+    assert_eq!(row.status, RunStatus::Failed);
+}
+
+/// Should fix 2 (D-79): answering the same ask twice gives ask::answer's AlreadyExists
+/// message as is, from the library and on the binary's stderr.
+#[tokio::test]
+async fn ask_answered_twice_prints_the_already_exists_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let e = env(tmp.path(), "postgres://unused");
+    let c = ctx(e.clone(), Arc::new(harness_core::testing::MemStore::new()));
+    let run = RunFolder::create(&e.runs_root, "ask twice", "p").unwrap();
+    let card = harness_core::ask::card_path(&run.dir, 1);
+    std::fs::create_dir_all(card.parent().unwrap()).unwrap();
+    std::fs::write(&card, "{}").unwrap();
+    let want = format!(
+        "ask 1 in run {} is already answered (yes); nothing changed",
+        run.id
+    );
+
+    run_cli(&c, &["ask", &run.id.0, "1", "yes"]).await.unwrap();
+    let err = run_cli(&c, &["ask", &run.id.0, "1", "no"])
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_string(), want);
+    let answer = std::fs::read_to_string(harness_core::ask::answer_path(&run.dir, 1)).unwrap();
+    assert_eq!(answer.trim(), "yes", "the second answer changed nothing");
+
+    // The binary: the same text after `harness: `, exit code 1.
+    let card2 = harness_core::ask::card_path(&run.dir, 2);
+    std::fs::write(&card2, "{}").unwrap();
+    let bin = env!("CARGO_BIN_EXE_harness");
+    let ask = |answer: &str| {
+        std::process::Command::new(bin)
+            .args(["ask", &run.id.0, "2", answer])
+            .env("SB_RUNS_ROOT", &e.runs_root)
+            .env("SB_TOOLS_ROOT", &e.tools_root)
+            .env("SB_VAULT_PATH", &e.vault_path)
+            .env_remove("SB_RUN_ID")
+            .output()
+            .unwrap()
+    };
+    let first = ask("yes");
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout),
+        format!("ask 2 in run {}: yes\n", run.id)
+    );
+    let second = ask("no");
+    assert_eq!(second.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&second.stderr),
+        format!(
+            "harness: ask 2 in run {} is already answered (yes); nothing changed\n",
+            run.id
+        )
+    );
+    assert!(second.stdout.is_empty());
+}
+
+/// A MemStore whose ledger append fails (the database went away mid-command).
+struct FailAppend(harness_core::testing::MemStore);
+
+#[async_trait]
+impl MemoryStore for FailAppend {
+    async fn remember(&self, f: Fact) -> Result<FactId> {
+        self.0.remember(f).await
+    }
+    async fn forget(&self, id: FactId) -> Result<()> {
+        self.0.forget(id).await
+    }
+    async fn link(&self, src: NodeId, rel: &str, dst: NodeId, source: Source) -> Result<()> {
+        self.0.link(src, rel, dst, source).await
+    }
+    async fn node(&self, kind: &str, name: &str) -> Result<NodeId> {
+        self.0.node(kind, name).await
+    }
+    async fn neighbors(&self, n: NodeId, rel: Option<&str>, depth: u8) -> Result<Vec<Node>> {
+        self.0.neighbors(n, rel, depth).await
+    }
+    async fn recall(&self, q: &str, k: usize, filter: Option<Filter>) -> Result<Vec<Hit>> {
+        self.0.recall(q, k, filter).await
+    }
+    async fn search(&self, q: &str, k: usize) -> Result<Vec<Hit>> {
+        self.0.search(q, k).await
+    }
+    async fn contact(&self, person: &str) -> Result<Option<Contact>> {
+        self.0.contact(person).await
+    }
+    async fn touch_contact(&self, person: &str, channel: &str, note: &str) -> Result<()> {
+        self.0.touch_contact(person, channel, note).await
+    }
+    async fn due_reviews(&self, now: Ts, k: usize) -> Result<Vec<Review>> {
+        self.0.due_reviews(now, k).await
+    }
+    async fn grade_review(&self, id: ReviewId, grade: u8) -> Result<()> {
+        self.0.grade_review(id, grade).await
+    }
+    async fn baseline_get(&self, w: &str) -> Result<Option<Baseline>> {
+        self.0.baseline_get(w).await
+    }
+    async fn baseline_set(&self, w: &str, b: Baseline) -> Result<()> {
+        self.0.baseline_set(w, b).await
+    }
+    async fn append(&self, _: LedgerEvent) -> Result<LedgerId> {
+        Err(MemoryError::Invalid("test: ledger append refused".into()))
+    }
+    async fn tool_health(&self, domain: &str) -> Result<Vec<ToolHealth>> {
+        self.0.tool_health(domain).await
+    }
+    async fn tool_health_set(&self, h: ToolHealth) -> Result<()> {
+        self.0.tool_health_set(h).await
+    }
+    async fn gate_rule(&self, domain: &str, class: &str) -> Result<Option<GateRule>> {
+        self.0.gate_rule(domain, class).await
+    }
+    async fn run_start(&self, run: Run) -> Result<()> {
+        self.0.run_start(run).await
+    }
+    async fn run_end(&self, id: &RunId, status: RunStatus, ended: Ts) -> Result<()> {
+        self.0.run_end(id, status, ended).await
+    }
+    async fn run_get(&self, id: &RunId) -> Result<Option<Run>> {
+        self.0.run_get(id).await
+    }
+    async fn schedule_add(&self, s: Schedule) -> Result<i32> {
+        self.0.schedule_add(s).await
+    }
+    async fn schedule_list(&self) -> Result<Vec<Schedule>> {
+        self.0.schedule_list().await
+    }
+    async fn schedule_rm(&self, id: i32) -> Result<()> {
+        self.0.schedule_rm(id).await
+    }
+    async fn schedule_fired(&self, id: i32, at: Ts) -> Result<()> {
+        self.0.schedule_fired(id, at).await
+    }
+    async fn gate_rule_set(&self, d: &str, c: &str, r: GateRule, note: &str) -> Result<()> {
+        self.0.gate_rule_set(d, c, r, note).await
+    }
+    async fn review_add(&self, item: &str, answer: &str) -> Result<ReviewId> {
+        self.0.review_add(item, answer).await
+    }
+    async fn ledger_events(&self, run: &RunId) -> Result<Vec<(LedgerId, LedgerEvent)>> {
+        self.0.ledger_events(run).await
+    }
+}
+
+/// Should fix 5: `schedule add` whose ledger write fails after the schedule row exists ends
+/// its own run failed and still rewrites the marker harnessd watches.
+#[tokio::test]
+async fn schedule_add_failing_after_the_row_ends_its_run_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(FailAppend(harness_core::testing::MemStore::new()));
+    let e = env(tmp.path(), "postgres://unused");
+    let c = ctx(e.clone(), store.clone());
+    let err = run_cli(&c, &["schedule", "add", "*/5 * * * *", "say hi"])
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("ledger append refused"), "{err}");
+    let s = store.schedule_list().await.unwrap();
+    assert_eq!(s.len(), 1, "the schedule row was written");
+    let parent = s[0].run_id.clone().expect("schedule's run");
+    let row = store.run_get(&parent).await.unwrap().unwrap();
+    assert_eq!(row.status, RunStatus::Failed);
+    assert!(row.ended.is_some());
+    assert!(
+        e.runs_root.join(".sched/changed").is_file(),
+        "harnessd is told the schedules changed"
+    );
+}

@@ -55,6 +55,10 @@ pub enum SchedError {
     Ledger(#[from] LedgerError),
     #[error("run folder: {0}")]
     Io(#[from] std::io::Error),
+    /// [`Launcher::before_run`] refused (harnessd: the vault could not be re-opened, so the
+    /// prompt cannot be scrubbed). Nothing was written for the run (fail closed).
+    #[error("before the run: {0}")]
+    BeforeRun(LaunchError),
 }
 
 pub type Result<T, E = SchedError> = std::result::Result<T, E>;
@@ -248,6 +252,14 @@ pub struct LaunchError(pub String);
 /// runs `claude -p`; tests use a launcher that does not call a model (rule 1).
 #[async_trait]
 pub trait Launcher: Send + Sync {
+    /// Called by [`Runner::execute`] first, before the prompt is scrubbed or anything is
+    /// written. harnessd re-opens and installs the vault here, so a value added with
+    /// `harness vault set` after it started is scrubbed from the next firing (D-124). An
+    /// error ends the run before it starts ([`SchedError::BeforeRun`]). Default: nothing.
+    fn before_run(&self) -> Result<(), LaunchError> {
+        Ok(())
+    }
+
     async fn launch(&self, req: LaunchRequest<'_>) -> Result<LaunchExit, LaunchError>;
 }
 
@@ -353,7 +365,9 @@ impl Runner {
     /// Status is the ledger's ([`ledger::run_status`]), or `failed` when the launcher failed
     /// and the ledger does not say stopped. Errors before the row exists return early; after
     /// it, the report and the end are always attempted and the first error is returned.
+    /// [`Launcher::before_run`] runs first; when it fails nothing is written.
     pub async fn execute(&self, spec: RunSpec<'_>) -> Result<Finished> {
+        self.launcher.before_run().map_err(SchedError::BeforeRun)?;
         let prompt = scrub(spec.prompt);
         let started = self.clock.now();
         let folder = RunFolder::create_at(&self.runs_root, &prompt, &prompt, started)?;

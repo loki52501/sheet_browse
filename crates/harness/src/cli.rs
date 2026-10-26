@@ -16,8 +16,13 @@
 //! ```
 //!
 //! [`execute`] runs one parsed command against a [`Ctx`] and writes its output to `out`.
-//! Everything printed from the database or a run folder goes through the vault scrub and
-//! has control characters replaced, so page text cannot drive the terminal.
+//! Every command except `vault set` first opens the vault and installs it as the
+//! process-wide scrubber; when it cannot be opened the command fails before it prints or
+//! writes anything (rule 2, fail closed), and the error names vault entries, never values.
+//! So everything printed from the database or a run folder, and the binary's error line,
+//! goes through the vault scrub, with control characters replaced so page text cannot drive
+//! the terminal. `vault set` opens the vault with `Vault::open_for_set` (so it can repair an
+//! entry `open` refuses, D-118) and never installs that handle.
 
 use crate::{ClaudeLauncher, CliError, Env};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -230,8 +235,16 @@ impl Ctx {
     }
 }
 
-/// Runs one command.
+/// Runs one command. Installs the vault first for every command except `vault set`.
 pub async fn execute(cli: Cli, ctx: &Ctx, out: &mut dyn Write) -> Result<(), CliError> {
+    if let Cmd::Vault {
+        cmd: VaultCmd::Set { name, personal },
+    } = &cli.cmd
+    {
+        return vault_set(ctx, name, *personal, out);
+    }
+    // Rule 2: without an installed vault scrub() is the identity. Fail closed.
+    ctx.env.install_vault()?;
     match cli.cmd {
         Cmd::Run { prompt, strict } => run(ctx, &prompt, strict, out).await,
         Cmd::Schedule { cmd } => match cmd {
@@ -261,6 +274,7 @@ pub async fn execute(cli: Cli, ctx: &Ctx, out: &mut dyn Write) -> Result<(), Cli
                 Ok(())
             }
         },
+        // Handled above, before the vault is installed; kept so the match stays exhaustive.
         Cmd::Vault {
             cmd: VaultCmd::Set { name, personal },
         } => vault_set(ctx, &name, personal, out),
@@ -381,7 +395,6 @@ fn kind_str(k: ScheduleKind) -> &'static str {
 // ---------------------------------------------------------------- run
 
 async fn run(ctx: &Ctx, prompt: &str, strict: bool, out: &mut dyn Write) -> Result<(), CliError> {
-    ctx.env.install_vault()?;
     let store = ctx.store().await?;
     let launcher = ctx
         .launcher
@@ -436,8 +449,10 @@ fn ledger_event(run: &RunId, tool: &str, args: serde_json::Value, summary: Strin
 
 /// `harness schedule add` (H-5, D-107). Inside a session (`SB_RUN_ID`) the schedule's run is
 /// that run; otherwise the command creates its own run `<ts>-schedule-add` (status done, with
-/// report.md), so every firing has `parent_run` set. Wakes harnessd through the marker.
-pub async fn schedule_add(
+/// report.md), so every firing has `parent_run` set. Wakes harnessd through the marker,
+/// also when a step after the schedule row was written fails (the own run then ends
+/// failed). The caller has installed the vault ([`execute`]).
+async fn schedule_add(
     ctx: &Ctx,
     cron: &str,
     prompt: &str,
@@ -453,7 +468,6 @@ pub async fn schedule_add(
     if prompt.trim().is_empty() {
         return Err(CliError::Usage("the prompt is empty".into()));
     }
-    ctx.env.install_vault()?;
     let store = ctx.store().await?;
     let prompt = scrub(prompt);
     let cron = cron.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -513,27 +527,39 @@ pub async fn schedule_add(
             return Err(e.into());
         }
     };
-    let ledger = Ledger::new(store.clone(), parent.clone());
-    ledger
-        .write(ledger_event(
-            &parent.id,
-            SCHEDULE_ADD_TOOL,
-            args(id),
-            format!("schedule {id} added"),
-        ))
-        .await?;
-    if own {
-        let events: Vec<LedgerEvent> = store
-            .ledger_events(&parent.id)
-            .await?
-            .into_iter()
-            .map(|(_, e)| e)
-            .collect();
-        let task = std::fs::read_to_string(parent.prompt_md())?;
-        ledger::write_report(&parent, &task, &events)?;
-        store.run_end(&parent.id, RunStatus::Done, ts_now()).await?;
+    let recorded = async {
+        let ledger = Ledger::new(store.clone(), parent.clone());
+        ledger
+            .write(ledger_event(
+                &parent.id,
+                SCHEDULE_ADD_TOOL,
+                args(id),
+                format!("schedule {id} added"),
+            ))
+            .await?;
+        if own {
+            let events: Vec<LedgerEvent> = store
+                .ledger_events(&parent.id)
+                .await?
+                .into_iter()
+                .map(|(_, e)| e)
+                .collect();
+            let task = std::fs::read_to_string(parent.prompt_md())?;
+            ledger::write_report(&parent, &task, &events)?;
+            store.run_end(&parent.id, RunStatus::Done, ts_now()).await?;
+        }
+        Ok::<(), CliError>(())
     }
-    sched::notify_changed(&ctx.env.runs_root)?;
+    .await;
+    // The schedule row exists either way: harnessd must re-read it.
+    let notified = sched::notify_changed(&ctx.env.runs_root);
+    if let Err(e) = recorded {
+        if own {
+            let _ = store.run_end(&parent.id, RunStatus::Failed, ts_now()).await;
+        }
+        return Err(e);
+    }
+    notified?;
 
     let next = next_after(&parsed, ts_now());
     writeln!(
@@ -602,14 +628,18 @@ async fn schedule_list(ctx: &Ctx, out: &mut dyn Write) -> Result<(), CliError> {
 // ---------------------------------------------------------------- vault
 
 /// `harness vault set`: the value comes from [`Ctx::read_secret`] (rpassword, no echo), is
-/// held in `Zeroizing`, and is never printed, logged or put in an error.
+/// held in `Zeroizing`, and is never printed, logged or put in an error. Opens the vault
+/// with `open_for_set`, so an entry `Vault::open` refuses can be set to a valid value.
 fn vault_set(ctx: &Ctx, name: &str, personal: bool, out: &mut dyn Write) -> Result<(), CliError> {
     let kind = if personal {
         EntryKind::Personal
     } else {
         EntryKind::Secret
     };
-    let mut vault = harness_core::vault::Vault::open(&ctx.env.vault_path, &ctx.env.vault_key)?;
+    // open_for_set: a file `open` refuses (an entry under the D-118 floor) can be repaired
+    // here. Its scrubber is never installed (vault.rs).
+    let mut vault =
+        harness_core::vault::Vault::open_for_set(&ctx.env.vault_path, &ctx.env.vault_key)?;
     // Vault::set checks the name too; checking first avoids asking for a value it would refuse.
     let name_ok = !name.is_empty()
         && name
@@ -645,7 +675,6 @@ async fn print_ledger(ctx: &Ctx, run: &str, out: &mut dyn Write) -> Result<(), C
             clean(run)
         )));
     }
-    ctx.env.install_vault()?;
     let store = ctx.store().await?;
     let id = RunId(run.to_owned());
     let Some(r) = store.run_get(&id).await? else {

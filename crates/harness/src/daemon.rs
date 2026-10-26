@@ -1,10 +1,17 @@
 //! harnessd (H-5 Phase 1, D-107, D-116): the `harness_core::sched` loop plus a watcher on
 //! `<runs_root>/.sched/`, which `harness schedule add|rm` writes, so a change re-reads the
 //! schedules at once instead of on a poll interval (rule 6).
+//!
+//! harnessd wraps its launcher in [`ReopenVault`], so every firing re-opens the vault and
+//! installs it before the prompt is scrubbed: a value added with `harness vault set` while
+//! harnessd runs is scrubbed from the next firing without a restart (D-124).
 
-use crate::CliError;
+use crate::{CliError, Env};
+use async_trait::async_trait;
 use harness_core::memory::MemoryStore;
-use harness_core::sched::{changed_dir, Clock, Fired, Launcher, Runner, Scheduler};
+use harness_core::sched::{
+    changed_dir, Clock, Fired, LaunchError, LaunchExit, LaunchRequest, Launcher, Runner, Scheduler,
+};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -22,6 +29,29 @@ pub fn watch_changes(runs_root: &Path, wake: Arc<Notify>) -> Result<RecommendedW
     })?;
     w.watch(&dir, RecursiveMode::NonRecursive)?;
     Ok(w)
+}
+
+/// A [`Launcher`] that re-opens the vault in `env` and installs it as the process-wide
+/// scrubber before every run ([`Launcher::before_run`]), then defers to `inner`. When the
+/// vault cannot be opened the firing does not start and nothing is written (fail closed).
+pub struct ReopenVault {
+    pub env: Env,
+    pub inner: Arc<dyn Launcher>,
+}
+
+#[async_trait]
+impl Launcher for ReopenVault {
+    fn before_run(&self) -> Result<(), LaunchError> {
+        // VaultError names entries, never values.
+        self.env
+            .install_vault()
+            .map_err(|e| LaunchError(e.to_string()))?;
+        self.inner.before_run()
+    }
+
+    async fn launch(&self, req: LaunchRequest<'_>) -> Result<LaunchExit, LaunchError> {
+        self.inner.launch(req).await
+    }
 }
 
 /// A scheduler with its change watcher already installed, so a change made right after

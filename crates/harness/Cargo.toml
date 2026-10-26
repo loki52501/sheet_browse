@@ -36,5 +36,8 @@ toolstore.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Tests write vault files that Vault::open refuses (D-118 repair through `vault set`).
+age.workspace = true
 harness-core = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+toml.workspace = true
