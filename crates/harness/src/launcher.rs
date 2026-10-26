@@ -17,6 +17,10 @@
 //! not answer its own asks, change gate rules or vault entries through the CLI (rule 4).
 //! Both get `SB_RUN_ID` and an absolute `SB_RUNS_ROOT`, which the tool servers read in
 //! `core_pg::bootstrap()` to attach to this run. No API key is set or read (rule 1).
+//!
+//! A launcher with a non-empty [`ClaudeLauncher::allowed_tools`] adds `--allowedTools` with
+//! that list: reflect's readers-only replay session runs with only `mcp__harness-web` allowed
+//! (G-3, T-16), so in `-p` mode every other tool that needs a permission is refused.
 
 use crate::CliError;
 use async_trait::async_trait;
@@ -63,6 +67,9 @@ pub struct ClaudeLauncher {
     pub max_session: Duration,
     /// Bytes of a `claude -p` session's stdout kept in `files/answer.md`.
     pub max_answer_bytes: usize,
+    /// Claude Code permission rules passed as `--allowedTools` (none: the flag is left out).
+    /// Reflect's replay session uses [`crate::reflect::READERS_ALLOWED_TOOLS`] (G-3, T-16).
+    pub allowed_tools: Vec<String>,
 }
 
 /// The session cap from `SB_SESSION_CAP_SECS` (unset or blank: [`DEFAULT_SESSION_CAP`]).
@@ -91,6 +98,7 @@ impl ClaudeLauncher {
             interactive: false,
             max_session: DEFAULT_SESSION_CAP,
             max_answer_bytes: DEFAULT_MAX_ANSWER_BYTES,
+            allowed_tools: Vec::new(),
         }
     }
 
@@ -127,6 +135,10 @@ impl ClaudeLauncher {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .kill_on_drop(true);
+        }
+        // Both lists are variadic: each ends where the next flag starts.
+        if !self.allowed_tools.is_empty() {
+            cmd.arg("--allowedTools").args(&self.allowed_tools);
         }
         cmd.arg("--disallowedTools").args(DISALLOWED_TOOLS);
         cmd
@@ -381,6 +393,31 @@ mod tests {
         let (pre, task) = p.split_once("\n\n").unwrap();
         assert_eq!(format!("{pre}\n"), run_preamble(&req));
         assert_eq!(task, "-h say hi\n\nsecond paragraph");
+    }
+
+    /// G-3, T-16: the reflect replay session allows only harness-web.
+    #[test]
+    fn allowed_tools_go_before_the_deny_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = RunFolder::create(tmp.path(), "x", "x").unwrap();
+        let req = LaunchRequest {
+            run: &run,
+            runs_root: tmp.path(),
+            prompt: "replay",
+            schedule: None,
+        };
+        let mut p = ClaudeLauncher::print("claude");
+        p.allowed_tools = vec!["mcp__harness-web".into()];
+        let got = argv(&p.command(&p.program, &req, tmp.path()));
+        assert_eq!(
+            got[..4],
+            [
+                "-p",
+                "--allowedTools",
+                "mcp__harness-web",
+                "--disallowedTools"
+            ]
+        );
     }
 
     #[test]
