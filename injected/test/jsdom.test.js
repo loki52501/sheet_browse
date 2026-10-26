@@ -851,3 +851,238 @@ test("passive reCAPTCHA v3 markers are not challenge context; a visible v2 widge
   assert.ok(byName(rows, "Are you human?", "heading").flags.challenge);
   assert.ok(byName(rows, "Press and hold the button to continue").flags.challenge);
 });
+
+// ------------------------------------------------------------------ D-438
+// add-first.html with injected.js on a frozen clock; every password field counts its value
+// getter calls. step(j) changes the page and returns the fields to check.
+async function addFirst(canary, step) {
+  const c = { reads: 0 };
+  const j = jsdom(page("add-first.html"));
+  j.advance = fakeClock(j.win);
+  j.mk = (html) => tmpl(j.doc, html);
+  j.spy = (el) => spied(j.win, el, canary, c);
+  j.$ = (id) => j.doc.getElementById(id);
+  for (const el of j.doc.querySelectorAll('input[type="password"]')) j.spy(el);
+  j.sb.walk({ base: 1 });
+  j.sb.index();
+  const fields = await step(j);
+  await tick();
+  j.sb.walk({ dirty: true });
+  const states = fields.map((f) => j.sb.state(f).value);
+  const blob = JSON.stringify([j.sb.index(), j.sb.text(), states]);
+  return { c, states: JSON.parse(JSON.stringify(states)), blob };
+}
+// Observer batches seen while fn runs (a microtask split must deliver more than one).
+async function batches(win, doc, fn) {
+  let n = 0;
+  const mo = new win.MutationObserver(() => { n++; });
+  mo.observe(doc, { subtree: true, childList: true });
+  await fn();
+  await tick();
+  mo.disconnect();
+  return n;
+}
+
+test("an add-first rebuild split by a microtask or a later task inherits within 2 s (D-438 (1))", async () => {
+  const CANARY = "addfirst-canary-438";
+  const cases = {
+    // the copy keeps the old field's aria-label and lands in another parent: a key match
+    "microtask, key": async (j) => {
+      const n = j.spy(j.mk('<input id="k1-copy" type="text" aria-label="Key one">'));
+      const b = await batches(j.win, j.doc, async () => {
+        j.$("b1").appendChild(n);
+        await null;
+        j.$("k1").remove();
+      });
+      assert.equal(b, 2, "the microtask split delivered two batches");
+      return [n];
+    },
+    "later task at 2000 ms, key": async (j) => {
+      const n = j.spy(j.mk('<input id="k1-copy" type="text" aria-label="Key one">'));
+      j.$("b1").appendChild(n);
+      await tick();
+      j.advance(2000);
+      j.$("k1").remove();
+      return [n];
+    },
+    // the copy shares nothing with the old field: the single field added to its parent
+    "later task, same parent, no shared key": async (j) => {
+      const n = j.spy(j.mk('<input id="k2-plain" type="text" aria-label="Visible key">'));
+      j.$("k2").after(n);
+      await tick();
+      j.advance(1999);
+      j.$("k2").remove();
+      return [n];
+    },
+  };
+  for (const [k, step] of Object.entries(cases)) {
+    const r = await addFirst(CANARY, step);
+    assert.equal(r.c.reads, 0, k + ": a value getter was called");
+    assert.ok(!r.blob.includes(CANARY), k + ": " + r.blob);
+    same(r.states, [{ kind: "filled" }], k);
+  }
+  // after 2000 ms the memory has aged out, and two fields added to one parent are not "the
+  // single field": they read their text
+  const late = {
+    "key, 2001 ms": async (j) => {
+      const n = j.mk('<input id="k1-copy" type="text" aria-label="Key one" value="plain one">');
+      j.$("b1").appendChild(n);
+      await tick();
+      j.advance(2001);
+      j.$("k1").remove();
+      return [n];
+    },
+    "same parent, 2001 ms": async (j) => {
+      const n = j.mk('<input id="k2-plain" type="text" aria-label="Visible key" value="plain two">');
+      j.$("k2").after(n);
+      await tick();
+      j.advance(2001);
+      j.$("k2").remove();
+      return [n];
+    },
+    "same parent, two fields": async (j) => {
+      const a = j.mk('<input aria-label="Street" value="Elm St">');
+      const b = j.mk('<input aria-label="Town" value="Leeds">');
+      j.$("k2").after(a, b);
+      await tick();
+      j.$("k2").remove();
+      return [a, b];
+    },
+  };
+  const want = {
+    "key, 2001 ms": [{ kind: "text", text: "plain one" }],
+    "same parent, 2001 ms": [{ kind: "text", text: "plain two" }],
+    "same parent, two fields": [{ kind: "text", text: "Elm St" }, { kind: "text", text: "Leeds" }],
+  };
+  for (const [k, step] of Object.entries(late)) same((await addFirst(CANARY, step)).states, want[k], k);
+});
+
+test("while the old field is still there, an added field matching its keys is sensitive at once (D-438 (1))", async () => {
+  const CANARY = "overlap-canary-438";
+  const r = await addFirst(CANARY, async (j) => {
+    // next to the old field in its parent, and in a wrapper inserted next to the old wrapper
+    const n1 = j.spy(j.mk('<input id="k1-t" type="text" aria-label="Key one">'));
+    const n2 = j.mk('<div id="w2b"><input id="k2-t" type="text" aria-label="Key two"></div>');
+    j.spy(n2.firstElementChild);
+    const note = j.mk('<input aria-label="Note" value="hello">');
+    j.$("k1").after(n1, note);
+    j.$("w2").after(n2);
+    await tick();
+    assert.ok(j.$("k1").isConnected && j.$("k2").isConnected);
+    return [n1, n2.firstElementChild, note];
+  });
+  assert.equal(r.c.reads, 0);
+  assert.ok(!r.blob.includes(CANARY), r.blob);
+  same(r.states, [{ kind: "filled" }, { kind: "filled" }, { kind: "text", text: "hello" }]);
+});
+
+test("swap counts take value fields only; a label[for] removed beside its field is its label (D-438 (2), (3))", async () => {
+  const CANARY = "count-canary-438";
+  const cases = {
+    // the wrapper also holds a show checkbox or a hidden input: still a one-for-one swap
+    "checkbox in the wrapper": async (j) => {
+      const n = j.mk('<div id="w3"><span>Key three</span><input type="text"><input type="checkbox" id="sh3" checked> Show</div>');
+      j.spy(n.querySelector('input[type="text"]'));
+      j.$("w3").replaceWith(n);
+      return [n.querySelector('input[type="text"]')];
+    },
+    "hidden in the wrapper": async (j) => {
+      const n = j.mk('<div id="w4"><span>Key four</span><input type="text"><input type="hidden" name="enc" value="1"></div>');
+      j.spy(n.querySelector('input[type="text"]'));
+      j.$("w4").replaceWith(n);
+      return [n.querySelector('input[type="text"]')];
+    },
+    // innerHTML rebuild of a never-walked block with new ids and a second value field (so not
+    // a one-for-one swap): the label text matches only through the removed label[for]
+    "label[for] removed beside the field": async (j) => {
+      const w = j.$("w5");
+      w.innerHTML = '<label for="acct">Account key</label><input id="acct" type="password"><input id="hint" aria-label="Hint">';
+      j.spy(w.querySelector("#acct"));
+      await tick();
+      w.innerHTML = '<label for="acct2">Account key</label><input id="acct2" type="text"><input id="hint2" aria-label="Hint" value="blue">';
+      j.spy(w.querySelector("#acct2"));
+      return [w.querySelector("#acct2"), w.querySelector("#hint2")];
+    },
+  };
+  const want = {
+    "checkbox in the wrapper": [{ kind: "filled" }],
+    "hidden in the wrapper": [{ kind: "filled" }],
+    "label[for] removed beside the field": [{ kind: "filled" }, { kind: "text", text: "blue" }],
+  };
+  for (const [k, step] of Object.entries(cases)) {
+    const r = await addFirst(CANARY, step);
+    assert.equal(r.c.reads, 0, k);
+    assert.ok(!r.blob.includes(CANARY), k + ": " + r.blob);
+    same(r.states, want[k], k);
+  }
+});
+
+test("a two-field login replaced by a one-field pre-filled page reads that field (D-437: lost exactly one)", async () => {
+  const { doc, sb } = jsdom('<div id="root"><div id="app"><input aria-label="User">' +
+    '<input type="password" aria-label="Password"></div></div>');
+  sb.walk({ base: 1 });
+  const n = tmpl(doc, '<div id="app"><h1>Home</h1><input aria-label="Search" value="cats"></div>');
+  doc.getElementById("app").replaceWith(n);
+  await tick();
+  sb.walk({ dirty: true });
+  same(byName(sb.index(), "Search").state.value, { kind: "text", text: "cats" });
+});
+
+test("a removed sensitive field whose keys cannot be read matches every field for 2 s (D-438 (3))", async () => {
+  const CANARY = "throw-canary-438";
+  // the walk has marked k1 sensitive, so only fieldKeys reads its id (and throws)
+  const boom = (el) => Object.defineProperty(el, "id", { configurable: true, get() { throw new Error("id"); } });
+  const cases = {
+    // added after the removal (remembered removal) and before it (remembered add), elsewhere
+    // and with nothing in common
+    after: async (j) => {
+      boom(j.$("k1")).remove();
+      await tick();
+      j.advance(2000);
+      const n = j.spy(j.mk('<input aria-label="Nickname">'));
+      j.$("b5").appendChild(n);
+      return [n];
+    },
+    before: async (j) => {
+      const n = j.spy(j.mk('<input aria-label="Nickname">'));
+      j.$("b5").appendChild(n);
+      await tick();
+      j.advance(2000);
+      boom(j.$("k1")).remove();
+      return [n];
+    },
+  };
+  for (const [k, step] of Object.entries(cases)) {
+    const r = await addFirst(CANARY, step);
+    assert.equal(r.c.reads, 0, k);
+    assert.ok(!r.blob.includes(CANARY), k + ": " + r.blob);
+    same(r.states, [{ kind: "filled" }], k);
+  }
+  const late = await addFirst(CANARY, async (j) => {
+    boom(j.$("k1")).remove();
+    await tick();
+    j.advance(2001);
+    const n = j.mk('<input aria-label="Nickname" value="ada">');
+    j.$("b5").appendChild(n);
+    return [n];
+  });
+  same(late.states, [{ kind: "text", text: "ada" }]);
+});
+
+test("an hCaptcha challenge frame is never passive by URL; size=invisible counts only in a reCAPTCHA query (D-438 (4))", () => {
+  const prompts = "<main><h2>Are you human?</h2><p>Press and hold the button to continue</p><button>Start the quiz</button></main>";
+  const hc = (frame, size) => '<iframe title="Main content of the hCaptcha challenge" ' +
+    'src="https://newassets.hcaptcha.com/captcha/v1/x/static/hcaptcha.html#frame=' + frame + "&amp;id=0&amp;sitekey=k" + size + '"></iframe>';
+  const chRows = (html) => walked(prompts + html).sb.index().filter((r) => r.flags.challenge).map((r) => r.role + "|" + r.name);
+  const all = ["heading|Are you human?", "group|Press and hold the button to continue", "iframe|Main content of the hCaptcha challenge"];
+  // size=invisible in the hash, at body level and inside the invisible widget
+  same(chRows("<div>" + hc("challenge", "&amp;size=invisible") + "</div>"), all, "hash");
+  same(chRows('<div class="h-captcha" data-sitekey="k" data-size="invisible">' + hc("challenge", "&amp;size=invisible") + "</div>"), all, "in widget");
+  // the invisible widget's own checkbox frame and a hidden challenge frame stay passive
+  same(chRows('<div class="h-captcha" data-sitekey="k" data-size="invisible">' + hc("checkbox", "&amp;size=invisible") + "</div>"), [], "checkbox");
+  same(chRows('<div style="display:none">' + hc("challenge", "") + "</div>"), [], "hidden");
+  // a reCAPTCHA anchor is invisible by its query, not by its hash
+  const rc = (q, h) => '<iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?k=k' + q + h + '"></iframe>';
+  same(chRows(rc("&amp;size=invisible", "")), [], "query");
+  assert.equal(chRows(rc("", "#hl=en&amp;size=invisible")).length, 3, "a hash is not the query");
+});

@@ -557,6 +557,36 @@ test("same-identity rebuilds split by a microtask or a timer stay sensitive; aft
   assert.deepEqual(byName(rows, "Key three").state.value, { kind: "text", text: "not a secret" });
 });
 
+test("an add-first show toggle that removes the old field on transitionend never reads the value (D-438 (1))", async () => {
+  const o = await open("fade-show.html");
+  await o.page.fill("#acct", "fade-canary-1");
+  await o.page.fill("#k2", "fade-canary-2");
+  await o.page.fill("#user", "ada");
+  await o.ev(() => globalThis.__sb.index());
+  const gone = (id) => o.page.waitForFunction((i) => !document.getElementById(i), id);
+  // 1. the copy keeps name and aria-label: sensitive while both fields exist (the overlap read)
+  await o.page.click("#show1");
+  assert.equal(await o.page.evaluate(() => document.getElementById("acct-t").value), "fade-canary-1");
+  const mid = await readCounting(o, ["acct-t"]);
+  assert.ok(await o.page.evaluate(() => !!document.getElementById("acct")), "the old field is still there");
+  assert.deepEqual(mid.reads, {}, "read during the overlap");
+  assert.ok(!mid.blob.includes("fade-canary"), mid.blob);
+  // and after the old field leaves on transitionend
+  await o.page.evaluate(() => globalThis.fade("acct"));
+  await gone("acct");
+  // 2. the copy shares nothing: the single field added to the old field's parent
+  await o.page.click("#show2");
+  await o.page.evaluate(() => globalThis.fade("k2"));
+  await gone("k2");
+  const r = await readCounting(o, ["acct-t", "k2-plain"]);
+  assert.deepEqual(r.reads, {}, "a rebuilt field's value getter was called");
+  assert.ok(!r.blob.includes("fade-canary"), r.blob);
+  const rows = fill(r.index);
+  assert.deepEqual(byName(rows, "Account key").state.value, { kind: "filled" });
+  assert.deepEqual(byName(rows, "Visible key").state.value, { kind: "filled" });
+  assert.deepEqual(byName(rows, "User").state.value, { kind: "text", text: "ada" });
+});
+
 test("passive reCAPTCHA v3 markers are not challenge context in Chromium; a visible v2 checkbox is (D-436, D-435 (3))", async () => {
   const v3 = await open("quiz-v3.html");
   const r3 = fill(await v3.ev(() => globalThis.__sb.index()));

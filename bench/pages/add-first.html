@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Add-first rebuilds</title>
+</head>
+<body>
+<!-- D-438 (1), (2), (3): show-password rebuilds driven by injected/test/jsdom.test.js. Ids,
+     names and labels are neutral (no "pw", "password", "token"), so only inheritance can mark
+     a rebuilt field. -->
+<form id="f">
+  <div id="w1"><input id="k1" type="password" aria-label="Key one"><button type="button">Show</button></div>
+  <div id="b1"></div>
+  <div id="w2"><input id="k2" type="password" aria-label="Key two"><button type="button">Show</button></div>
+  <div id="w3"><span>Key three</span><input id="k3" type="password"><input type="checkbox" id="sh3"> Show</div>
+  <div id="w4"><span>Key four</span><input id="k4" type="password"><input type="hidden" name="enc" value="1"></div>
+  <div id="w5"></div>
+  <div id="b5"></div>
+</form>
+</body>
+</html>

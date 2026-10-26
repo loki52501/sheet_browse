@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fade show toggle</title>
+<style>
+  input { transition: opacity .3s; }
+  .out { opacity: 0; }
+</style>
+<script>
+  // D-438 (1): an animated show toggle in the order of Vue <Transition> (default mode),
+  // framer-motion AnimatePresence (sync) and Svelte outros: the new field mounts at once with
+  // the value, the old one leaves when its fade ends (transitionend). show() mounts; fade()
+  // starts the leave, so a test can read while both fields exist.
+  function show(oldId, html) {
+    const o = document.getElementById(oldId);
+    const t = document.createElement("template");
+    t.innerHTML = html;
+    const n = t.content.firstElementChild;
+    n.value = o.value;
+    o.after(n);
+    o.addEventListener("transitionend", () => o.remove(), { once: true });
+  }
+  function fade(oldId) {
+    document.getElementById(oldId).classList.add("out");
+  }
+</script>
+</head>
+<body>
+<form>
+  <!-- the new field keeps the old one's name and aria-label (a key match) -->
+  <div id="w1"><input id="acct" name="acct" type="password" aria-label="Account key">
+    <button id="show1" type="button" onclick="show('acct', '&lt;input id=&quot;acct-t&quot; name=&quot;acct&quot; type=&quot;text&quot; aria-label=&quot;Account key&quot;&gt;')">Show</button></div>
+  <!-- the new field shares nothing with the old one (the single field added to its parent) -->
+  <div id="w2"><input id="k2" type="password" aria-label="Key two">
+    <button id="show2" type="button" onclick="show('k2', '&lt;input id=&quot;k2-plain&quot; type=&quot;text&quot; aria-label=&quot;Visible key&quot;&gt;')">Show</button></div>
+  <input id="user" aria-label="User">
+</form>
+</body>
+</html>

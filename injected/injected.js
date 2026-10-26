@@ -179,7 +179,8 @@
     respBox: new WeakSet(), // parents of captcha response fields (D-405 (4))
     chCtx: false, // the document holds a challenge widget, response field or frame (D-429 (2))
     lastFill: new WeakMap(), // sensitive element -> last empty|filled evidence (D-426)
-    gone: [], // [{ t, keys }] removed sensitive field signatures, oldest first (D-435 (2))
+    gone: [], // [{ t, keys }] removed sensitive field signatures, oldest first (D-435 (2)); keys null: match all
+    born: [], // [{ t, ref, parent }] recently added non-sensitive value fields, WeakRefs only (D-438 (1))
     ids: new WeakMap(), // Element -> id
     refs: new Map(), // id -> WeakRef<Element>
     rec: new WeakMap(), // Element -> walk decision (cached between walks)
@@ -334,9 +335,21 @@
     if (attr(el, "data-size").toLowerCase() === "invisible") return true;
     return !!closestComposed(el, ".grecaptcha-badge");
   }
+  // D-438 (4): hCaptcha keeps its options (size=invisible included) in the hash of every frame,
+  // so its challenge frame is never passive by URL, only by display; size=invisible counts only
+  // in the query string of a reCAPTCHA frame (google.com/recaptcha/..., recaptcha.net).
   function passiveFrame(fr, vis) {
     if (!vis) return true;
-    if (/[?&]size=invisible\b/i.test(attr(fr, "src"))) return true;
+    let u = null;
+    try {
+      u = new URL(attr(fr, "src"), doc.baseURI);
+    } catch (e) { /* no usable src */ }
+    if (u) {
+      if (/(^|\.)hcaptcha\.com$/i.test(u.hostname) && /(^#|&)frame=challenge(&|$)/i.test(u.hash)) return false;
+      const recaptcha = /(^|\.)recaptcha\.net$/i.test(u.hostname) ||
+        (/(^|\.)google\.com$/i.test(u.hostname) && /^\/recaptcha\//i.test(u.pathname));
+      if (recaptcha && /[?&]size=invisible(&|$)/i.test(u.search)) return true;
+    }
     return !!closestComposed(fr, '.grecaptcha-badge,[data-size="invisible"]');
   }
   function challengeBox(el, vis) {
@@ -1824,41 +1837,59 @@
     if (S.recent.length > 300) S.recent.splice(0, S.recent.length - 300);
   }
 
-  // input and textarea elements in a node (itself or its light-DOM subtree).
+  // Fields that hold a value (D-438 (2)): textarea, and inputs other than these types. Only they
+  // count in the one-for-one swap and in the add-side memory, so a show-password checkbox or a
+  // hidden input next to the password does not break a wrapper swap.
+  const NONVALUE_TYPES = new Set(["checkbox", "radio", "hidden", "button", "submit", "reset", "image", "file", "range", "color"]);
+  const valueField = (f) => f.localName === "textarea" || !NONVALUE_TYPES.has(String(f.type).toLowerCase());
+  // Value fields in a node (itself or its light-DOM subtree).
   function fieldsIn(n) {
     if (!n || n.nodeType !== 1) return [];
     const own = n.localName === "input" || n.localName === "textarea" ? [n] : [];
-    return n.firstElementChild ? own.concat(Array.from(n.querySelectorAll("input,textarea"))) : own;
+    const all = n.firstElementChild ? own.concat(Array.from(n.querySelectorAll("input,textarea"))) : own;
+    return all.filter(valueField);
   }
 
   // A show-password toggle that rebuilds the element (replaceWith, a re-render) hands the value
   // to a new node. The new field inherits sensitivity only when it matches a removed sensitive
-  // field (D-435 (1)): a one-for-one swap (in one batch, one parent lost exactly one field, a
-  // sensitive one, and gained exactly one field, counting subtrees: replaceWith of the input or
-  // of its wrapper, remove + append), or a shared id, name, autocomplete token, aria-label,
-  // placeholder or label text. A re-rendered page whose other fields match nothing (an SPA
-  // login swap removes at least two fields) keeps reading their values. Removed sensitive fields
-  // are remembered (signature and removal time, never a value) for SENS_KEEP_MS, so a rebuild
-  // split by a microtask or a later task still matches (D-435 (2)); entries age out on use.
+  // field (D-435 (1)): a one-for-one swap (in one batch, one parent lost exactly one value field,
+  // a sensitive one, and gained exactly one, counting subtrees: replaceWith of the input or of
+  // its wrapper, remove + append, D-437), or a shared id, name, autocomplete token, aria-label,
+  // placeholder or label text. A re-rendered page whose other fields match nothing (an SPA login
+  // swap removes at least two fields) keeps reading their values. Removed sensitive fields are
+  // remembered (signature and removal time, never a value) for SENS_KEEP_MS, so a rebuild split
+  // by a microtask or a later task still matches (D-435 (2)); entries age out on use.
+  // Add-first rebuilds (D-438 (1); Vue <Transition>, framer-motion AnimatePresence, Svelte
+  // outros insert the new field and remove the old one later): an added field is checked at
+  // once against the sensitive fields already in its parent (the overlap read), and every added
+  // value field that stays non-sensitive is remembered (WeakRef and add time) for the same
+  // window, so a later removal of a sensitive field marks the ones that match its keys, or the
+  // single one added to the same parent.
   const SENS_KEEP_MS = 2000;
   const SENS_KEEP_MAX = 32;
+  const BORN_MAX = 64;
+  const NEAR_MAX = 64; // fields per parent whose sensitivity is computed for the overlap check
   const KEY_CAP = 120;
   // Autocomplete tokens every kind of field shares: never a match on their own.
   const AC_GENERIC = new Set(["on", "off", "shipping", "billing", "home", "work", "mobile", "fax", "pager", "webauthn"]);
 
   const foldKey = (v) => String(v || "").replace(/\s+/g, " ").trim().replace(/[\s:*]+$/, "").toLowerCase().slice(0, KEY_CAP);
-  // An element with this id: in the document, else inside root (a detached subtree).
-  function byIdIn(id, root) {
+  // Detached roots to search besides the document: the removed nodes of one record.
+  const detached = (roots) => (roots || []).filter((r) => r && r.nodeType === 1 && !r.isConnected);
+  // An element with this id: in the document, else inside one of the detached roots.
+  function byIdIn(id, roots) {
     const d = doc.getElementById(id);
     if (d) return d;
-    if (!root || root.nodeType !== 1) return null;
-    if (root.id === id) return root;
-    for (const e of root.querySelectorAll("[id]")) if (e.id === id) return e;
+    for (const root of detached(roots)) {
+      if (root.id === id) return root;
+      for (const e of root.querySelectorAll("[id]")) if (e.id === id) return e;
+    }
     return null;
   }
   // Labels of a field: el.labels when attached, else the wrapping label and label[for] in the
-  // removed subtree or the document.
-  function fieldLabels(f, root) {
+  // document or in the nodes removed by the same record (a label removed as a sibling of the
+  // field counts, D-438 (3)).
+  function fieldLabels(f, roots) {
     const out = new Set();
     try {
       if (f.isConnected && f.labels) {
@@ -1869,15 +1900,17 @@
     const wrap = f.parentNode && f.parentNode.closest ? f.parentNode.closest("label") : null;
     if (wrap) out.add(wrap);
     if (f.id) {
-      const pools = [doc];
-      if (root && root.nodeType === 1 && !root.isConnected) pools.push(root);
-      for (const pool of pools) for (const l of pool.querySelectorAll("label[for]")) if (l.htmlFor === f.id) out.add(l);
+      for (const l of doc.querySelectorAll("label[for]")) if (l.htmlFor === f.id) out.add(l);
+      for (const root of detached(roots)) {
+        if (root.localName === "label" && root.htmlFor === f.id) out.add(root);
+        for (const l of root.querySelectorAll("label[for]")) if (l.htmlFor === f.id) out.add(l);
+      }
     }
     return out;
   }
   // Identity keys of a field. Attributes and label text only: textOf skips field contents,
   // so a value (or a textarea's default text) never enters a key.
-  function fieldKeys(f, root) {
+  function fieldKeys(f, roots) {
     const keys = new Set();
     const add = (k, v) => {
       const x = foldKey(v);
@@ -1890,36 +1923,45 @@
     }
     add("t:", attr(f, "aria-label"));
     add("t:", attr(f, "placeholder"));
-    for (const l of fieldLabels(f, root)) add("t:", textOf(l, f));
+    for (const l of fieldLabels(f, roots)) add("t:", textOf(l, f));
     for (const ref of attr(f, "aria-labelledby").split(/\s+/)) {
-      const e = ref ? byIdIn(ref, root) : null;
+      const e = ref ? byIdIn(ref, roots) : null;
       if (e && e !== f) add("t:", textOf(e, f));
     }
     const r = S.rec.get(f);
     if (r && r.row && r.row.el === f && r.row.name) add("t:", r.row.name);
     return keys;
   }
+  // keys: an array, or null for a field whose identity could not be read (matches everything).
+  const keysHit = (keys, set) => keys === null || keys.some((k) => set.has(k));
+  function markSens(f) {
+    S.sens.add(f);
+    if (S.walked && !S.full) markDirty(f);
+  }
 
   function inheritSensitive(recs) {
     const t = now();
-    if (S.gone.length && t - S.gone[0].t > SENS_KEEP_MS) S.gone = S.gone.filter((g) => t - g.t <= SENS_KEEP_MS);
+    const live = (x) => t - x.t <= SENS_KEEP_MS;
+    if (S.gone.length && !live(S.gone[0])) S.gone = S.gone.filter(live);
+    if (S.born.length && !live(S.born[0])) S.born = S.born.filter(live);
     let swap = null; // parent -> { out: removed fields, sens: sensitive among them, add: added fields }
+    const lost = []; // [{ keys, parent }] sensitive fields this batch removed
     for (const m of recs) {
       if (m.type !== "childList" || !m.removedNodes.length) continue;
-      for (const r of m.removedNodes) {
+      const roots = Array.from(m.removedNodes);
+      for (const r of roots) {
         for (const f of fieldsIn(r)) {
           const e = (swap || (swap = new Map())).get(m.target) || { out: 0, sens: 0, add: null };
           swap.set(m.target, e);
           e.out++;
           if (!sensitive(f)) continue;
           e.sens++;
-          let keys;
+          let keys = null; // identity unreadable: remember a match-all entry (D-438 (3), fail closed)
           try {
-            keys = fieldKeys(f, r);
-          } catch (err) {
-            keys = new Set(); // no identity: the one-for-one rule still applies
-          }
-          if (keys.size) S.gone.push({ t, keys: Array.from(keys) });
+            keys = Array.from(fieldKeys(f, roots));
+          } catch (err) { /* keys stays null */ }
+          if (keys === null || keys.length) S.gone.push({ t, keys });
+          lost.push({ keys, parent: m.target });
         }
       }
     }
@@ -1932,21 +1974,80 @@
       for (const e of swap.values()) if (e.out === 1 && e.sens === 1 && e.add && e.add.length === 1) S.sens.add(e.add[0]);
     }
     if (S.gone.length > SENS_KEEP_MAX) S.gone.splice(0, S.gone.length - SENS_KEEP_MAX);
-    if (!S.gone.length) return;
-    for (const m of recs) {
-      if (m.type !== "childList" || !m.addedNodes.length) continue;
-      for (const a of m.addedNodes) {
-        for (const f of fieldsIn(a)) {
-          if (S.sens.has(f) || sensitive(f)) continue;
-          let hit = true; // a field whose keys cannot be read while a removal is remembered: sensitive
-          try {
-            const keys = fieldKeys(f, null);
-            hit = S.gone.some((g) => g.keys.some((k) => keys.has(k)));
-          } catch (e) { /* fail closed */ }
-          if (hit) S.sens.add(f);
+    // Add-first: fields added by earlier batches, still in the page, matched against the
+    // sensitive fields this batch removed.
+    if (lost.length && S.born.length) {
+      const prior = [];
+      for (const b of S.born) {
+        const f = b.ref.deref();
+        if (f && f.isConnected && !S.sens.has(f)) prior.push({ f, p: b.parent.deref(), keys: undefined });
+      }
+      for (const g of lost) {
+        const inParent = prior.filter((x) => x.p === g.parent);
+        for (const x of prior) {
+          if (S.sens.has(x.f)) continue;
+          let hit = g.keys === null || (inParent.length === 1 && inParent[0] === x);
+          if (!hit) {
+            try {
+              if (x.keys === undefined) x.keys = fieldKeys(x.f, null);
+              hit = keysHit(g.keys, x.keys);
+            } catch (e) {
+              hit = true; // fail closed
+            }
+          }
+          if (hit) markSens(x.f);
         }
       }
+      S.born = S.born.filter((b) => {
+        const f = b.ref.deref();
+        return f && !S.sens.has(f);
+      });
     }
+    // Fields this batch added: match the remembered removals and the sensitive fields still
+    // next to them (same parent, not added by this batch); remember the rest.
+    const added = [];
+    for (const m of recs) {
+      if (m.type !== "childList" || !m.addedNodes.length) continue;
+      for (const a of m.addedNodes) for (const f of fieldsIn(a)) added.push([f, m.target]);
+    }
+    if (!added.length) return;
+    const fresh = new Set(added.map((x) => x[0]));
+    const near = new Map(); // parent -> [{ s, keys }] sensitive fields already in it
+    const nearOf = (p) => {
+      let v = near.get(p);
+      if (v) return v;
+      v = [];
+      if (p && typeof p.querySelectorAll === "function") {
+        let n = 0;
+        for (const s of p.querySelectorAll("input,textarea")) {
+          if (fresh.has(s) || !valueField(s)) continue;
+          if (S.sens.has(s) || (n++ < NEAR_MAX && sensitive(s))) v.push({ s, keys: undefined });
+        }
+      }
+      near.set(p, v);
+      return v;
+    };
+    for (const [f, p] of added) {
+      if (S.sens.has(f) || sensitive(f)) continue;
+      let hit = false;
+      try {
+        const sib = nearOf(p);
+        if (S.gone.length || sib.length) {
+          const keys = fieldKeys(f, null);
+          hit = S.gone.some((g) => keysHit(g.keys, keys));
+          for (const x of sib) {
+            if (hit) break;
+            if (x.keys === undefined) x.keys = Array.from(fieldKeys(x.s, null));
+            hit = keysHit(x.keys, keys);
+          }
+        }
+      } catch (e) {
+        hit = true; // a field whose keys cannot be read next to a sensitive one: sensitive
+      }
+      if (hit) S.sens.add(f);
+      else S.born.push({ t, ref: new WeakRef(f), parent: new WeakRef(p) });
+    }
+    if (S.born.length > BORN_MAX) S.born.splice(0, S.born.length - BORN_MAX);
   }
 
   function flushMut() {
