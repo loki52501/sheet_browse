@@ -20,9 +20,17 @@
 //! * ask outcome: `server = core`, `tool`, `class`, `mode` = one of the four outcomes,
 //!   `args` scrubbed, `result_summary` = `why` = the card's what line, `duration_ms` = how
 //!   long the ask waited, `consequences = {"site", "on_timeout"}`;
-//! * stop (gate Stop before the call or before a mid-call ask, or a handler's stopped
-//!   output after it): `server = core`, `mode = stop`, `why` = the reason,
-//!   `consequences = {"element"}`.
+//! * stop (gate Stop before the call or before a mid-call ask, a mid-call Challenge, or a
+//!   handler's stopped output): `server = core`, `mode = stop`, `why` = the reason,
+//!   `consequences = {"element"}`. One per stopped call (D-127, D-121 (4)): a gate Stop
+//!   before the call is the call's only event; a handler that returns `stopped` writes the
+//!   tool event and then one trailing core stop, which carries the call's first stop (a
+//!   mid-call one if any, its element filled from the handler's, else the handler's). A
+//!   mid-call stop on a call that did not return `stopped` (it went on, failed or panicked)
+//!   is written right before the tool event. A mid-call stop is held until the call
+//!   returns; only the first one per call is logged, a later one goes to stderr. Accepted
+//!   gap: a process that dies inside the handler after a mid-call stop loses that line
+//!   (nothing ran on its behalf: the ask returned `TimeoutSkip`).
 //!
 //! # Fail closed (rule 4, D-119)
 //!
@@ -43,7 +51,12 @@
 //! to stdout; diagnostics go to stderr, scrubbed. Outgoing messages scrub their payload
 //! strings only (D-119 (6)): the envelope (`id`, `jsonrpc`, `protocolVersion`) is ours and
 //! a short vault value must not rewrite it. A line that is not UTF-8 or not JSON answers
-//! -32700 and the server keeps reading.
+//! -32700 and the server keeps reading. An incoming line longer than [`MAX_LINE_BYTES`]
+//! (8 MiB, the newline not counted) is not buffered: the bytes past the cap are read and
+//! dropped up to the next newline, the line answers -32600 with `id: null`, and the server
+//! keeps reading (D-127). -32600 (invalid request), not -32700 (parse error): the line was
+//! never parsed, so the server cannot say it is not JSON, only that it will not take it
+//! as a request; its id is unknown, so the reply's id is null as JSON-RPC 2.0 requires.
 
 use crate::class::Class;
 use crate::gate::{
@@ -76,6 +89,11 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// Cap on `ledger.events.result_summary` when it is taken from the output text.
 const SUMMARY_MAX_CHARS: usize = 300;
+
+/// Longest incoming JSON-RPC line `serve_io` accepts, in bytes without the newline. Tool
+/// arguments are short text (a form, a mail body, a path); 8 MiB is far above any real
+/// call and keeps one runaway line from growing the read buffer without bound.
+pub(crate) const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 /// How long past `card.timeout` the wrapper waits for an `Asker` before it counts the ask
 /// as `TimeoutSkip` (an asker that ignores its timer must not hang the call).
@@ -141,9 +159,14 @@ pub trait ToolHandler: Send + Sync {
 
 /// Tools a server currently exposes. Site tools are added when a page is fetched or opened
 /// and removed when the tab goes (T-3, W-7); `serve` sends `notifications/tools/list_changed`.
+///
+/// A name's class never goes down while the registry lives (rule 4, D-127): every name
+/// keeps a floor, the highest class it was ever registered with, which outlives `remove`.
+/// Re-registering a name (a repaired or re-forged site tool, a tab opened again) keeps
+/// `max(floor, new class)`; the new handler, description and schema replace the old ones.
 #[derive(Clone)]
 pub struct ToolRegistry {
-    tools: Arc<RwLock<Vec<ToolSpec>>>,
+    tools: Arc<RwLock<Tools>>,
     /// Bumped by every `add` and every `remove` that removed something; `serve_io` watches it.
     version: Arc<watch::Sender<u64>>,
 }
@@ -154,30 +177,59 @@ impl Default for ToolRegistry {
     }
 }
 
+/// The registered tools and every name's class floor (D-127).
+struct Tools {
+    specs: Vec<ToolSpec>,
+    /// Highest class each name was ever registered with; kept after `remove`.
+    floors: HashMap<String, Class>,
+}
+
+impl Tools {
+    /// Raises `spec.class` to the name's floor and the floor to `spec.class`.
+    fn floored(&mut self, mut spec: ToolSpec) -> ToolSpec {
+        let floor = self.floors.entry(spec.name.clone()).or_insert(spec.class);
+        *floor = (*floor).max(spec.class);
+        spec.class = *floor;
+        spec
+    }
+}
+
 impl ToolRegistry {
+    /// A name listed twice keeps the higher class for both entries (`get` finds the first).
     pub fn new(tools: Vec<ToolSpec>) -> ToolRegistry {
+        let mut t = Tools {
+            specs: Vec::new(),
+            floors: HashMap::new(),
+        };
+        for spec in &tools {
+            t.floored(spec.clone());
+        }
+        t.specs = tools.into_iter().map(|s| t.floored(s)).collect();
         ToolRegistry {
-            tools: Arc::new(RwLock::new(tools)),
+            tools: Arc::new(RwLock::new(t)),
             version: Arc::new(watch::channel(0).0),
         }
     }
 
-    /// Adds or replaces by name.
+    /// Adds or replaces by name. The class is never lowered: a spec whose class is below
+    /// the name's floor is registered at the floor (rule 4, D-127).
     pub fn add(&self, spec: ToolSpec) {
         {
             let mut t = self.tools.write().unwrap_or_else(|e| e.into_inner());
-            t.retain(|s| s.name != spec.name);
-            t.push(spec);
+            let spec = t.floored(spec);
+            t.specs.retain(|s| s.name != spec.name);
+            t.specs.push(spec);
         }
         self.bump();
     }
 
+    /// Drops the tool; its class floor stays, so adding it back cannot lower the class.
     pub fn remove(&self, name: &str) {
         let removed = {
             let mut t = self.tools.write().unwrap_or_else(|e| e.into_inner());
-            let before = t.len();
-            t.retain(|s| s.name != name);
-            t.len() != before
+            let before = t.specs.len();
+            t.specs.retain(|s| s.name != name);
+            t.specs.len() != before
         };
         if removed {
             self.bump();
@@ -186,11 +238,15 @@ impl ToolRegistry {
 
     pub fn get(&self, name: &str) -> Option<ToolSpec> {
         let t = self.tools.read().unwrap_or_else(|e| e.into_inner());
-        t.iter().find(|s| s.name == name).cloned()
+        t.specs.iter().find(|s| s.name == name).cloned()
     }
 
     pub fn list(&self) -> Vec<ToolSpec> {
-        self.tools.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.tools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .specs
+            .clone()
     }
 
     fn bump(&self) {
@@ -244,6 +300,11 @@ pub struct ToolCtx {
     registry: ToolRegistry,
     ledger: Arc<Ledger>,
     call: CallInfo,
+    /// Set while the handler's `call` runs: a mid-call stop is held, not written, until the
+    /// call returns, so a stopped call writes one core stop (D-127, D-121 (4)).
+    hold_stops: bool,
+    /// The first stop a mid-call ask hit while `hold_stops` was set.
+    held_stop: Mutex<Option<StopReason>>,
 }
 
 impl ToolCtx {
@@ -271,6 +332,8 @@ impl ToolCtx {
             registry,
             ledger,
             call: CallInfo::default(),
+            hold_stops: false,
+            held_stop: Mutex::new(None),
         }
     }
 
@@ -298,7 +361,8 @@ impl ToolCtx {
     /// card with no site is checked against the call's classified domain (D-123):
     ///
     /// * a `Challenge` card or a gate `Stop` is never shown: it is logged as a core stop and
-    ///   returns `TimeoutSkip` (D-5; the handler should return `ToolOutput::stopped`);
+    ///   returns `TimeoutSkip` (D-5; the handler should return `ToolOutput::stopped`). The
+    ///   stop is written when the call returns, one core stop per call (D-127);
     /// * otherwise `on_timeout` can only be tightened: the card proceeds on timeout only if
     ///   the handler's card, the gate's card (a strict or hint rule makes it skip) and
     ///   [`Gate::on_timeout`] for the class and the run's `strict` all proceed. A gate
@@ -313,7 +377,7 @@ impl ToolCtx {
                 &self.vault,
                 &format!("challenge during {}: {}", self.call.tool, card.what),
             );
-            self.write_stop(&StopReason {
+            self.mid_call_stop(StopReason {
                 class: Class::Challenge,
                 why,
                 element: None,
@@ -340,7 +404,7 @@ impl ToolCtx {
         };
         let gate_timeout = match Gate::new(self.store.clone()).check(&call).await {
             Ok(Decision::Stop(reason)) => {
-                self.write_stop(&clean_stop(&self.vault, reason)).await;
+                self.mid_call_stop(clean_stop(&self.vault, reason)).await;
                 return AskOutcome::TimeoutSkip;
             }
             Ok(Decision::Ask(g)) => g.on_timeout,
@@ -422,6 +486,38 @@ impl ToolCtx {
         if let Err(err) = self.ledger.write(self.stop_event(reason)).await {
             diag(&self.vault, &format!("ledger write failed (stop): {err}"));
         }
+    }
+
+    /// A stop a mid-call ask hit (`reason` already clean). While the handler runs it is held
+    /// for [`dispatch`] to write when the call returns; only the call's first stop is kept
+    /// (a later one goes to stderr). Outside the handler (an ask from `classify`) it is
+    /// written at once.
+    async fn mid_call_stop(&self, reason: StopReason) {
+        if !self.hold_stops {
+            self.write_stop(&reason).await;
+            return;
+        }
+        let mut held = self.held_stop.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_none() {
+            *held = Some(reason);
+        } else {
+            drop(held);
+            diag(
+                &self.vault,
+                &format!(
+                    "second stop in one call to {}, not logged: {}",
+                    self.call.tool, reason.why
+                ),
+            );
+        }
+    }
+
+    /// Takes the held mid-call stop (see [`ToolCtx::mid_call_stop`]).
+    fn take_held_stop(&self) -> Option<StopReason> {
+        self.held_stop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 }
 
@@ -610,32 +706,39 @@ where
     let mut changes = registry.changes();
     changes.borrow_and_update();
     let mut reader = reader;
-    // Raw bytes, so one bad line is a -32700 instead of a dead server. `read_until` is
-    // cancel safe: bytes read before another branch wins stay in `buf`.
+    // Raw bytes, so one bad line is a -32700 instead of a dead server. `read_line_capped` is
+    // cancel safe: bytes read before another branch wins stay in `buf` (and `overlong`).
     let mut buf: Vec<u8> = Vec::new();
+    let mut overlong = false;
     let mut initialized = false;
     let mut watching = true;
 
     loop {
         tokio::select! {
-            read = reader.read_until(b'\n', &mut buf), if tx.is_some() => match read {
-                Ok(n) => {
-                    let eof = n == 0;
-                    if !buf.is_empty() {
-                        let raw = std::mem::take(&mut buf);
-                        if let Some(sender) = tx.as_ref() {
-                            let reply = match std::str::from_utf8(&raw) {
-                                Ok(line) => handle_line(&server, &registry, &harness, line, sender, &mut initialized),
-                                Err(_) => Some(rpc_error(Value::Null, -32700, "parse error: not UTF-8")),
-                            };
-                            if let Some(reply) = reply {
-                                write_message(&mut writer, &harness.vault, reply).await?;
+            read = read_line_capped(&mut reader, &mut buf, &mut overlong, MAX_LINE_BYTES), if tx.is_some() => match read {
+                Ok(read) => {
+                    let reply = match read {
+                        // EOF: stop reading; answer the calls in flight, then return.
+                        LineRead::Eof => {
+                            tx = None;
+                            None
+                        }
+                        LineRead::TooLong => Some(rpc_error(
+                            Value::Null,
+                            -32600,
+                            "invalid request: line longer than 8 MiB",
+                        )),
+                        LineRead::Line => {
+                            let raw = std::mem::take(&mut buf);
+                            match (tx.as_ref(), std::str::from_utf8(&raw)) {
+                                (None, _) => None,
+                                (Some(sender), Ok(line)) => handle_line(&server, &registry, &harness, line, sender, &mut initialized),
+                                (Some(_), Err(_)) => Some(rpc_error(Value::Null, -32700, "parse error: not UTF-8")),
                             }
                         }
-                    }
-                    // EOF: stop reading; answer the calls in flight, then return.
-                    if eof {
-                        tx = None;
+                    };
+                    if let Some(reply) = reply {
+                        write_message(&mut writer, &harness.vault, reply).await?;
                     }
                 }
                 Err(e) => return Err(ServeError::Transport(clean_line(&harness.vault, &e.to_string()))),
@@ -661,6 +764,62 @@ where
         }
     }
     Ok(())
+}
+
+/// What [`read_line_capped`] found.
+#[derive(Debug, PartialEq, Eq)]
+enum LineRead {
+    /// `buf` holds one line, without its newline (the last line may lack one).
+    Line,
+    /// A line over the cap ended (newline or EOF); its bytes were dropped, `buf` is empty.
+    TooLong,
+    /// End of input with nothing pending.
+    Eof,
+}
+
+/// Reads one `\n`-terminated line into `buf` (cleared by the caller between lines), never
+/// holding more than `cap` bytes: once a line passes `cap`, `buf` is freed, `*overlong` is
+/// set and the rest of the line is consumed and dropped. Cancel safe: all state lives in
+/// `buf`, `*overlong` and the reader's buffer, and each chunk is copied and consumed with no
+/// await in between, so a future dropped at its await point loses nothing.
+async fn read_line_capped<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    overlong: &mut bool,
+    cap: usize,
+) -> std::io::Result<LineRead> {
+    loop {
+        let avail = reader.fill_buf().await?;
+        if avail.is_empty() {
+            if std::mem::take(overlong) {
+                return Ok(LineRead::TooLong);
+            }
+            return Ok(if buf.is_empty() {
+                LineRead::Eof
+            } else {
+                LineRead::Line
+            });
+        }
+        let (take, used, done) = match avail.iter().position(|&b| b == b'\n') {
+            Some(i) => (i, i + 1, true),
+            None => (avail.len(), avail.len(), false),
+        };
+        if !*overlong {
+            if buf.len() + take > cap {
+                *overlong = true;
+                *buf = Vec::new();
+            } else {
+                buf.extend_from_slice(&avail[..take]);
+            }
+        }
+        reader.consume(used);
+        if done {
+            if std::mem::take(overlong) {
+                return Ok(LineRead::TooLong);
+            }
+            return Ok(LineRead::Line);
+        }
+    }
 }
 
 /// One whole line with its payload scrubbed ([`scrub_payload`]), then flushed.
@@ -990,12 +1149,16 @@ pub async fn dispatch(
 
     // Run at the approved class.
     ctx.class = class;
+    ctx.hold_stops = true;
     let started = Instant::now();
     // A panic may come after the side effect: it is a failed call the ledger shows.
     let result = CatchUnwind(spec.handler.call(&ctx, args))
         .await
         .unwrap_or_else(|_| Err(ToolError::Failed(PANICKED.into())));
     let duration_ms = millis(started);
+    // One core stop per call (D-127, D-121 (4)): a mid-call stop is written before the tool
+    // event, or, when the handler returned `stopped`, as that call's trailing stop.
+    let held = ctx.take_held_stop();
 
     let mut e = ctx.event(server, Some(class), Some(mode));
     e.duration_ms = duration_ms;
@@ -1022,14 +1185,29 @@ pub async fn dispatch(
                     other => json!({ "result": other, "files": files }),
                 };
             }
-            if let Some(r) = &out.stopped {
-                // H-1.4: a stopped call is not a completed action.
-                e.mode = Some(LedgerMode::Stop);
-                e.why = Some(r.why.clone());
-            }
-            write_or_diag(&ctx, e).await;
-            if let Some(r) = &out.stopped {
-                write_or_diag(&ctx, ctx.stop_event(r)).await;
+            match &out.stopped {
+                Some(r) => {
+                    // H-1.4: a stopped call is not a completed action.
+                    e.mode = Some(LedgerMode::Stop);
+                    e.why = Some(r.why.clone());
+                    write_or_diag(&ctx, e).await;
+                    // The trailing core stop shows the call's first stop: the mid-call one
+                    // when there was one (its element filled from the handler's).
+                    let trailing = match held {
+                        Some(h) => StopReason {
+                            element: h.element.or_else(|| r.element.clone()),
+                            ..h
+                        },
+                        None => r.clone(),
+                    };
+                    write_or_diag(&ctx, ctx.stop_event(&trailing)).await;
+                }
+                None => {
+                    if let Some(h) = &held {
+                        write_or_diag(&ctx, ctx.stop_event(h)).await;
+                    }
+                    write_or_diag(&ctx, e).await;
+                }
             }
             Ok(out)
         }
@@ -1038,6 +1216,9 @@ pub async fn dispatch(
             e.ok = false;
             e.result_summary = clip(&format!("error: {}", first_line(&err.to_string())));
             e.why = Some(err.to_string());
+            if let Some(h) = &held {
+                write_or_diag(&ctx, ctx.stop_event(h)).await;
+            }
             write_or_diag(&ctx, e).await;
             Err(err)
         }
@@ -1379,6 +1560,70 @@ mod tests {
         )]);
         let out = scrub_value(&v, &json!({"a": 48151623, "b": [1, "x48151623"]}));
         assert_eq!(out, json!({"a": "@vault(pin)", "b": [1, "x@vault(pin)"]}));
+    }
+
+    /// Polls `fut` once; `Pending` means it consumed what was there and is waiting.
+    async fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
+        std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *fut).poll(cx))).await
+    }
+
+    /// D-127: an over-long line never holds more than the cap in `buf`, and a read dropped
+    /// part-way (another select branch won) loses nothing: state lives in `buf` and
+    /// `overlong`, so the next call carries on.
+    #[tokio::test]
+    async fn capped_reads_are_bounded_and_cancel_safe() {
+        const CAP: usize = 1024;
+        let (mut tx, rx) = tokio::io::duplex(1 << 16);
+        let mut reader = tokio::io::BufReader::new(rx);
+        let mut buf = Vec::new();
+        let mut overlong = false;
+
+        // Half a line, then the read is dropped while it waits for more.
+        tx.write_all(&[b'x'; CAP / 2]).await.unwrap();
+        {
+            let mut f = Box::pin(read_line_capped(&mut reader, &mut buf, &mut overlong, CAP));
+            assert!(poll_once(&mut f).await.is_pending());
+        }
+        assert_eq!(buf.len(), CAP / 2, "bytes read before the drop are kept");
+        assert!(!overlong);
+
+        // 40 caps more without a newline: buf is freed once the line passes the cap.
+        tx.write_all(&[b'x'; 40 * CAP]).await.unwrap();
+        {
+            let mut f = Box::pin(read_line_capped(&mut reader, &mut buf, &mut overlong, CAP));
+            assert!(poll_once(&mut f).await.is_pending());
+        }
+        assert!(overlong, "the line is marked over-long across the drop");
+        assert!(
+            buf.is_empty() && buf.capacity() <= CAP,
+            "{}",
+            buf.capacity()
+        );
+
+        // The rest of the line, a newline, then a good line.
+        tx.write_all(b"tail\nok line\n").await.unwrap();
+        let r = read_line_capped(&mut reader, &mut buf, &mut overlong, CAP).await;
+        assert_eq!(r.unwrap(), LineRead::TooLong);
+        assert!(!overlong && buf.is_empty());
+        let r = read_line_capped(&mut reader, &mut buf, &mut overlong, CAP).await;
+        assert_eq!(r.unwrap(), LineRead::Line);
+        assert_eq!(buf, b"ok line");
+        buf.clear();
+
+        // Exactly the cap is a line; a last line without a newline is a line; then EOF.
+        tx.write_all(&[b'y'; CAP]).await.unwrap();
+        tx.write_all(b"\nlast").await.unwrap();
+        drop(tx);
+        let r = read_line_capped(&mut reader, &mut buf, &mut overlong, CAP).await;
+        assert_eq!(r.unwrap(), LineRead::Line);
+        assert_eq!(buf.len(), CAP);
+        buf.clear();
+        let r = read_line_capped(&mut reader, &mut buf, &mut overlong, CAP).await;
+        assert_eq!(r.unwrap(), LineRead::Line);
+        assert_eq!(buf, b"last");
+        buf.clear();
+        let r = read_line_capped(&mut reader, &mut buf, &mut overlong, CAP).await;
+        assert_eq!(r.unwrap(), LineRead::Eof);
     }
 
     #[test]
