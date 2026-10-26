@@ -1908,3 +1908,90 @@ test("A22 D-444 (2)(3): a password moved or re-attached in its copy's batch, or 
   t.diagnostic(`ACCEPT A22 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""}; ` + lines.join("; "));
   assert.deepEqual(fails, []);
 });
+
+// A23 (tester-11, round 6): D-445 (1)(2), review-T-19 round 9 Z7v and Z4, in a tester fixture
+// (bench/pages/accept-d445.html). v: a Vue v-show component (div.field > label + div.control >
+// input + p.help) rendered twice, Show flips the components' display, so the password and its
+// synced plain twin sit two levels below their wrapper. o: Show moves the password off the top
+// of the page (absolute, top -9999px, full-size box) and the twin back in; no display change.
+// One page load per case: type the password, click Show, settle() and read in one evaluate
+// (same), read again (next), and once the page clock is 2.05 s past the click (late). Values
+// are compared in world sb; only kinds, counts and booleans return.
+test("A23 D-445 (1)(2): a Vue v-show component twin and an off-screen password never let the twin read or emit the value", async (t) => {
+  const secret = process.env.SB_VAULT_CANARY || "sbpw" + crypto.randomBytes(12).toString("hex");
+  const lines = [];
+  const fails = [];
+  for (const k of ["v", "o"]) {
+    const o = await open("accept-d445.html");
+    const IDS = ["pw-" + k, "twin-" + k];
+    await o.page.fill("#pw-" + k, secret);
+    await o.page.fill("#user", "ada");
+    const synced = await o.page.evaluate((id) => document.getElementById(id).value.length, "twin-" + k);
+    if (synced !== secret.length) fails.push(`${k}: the twin does not carry the value (${synced})`);
+    await o.ev(() => globalThis.__sb.index());
+    await o.ev((ids) => {
+      const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+      globalThis.__pwReads = {};
+      Object.defineProperty(HTMLInputElement.prototype, "value", {
+        configurable: true,
+        enumerable: d.enumerable,
+        get() {
+          if (ids.includes(this.id)) globalThis.__pwReads[this.id] = (globalThis.__pwReads[this.id] || 0) + 1;
+          return d.get.call(this);
+        },
+        set(v) {
+          d.set.call(this, v);
+        },
+      });
+    }, IDS);
+    const read = (settleFirst) => o.ev(async (a) => {
+      const sb = globalThis.__sb;
+      const out = [];
+      let settled = null;
+      if (a.settleFirst) {
+        const s = await sb.settle({ cap: 3000 });
+        settled = !!(s && s.settled);
+        out.push(s);
+      }
+      const pw = document.getElementById(a.ids[0]);
+      const r = pw.getBoundingClientRect();
+      // the shape really happened: v hides the password's component, o puts it above the page
+      const hidden = a.k === "v" ? pw.offsetParent === null : r.bottom + window.scrollY < 0;
+      out.push(sb.walk({ dirty: true }), sb.index(), sb.text(), sb.text("f" + a.k), sb.frames(),
+        sb.fingerprint("textbox \"Password\" textbox \"Passcode shown\""));
+      const kinds = {};
+      for (const id of a.ids.concat(["user"])) {
+        const el = document.getElementById(id);
+        const s = sb.state(el);
+        out.push([s, sb.name(el), await sb.act(sb.id(el))]);
+        const v = s && s.value ? s.value : {};
+        kinds[id] = id === "user" ? v.text : v.kind + ("text" in v ? "+text" : "");
+      }
+      const blob = JSON.stringify(out);
+      let frag = false;
+      for (let i = 0; i + 8 <= a.secret.length; i += 2) if (blob.includes(a.secret.slice(i, i + 8))) frag = true;
+      return { settled, hidden, kinds, leak: blob.includes(a.secret) || frag };
+    }, { settleFirst, secret, ids: IDS, k });
+    const t0 = await o.page.evaluate(() => performance.now());
+    await o.page.click("#show-" + k, { noWaitAfter: true });
+    const same = await read(true);
+    const next = await read(false);
+    await pastBornWindow(o, t0);
+    const late = await read(false);
+    const reads = await o.ev(() => globalThis.__pwReads);
+    const all = { same, next, late };
+    lines.push(`${k}: settled ${same.settled}, ` + Object.entries(all).map(([w, r]) =>
+      `${w} pw ${r.hidden ? "hidden" : "SHOWN"} twin ${r.kinds["twin-" + k]} leak ${r.leak}`).join(", ") + `, getter ${JSON.stringify(reads)}`);
+    if (same.settled !== true) fails.push(`${k}: settle() did not settle`);
+    if (Object.keys(reads).length) fails.push(`${k}: world sb called a value getter ${JSON.stringify(reads)}`);
+    for (const [w, r] of Object.entries(all)) {
+      if (!r.hidden) fails.push(`${k} ${w}: the password is not hidden, the case does not test D-445`);
+      if (r.leak) fails.push(`${k} ${w}: the value or a fragment is in __sb output`);
+      if (!["empty", "filled"].includes(r.kinds["twin-" + k])) fails.push(`${k} ${w}: twin ${r.kinds["twin-" + k]}`);
+      if (r.kinds["pw-" + k] && r.kinds["pw-" + k].endsWith("+text")) fails.push(`${k} ${w}: password ${r.kinds["pw-" + k]}`);
+      if (r.kinds.user !== "ada") fails.push(`${k} ${w}: user (control) ${r.kinds.user}`);
+    }
+  }
+  t.diagnostic(`ACCEPT A23 secret len ${secret.length}${process.env.SB_VAULT_CANARY ? " (SB_VAULT_CANARY)" : ""}; ` + lines.join("; "));
+  assert.deepEqual(fails, []);
+});
