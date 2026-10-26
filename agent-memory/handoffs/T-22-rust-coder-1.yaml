@@ -1,0 +1,27 @@
+from: rust-coder (driver area, T-22 round 1)
+to: driver/suborch, then reviewer and tester
+task: T-22
+date: "2026-10-26"
+state: "Commit 4dcdb4f on swarm/driver-T22. B-4 #8 settle with network tracking (D-620): every tracked session gets Network.enable {maxPostDataSize: 0}; the observer keeps requests in flight in the event store; a request counts when it started on the tab (page or OOPIF) after the settle's mark, is not a stream/ping/prefetch, and is younger than 3 s. Driver::settle (frame 0 DOM + whole-tab network, cap is a hard Rust deadline), open (network pass after the walk only when a request was involved), w(d), and the act consequence window (D-621, B-614, T-21b item 4: a step with a request still in flight never reports NoVisibleChange) all use one loop in settle.rs. tabs() refreshes titles with one Target.getTargets (B-601, D-622). index() merges every readable frame in document order with #fN.id refs and child_frame from DOM.getFrameOwner + DOM.resolveNode + __sb.id(this); opaque and CHALLENGE frames are one row, never read inside; rows scrubbed (D-623). close() waits for the detach (5 s cap, else forgets), drops sessions, OOPIF installs, bases, owners, dialogs, requests (D-624). New accept_t22.rs (real chromium-1248, 7 tests): acceptance 4 (popup with opener, same-origin iframe + nested, cross-port and cross-site OOPIF opaque, merged index order), getFrameTree seeding of a running target with an OOPIF (T-18c), fresh title, close, acceptance 5 (SPA whose data comes from a 1.2 s fetch, and a 400 ms-after-load SPA, give a non-empty skeleton from index() right after open; 3 s cap on endless mutations worst 2.958 s and on never-answered fetches every 50 ms worst 3.015 s), slow-XHR submit ('+ heading \"Saved\"' diff after 1.1 s; a hung one ends at 3.03 s, settled false, no NoVisibleChange). Gates: cargo fmt --all -- --check clean; cargo clippy -j 2 -p sb-driver -p sb-cdp --all-targets -- -D warnings clean; cargo test -j 2 -p sb-driver -p sb-cdp -- --test-threads=1 green: sb-cdp 29, sb-driver lib 93 + accept_t18 1 + accept_t20 12 + accept_t21 10 + accept_t21_tester 16 + accept_t22 7 + chromium_driver 1 + contract_paths 2 (one more lib test, a_w_step_waits_for_a_request_that_started_meanwhile, was added after that run and passed in the lib-only run: 94). Canary (dashed, sbcanary-t22-<hex>) 0 hits in the package log. Mutations seen red then restored: network tracking off (accept_t22 spa + slow-xhr), started-meanwhile off (lib), titles off, closeTarget off, merge recursion off, child_frame off, getFrameTree seed off, cap +300 ms, the !net_busy rule off, opaque frames read (merge unit), w() mark ignored."
+not_done: "1. The full workspace run (cargo test -j 2 --workspace --no-fail-fast -- --test-threads=1) was started once and killed by the host for low memory while still compiling; no test result exists for it. Rerun it when memory allows before the PR. 2. Reviewer and tester round 1; accept-T-22.md and review-T-22.md do not exist yet. 3. interface_changes: none filed; every I-9 signature is unchanged (index, settle, close, tabs were already in I-9; they were todo!() bodies). Supreme may want a note in I-9 that index() is the merged view and settle() includes the network (D-620, D-623). 4. Open: B-615 (settle awaits frame 0's DOM only), B-616 (worker requests not counted). D-617 is not lifted: the act window still compares only the step frame's index (frame merging in the window/diff is not done). B-4 #10 scheduling (max 6 tabs) is not in T-22's scope here and is not done."
+gotchas:
+  - "The write hook refuses files outside the worktree, including the session scratchpad; put scratch scripts under target/ (git-ignored)."
+  - "Measured on chromium-1248: Target.getTargets has the new document.title within ms though no targetInfoChanged comes; DOM.getFrameOwner and DOM.resolveNode work without DOM.enable, also for a cross-site OOPIF's owner on the parent session."
+  - "localhost vs 127.0.0.1 is cross-site, so an iframe on http://localhost:<port> from a 127.0.0.1 page is a real OOPIF in a test; another port on 127.0.0.1 is only cross-origin (in process, still opaque)."
+  - "The in-page settle has its own content wait (D-416): an SPA that only renders after a fetch, with nothing else, may already settle on content; the acceptance-5 /spa fixture renders a shell 400 ms after load so only the network tracking keeps open from returning before the data."
+  - "A request aging out of D-620 (3) during the act window's last call must still count as busy; a wait that ends busy is reported busy (unit test a_step_whose_request_outlasts_the_window_never_claims_no_change)."
+decisions_made: [D-620, D-621, D-622, D-623, D-624]
+blockers_opened: [B-615, B-616]
+files_touched:
+  - crates/sb-driver/src/act.rs
+  - crates/sb-driver/src/actionable.rs
+  - crates/sb-driver/src/consequence.rs
+  - crates/sb-driver/src/lib.rs
+  - crates/sb-driver/src/merge.rs
+  - crates/sb-driver/src/registry.rs
+  - crates/sb-driver/src/runtime.rs
+  - crates/sb-driver/src/settle.rs
+  - crates/sb-driver/tests/accept_t22.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+verify: "SB_VAULT_CANARY=sbcanary-<unique-with-dash> cargo test -j 2 -p sb-driver -p sb-cdp -- --test-threads=1"
