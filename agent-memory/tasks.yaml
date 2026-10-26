@@ -96,10 +96,18 @@ tasks:
     step: 2
     title: "srv-web: fetch→index (scraper), read/sheet/raw modes, api with vault headers, feed, search backend (decide D-31)"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
-    status: doing
+    status: done
     owner: servers/suborch
     claimed_at: 2026-10-25
+    done_at: 2026-10-26
     blocked_by: [T-10, T-11]
+    notes: "review-T-12 approve (round 2 + three rule-5 confirm rounds, D-508); accept-T-12 all pass except the base64-echo vault row (not-run, needs T-05d / D-77). Follow-ups in T-12b."
+  - id: T-12b
+    step: 2
+    title: "srv-web follow-ups: un-ignore api_base64_echoed_vault_value_is_scrubbed once T-05d is on main; api text/plain tag check before JSON decode; text/plain walk loses <...> content (Vec<String>); page client honours system proxy so PublicOnly is skipped; Content-Type echoed; wiring tests for feed/search cleaned URLs and text; relative feed links without xml:base dropped; B-500 and B-501 need supreme answers"
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: todo
+    owner: servers
   - id: T-13
     step: 2
     title: "Seed tools/ashbyhq.com/list_jobs.js (@phase 1) and step-2 acceptance; ladder rungs 1, 2, 4"
