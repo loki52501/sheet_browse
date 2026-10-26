@@ -12,4 +12,10 @@ sb-act.workspace = true
 sb-cdp.workspace = true
 sb-sheet.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
