@@ -1,0 +1,18 @@
+from: rust-coder
+to: tester
+task: T-08b
+date: "2026-10-26"
+state: "D-85: SchedError is #[non_exhaustive] (crates/core/src/sched.rs, carried in da34238). D-124 (1): print_ledger writes the run id and parent through clean(); tools pin/unpin/retire echo the id through clean(), and pin/unpin of an id with no tools.health row and no file is refused (NotFound) instead of creating a row named with the typed text; gate set scrubs --note before gate_rule_set (all in crates/harness/src/cli.rs, da34238). The three red-first tests in accept_t08_r2.rs run un-ignored and pass (12 passed, 0 ignored). This commit adds an assertion that tools.health holds no value after the unknown-id pin. It also fixes B-526: FileAsker's fail-closed stderr lines now start with 'ask: skipped, nobody saw the card:' and put the path and OS error after, so the line-length cap cuts the path, not the fail-closed words. harness-core passes in full with TEMP = a 90-char folder. Red proofs: with the cli.rs fixes reverted, all 3 D-124 tests fail (canary in stdout and in gate.rules); with known_tool alone reverted, the tools test fails on a tools.health row holding the value; with the old ask.rs and the long TEMP, mcp_t07 file_asker_stderr_has_no_canary fails. Run in a private target dir: clippy -p harness-core -p harness --all-targets -D warnings clean; harness-core all green (mcp_t07 33 passed with the long TEMP); harness lib 6, accept_t08 18, accept_t08_r2 12 passed. Not run to completion here: accept_t09, ladder_vault_plant, step1_accept, t08, t08_vault, vault_cli_repair_t05_r4 and vault_editor_cli_t05c. accept_t09 failed to link its echo example (link.exe 1318), and then F: ran out of space (os error 112). Neither failure came from this change, which touches only an ask.rs message and one test assertion beyond da34238."
+not_done: "Tester: re-run accept-T-08 rows 38-40 (now N, not R) and write bench/results/accept-T-08b.md. B-526 can be closed by the orchestrator (blockers.yaml is append-only; not edited here)."
+gotchas:
+  - "The shared target dir F:/sb-swarm/wt/core/target is not safe across worktrees. Cargo hashes workspace members by path relative to the workspace root, so every worktree writes the same libharness_core-<hash>.rlib, and a concurrent build in another worktree replaced it mid-build (E0063 on a LaunchRequest.schedule field that is not on this branch). Use a per-worktree CARGO_TARGET_DIR, -j 1 or 2 (-j 4 hit 'paging file is too small'), and check free space on F: first (it was at 91 MB)."
+  - "Restoring a file with `git apply` can leave its mtime older than a cached rlib in the shared target dir, and cargo then skips the rebuild. Touch the source before re-running."
+  - "Use a canary with a dash (sbcanary-x-<hex>): vault_scrub_t05_fix::set_refuses_values_inside_literals fails with an all-alphanumeric one on this branch (fixed on swarm/core-T05c, 2527224)."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/src/ask.rs
+  - crates/harness/tests/accept_t08_r2.rs
+  - crates/harness/src/cli.rs (da34238)
+  - crates/core/src/sched.rs (da34238)
+verify: "SB_VAULT_CANARY=sbcanary-x-$(openssl rand -hex 8) cargo test -p harness --test accept_t08_r2 -- --test-threads=1"

@@ -668,6 +668,11 @@ async fn d124_1_tools_commands_echo_the_tool_id_as_literal() {
             leaks.push(format!("{what} printed the value: {}", redact(&shown)));
         }
     }
+    // Pin on an unknown id is refused; it must not create a row named with the value.
+    let health = db.dump_tables(&["tools.health"]).await;
+    if health.contains(v) {
+        leaks.push(format!("tools.health holds the value: {}", redact(&health)));
+    }
     assert!(leaks.is_empty(), "{}", leaks.join(" | "));
 }
 
