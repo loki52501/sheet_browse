@@ -1,0 +1,33 @@
+# Review T-22 (driver), round 1
+
+Scope: `git diff e47a911..HEAD` (4dcdb4f code, fb8a35e handoff). I did not run cargo (per the brief). Spec: docs/05 B-4 #2 #8 #9 #11, B-6.1, acceptance 4 and 5; I-5, I-9; D-620..D-624; B-614..B-616.
+
+## Blocking
+
+- **settle reports `settled: true` while a counted request is still in flight once the cap is over 3 s** (settle.rs:65, settle.rs:202-210). `LONG_REQUEST` is a fixed 3 s, but `w(d)` takes any `d` up to MAX_WAIT (30 s, D-63), and `Driver::settle` takes any `cap_ms`. When a request ages out, `wait_net_idle` returns idle and the loop reports the page's own `settled: true`. Example: `w(10s)` on a 5 s save returns `settled: true` after about 3.2 s while the save is still pending. The act window already treats a wait that ended busy as busy (D-621), but this general loop does not. Fix: when a counted request aged out while pending, still stop waiting but report `settled: false`, or make the age limit max(3 s, cap). Add a mock test: `w(5s)` with a request that never ends must give `settled: Some(false)`.
+- **The act window can run past the 3 s settle cap** (settle.rs:166-171, act.rs:697-706, act.rs:775-785). The network wait can end busy at t0 + 3 s. The `at_least_once` call after it still gets the whole 500 ms `WINDOW` plus 300 ms grace, so the window can end about 3.8 s after the input. A document change then re-runs `post_step` for up to 0.8 s more. The tests lock this in: the lib test `a_step_whose_request_outlasts_the_window_never_claims_no_change` asserts `cap: 500` after the 3 s wait, and accept_t22.rs:680 allows 4.5 s. Fix: give that call `WINDOW.min(left)` (index-only when no time is left), or end the network wait at t0 + NAV_CAP - WINDOW. Then tighten both tests to 3 s plus a round-trip slack.
+- **Rule 2: `scrub_rows` skips `IndexRow.role`** (merge.rs:92-121). `role` is a page string: injected.js:242 `ariaRole` returns the first token of the page's `role` attribute, with no length limit. D-623 and the `index()` docs say every row string is scrubbed. Fix: scrub `r.role`. Add a test that puts the canary into a row's fields (name, role, text value) and asserts that `index()` output has no canary. Nothing tests the index scrub today.
+
+## Should-fix
+
+1. **Requests started before the settle (D-620 (1)).** `Driver::settle` called on its own returns `settled: true` while a request the tab started just before the call (under 3 s old) is still in flight. That contradicts B-4 #8 ("no in-flight requests"). Suggested fix, which keeps the fail-safe: do not wait for these requests, but report `settled: false` if one is still in flight at the end. Supreme should rule on this under D-620.
+2. **Opacity is checked only against a snapshot.** merge.rs:290 picks readable frames from the registry snapshot. A frame that navigates to a cross-origin page in the same process between the snapshot and the call is read inside, and its rows are kept. `based_ctx` and `call_sb_doc` never check `opaque`. So `act` on `#fN.x`, where N is an opaque frame whose number `index()` now publishes as `child_frame`, reads that frame's index and sends input into a cross-origin frame (act.rs:476, act.rs:488). That gap predates T-22, but T-22 is what makes it reachable. One check in `call_sb_doc`/`based_ctx` that refuses frames the registry calls opaque fixes both. Add a test: `act` on `#f<opaque>.1` must fail without reading.
+3. **Challenge frames are read, then their rows are dropped** (merge.rs:290-314; D-623 says "if read, are dropped"). The comments at lib.rs:692-695 and merge.rs:8-9 say "never read inside". The in-page check (D-424 `selfChallenge`) guards a same-origin child of a challenge widget. A frame nested one level deeper is fully walked, and its rows are dropped only in Rust. Either correct the comments, or make `selfChallenge` walk up the same-origin `frameElement` chain (no extra round trip).
+4. **The owner cache stores a transient failure** (merge.rs:256). When `Runtime.callFunctionOn` hits the 3 s deadline or fails, `None` is cached for that parent document. The frame is then left out of every later `index()` until the parent navigates. Cache only definite answers.
+5. **`tabs()` titles and URLs are not capped or cleaned** (lib.rs:734, lib.rs:741). T-21 runs `OpenedTab` titles through `page_text(TEXT_CAP)` and URLs through `clean_url` (act.rs:1013-1014). `tabs()` passes a huge or multi-line title from `Target.getTargets` through raw (pr-ready §5, untrusted text unescaped). Apply the same helpers.
+6. **Missing tests:** `w(d)` with d > 3 s and a hung request (see Blocking 1), the index scrub (see Blocking 3), and the `tabs()` fallback when `getTargets` does not answer within 1 s.
+
+## Notes
+
+- Hard rules: no keys or `.env`. The only new sleep is in the test fixture server (accept_t22.rs:158), and it has a comment. `Network.enable` uses `maxPostDataSize: 0`. `Req` stores no URL or headers, and network events are not logged or persisted. The vault canary appears in no new fixture string.
+- Interface: no I-9 or I-5 signature change. `index`, `settle`, `close` and `tabs` fill in what were `todo!()` bodies.
+- Spec ids: the commit claims B-4 #2 #8 #9, B-601, B-614 and D-620..D-624, and each is implemented. B-4 #10 (scheduling) is not done and not claimed.
+- Regressions vs T-20/T-21: the gate before input and the strict act(id) cap are untouched. A quiet step still makes one 500 ms call and reports NoVisibleChange (`a_quiet_step_still_reports_no_visible_change_in_one_call`). D-617 is kept (`frame == 0 && !c.net_busy`).
+- Acceptance 4 (popup and opener, same-origin and nested frames, cross-port and cross-site frames opaque with one row, merged order) and acceptance 5 (/spa and /spa400 skeletons not empty; endless mutations and never-answered fetches stay under 3 s + 40 ms) have real-browser tests that assert the behaviour. The coder reports mutation runs that went red.
+- Throughput: `Network.enable` adds roughly six events per request, and each one wakes every `wait_state`/`wait_registry` waiter. Consider `maxTotalBufferSize`/`maxResourceBufferSize` so Chromium does not buffer response bodies per session, and measure on a heavy page.
+- Verify that CORS `Preflight` requests get `loadingFinished` on chromium-1248. If they do not, every cross-origin API step waits the full 3 s.
+- `close()`: downloads stopped on the closed tab stay in `Events`. If `closeTarget` raises a beforeunload dialog, the tab is forgotten after 5 s while the target stays alive.
+- The wait between actionability retries (actionable.rs:650) still settles on the DOM only.
+- The full workspace test run is still outstanding (coder handoff, not_done 1).
+
+Verdict: changes
