@@ -1,0 +1,16 @@
+from: page/reviewer-15
+to: page/suborch
+task: T-19
+date: "2026-10-26"
+state: "Round 10 leak check at 7dfc6f1 (code fbce10e, D-445) in bench/results/review-T-19.md: Verdict approve, Blocking none. node --test injected/test/ 131/131 on a git-archive snapshot (221 s). (a) Every reviewer-10..14 probe re-run serially (runs/reviewer-15/run-probes.sh, compared against runs/reviewer-14/out by cmp-probes.py, out/cmp.txt). No regression. The one difference, r11-dbg3 postload k=50, is the 2 s SENS_KEEP_MS edge (dbg3-timed: ok at 1937 ms, leak at 2006 and 2060 ms on both trees). A back-to-back re-run on 86cb048 and 7dfc6f1 gives the same rows. (b) Z3, Z4, Z4v, Z5m, Z6, Z7, Z7v, Z7i and round 9's closed list read 0 at same/next/late. (c) Eight mainstream toggles not in earlier probes read 0 (probe-r15-chromium.js M1..M8): MUI OutlinedInput with React value-attribute sync, Ant Design Input.Password, Vue 3/Vuetify v-if subtree remount, a Shoelace-style shadow-root input with a microtask type flip, Angular Material two *ngIf with a promise value write, Svelte 5 {#if} add-first, a Bootstrap checkbox, and a React key remount of an MUI TextField. (d) fieldValue is the only value getter call site. The settle yield has its rule 6 comment. No canary was seen. settle() on pages that mutate every task (setTimeout 0, MessageChannel, rAF, 50 ms interval) ends settled false at the cap (probe-r15-settle.js)."
+not_done: "Should fix, T-19b: 1) TWIN_DEPTH 6 (injected.js:922): a twin pair 7 levels deep (M10, Vuetify 2 v-col > v-card > v-card__text > v-text-field) leaks with settled true, getter 3/6/9. M9 at depth 6 is ok. The climb is memoized and stops at the first ancestor with another field, so raise the cap (12 or 16) and add an M10 case. 2) Accepted cost: masked fields with no evidence read empty. c1, c2 and c4 pre-filled read empty, and c3 (identifier-first) reads the typed email as filled. c2 is newly masked by D-445 (2). 3) V5, V9, born-window edge, r12 long.html, r13 y1g late, o5, o6 late: unchanged. 4) Merge needs the tester's run at 7dfc6f1 (accept-d445.html and the accept-t19.test.js edits are uncommitted in the worktree)."
+gotchas:
+  - "Probe copies in runs/reviewer-15/probes point at runs/reviewer-15/snap (sed of reviewer-14 paths). probes/old/probe-r11-dbg3-86cb048.js points at runs/reviewer-14/snap (86cb048)."
+  - "jsdom real-clock rows near k=50 flip with machine load (the 2 s window). Compare them with dbg3-timed, which prints the elapsed ms, before calling a regression."
+  - "probe-r15-chromium.js takes ONLY=<page prefix>. Run Chromium probes one at a time: about 1 GB was free during this round."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19.md
+  - agent-memory/handoffs/T-19-reviewer-15.yaml
+verify: "TMP=TEMP=TMPDIR=F:/sb-swarm/tmp-page NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules: sh runs/reviewer-15/run-probes.sh; python -I runs/reviewer-15/cmp-probes.py; node runs/reviewer-15/probes/probe-r15-chromium.js runs/reviewer-15/snap (M10 is the only leak); node runs/reviewer-15/probes/probe-r15-settle.js runs/reviewer-15/snap; in runs/reviewer-15/snap node --test injected/test/ (131/131)"
