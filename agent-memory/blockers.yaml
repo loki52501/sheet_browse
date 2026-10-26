@@ -250,6 +250,16 @@ blockers:
     question: "ToolCtx::ask documents 'a step whose live class exceeds self.class' as a mid-call ask. Should Driver::act ask instead of stopping when a step's live class is above ctx.class?"
     default_taken: "Stop (H-1.4 and the T-21 brief): ActResult.stopped carries the live class, the why and the element, and no later step runs. sb-mcp can turn that stop into an ask and run the rest of the program again under the approved class. A CHALLENGE is always a stop (D-5)."
     needs_user: false
+  - id: B-613
+    task: T-21
+    question: "For area core (rule 2, B-152): core's scrubber (harness_core::scrub, Vault::scrub) matches whole values only, and ToolCtx exposes no way to scrub against every vault value. A page can echo a value the model typed in an earlier program (so sb-driver does not know it is a vault value), cut by a cap before the driver sees it (the page index cuts names at 150 with '…'; raw page strings are cut at 2000). Should core's scrubber also replace a value prefix of 8 or more characters that ends at a cut ('…', '...', or the end of the string), and should ToolCtx offer scrub(&self, s: &str) -> String over the run's vault?"
+    default_taken: "D-616 in sb-driver: both scrub passes apply the prefix rule against the values of the keys the program typed, and against core's whole-value scrubber for every other value. Driver::tabs() and frames() use harness_core::scrub. Proposed for core: the prefix rule in Scrubber::scrub, and ToolCtx::scrub, so every tool server can scrub against every value with it; sb-driver would then call ctx.scrub instead of resolving typed keys."
+    needs_user: false
+  - id: B-614
+    task: T-21
+    question: "For T-22 (B-4 #8 and #9): the consequence window settles on the DOM only and compares only the step frame's index. A submit click whose XHR outlasts the 500 ms window, or a frame click that changes its parent, can read as 'no visible change'. What should the window do?"
+    default_taken: "T-21: a step in a frame other than 0 never reports NoVisibleChange (D-617). A frame-0 Submit step whose request is still in flight after 500 ms still can (review-T-21 should-fix 7, left for T-22). Proposed for T-22: network in-flight tracking in settle(), and the parent and top frames' indexes in the window and the diff (frame merging), after which D-617 can be lifted."
+    needs_user: false
 interface_changes:
   - id: B-401
     from: page/suborch

@@ -252,7 +252,7 @@ async fn all_ids(d: &Driver, tab: TabId) -> Vec<u64> {
 }
 
 const PROBE: &str = "function (id) {
-  const P = { starts: [], hits: [], what: [] };
+  const P = { starts: [], hits: [], what: [], indexHits: 0 };
   globalThis.__probe = P;
   const isInt = Number.isInteger;
   Number.isInteger = function (n) {
@@ -262,9 +262,13 @@ const PROBE: &str = "function (id) {
   const efp = document.elementFromPoint;
   document.elementFromPoint = function (x, y) {
     const hit = efp.call(document, x, y);
-    // T-21: only hit tests inside an attempt count (the gate's index() before a step
-    // hit-tests rows too).
-    if (P.hits.length >= P.starts.length) return hit;
+    // The gate's and the consequence window's index() hit-test rows too: those are
+    // counted apart, so every other hit test (act()'s, one per attempt) still counts.
+    const lim = Error.stackTraceLimit;
+    Error.stackTraceLimit = 200;
+    const st = String(new Error().stack);
+    Error.stackTraceLimit = lim;
+    if (/\\bat (?:\\S+\\.)?index \\(/.test(st)) { P.indexHits += 1; return hit; }
     P.hits.push(performance.now());
     P.what.push(hit ? (hit.getAttribute('class') || hit.id || hit.localName) : 'nothing');
     return hit;

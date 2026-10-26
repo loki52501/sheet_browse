@@ -40,11 +40,20 @@ const NOT_ANSWERING: &str = "not answering";
 /// T-21: on a point, the frame's offset is added in the page (B-4 #7): from a frame below
 /// the top, each same-origin `frameElement`'s content box is added on the way up, so the
 /// point is in the tab's viewport, where `Input.dispatchMouseEvent` wants it; a frame whose
-/// parent cannot be reached (cross-origin) answers a terminal why. Then `op`, when given,
-/// runs on the element in the same round trip: `{focus: true}` focuses it and reports
-/// whether it took focus (type and key steps), `{select: choice}` picks the option whose
-/// label, then value, then case-folded label is `choice` and dispatches `input` and
-/// `change` (B-4 #7). Its answer comes back as `op`.
+/// parent cannot be reached (cross-origin) answers a terminal why. On the way up, a frame
+/// element whose point is outside its parent's viewport is scrolled into view there
+/// (`scrollIntoView`, then a window scroll for a frame taller than the viewport), and the
+/// point must then be inside that viewport and hit the frame element itself, else
+/// `outside the viewport` or `covered by ..` (both retried, D-603). The final point is
+/// checked against the top viewport for every frame: input never goes off-screen.
+/// Then `op`, when given, runs on the element in the same round trip: `{focus: true}`
+/// focuses it and reports whether it took focus (type and key steps). Focus counts only
+/// when the deep active element is the element itself; with `text: true` (a type step) it
+/// may also be a plain text field inside the element's own `delegatesFocus` shadow root
+/// (D-615): a focused descendant (an autofocused Pay button in a dialog, a password field in
+/// a container) was never classified by the gate (rule 4). `{select: choice}` picks the
+/// option whose label, then value, then case-folded label is `choice` and dispatches
+/// `input` and `change` (B-4 #7). Its answer comes back as `op`.
 const ACT_FN: &str = "function (id, op) {
   const sb = globalThis.__sb;
   if (!sb) return { why: 'no runtime' };
@@ -54,11 +63,27 @@ const ACT_FN: &str = "function (id, op) {
     while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
     return a;
   };
+  const TEXT = ['text', 'search', 'email', 'url', 'tel', 'number'];
+  const ownShadow = (el, a) => {
+    const root = el.shadowRoot;
+    let n = a;
+    for (let i = 0; root && n && i < 64; i++) {
+      const r = n.getRootNode();
+      if (r === root) return true;
+      if (!r || !r.host) return false;
+      n = r.host;
+    }
+    return false;
+  };
+  const delegated = (el, a) => op.text === true && !!el.shadowRoot &&
+    el.shadowRoot.delegatesFocus === true && ownShadow(el, a) &&
+    (a.localName === 'textarea' ||
+      (a.localName === 'input' && TEXT.indexOf(String(a.type).toLowerCase()) >= 0));
   const runOp = (el) => {
     if (op.focus) {
       el.focus({ preventScroll: true });
       const a = deepActive();
-      return { focused: !!a && (a === el || el.contains(a)) };
+      return { focused: !!a && (a === el || delegated(el, a)) };
     }
     if (typeof op.select === 'string') {
       if (el.localName !== 'select') return { why: 'not a select element' };
@@ -78,26 +103,62 @@ const ACT_FN: &str = "function (id, op) {
     }
     return { why: 'unknown op' };
   };
+  const vp = (w) => {
+    const d = w.document;
+    const se = d.scrollingElement || d.documentElement;
+    return {
+      w: (se && se.clientWidth) || w.innerWidth || 0,
+      h: (se && se.clientHeight) || w.innerHeight || 0,
+    };
+  };
+  const inside = (p, v) => p.x >= 0 && p.y >= 0 && p.x < v.w && p.y < v.h;
   return sb.act(id).then((a) => {
     const w = a && a.why;
     if (typeof w !== 'string') {
       if (!a || typeof a.x !== 'number' || typeof a.y !== 'number') return a;
       let x = a.x;
       let y = a.y;
+      let win = window;
       try {
-        let win = window;
         while (win !== win.top) {
           const fe = win.frameElement;
           if (!fe) return { why: 'cross-origin frame' };
-          const r = fe.getBoundingClientRect();
-          const cs = win.parent.getComputedStyle(fe);
-          x += r.left + fe.clientLeft + (parseFloat(cs.paddingLeft) || 0);
-          y += r.top + fe.clientTop + (parseFloat(cs.paddingTop) || 0);
-          win = win.parent;
+          const pw = win.parent;
+          const cs = pw.getComputedStyle(fe);
+          const at = () => {
+            const r = fe.getBoundingClientRect();
+            return {
+              x: x + r.left + fe.clientLeft + (parseFloat(cs.paddingLeft) || 0),
+              y: y + r.top + fe.clientTop + (parseFloat(cs.paddingTop) || 0),
+            };
+          };
+          let p = at();
+          if (!inside(p, vp(pw))) {
+            fe.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+            p = at();
+            const v = vp(pw);
+            if (!inside(p, v)) {
+              pw.scrollBy({ left: p.x - v.w / 2, top: p.y - v.h / 2, behavior: 'instant' });
+              p = at();
+            }
+          }
+          if (!inside(p, vp(pw))) return { why: 'outside the viewport' };
+          let hit = pw.document.elementFromPoint(p.x, p.y);
+          while (hit && hit.shadowRoot) {
+            const inner = hit.shadowRoot.elementFromPoint(p.x, p.y);
+            if (!inner || inner === hit) break;
+            hit = inner;
+          }
+          if (!hit) return { why: 'outside the viewport' };
+          if (hit !== fe) return { why: 'covered by ' + hit.localName };
+          x = p.x;
+          y = p.y;
+          win = pw;
         }
       } catch (e) {
         return { why: 'cross-origin frame' };
       }
+      if (!inside({ x: x, y: y }, vp(win))) return { why: 'outside the viewport' };
       const out = { x: x, y: y };
       if (op) {
         const el = sb.resolve(id);

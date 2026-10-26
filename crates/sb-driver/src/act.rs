@@ -9,16 +9,19 @@
 //! one in-page `settle()` capped at 500 ms that also returns the index, which is the next
 //! step's live index and the diff's after side (B-8). Network settle is T-22.
 //!
-//! Page strings in the result are escaped and capped (`diff.rs`), and the whole result is
-//! scrubbed against the values of the vault keys the program typed before it is returned.
+//! Page strings are kept raw while the program runs. When it ends, every raw page string
+//! (consequences, diff row names) is scrubbed against the values of the vault keys the
+//! program typed, then escaped and capped (`diff.rs`), then the shown result is scrubbed
+//! again (rule 2, D-616): a cap can never cut a value before the scrub sees it whole.
 
 use crate::actionable::{input_target, step_label, tidy_why, StepEnd, Why, WhyKind};
-use crate::consequence::{is_main, Kind};
+use crate::consequence::{is_main, raw_name, sanitize_name, Kind};
 use crate::diff::{changes, clean_url, page_text, render, TEXT_CAP};
 use crate::input::{
     click_events, key_events, ready, upload_path, InputFut, SCROLL_FN, SCROLL_TO_FN, UPLOAD_FN,
 };
 use crate::runtime::{CallError, OBJECT_GROUP};
+use crate::scrub::{scrub_with, spellings};
 use crate::{
     ActResult, Consequence, Driver, DriverError, SettleOpts, StepOutcome, StepResult, TabId,
     ToolCtx,
@@ -26,7 +29,6 @@ use crate::{
 use harness_core::gate::StopReason;
 use harness_core::vault::{vault_literal, vault_refs, MIN_VALUE_CHARS};
 use harness_core::Class;
-use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use sb_act::{Scroll, Step};
 use sb_sheet::{ElemRef, IndexRow};
 use serde::Deserialize;
@@ -36,7 +38,6 @@ use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 use tokio::time::Instant;
-use zeroize::Zeroizing;
 
 /// B-4 #9: after a step, listen until the page settles or for at most this long.
 pub(crate) const WINDOW: Duration = Duration::from_millis(500);
@@ -67,6 +68,45 @@ const POST_FN: &str = "async function (opts) {
 }";
 
 const TITLE_FN: &str = "function () { return String(document.title || ''); }";
+
+/// Whether an id the live index does not list is still an element of this document:
+/// `live`, or the resolver's why (`stale`: from an earlier document; `gone`).
+const RESOLVE_FN: &str = "function (id) {
+  const sb = globalThis.__sb;
+  if (!sb) return 'no runtime';
+  const el = sb.resolve(id);
+  if (!el) return 'gone';
+  if (el.why) return String(el.why);
+  return 'live';
+}";
+
+/// Raw page strings are cut here on arrival (as the event log does); escaped and capped
+/// after the scrub.
+const RAW_CAP: usize = 2000;
+
+/// The why of a type or key step whose element did not end up focused itself (D-615).
+const NO_FOCUS: &str =
+    "the element did not take focus (another element has it; target that element instead)";
+
+/// The why of a step that did not run because a dialog is open on the tab.
+const DIALOG_OPEN: &str = "a dialog is open on this tab: answer it with dialog() first";
+
+fn failed_step(n: usize, step: &Step, why: impl Into<String>) -> StepResult {
+    StepResult {
+        n,
+        step: step_label(step),
+        outcome: StepOutcome::Failed { why: why.into() },
+        consequences: Vec::new(),
+        settled: None,
+    }
+}
+
+/// A step that did not run because a dialog is open (raw text; shown at the end).
+fn dialog_step(n: usize, step: &Step, text: String) -> StepResult {
+    let mut s = failed_step(n, step, DIALOG_OPEN);
+    s.consequences.push(Consequence::Dialog { text });
+    s
+}
 
 /// Index rows from an in-page answer, with the frame number the driver knows them by.
 fn rows(v: &Value, frame: u32) -> Option<Vec<IndexRow>> {
@@ -246,41 +286,25 @@ impl Driver {
             .with_registry(|r| r.session(tab).map(str::to_string))
             .ok_or(DriverError::TabGone(tab))?;
         let steps = sb_act::parse(program)?;
-        let Some(first) = steps.first() else {
+        if steps.is_empty() {
             return Err(DriverError::Parse(sb_act::ParseError {
                 step: 1,
                 at: 0,
                 msg: "the program has no steps".into(),
             }));
-        };
+        }
         let files = ctx.run_dir.join("files");
         let mut out = Vec::with_capacity(steps.len());
         let mut stopped = None;
         let mut pages = Pages::default();
-        // A dialog left open blocks the page's main thread: nothing can run until it is
-        // answered.
-        if let Some(text) = self.open_dialog(tab) {
-            out.push(StepResult {
-                n: 1,
-                step: step_label(first),
-                outcome: StepOutcome::Failed {
-                    why: "a dialog is open on this tab: answer it with dialog() first".into(),
-                },
-                consequences: vec![Consequence::Dialog {
-                    text: page_text(&text, TEXT_CAP),
-                }],
-                settled: None,
-            });
-            let mut r = ActResult {
-                steps: out,
-                diff: None,
-                stopped: None,
-            };
-            scrub(ctx, &steps, &mut r);
-            return Ok(r);
-        }
         for (i, step) in steps.iter().enumerate() {
             let n = i + 1;
+            // A dialog left open, or opened by a timer since the last step, blocks the
+            // page's main thread: nothing can run until it is answered.
+            if let Some(text) = self.open_dialog(tab) {
+                out.push(dialog_step(n, step, text));
+                break;
+            }
             let (outcome, consequences, settled, paused) = match step {
                 Step::Wait(d) => {
                     let (o, s): StepEnd = self.wait_step(tab, *d).await?;
@@ -290,22 +314,59 @@ impl Driver {
                 Step::StopHere => (StepOutcome::Ok, Vec::new(), None, false),
                 _ => {
                     let frame = step_frame(step);
-                    let before = self.live_index(tab, frame, &mut pages).await?;
-                    if let Some((stop, why)) = gate_step(n, step, before.as_deref(), ctx.class) {
-                        stopped = Some(stop);
-                        out.push(StepResult {
+                    // Every read before the input races a dialog: one that opens now is
+                    // reported at once (no stall to the read's cap, no Submit stop for a
+                    // missing index).
+                    let mark = self.events_mark();
+                    let read = self.live_index(tab, frame, &mut pages);
+                    let Some(before) = self.or_dialog(tab, mark, read).await else {
+                        out.push(dialog_step(
                             n,
-                            step: step_label(step),
-                            outcome: StepOutcome::Failed { why },
-                            consequences: Vec::new(),
-                            settled: None,
-                        });
+                            step,
+                            self.open_dialog(tab).unwrap_or_default(),
+                        ));
+                        break;
+                    };
+                    let before = before?;
+                    if let Some((stop, why)) = gate_step(n, step, before.as_deref(), ctx.class) {
+                        // A target the fresh index does not list: an id from an earlier
+                        // document (or a removed element) fails the step; no approval could
+                        // make it run, so it is not a stop. A CHALLENGE is never asked about
+                        // (no call into a challenge page, D-5).
+                        let dead = if stop.class == Class::Challenge {
+                            Some(None)
+                        } else {
+                            let dead = self.dead_target(tab, step, before.as_deref());
+                            self.or_dialog(tab, mark, dead).await
+                        };
+                        let Some(dead) = dead else {
+                            out.push(dialog_step(
+                                n,
+                                step,
+                                self.open_dialog(tab).unwrap_or_default(),
+                            ));
+                            break;
+                        };
+                        match dead {
+                            Some(w) => out.push(failed_step(n, step, w)),
+                            None => {
+                                stopped = Some(stop);
+                                out.push(failed_step(n, step, why));
+                            }
+                        }
                         break;
                     }
                     let mark = self.events_mark();
                     let tabs_before: BTreeSet<TabId> =
                         self.with_registry(|r| r.tabs().into_iter().map(|t| t.0).collect());
-                    match self.start_step(tab, &session, step, ctx, &files).await? {
+                    let start = self.start_step(tab, &session, step, ctx, &files);
+                    let started = match self.or_dialog(tab, mark, start).await {
+                        Some(s) => s?,
+                        None => Started::failed(
+                            "a dialog opened before the input: answer it with dialog() first",
+                        ),
+                    };
+                    match started {
                         Started::Failed { why, challenge } => {
                             if let Some(e) = challenge {
                                 stopped = Some(StopReason {
@@ -319,9 +380,7 @@ impl Driver {
                             // A dialog the page opened meanwhile is why it stopped answering.
                             let dialog: Vec<Consequence> = self
                                 .open_dialog(tab)
-                                .map(|t| Consequence::Dialog {
-                                    text: page_text(&t, TEXT_CAP),
-                                })
+                                .map(|text| Consequence::Dialog { text })
                                 .into_iter()
                                 .collect();
                             let paused = !dialog.is_empty();
@@ -340,7 +399,11 @@ impl Driver {
                             pages.live.clear();
                             let mut consequences = c.consequences;
                             if let Some(after) = c.after {
-                                let quiet = consequences.is_empty()
+                                // Only the step frame's index is compared: a step in a frame
+                                // can change its parent, so it never claims no change (D-617;
+                                // frame merging is T-22).
+                                let quiet = frame == 0
+                                    && consequences.is_empty()
                                     && c.failed.is_none()
                                     && moved != Some(true)
                                     && before
@@ -375,18 +438,41 @@ impl Driver {
                 break;
             }
         }
-        let diff = if self.open_dialog(tab).is_some() {
+        let rows = if self.open_dialog(tab).is_some() {
             None
         } else {
-            self.program_diff(tab, &mut pages).await
+            self.program_rows(tab, &mut pages).await
         };
-        let mut result = ActResult {
-            steps: out,
-            diff,
-            stopped,
+        Ok(finish(ctx, &steps, out, stopped, rows))
+    }
+
+    /// For a step whose target the live index does not list: `Some(why)` when the page
+    /// says the id is `stale` (an earlier document) or `gone`; `None` when it is a live
+    /// element, or on any doubt (the gate's Submit stop then stands, D-402).
+    async fn dead_target(
+        &self,
+        tab: TabId,
+        step: &Step,
+        index: Option<&[IndexRow]>,
+    ) -> Option<String> {
+        let (Some(rows), Some(t)) = (index, step_target(step)) else {
+            return None;
         };
-        scrub(ctx, &steps, &mut result);
-        Ok(result)
+        if rows.iter().any(|r| r.elem() == t) {
+            return None;
+        }
+        let deadline = Instant::now() + CALL_CAP;
+        match self
+            .call_sb(tab, t.frame, RESOLVE_FN, &[json!(t.id)], deadline)
+            .await
+        {
+            Ok(v) => match v.as_str() {
+                Some(w @ ("stale" | "gone")) => Some(w.to_string()),
+                _ => None,
+            },
+            Err(CallError::Lost) => Some("stale".into()),
+            Err(_) => None,
+        }
     }
 
     /// The frame's live index: the previous step's, else read now (one round trip). `None`
@@ -430,6 +516,7 @@ impl Driver {
         files: &Path,
     ) -> Result<Started, DriverError> {
         let focus = json!({"focus": true});
+        let focus_text = json!({"focus": true, "text": true});
         let focused = |op: &Value| op.get("focused") == Some(&Value::Bool(true));
         Ok(match step {
             Step::Click { target } => match self.actionable_op(tab, *target, None).await? {
@@ -446,11 +533,9 @@ impl Driver {
                         "malformed @vault(..) reference in the value",
                     ));
                 }
-                match self.actionable_op(tab, *target, Some(&focus)).await? {
+                match self.actionable_op(tab, *target, Some(&focus_text)).await? {
                     Err(w) => Started::from_why(w, *target),
-                    Ok((_, op)) if !focused(&op) => {
-                        Started::failed("the element did not take focus")
-                    }
+                    Ok((_, op)) if !focused(&op) => Started::failed(NO_FOCUS),
                     Ok(_) => match self.type_text(session, text, ctx) {
                         Ok(f) => Started::input(f),
                         Err(why) => Started::failed(why),
@@ -480,9 +565,7 @@ impl Driver {
                 };
                 match self.actionable_op(tab, *target, Some(&focus)).await? {
                     Err(w) => Started::from_why(w, *target),
-                    Ok((_, op)) if !focused(&op) => {
-                        Started::failed("the element did not take focus")
-                    }
+                    Ok((_, op)) if !focused(&op) => Started::failed(NO_FOCUS),
                     Ok(_) => {
                         Started::input(self.dispatch(session, "Input.dispatchKeyEvent", events))
                     }
@@ -726,19 +809,15 @@ impl Driver {
             (nav, dialog, downloads)
         });
         if let Some(url) = nav {
-            c.consequences.push(Consequence::Navigated {
-                url: clean_url(&url),
-            });
+            c.consequences.push(Consequence::Navigated { url });
         }
         for t in opened
             .into_iter()
             .filter(|t| self.with_registry(|r| r.has_tab(*t)))
         {
-            let title = self.tab_title(t).await;
-            c.consequences.push(Consequence::OpenedTab {
-                tab: t,
-                title: page_text(&title, TEXT_CAP),
-            });
+            let title: String = self.tab_title(t).await.chars().take(RAW_CAP).collect();
+            c.consequences
+                .push(Consequence::OpenedTab { tab: t, title });
         }
         for (guid, name, url) in downloads {
             // The ask: Driver::download saves it to this run's files folder if allowed.
@@ -747,16 +826,13 @@ impl Driver {
                     d.files_dir = Some(files.to_path_buf());
                 }
             });
-            let shown = crate::consequence::safe_name(&name, &url);
             c.consequences.push(Consequence::Download {
-                name: page_text(&shown, TEXT_CAP),
-                guid: page_text(&guid, 64),
+                name: raw_name(&name, &url),
+                guid,
             });
         }
         if let Some(text) = dialog {
-            c.consequences.push(Consequence::Dialog {
-                text: page_text(&text, TEXT_CAP),
-            });
+            c.consequences.push(Consequence::Dialog { text });
             c.paused = true;
         }
         if self.open_dialog(tab).is_some() {
@@ -786,8 +862,9 @@ impl Driver {
         })
     }
 
-    /// The program's diff (B-8) over every frame a step read, from its first index to now.
-    async fn program_diff(&self, tab: TabId, pages: &mut Pages) -> Option<String> {
+    /// The rows of the program's diff (B-8): every frame a step read, from its first index
+    /// (before) to now (after). Rendered after the scrub ([`finish`]).
+    async fn program_rows(&self, tab: TabId, pages: &mut Pages) -> Option<DiffRows> {
         let frames: Vec<u32> = pages.first.keys().copied().collect();
         let (mut before, mut after) = (Vec::new(), Vec::new());
         for f in frames {
@@ -801,7 +878,7 @@ impl Driver {
             before.extend(pages.first[&f].iter().cloned());
             after.extend(now);
         }
-        render(&changes(&before, &after))
+        Some((before, after))
     }
 }
 
@@ -820,79 +897,11 @@ fn nav_pending(ev: &crate::consequence::Events, session: &str, main: &str, mark:
     pending
 }
 
-/// `encodeURIComponent`'s set, and the form encoding's (space as `+` is added separately).
-const URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'_')
-    .remove(b'.')
-    .remove(b'!')
-    .remove(b'~')
-    .remove(b'*')
-    .remove(b'\'')
-    .remove(b'(')
-    .remove(b')');
-const FORM: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'_')
-    .remove(b'.')
-    .remove(b'*')
-    .remove(b' ');
+/// The diff's rows: (before, after).
+type DiffRows = (Vec<IndexRow>, Vec<IndexRow>);
 
-/// The spellings of a typed vault value that can reach the result: as typed, ASCII upper and
-/// lower case, URL-encoded (component and form), each also as the result's own escaping
-/// (page text, cleaned URL) renders it.
-fn spellings(v: &str) -> Vec<Zeroizing<String>> {
-    let bases = [
-        v.to_string(),
-        v.to_ascii_uppercase(),
-        v.to_ascii_lowercase(),
-        utf8_percent_encode(v, URI_COMPONENT).to_string(),
-        utf8_percent_encode(v, FORM).to_string().replace(' ', "+"),
-    ];
-    let mut out: Vec<Zeroizing<String>> = Vec::new();
-    for b in bases {
-        for s in [page_text(&b, usize::MAX), clean_url(&b), b.clone()] {
-            if !s.is_empty() && !out.iter().any(|o| o.as_str() == s) {
-                out.push(Zeroizing::new(s));
-            }
-        }
-        drop(Zeroizing::new(b));
-    }
-    out
-}
-
-fn for_each_string(r: &mut ActResult, mut f: impl FnMut(&mut String)) {
-    for s in &mut r.steps {
-        if let StepOutcome::Failed { why } = &mut s.outcome {
-            f(why);
-        }
-        for c in &mut s.consequences {
-            match c {
-                Consequence::Navigated { url } => f(url),
-                Consequence::OpenedTab { title, .. } => f(title),
-                Consequence::Dialog { text } => f(text),
-                Consequence::Download { name, guid } => {
-                    f(name);
-                    f(guid);
-                }
-                Consequence::NoVisibleChange => {}
-            }
-        }
-    }
-    if let Some(d) = &mut r.diff {
-        f(d);
-    }
-    if let Some(s) = &mut r.stopped {
-        f(&mut s.why);
-    }
-}
-
-/// H-2: a page can echo what was typed (a greeting, a URL after a GET form, a dialog). Every
-/// string of the result is scrubbed against the values of the vault keys the program typed,
-/// resolved inside `ctx.resolve_into` (the values never leave the sink), in every spelling
-/// [`spellings`] lists, then against the process-wide scrubber (D-102) when one is
-/// installed. The MCP wrapper scrubs again on the way out.
-fn scrub(ctx: &ToolCtx, steps: &[Step], r: &mut ActResult) {
+/// The vault keys the program's `t#` steps type, each once, in order.
+fn typed_names(steps: &[Step]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for s in steps {
         if let Step::Type { text, .. } = s {
@@ -903,7 +912,16 @@ fn scrub(ctx: &ToolCtx, steps: &[Step], r: &mut ActResult) {
             }
         }
     }
-    for name in &names {
+    names
+}
+
+/// H-2, rule 2: every string in `strings` scrubbed against the values of the keys in
+/// `names`, resolved inside `ctx.resolve_into` (a value never leaves the sink), in every
+/// spelling [`spellings`] lists and with cut prefixes ([`scrub_with`]), then against the
+/// process-wide scrubber (D-102) when one is installed. The MCP wrapper scrubs again on the
+/// way out.
+fn scrub_all(ctx: &ToolCtx, names: &[String], strings: &mut [&mut String]) {
+    for name in names {
         let lit = vault_literal(name);
         let _ = ctx.resolve_into(&lit, |res| {
             let v = res.expose();
@@ -911,21 +929,112 @@ fn scrub(ctx: &ToolCtx, steps: &[Step], r: &mut ActResult) {
                 return;
             }
             let sp = spellings(v);
-            for_each_string(r, |s| {
-                for x in &sp {
-                    if s.contains(x.as_str()) {
-                        *s = s.replace(x.as_str(), &lit);
-                    }
-                }
-            });
+            for s in strings.iter_mut() {
+                scrub_with(s, &sp, &lit);
+            }
         });
     }
-    for_each_string(r, |s| {
+    for s in strings.iter_mut() {
         let c = harness_core::scrub(s);
-        if c != *s {
-            *s = c;
+        if c != **s {
+            **s = c;
         }
-    });
+    }
+}
+
+/// The raw page strings of the consequences.
+fn raw_strings<'a>(steps: &'a mut [StepResult], out: &mut Vec<&'a mut String>) {
+    for s in steps {
+        consequence_strings(&mut s.consequences, out);
+    }
+}
+
+fn consequence_strings<'a>(cs: &'a mut [Consequence], out: &mut Vec<&'a mut String>) {
+    for c in cs {
+        match c {
+            Consequence::Navigated { url } => out.push(url),
+            Consequence::OpenedTab { title, .. } => out.push(title),
+            Consequence::Dialog { text } => out.push(text),
+            Consequence::Download { name, guid } => {
+                out.push(name);
+                out.push(guid);
+            }
+            Consequence::NoVisibleChange => {}
+        }
+    }
+}
+
+/// A consequence as the model sees it: escaped and capped (pr-ready 5).
+fn shown(c: &mut Consequence) {
+    match c {
+        Consequence::Navigated { url } => *url = clean_url(url),
+        Consequence::OpenedTab { title, .. } => *title = page_text(title, TEXT_CAP),
+        Consequence::Dialog { text } => *text = page_text(text, TEXT_CAP),
+        Consequence::Download { name, guid } => {
+            *name = page_text(&sanitize_name(name), TEXT_CAP);
+            *guid = page_text(guid, 64);
+        }
+        Consequence::NoVisibleChange => {}
+    }
+}
+
+/// Every string of a finished result.
+fn all_strings<'a>(r: &'a mut ActResult, out: &mut Vec<&'a mut String>) {
+    for s in &mut r.steps {
+        if let StepOutcome::Failed { why } = &mut s.outcome {
+            out.push(why);
+        }
+        consequence_strings(&mut s.consequences, out);
+    }
+    if let Some(d) = &mut r.diff {
+        out.push(d);
+    }
+    if let Some(s) = &mut r.stopped {
+        out.push(&mut s.why);
+    }
+}
+
+/// The result of a run (rule 2, D-616): the raw page strings (consequences and the diff's
+/// row names and form ids) are scrubbed first, while every typed value in them is whole;
+/// then escaped, capped and rendered; then every shown string (whys and the diff included)
+/// is scrubbed again, cut prefixes included.
+fn finish(
+    ctx: &ToolCtx,
+    steps: &[Step],
+    mut out: Vec<StepResult>,
+    stopped: Option<StopReason>,
+    rows: Option<DiffRows>,
+) -> ActResult {
+    let names = typed_names(steps);
+    let mut rows = rows;
+    {
+        let mut raw: Vec<&mut String> = Vec::new();
+        raw_strings(&mut out, &mut raw);
+        if let Some((before, after)) = rows.as_mut() {
+            for r in before.iter_mut().chain(after.iter_mut()) {
+                raw.push(&mut r.name);
+                if let Some(f) = r.form.as_mut() {
+                    raw.push(f);
+                }
+            }
+        }
+        scrub_all(ctx, &names, &mut raw);
+    }
+    for s in &mut out {
+        for c in &mut s.consequences {
+            shown(c);
+        }
+    }
+    let diff = rows.and_then(|(before, after)| render(&changes(&before, &after)));
+    let mut result = ActResult {
+        steps: out,
+        diff,
+        stopped,
+    };
+    let mut strings: Vec<&mut String> = Vec::new();
+    all_strings(&mut result, &mut strings);
+    scrub_all(ctx, &names, &mut strings);
+    result
 }
 
 #[cfg(test)]
@@ -1009,21 +1118,6 @@ mod tests {
         doc.flags.challenge = true;
         let (stop, _) = gate_step(1, &step("sc(down)"), Some(&[doc]), Class::Pay).unwrap();
         assert_eq!(stop.class, Class::Challenge);
-    }
-
-    #[test]
-    fn vault_spellings_cover_url_and_escaped_forms() {
-        let sp = spellings("p@ss w\"rd#1");
-        let all: Vec<&str> = sp.iter().map(|s| s.as_str()).collect();
-        for want in [
-            "p@ss w\"rd#1",
-            "p%40ss%20w%22rd%231",
-            "p%40ss+w%22rd%231",
-            "p@ss w'rd＃1",
-            "P@SS W\"RD#1",
-        ] {
-            assert!(all.contains(&want), "{want} in {all:?}");
-        }
     }
 
     #[test]

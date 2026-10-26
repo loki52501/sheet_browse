@@ -31,6 +31,7 @@ mod input;
 mod launch;
 mod registry;
 mod runtime;
+mod scrub;
 
 pub use launch::{
     binary_name, launch_args, platform_dir, resolve_chromium, LaunchEnv, CHROMIUM_VERSION,
@@ -657,9 +658,16 @@ impl Driver {
         todo!("T-23")
     }
 
-    /// (tab, url, title) for every live tab.
+    /// (tab, url, title) for every live tab. The URL and title are page strings: a page can
+    /// echo a typed value into them (a GET form), so they go through the process-wide
+    /// vault scrub (H-2, rule 2) before they leave, as defence in depth under the MCP
+    /// wrapper's own scrub.
     pub async fn tabs(&self) -> Result<Vec<(TabId, String, String)>, DriverError> {
-        Ok(lock(&self.registry).tabs())
+        let tabs = lock(&self.registry).tabs();
+        Ok(tabs
+            .into_iter()
+            .map(|(t, url, title)| (t, harness_core::scrub(&url), harness_core::scrub(&title)))
+            .collect())
     }
 
     pub async fn close(&self, tab: TabId) -> Result<(), DriverError> {
@@ -709,9 +717,14 @@ impl Driver {
 
     /// I-9 `frames` (B-4 #2).
     pub async fn frames(&self, tab: TabId) -> Result<Vec<FrameInfo>, DriverError> {
-        lock(&self.registry)
+        let mut frames = lock(&self.registry)
             .frames(tab)
-            .ok_or(DriverError::TabGone(tab))
+            .ok_or(DriverError::TabGone(tab))?;
+        // Page strings: scrubbed as in `tabs()` (H-2).
+        for f in &mut frames {
+            f.url = harness_core::scrub(&f.url);
+        }
+        Ok(frames)
     }
 }
 
@@ -1406,7 +1419,7 @@ mod tests {
             let act = s.call(ACT, 2).await;
             assert_eq!(
                 act["params"]["arguments"][1]["value"],
-                json!({"focus": true})
+                json!({"focus": true, "text": true})
             );
             s.value(&act, json!({"x": 10, "y": 20, "op": {"focused": true}}))
                 .await;

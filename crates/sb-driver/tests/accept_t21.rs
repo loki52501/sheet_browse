@@ -35,6 +35,13 @@ fn canary() -> String {
 
 const DL_BODY: &str = "T21 download body: report";
 const DL2_BODY: &str = "T21 download body: refused";
+const ONCE_BODY: &str = "T21 download body: once";
+const ONCE_ERROR: &str = "T21 once: this link was used already";
+
+/// The long vault value: the canary, then enough to cross every cap (120, 150, 200).
+fn long_value() -> String {
+    format!("{}-{}", canary(), "q".repeat(180))
+}
 
 fn file_name(tag: &str) -> String {
     format!("t21-{tag}-{}.txt", std::process::id())
@@ -117,7 +124,61 @@ fn page(path: &str) -> Option<(String, String, Vec<u8>)> {
              <input id=user aria-label=User>\
              <button id=sub type=submit>Register</button></form>\
              <div id=cap class=g-recaptcha data-sitekey=x \
-               onclick=\"document.title = 'captcha clicked'\"></div>"
+               onclick=\"document.title = 'captcha clicked'\"></div>\
+             <script>window.keys = 0; \
+               document.addEventListener('keydown', () => {{ window.keys += 1; }}, true);</script>"
+        ),
+        // A page that echoes a typed value into a heading (the index cuts it at 150 with
+        // `…`), the URL (history API), a new tab's title and an alert.
+        "/echo" => format!(
+            "<title>Echo</title>{STYLE}<style>input{{display:block;margin:8px;width:200px;\
+             height:28px}}</style>\
+             <h1 id=h>Hello</h1>\
+             <input id=e aria-label=Echo oninput=\"document.getElementById('h').textContent = \
+               this.value; history.replaceState(null, '', '/echo?pad=' + 'p'.repeat(40) + \
+               '&v=' + encodeURIComponent(this.value));\">\
+             <button id=open onclick=\"window.open('/titled')\">Open</button>\
+             <button id=al onclick=\"alert(document.getElementById('e').value)\">Alert</button>"
+        ),
+        "/titled" => "<title>Titled</title><h1>t</h1><script>\
+             document.title = 'Hi ' + opener.document.getElementById('e').value;</script>"
+            .to_string(),
+        // Focus already on an element inside the target (rule 4, D-615).
+        "/focus" => format!(
+            "<title>Focus</title>{STYLE}<style>input{{display:block;margin:8px;width:200px;\
+             height:28px}}</style>\
+             <div id=dlg role=dialog aria-modal=true aria-label=\"Confirm payment\">\
+               <p>Pay 10 EUR?</p>\
+               <button id=pay onclick=\"window.pays = (window.pays || 0) + 1\">Pay now</button>\
+             </div>\
+             <div id=box role=group aria-label=Login>\
+               <input id=secret type=password aria-label=Secret></div>\
+             <input id=plain aria-label=Plain>\
+             <script>window.keys = 0; \
+               document.addEventListener('keydown', () => {{ window.keys += 1; }}, true); \
+               document.getElementById('pay').focus();</script>"
+        ),
+        // A dialog from a timer while the next step waits for a hidden element.
+        "/timer" => format!(
+            "<title>Timer</title>{STYLE}\
+             <button id=t onclick=\"setTimeout(() => alert('timer'), 600)\">Arm</button>\
+             <button id=hid style=\"display:none\">Hidden</button>"
+        ),
+        "/once" => format!("<title>Once</title>{STYLE}<a id=dl href=/dl-once>Export</a>"),
+        "/dl-once" => {
+            return Some((
+                "text/plain".into(),
+                format!(
+                    "Content-Disposition: attachment; filename=\"{}\"\r\n",
+                    file_name("once")
+                ),
+                ONCE_BODY.as_bytes().to_vec(),
+            ))
+        }
+        "/get" => format!(
+            "<title>Get</title>{STYLE}<style>input{{display:block;margin:8px;width:200px;\
+             height:28px}}</style>\
+             <form id=gf action=/welcome method=get><input id=q name=q aria-label=Query></form>"
         ),
         "/challenge" => format!("<title>Just a moment...</title>{STYLE}<button id=b>Go</button>"),
         "/framed" => "<title>Framed</title><style>body{margin:0}</style>\
@@ -137,6 +198,8 @@ fn page(path: &str) -> Option<(String, String, Vec<u8>)> {
 
 /// Requests per path, to show a refused download is not fetched again.
 static HITS: AtomicUsize = AtomicUsize::new(0);
+/// Requests to the one-time download link.
+static ONCE: AtomicUsize = AtomicUsize::new(0);
 
 async fn serve() -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -156,11 +219,20 @@ async fn serve() -> u16 {
                     }
                 }
                 let req = String::from_utf8_lossy(&buf[..n]);
-                let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("/");
+                let path = path.split('?').next().unwrap_or("/").to_string();
                 if path == "/dl2" {
                     HITS.fetch_add(1, Ordering::SeqCst);
                 }
+                // A one-time link: the second request gets an error page.
+                let used = path == "/dl-once" && ONCE.fetch_add(1, Ordering::SeqCst) > 0;
                 let (status, ct, extra, body) = match page(&path) {
+                    _ if used => (
+                        "410 Gone",
+                        "text/plain".into(),
+                        String::new(),
+                        ONCE_ERROR.as_bytes().to_vec(),
+                    ),
                     Some((ct, ex, b)) => ("200 OK", ct, ex, b),
                     None => ("404 Not Found", "text/plain".into(), String::new(), vec![]),
                 };
@@ -234,7 +306,10 @@ async fn rig() -> Rig {
     .await
     .expect("launch");
     let port = serve().await;
-    let vault = Vault::in_memory([("pw".to_string(), canary(), EntryKind::Secret)]);
+    let vault = Vault::in_memory([
+        ("pw".to_string(), canary(), EntryKind::Secret),
+        ("long".to_string(), long_value(), EntryKind::Personal),
+    ]);
     let harness = Harness {
         store: Arc::new(MemStore::new()),
         vault: Arc::new(vault),
@@ -758,4 +833,320 @@ async fn a_click_inside_a_frame_lands_at_the_frame_offset() {
         page_js(d, tab, "document.getElementById('r').textContent").await,
         "hit"
     );
+    // The step changed the parent only: a frame step never claims no change (D-617).
+    assert!(
+        !res.steps[0]
+            .consequences
+            .contains(&Consequence::NoVisibleChange),
+        "{res:?}"
+    );
+}
+
+/// Every string form of a result that can leave: Debug, the JSON of its steps and stop,
+/// the diff and each consequence.
+fn forms_of(res: &ActResult) -> Vec<String> {
+    let mut out = vec![
+        format!("{res:?}"),
+        serde_json::to_string(&res.steps).unwrap(),
+        serde_json::to_string(&res.stopped).unwrap(),
+        res.diff.clone().unwrap_or_default(),
+    ];
+    for s in &res.steps {
+        for c in &s.consequences {
+            out.push(serde_json::to_string(c).unwrap());
+        }
+    }
+    out
+}
+
+/// Neither the canary nor any 8-character prefix of the long value is in any form.
+fn no_long_value(res: &ActResult, what: &str) {
+    let v = long_value();
+    let prefix: String = v.chars().take(8).collect();
+    for f in forms_of(res) {
+        assert!(
+            !f.contains(&canary()),
+            "{what}: the canary is in the result"
+        );
+        assert!(
+            !f.contains(&prefix),
+            "{what}: a prefix of the value is in the result"
+        );
+    }
+}
+
+/// Rule 2 (review T-21 Blocking 1): a typed value longer than every cap, echoed into a
+/// heading (cut by the index at 150 with `…` and by the diff at 60), the URL (cut at 200),
+/// a new tab's title and an alert (cut at 120), never reaches the result whole or cut.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_long_echo_never_leaves_whole_or_cut() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let ctx = rig.ctx(Class::Submit);
+    let tab = d.open(&rig.url("/echo")).await.expect("open /echo");
+    let e = r(d, tab, "#e").await;
+    let open = r(d, tab, "#open").await;
+    let res = act(d, tab, &format!("t{e}=@vault(long); c{open}"), &ctx).await;
+    assert!(ok_steps(&res), "{res:?}");
+    // The page did echo it: in the heading and the URL (the new tab's title is below).
+    let echoed = sb_eval(
+        d,
+        tab,
+        0,
+        "function (v) { return document.getElementById('h').textContent === v && \
+         location.href.endsWith('&v=' + encodeURIComponent(v)); }",
+        &[json!(long_value())],
+    )
+    .await;
+    assert_eq!(echoed, json!(true), "the page echoed the value");
+    no_long_value(&res, "heading, URL, title");
+    // Each echo is shown as the literal, so the model still reads what happened.
+    let diff = res.diff.clone().unwrap_or_default();
+    assert!(diff.contains("heading \"@vault(long)"), "diff: {diff}");
+    let nav = res.steps[0].consequences.iter().find_map(|c| match c {
+        Consequence::Navigated { url } => Some(url.clone()),
+        _ => None,
+    });
+    assert!(
+        nav.as_deref()
+            .is_some_and(|u| u.ends_with("&v=@vault(long)")),
+        "{nav:?}"
+    );
+    let title = res.steps[1].consequences.iter().find_map(|c| match c {
+        Consequence::OpenedTab { title, .. } => Some(title.clone()),
+        _ => None,
+    });
+    assert_eq!(title.as_deref(), Some("Hi @vault(long)"));
+
+    // An alert with the value: the dialog text is cut at 120.
+    let al = r(d, tab, "#al").await;
+    let res = act(d, tab, &format!("t{e}=@vault(long); c{al}"), &ctx).await;
+    let text = res.steps[1].consequences.iter().find_map(|c| match c {
+        Consequence::Dialog { text } => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(text.as_deref(), Some("@vault(long)"), "{res:?}");
+    no_long_value(&res, "alert");
+    d.dialog(tab, true, None).await.expect("accept");
+}
+
+/// Rule 4 (review T-21 Blocking 2, D-615): a key or type step acts only on the element the
+/// gate classified, never on a descendant that already holds focus.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_never_reaches_a_focused_descendant() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/focus")).await.expect("open /focus");
+    assert_eq!(
+        page_js(d, tab, "document.activeElement.id").await,
+        "pay",
+        "the dialog's Pay button holds focus"
+    );
+    // Enter on the dialog row: the gate classifies the dialog (Navigate at most), so the Pay
+    // button inside it must not get the key.
+    let dlg = r(d, tab, "#dlg").await;
+    let res = act(d, tab, &format!("k{dlg}=Enter"), &rig.ctx(Class::Navigate)).await;
+    assert!(
+        res.stopped.is_none(),
+        "the gate passed the dialog row: {res:?}"
+    );
+    assert!(
+        matches!(&res.steps[0].outcome, StepOutcome::Failed { why } if why.contains("did not take focus")),
+        "{res:?}"
+    );
+    assert_eq!(
+        page_js(d, tab, "window.pays || 0").await,
+        0,
+        "Pay not pressed"
+    );
+    assert_eq!(
+        page_js(d, tab, "window.keys").await,
+        0,
+        "no key event at all"
+    );
+
+    // Typing into a container while its password field holds focus types nothing.
+    page_js(d, tab, "document.getElementById('secret').focus()").await;
+    let boxed = r(d, tab, "#box").await;
+    let res = act(d, tab, &format!("t{boxed}=x"), &rig.ctx(Class::Pay)).await;
+    assert!(res.stopped.is_none(), "{res:?}");
+    assert!(
+        matches!(&res.steps[0].outcome, StepOutcome::Failed { why } if why.contains("did not take focus")),
+        "{res:?}"
+    );
+    assert_eq!(
+        page_js(d, tab, "document.getElementById('secret').value === ''").await,
+        true,
+        "nothing typed into the password field"
+    );
+    assert_eq!(page_js(d, tab, "window.keys").await, 0);
+
+    // The element itself still takes focus and gets the input.
+    let plain = r(d, tab, "#plain").await;
+    let res = act(d, tab, &format!("t{plain}=ok"), &rig.ctx(Class::Fill)).await;
+    assert!(ok_steps(&res), "{res:?}");
+    assert_eq!(
+        page_js(d, tab, "document.getElementById('plain').value").await,
+        "ok"
+    );
+}
+
+/// Review T-21 Should-fix 6: Enter in a form field under Fill and `u#` under Read stop at
+/// the gate before any input; a stale id fails the step instead of asking for Submit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gate_for_enter_upload_and_stale_targets() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/gate")).await.expect("open /gate");
+    let user = r(d, tab, "#user").await;
+    let res = act(d, tab, &format!("k{user}=Enter"), &rig.ctx(Class::Fill)).await;
+    let stop = res.stopped.clone().expect("stopped");
+    assert_eq!(
+        stop.class,
+        Class::Submit,
+        "Enter in a form is Submit: {res:?}"
+    );
+    assert_eq!(page_js(d, tab, "window.keys").await, 0, "no key event");
+    assert_eq!(page_js(d, tab, "window.submits || 0").await, 0);
+    // An upload on a CHALLENGE row stops whatever the approval.
+    std::fs::create_dir_all(rig.files()).unwrap();
+    std::fs::write(rig.files().join("cv.txt"), b"cv").unwrap();
+    let cap = r(d, tab, "#cap").await;
+    let res = act(d, tab, &format!("u{cap}=cv.txt"), &rig.ctx(Class::Pay)).await;
+    assert_eq!(
+        res.stopped.as_ref().map(|s| s.class),
+        Some(Class::Challenge),
+        "{res:?}"
+    );
+
+    let form = d.open(&rig.url("/form")).await.expect("open /form");
+    let f = r(d, form, "#f").await;
+    let res = act(d, form, &format!("u{f}=cv.txt"), &rig.ctx(Class::Read)).await;
+    let stop = res.stopped.clone().expect("u# is gated");
+    assert_eq!(stop.class, Class::Fill, "{res:?}");
+    assert_eq!(
+        page_js(d, form, "document.querySelector('#f').files.length").await,
+        0
+    );
+    let res = act(d, form, &format!("u{f}=cv.txt"), &rig.ctx(Class::Fill)).await;
+    assert!(ok_steps(&res), "{res:?}");
+
+    // A stale id after a navigation: a failed step, not a Submit stop.
+    let links = d.open(&rig.url("/links")).await.expect("open /links");
+    let noop = r(d, links, "#noop").await;
+    let nav = r(d, links, "#nav").await;
+    let res = act(d, links, &format!("c{nav}"), &rig.ctx(Class::Navigate)).await;
+    assert!(ok_steps(&res), "{res:?}");
+    let res = act(d, links, &format!("c{noop}"), &rig.ctx(Class::Fill)).await;
+    assert!(res.stopped.is_none(), "not a stop: {res:?}");
+    assert_eq!(
+        res.steps[0].outcome,
+        StepOutcome::Failed {
+            why: "stale".into()
+        }
+    );
+}
+
+/// Review T-21 Should-fix 1: a dialog a timer opens while a later step waits is reported at
+/// once, not after the 5 s actionability budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dialog_between_steps_is_reported_at_once() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/timer")).await.expect("open /timer");
+    let t = r(d, tab, "#t").await;
+    let hid = r(d, tab, "#hid").await;
+    let t0 = std::time::Instant::now();
+    let res = act(d, tab, &format!("c{t}; c{hid}; c{t}"), &rig.ctx(Class::Pay)).await;
+    let took = t0.elapsed();
+    assert!(res.stopped.is_none(), "{res:?}");
+    let at = res
+        .steps
+        .iter()
+        .position(|s| {
+            s.consequences.contains(&Consequence::Dialog {
+                text: "timer".into(),
+            })
+        })
+        .unwrap_or_else(|| panic!("no dialog: {res:?}"));
+    assert_eq!(at + 1, res.steps.len(), "nothing runs after it: {res:?}");
+    assert!(took < Duration::from_millis(2500), "{took:?}: {res:?}");
+    d.dialog(tab, true, None).await.expect("accept");
+}
+
+/// Review T-21 Should-fix 2: a download whose second request answers an error status is
+/// not saved under the download's name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refetch_with_an_error_status_is_not_saved() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/once")).await.expect("open /once");
+    let dl = r(d, tab, "#dl").await;
+    let mut events = d.cdp().events();
+    let res = act(d, tab, &format!("c{dl}"), &rig.ctx(Class::Submit)).await;
+    let Some(Consequence::Download { guid, .. }) = res.steps[0]
+        .consequences
+        .iter()
+        .find(|c| matches!(c, Consequence::Download { .. }))
+        .cloned()
+    else {
+        panic!("no download: {res:?}");
+    };
+    assert_eq!(download_end(&mut events, &guid).await, "canceled");
+    let err = d
+        .download(tab, &guid, true)
+        .await
+        .expect_err("an error page is not saved");
+    // chromium-1248 reports a non-2xx answer as a failed load itself
+    // (ERR_HTTP_RESPONSE_CODE_FAILURE); the driver also checks the status (defence in depth).
+    let why = err.to_string();
+    assert!(
+        why.contains("410") || why.contains("RESPONSE_CODE"),
+        "{why}"
+    );
+    assert!(files_with(&rig.files(), ONCE_ERROR.as_bytes()).is_empty());
+    assert!(files_with(rig.home.path(), ONCE_ERROR.as_bytes()).is_empty());
+}
+
+/// Tester T-21 note: `tabs()` scrubs a URL that echoes a typed value (H-2, rule 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tabs_never_return_a_typed_value() {
+    let rig = rig().await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/get")).await.expect("open /get");
+    let q = r(d, tab, "#q").await;
+    let res = act(
+        d,
+        tab,
+        &format!("t{q}=@vault(pw); k{q}=Enter"),
+        &rig.ctx(Class::Submit),
+    )
+    .await;
+    assert!(ok_steps(&res), "{res:?}");
+    // The page put it in the URL (the registry's raw copy, once it has the new URL; never
+    // printed).
+    let echoed = d
+        .wait_registry(CAP, |r| {
+            r.tabs()
+                .into_iter()
+                .any(|t| t.0 == tab && t.1.contains("/welcome?q="))
+                .then(|| r.tabs().iter().any(|t| t.1.contains(&canary())))
+        })
+        .await;
+    assert_eq!(
+        echoed,
+        Some(true),
+        "the GET form echoed the value into the URL"
+    );
+    rig.harness.vault.install_global();
+    let tabs = d.tabs().await.expect("tabs");
+    for (_, url, title) in &tabs {
+        assert!(!url.contains(&canary()) && !title.contains(&canary()));
+    }
+    assert!(
+        tabs.iter().any(|t| t.1.contains("@vault(pw)")),
+        "shown as the literal"
+    );
+    let frames = d.frames(tab).await.expect("frames");
+    assert!(frames.iter().all(|f| !f.url.contains(&canary())));
 }

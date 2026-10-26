@@ -245,33 +245,81 @@ const READ_CHUNK: u64 = 1 << 20;
 /// Cap of a saved file's name, in characters.
 const NAME_CAP: usize = 120;
 
-/// A file name for a download: the page's suggestion, else the URL's last path segment,
-/// else `download`; path separators, control characters and characters Windows refuses
-/// become `_`, leading and trailing dots and spaces go, reserved device names get a `_`
-/// prefix, capped at 120 characters keeping the extension.
-pub(crate) fn safe_name(suggested: &str, url: &str) -> String {
+/// A download's name as the page gave it: its suggestion, else the URL's last path segment
+/// (percent-decoded). Raw: scrub it, then [`sanitize_name`].
+pub(crate) fn raw_name(suggested: &str, url: &str) -> String {
+    if !suggested.trim().is_empty() {
+        return suggested.to_string();
+    }
     let from_url = url
         .split(['?', '#'])
         .next()
         .and_then(|u| u.rsplit('/').next())
         .unwrap_or_default();
-    let raw = if suggested.trim().is_empty() {
-        percent_encoding::percent_decode_str(from_url)
-            .decode_utf8_lossy()
-            .into_owned()
-    } else {
-        suggested.to_string()
+    percent_encoding::percent_decode_str(from_url)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// Windows device names, matched on the part before the first dot (case folded, trailing
+/// spaces ignored): `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, and `COM`/`LPT` with
+/// one digit or one superscript `¹`, `²`, `³`.
+fn reserved(stem: &str) -> bool {
+    let stem = stem.trim_end().to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let Some(rest) = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+    else {
+        return false;
     };
-    let mapped: String = raw
+    let mut c = rest.chars();
+    matches!(
+        (c.next(), c.next()),
+        (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+    )
+}
+
+/// A raw name as a safe file name, which is also the name shown to the model: path
+/// separators, control characters and characters Windows refuses become `_`; format (Cf)
+/// characters (bidi overrides, zero-width) go; whitespace runs become one space; the
+/// harness's own syntax is neutralised as in page text (backticks as `'`, `[`/`]` as
+/// `(`/`)`, a `#` that would start a ref as `＃`); leading and trailing dots and spaces go;
+/// reserved device names get a `_` prefix; capped at 120 characters keeping the extension.
+pub(crate) fn sanitize_name(raw: &str) -> String {
+    let chars: Vec<char> = raw
         .chars()
-        .map(|c| {
-            if c.is_control() || "/\\:*?\"<>|".contains(c) {
-                '_'
-            } else {
-                c
-            }
-        })
+        .filter(|c| !crate::diff::is_format(*c))
         .collect();
+    let mut mapped = String::new();
+    let mut space = false;
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_whitespace() {
+            space = true;
+            continue;
+        }
+        if space {
+            mapped.push(' ');
+            space = false;
+        }
+        let next = chars.get(i + 1).copied();
+        let after = chars.get(i + 2).copied();
+        let starts_ref = next.is_some_and(|d| d.is_ascii_digit())
+            || (matches!(next, Some('f' | 'F')) && after.is_some_and(|d| d.is_ascii_digit()));
+        mapped.push(match c {
+            c if c.is_control() || "/\\:*?\"<>|".contains(c) => '_',
+            '`' => '\'',
+            '[' => '(',
+            ']' => ')',
+            '#' if starts_ref => '＃',
+            c => c,
+        });
+    }
     let mut name = mapped
         .trim_matches(|c: char| c == '.' || c.is_whitespace())
         .to_string();
@@ -281,25 +329,22 @@ pub(crate) fn safe_name(suggested: &str, url: &str) -> String {
             _ => String::new(),
         };
         let keep = NAME_CAP - ext.chars().count();
-        name = name.chars().take(keep).collect::<String>() + &ext;
+        let stem: String = name.chars().take(keep).collect();
+        name = stem.trim_end_matches([' ', '.']).to_string() + &ext;
     }
     if name.is_empty() {
         name = "download".into();
     }
-    let stem = name
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.len() == 4
-            && stem.as_bytes()[3].is_ascii_digit());
-    if reserved {
+    if reserved(name.split('.').next().unwrap_or_default()) {
         name.insert(0, '_');
     }
     name
+}
+
+/// [`raw_name`] then [`sanitize_name`].
+#[cfg(test)]
+pub(crate) fn safe_name(suggested: &str, url: &str) -> String {
+    sanitize_name(&raw_name(suggested, url))
 }
 
 /// Claim `dir/name`, or `dir/stem (2).ext` and so on when taken: the file is created
@@ -481,7 +526,9 @@ impl Driver {
             .clone()
             .ok_or_else(|| failed("it was not reported by an act step, so it has no run folder"))?;
         tokio::fs::create_dir_all(&dir).await.map_err(failed)?;
-        let name = safe_name(&d.name, &d.url);
+        // The name on disk is the one the act result showed: scrubbed (the process-wide
+        // vault, H-2) and sanitised, so the returned path is safe to show as it is.
+        let name = sanitize_name(&harness_core::scrub(&raw_name(&d.name, &d.url)));
         let part = dir.join(format!(".{shown}.part"));
         if let Err(e) = self.fetch_into(tab, &session, &d, &part).await {
             let _ = tokio::fs::remove_file(&part).await;
@@ -534,7 +581,8 @@ impl Driver {
             file.write_all(&bytes).await.map_err(failed)?;
             return file.flush().await.map_err(failed);
         }
-        if !matches!(scheme.as_str(), "http" | "https" | "file") {
+        // No `file`: a page never needs it, and it would copy a local file into the run.
+        if !matches!(scheme.as_str(), "http" | "https") {
             return Err(failed(format!(
                 "a {} download cannot be fetched again once stopped (B-608)",
                 crate::diff::page_text(&scheme, 20)
@@ -574,6 +622,19 @@ impl Driver {
                 "fetching it again: {}",
                 crate::diff::page_text(&why, 60)
             )));
+        }
+        // A one-time link or a POST-only export answers the second request with an error
+        // page: never save that under the download's name.
+        if let Some(code) = res.get("httpStatusCode").and_then(Value::as_f64) {
+            if !(200.0..300.0).contains(&code) {
+                if let Some(h) = res.get("stream").and_then(Value::as_str) {
+                    drop(
+                        self.cdp
+                            .start(Some(&session), "IO.close", json!({ "handle": h })),
+                    );
+                }
+                return Err(failed(format!("fetching it again: HTTP {code}, not saved")));
+            }
         }
         let handle = res
             .get("stream")
@@ -706,6 +767,36 @@ mod tests {
         assert_eq!(safe_name("..", "http://x/"), "download");
         assert_eq!(safe_name("CON.txt", ""), "_CON.txt");
         assert_eq!(safe_name(r"..\..\evil.exe", ""), "_.._evil.exe");
+        // Format characters go: `report<RLO>fdp.exe` would show as `reportexe.pdf`.
+        assert_eq!(
+            safe_name("report\u{202e}fdp.exe", ""),
+            "reportfdp.exe",
+            "bidi override"
+        );
+        assert_eq!(
+            safe_name("a\u{200b}b\u{feff}\u{2066}c.txt", ""),
+            "abc.txt",
+            "zero-width, BOM, isolate"
+        );
+        for dev in [
+            "COM\u{b9}.txt",
+            "lpt\u{b3}",
+            "CONIN$.log",
+            "conout$",
+            "COM0.txt",
+            "Nul .txt",
+        ] {
+            assert!(safe_name(dev, "").starts_with('_'), "{dev}");
+        }
+        for ok in ["COM10.txt", "CONSOLE.txt", "LPT.txt", "COM\u{b9}x.txt"] {
+            assert!(!safe_name(ok, "").starts_with('_'), "{ok}");
+        }
+        // The saved name is the shown name: harness syntax neutralised, spaces collapsed.
+        assert_eq!(safe_name("[x](#12) ```  n.txt", ""), "(x)(＃12) ''' n.txt");
+        assert_eq!(
+            crate::diff::page_text(&safe_name("[x](#12) ```  n.txt", ""), 120),
+            safe_name("[x](#12) ```  n.txt", "")
+        );
         let long = format!("{}.pdf", "a".repeat(300));
         let n = safe_name(&long, "");
         assert_eq!(n.chars().count(), NAME_CAP);

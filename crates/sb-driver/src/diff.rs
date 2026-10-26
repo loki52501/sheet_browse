@@ -20,9 +20,41 @@ const NAME_CAP: usize = 60;
 pub(crate) const TEXT_CAP: usize = 120;
 pub(crate) const URL_CAP: usize = 200;
 
-/// A page string as the model may see it: one line, no control characters, `"` as `'`,
-/// `[`/`]` as `(`/`)`, backticks as `'`, a `#` that would start a ref (`#12`, `#f2.3`) as
-/// `＃`, capped at `cap` characters with `...`.
+/// Unicode general category Cf (format characters, Unicode 15.1): bidi overrides and
+/// isolates (U+202A..U+202E, U+2066..U+2069), zero-width characters, the BOM, tags. They
+/// render as nothing or reorder what follows (`report<U+202E>fdp.exe` shows as `reportexe.pdf`),
+/// so page strings and file names drop them.
+pub(crate) fn is_format(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+/// A page string as the model may see it: one line, no control or format (Cf) characters,
+/// `"` as `'`, `[`/`]` as `(`/`)`, backticks as `'`, a `#` that would start a ref (`#12`,
+/// `#f2.3`) as `＃`, capped at `cap` characters with `...`. Callers scrub vault values from
+/// the raw string first (rule 2): the cap can cut a value.
 pub(crate) fn page_text(s: &str, cap: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::new();
@@ -31,6 +63,9 @@ pub(crate) fn page_text(s: &str, cap: usize) -> String {
     for (i, &c) in chars.iter().enumerate() {
         if c.is_whitespace() || c.is_control() {
             space = !out.is_empty();
+            continue;
+        }
+        if is_format(c) {
             continue;
         }
         if n >= cap {
@@ -66,9 +101,21 @@ fn starts_ref(next: Option<char>, after: Option<char>) -> bool {
     }
 }
 
+/// The length in bytes of an `@vault(name)` literal at the start of `s`, if one is there.
+fn literal_at(s: &str) -> Option<usize> {
+    let rest = s.strip_prefix("@vault(")?;
+    let name = rest
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        .count();
+    (name > 0 && rest.as_bytes().get(name) == Some(&b')')).then_some("@vault(".len() + name + 1)
+}
+
 /// A URL from the page (B-4 #9 `navigated to`): characters that cannot appear in a URL, or
 /// that spell harness syntax, are percent-encoded (`[`/`]` only after the host, so an IPv6
-/// host stays readable), a `#` that would start a ref becomes `%23`, and the result is capped.
+/// host stays readable), a `#` that would start a ref becomes `%23`, format (Cf) characters
+/// are encoded, and the result is capped. An `@vault(name)` literal the scrub wrote is kept
+/// as it is, so the model reads the reference. Callers scrub the raw URL first (rule 2).
 pub(crate) fn clean_url(url: &str) -> String {
     let host_end = url
         .find("://")
@@ -79,11 +126,27 @@ pub(crate) fn clean_url(url: &str) -> String {
         .unwrap_or(0);
     let chars: Vec<(usize, char)> = url.char_indices().collect();
     let mut out = String::new();
+    let mut skip_to = 0usize;
     for (k, &(i, c)) in chars.iter().enumerate() {
+        if i < skip_to {
+            continue;
+        }
+        if let Some(n) = literal_at(&url[i..]) {
+            for (_, lc) in url[i..i + n].char_indices() {
+                out.push(lc);
+                if out.chars().count() >= URL_CAP {
+                    out.push_str("...");
+                    return out;
+                }
+            }
+            skip_to = i + n;
+            continue;
+        }
         let next = chars.get(k + 1).map(|x| x.1);
         let after = chars.get(k + 2).map(|x| x.1);
         let encode = c.is_whitespace()
             || c.is_control()
+            || is_format(c)
             || matches!(
                 c,
                 '"' | '`' | '<' | '>' | '(' | ')' | '\\' | '^' | '{' | '}' | '|'
@@ -408,5 +471,23 @@ mod tests {
         );
         let long = format!("https://x.test/{}", "a".repeat(400));
         assert!(clean_url(&long).chars().count() <= URL_CAP + 3);
+        // The scrub's literal stays readable; other parentheses are still encoded.
+        assert_eq!(
+            clean_url("https://x.test/?q=@vault(pw)&r=(x)"),
+            "https://x.test/?q=@vault(pw)&r=%28x%29"
+        );
+        assert_eq!(
+            clean_url("https://x.test/a\u{202e}b"),
+            "https://x.test/a%E2%80%AEb"
+        );
+    }
+
+    #[test]
+    fn format_characters_never_reach_page_text() {
+        assert_eq!(
+            page_text("pay\u{202e}lanigiro \u{200b}x\u{feff}", 80),
+            "paylanigiro x"
+        );
+        assert!(is_format('\u{2066}') && is_format('\u{e0041}') && !is_format('a'));
     }
 }
