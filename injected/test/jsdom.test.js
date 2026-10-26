@@ -1718,3 +1718,96 @@ test("a field next to a hidden password reads empty|filled; next to a visible on
   assert.equal(c.reads, 0);
   assert.ok(!JSON.stringify([sb.index(), sb.text()]).includes(CANARY));
 });
+
+// D-445 (1), (2) in jsdom (no layout: only the style checks of "not shown" apply). The twin
+// holds the password's value (a synced show-password twin), so every read of it is a leak.
+test("a twin below wrappers, at mixed depth, or beside an opacity 0 password is never read (D-445 (1), (2))", () => {
+  const CANARY = "twin-canary-445";
+  const c = { reads: 0 };
+  const { doc, win, sb } = jsdom(
+    // depth 2, Vue v-show component shape (div.base > label + div.control > input)
+    '<form id="a"><div><div class="base"><label>Secret</label><div class="control"><input id="t1"></div></div>' +
+    '<div class="base" hidden><label>Secret</label><div class="control"><input id="p1" type="password"></div></div></div></form>' +
+    // depth 3, [hidden] on component hosts
+    '<form id="b"><div><x-in><div class="c"><div><input id="t2"></div></div></x-in>' +
+    '<x-in hidden><div class="c"><div><input id="p2" type="password"></div></div></x-in></div></form>' +
+    // mixed depth inside one label: the password in a span, the twin a direct child
+    '<form id="c"><label>Secret <span><input id="p3" type="password" style="display:none"></span><input id="t3"></label></form>' +
+    // opacity 0 on the password, and on an ancestor of it
+    '<form id="d"><div><input id="t4"><input id="p4" type="password" style="opacity:0"></div></form>' +
+    '<form id="e"><div style="opacity:0"><div><input id="p5" type="password"></div></div><div><div><input id="t5"></div></div></form>' +
+    // controls: the same component shapes beside a shown password
+    '<form id="k"><div class="base"><label>Email</label><div class="control"><input id="k1" aria-label="Email" value="a@x.io"></div></div>' +
+    '<div class="base"><label>Key</label><div class="control"><input id="k2" type="password"></div></div>' +
+    '<div class="base"><label>City</label><div class="control"><input id="k3" aria-label="City" value="London"></div></div></form>' +
+    '<form id="m"><div><div><input id="t6" aria-label="Plain six" value="ada"></div></div><div><div><input id="p6" type="password"></div></div></form>');
+  for (const id of ["t1", "t2", "t3", "t4", "t5"]) spied(win, doc.getElementById(id), CANARY, c);
+  sb.walk({ base: 1 });
+  const v = (id) => JSON.parse(JSON.stringify(sb.state(doc.getElementById(id)).value));
+  const masked = (s) => s.kind === "empty" || s.kind === "filled";
+  for (const [id, why] of [["t1", "depth 2"], ["t2", "depth 3"], ["t3", "mixed depth in one label"],
+    ["t4", "opacity 0 password"], ["t5", "opacity 0 ancestor"]]) {
+    assert.ok(masked(v(id)), why + ": " + JSON.stringify(v(id)));
+  }
+  same(v("k1"), { kind: "text", text: "a@x.io" }, "a component beside a shown password's component");
+  same(v("k3"), { kind: "text", text: "London" });
+  // the memo is per index() call: a later display flip is seen by the next read
+  same(v("t6"), { kind: "text", text: "ada" }, "before the flip");
+  spied(win, doc.getElementById("t6"), CANARY, c);
+  doc.getElementById("p6").closest("div").parentNode.hidden = true;
+  assert.ok(masked(v("t6")), "after the flip: " + JSON.stringify(v("t6")));
+  sb.walk({});
+  assert.equal(c.reads, 0);
+  assert.ok(!JSON.stringify([sb.index(), sb.text()]).includes(CANARY));
+});
+
+test("a twin and a hidden password in shadow roots: one root, or sibling hosts (D-444 (1), D-445 (1))", () => {
+  const CANARY = "shadow-canary-445";
+  const c = { reads: 0 };
+  const { doc, win, sb } = jsdom('<form id="a"><x-a id="h7"></x-a></form>' +
+    '<form id="b"><div><x-a id="h8a"></x-a><x-a id="h8b" hidden></x-a></div></form>' +
+    '<form id="k"><div><x-a id="h9a"></x-a><x-a id="h9b"></x-a></div></form>');
+  const root = (id, html) => {
+    const sr = doc.getElementById(id).attachShadow({ mode: "open" });
+    sr.innerHTML = html;
+    return sr;
+  };
+  // the shadow root is the parent of both (D-444 (1) direct, the holder path)
+  root("h7", '<input id="t7"><input id="p7" type="password" style="display:none">');
+  // each alone in a wrapper in its own host's root, [hidden] flipped on the hosts
+  const t8 = root("h8a", '<div><input id="t8"></div>');
+  root("h8b", '<div><input id="p8" type="password"></div>');
+  root("h9a", '<div><input id="t9" aria-label="Plain nine" value="ada"></div>');
+  root("h9b", '<div><input id="p9" type="password"></div>');
+  spied(win, doc.getElementById("h7").shadowRoot.getElementById("t7"), CANARY, c);
+  spied(win, t8.getElementById("t8"), CANARY, c);
+  sb.walk({ base: 1 });
+  const v = (el) => JSON.parse(JSON.stringify(sb.state(el).value));
+  const masked = (s) => s && (s.kind === "empty" || s.kind === "filled");
+  assert.ok(masked(v(doc.getElementById("h7").shadowRoot.getElementById("t7"))), "one shadow root");
+  assert.ok(masked(v(t8.getElementById("t8"))), "sibling hosts");
+  same(v(doc.getElementById("h9a").shadowRoot.getElementById("t9")), { kind: "text", text: "ada" }, "beside a shown password's host");
+  assert.equal(c.reads, 0);
+  assert.ok(!JSON.stringify([sb.index(), sb.text()]).includes(CANARY));
+});
+
+test("a textarea twin beside a hidden password is never read, at depth 1 and 2 (D-444 (1), D-445 (1))", () => {
+  const CANARY = "textarea-canary-445";
+  const c = { reads: 0 };
+  const { doc, win, sb } = jsdom(
+    '<form id="a"><div><textarea id="t1"></textarea><input id="p1" type="password" style="display:none"></div></form>' +
+    '<form id="b"><div><div><textarea id="t2"></textarea></div><div hidden><input id="p2" type="password"></div></div></form>' +
+    '<form id="c"><div><div class="base"><div class="control"><textarea id="t3"></textarea></div></div>' +
+    '<div class="base" style="display:none"><div class="control"><input id="p3" type="password"></div></div></div></form>' +
+    '<form id="k"><div><div><textarea id="k1" aria-label="Note">hello</textarea></div><div><input id="k2" type="password"></div></div></form>');
+  for (const id of ["t1", "t2", "t3"]) spied(win, doc.getElementById(id), CANARY, c);
+  sb.walk({ base: 1 });
+  const v = (id) => JSON.parse(JSON.stringify(sb.state(doc.getElementById(id)).value));
+  const masked = (s) => s.kind === "empty" || s.kind === "filled";
+  for (const [id, why] of [["t1", "same parent"], ["t2", "sibling wrappers"], ["t3", "depth 2"]]) {
+    assert.ok(masked(v(id)), why + ": " + JSON.stringify(v(id)));
+  }
+  same(v("k1"), { kind: "text", text: "hello" }, "beside a shown password's wrapper");
+  assert.equal(c.reads, 0);
+  assert.ok(!JSON.stringify([sb.index(), sb.text()]).includes(CANARY));
+});

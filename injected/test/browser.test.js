@@ -964,9 +964,9 @@ function twinRead(o, n, settle) {
     return r;
   }, { n, settle });
 }
-async function twinCase(t, n, label) {
+async function twinCase(t, n, label, page) {
   const CAN = "d444-canary-y" + n;
-  const o = await open("d444-twins.html");
+  const o = await open(page || "d444-twins.html");
   await o.page.fill("#acct" + n, CAN);
   await o.page.fill("#user", "ada");
   await o.page.fill("#email", "ada@example.com");
@@ -1038,6 +1038,56 @@ test("D-444 control: an ordinary visible form with no hidden sensitive field rea
   assert.ok(!r.blob.includes("d444-control-canary"));
   assert.deepEqual(r.email, { kind: "text", text: "ada@example.com" }, "Email in a wrapper next to a visible password's wrapper");
   assert.deepEqual(r.city, { kind: "text", text: "London" }, "City next to a hidden field that is not sensitive");
+  assert.deepEqual(r.user, { kind: "text", text: "ada" });
+  assert.ok(r.pw.kind === "empty" || r.pw.kind === "filled");
+});
+
+// D-445 (review-T-19 round 9 Z3..Z7, runs/reviewer-14/probes/probe-r14-chromium.js): the same
+// click, settle(), same/next/late protocol on bench/pages/d445-twins.html. (1) twin and password
+// below wrappers: Z7 `x-in > div > input` with [hidden] on the hosts, Z7v a Vue v-show component
+// (`div.base > label + div.control > input`) flipped on the base, Z7i the same shape with the
+// inputs flipped, Z5m mixed depth inside one label. (2) the password hidden by opacity 0 (Z3),
+// off-screen (Z4), sr-only (Z4v), clip-path inset(50%) (Z4c), clip rect 0 (Z4r), a 0x0 box (Z4z)
+// or a clip-path url() (Z4u, a shape that is not parsed counts as hiding). (3) Z6: a Vue
+// <Transition> whose transitionend handler sets display:none, read in the same evaluate as
+// settle(); Z6s slides instead of fading, so only the transitionend handler hides the password.
+for (const [n, label] of [
+  [71, "Z7 hidden hosts, depth 2"],
+  [72, "Z7v Vue v-show component, base flipped"],
+  [73, "Z7i component shape, inputs flipped"],
+  [51, "Z5m mixed depth inside one label"],
+  [31, "Z3 opacity 0 password"],
+  [41, "Z4 off-screen password"],
+  [42, "Z4v sr-only password"],
+  [43, "Z4c clip-path inset(50%) password"],
+  [44, "Z4r clip rect(0 0 0 0) password"],
+  [45, "Z4z zero-size password"],
+  [46, "Z4u clip-path url() to an empty clipPath on the password"],
+  [61, "Z6 Vue Transition + v-show, read chained after settle()"],
+  [62, "Z6s slide Transition + v-show (no opacity), read chained after settle()"],
+]) {
+  test(`${label.split(" ")[0]} D-445: ${label.slice(label.indexOf(" ") + 1)} never reads the value, also past 2 s`, async (t) => {
+    await twinCase(t, n, label, "d445-twins.html");
+  });
+}
+
+test("D-445 control: an ordinary multi-div form with a visible password reads its other fields as text", async () => {
+  const o = await open("d445-twins.html");
+  await o.page.fill("#email", "ada@example.com");
+  await o.page.fill("#city", "London");
+  await o.page.fill("#pwc", "d445-control-canary");
+  await o.page.fill("#user", "ada");
+  const r = await o.ev(() => {
+    const sb = globalThis.__sb;
+    sb.walk({ dirty: true });
+    const rows = sb.index();
+    const v = (id) => sb.state(document.getElementById(id)).value;
+    return { blob: JSON.stringify([rows, sb.text()]), email: v("email"), city: v("city"), user: v("user"), pw: v("pwc"), mail2: v("mail2") };
+  });
+  assert.ok(!r.blob.includes("d445-control-canary"));
+  assert.deepEqual(r.mail2, { kind: "text", text: "pane@example.com" }, "beside a password below the fold of a scroll pane");
+  assert.deepEqual(r.email, { kind: "text", text: "ada@example.com" }, "Email in a component beside a visible password's component");
+  assert.deepEqual(r.city, { kind: "text", text: "London" }, "City beside a visible password's component and a hidden plain one");
   assert.deepEqual(r.user, { kind: "text", text: "ada" });
   assert.ok(r.pw.kind === "empty" || r.pw.kind === "filled");
 });
