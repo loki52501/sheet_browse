@@ -615,9 +615,11 @@ fn d226_2_no_max_tokens_an_empty_chunk_still_takes_a_piece() {
     }
 }
 
-/// D-226 (2): under max_tokens a piece holds the unit's overhead plus at least one whole word;
-/// when what is left cannot hold that, the read stops instead of taking a char or two of the
-/// next word. Every whitespace-separated token of every read is a whole token of the page.
+/// D-226 (2) as amended by D-227: under max_tokens a piece holds the unit's overhead plus at
+/// least one whole word when that word fits what the read has left. Every whitespace-separated
+/// token of every read is a whole token of the page, except a word longer than what was left:
+/// that one is cut by characters, so it is the last token of the chain's last read, a prefix of
+/// a page token, and the read fills exactly what was left (the whole word could not fit).
 #[test]
 fn d226_2_a_read_under_max_tokens_never_takes_less_than_a_word() {
     let page = vec![
@@ -634,37 +636,61 @@ fn d226_2_a_read_under_max_tokens_never_takes_less_than_a_word() {
     for p in ["w", "v", "q"] {
         whole.extend((0..50).map(|i| format!("{p}{i:02}")));
     }
+    let mut partials = 0usize;
     for chunk in [0usize, 10, 40] {
         for m in 1..=60usize {
             let o = ReadOpts {
                 max_tokens: Some(m),
                 ..opts(chunk)
             };
-            for (i, out) in read_chain(&[], &page, &o, m + 3).iter().enumerate() {
-                for t in body(&out.markdown).split_whitespace() {
+            let outs = read_chain(&[], &page, &o, m + 3);
+            let mut spent = 0usize;
+            for (i, out) in outs.iter().enumerate() {
+                let b = body(&out.markdown);
+                let toks: Vec<&str> = b.split_whitespace().collect();
+                for (j, t) in toks.iter().enumerate() {
+                    if whole.iter().any(|w| w == t) {
+                        continue;
+                    }
                     assert!(
-                        whole.iter().any(|w| w == t),
+                        j + 1 == toks.len()
+                            && i + 1 == outs.len()
+                            && whole.iter().any(|w| w.starts_with(t))
+                            && estimate(b) == m - spent
+                            && out
+                                .markdown
+                                .ends_with(&format!("truncated: max_tokens {m} reached")),
                         "chunk {chunk} max {m} read {i}: partial word {t:?} in {:?}",
                         out.markdown
                     );
+                    partials += 1;
                 }
+                spent += estimate(b);
             }
         }
     }
+    assert!(
+        partials > 0,
+        "no read cut a word: the D-227 case is not reached"
+    );
 }
 
 // ---------------------------------------------------------------- termination
 
 /// Following cursors with a fixed max_tokens always terminates: every read either spends at
 /// least one token or is the stopped/spent read, so a chain takes at most max_tokens + 2 reads,
-/// and its last read has no cursor. Swept over every overhead page, max_tokens 1..=60 and
-/// chunk_tokens 0, 1, 5, 400.
+/// and its last read has no cursor. Swept over every overhead page and chunk_tokens 0, 1, 5,
+/// 400, with max_tokens sampled (D-227): every value up to 8, where what is left runs out
+/// inside a prefix or fence and reads stop, then a spread up to 60. At least one chain must
+/// reach a stopped read, so the sweep proves the stop cursor is spent.
 #[test]
 fn d226_cursor_chain_with_fixed_max_tokens_always_terminates() {
+    const MAX_TOKENS: [usize; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 11, 19, 33, 60];
     let mut chains = 0usize;
+    let mut stops = 0usize;
     for (name, page) in overhead_pages() {
         for chunk in [0usize, 1, 5, 400] {
-            for m in 1..=60usize {
+            for m in MAX_TOKENS {
                 let o = ReadOpts {
                     max_tokens: Some(m),
                     ..opts(chunk)
@@ -676,11 +702,19 @@ fn d226_cursor_chain_with_fixed_max_tokens_always_terminates() {
                     outs.len()
                 );
                 assert!(outs.last().is_some_and(|x| x.cursor.is_none()));
+                stops += outs
+                    .iter()
+                    .filter(|x| x.cursor.is_some() && body(&x.markdown).trim().is_empty())
+                    .count();
                 chains += 1;
             }
         }
     }
-    assert_eq!(chains, 8 * 4 * 60);
+    assert_eq!(chains, 8 * 4 * MAX_TOKENS.len());
+    assert!(
+        stops > 0,
+        "no chain reached a stopped read: the sweep proves nothing"
+    );
 }
 
 // ---------------------------------------------------------------- D-226 (3)

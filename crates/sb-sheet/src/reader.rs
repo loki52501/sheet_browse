@@ -32,6 +32,11 @@ const CHARS_PER_TOKEN: usize = 4;
 /// Inside a code block a backtick run is cut to this many, so the fence (one longer, at most
 /// 10) is fixed overhead the page cannot grow (D-226).
 const CODE_BACKTICK_RUN_MAX: usize = 9;
+/// The `remaining:` outline lists at most this many sections, then one `+N more sections, W
+/// words` entry (D-227). It stays outside the body budget, so it is bounded instead.
+const OUTLINE_MAX: usize = 20;
+/// Chars an outline label keeps, `...` included (D-227).
+const OUTLINE_LABEL_MAX: usize = 80;
 
 pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpts) -> ReadOutput {
     let ctx = Ctx::new(index);
@@ -192,8 +197,13 @@ pub(crate) fn read(index: &[IndexRow], text_blocks: &[TextBlock], opts: &ReadOpt
     }
     if !remaining.is_empty() {
         md.push_str("\n\nremaining:");
-        for e in &remaining {
-            md.push_str(&format!("\n- {} ({} words)", e.heading, e.words));
+        for (i, e) in remaining.iter().enumerate() {
+            if i == OUTLINE_MAX {
+                // the `+N more sections` entry outline_from appends past the cap (D-227)
+                md.push_str(&format!("\n- {}, {} words", e.heading, e.words));
+            } else {
+                md.push_str(&format!("\n- {} ({} words)", e.heading, e.words));
+            }
         }
     }
     if truncated {
@@ -672,9 +682,22 @@ fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
         // scrubbed the same way) with link syntax dropped, so it never shows a spelling the
         // body hides (D-226, H-2).
         let hashes = "#".repeat(usize::from(unit.level));
-        unit.label = Some(ctx.scrub(&format!("{hashes} {}", outline_text(&unit.body))));
+        let label = ctx.scrub(&format!("{hashes} {}", outline_text(&unit.body)));
+        unit.label = Some(cap_label(label));
     }
     Some(unit)
+}
+
+/// `label` capped at [`OUTLINE_LABEL_MAX`] chars with a trailing `...`, cut on a char
+/// boundary (D-227). Called on the scrubbed label, so a cut never exposes a hidden value.
+fn cap_label(label: String) -> String {
+    if label.chars().count() <= OUTLINE_LABEL_MAX {
+        return label;
+    }
+    let mut head: String = label.chars().take(OUTLINE_LABEL_MAX - 3).collect();
+    head.truncate(head.trim_end().len());
+    head.push_str("...");
+    head
 }
 
 /// A rendered line with each link form reduced to its label: `[text](#id)` to `text`,
@@ -1023,17 +1046,21 @@ struct Chunk {
 /// chunk, but never past `hard` (D-222).
 ///
 /// Fixed overhead (prefix, D-225 backslash, close fence, table header separator) counts
-/// against the cap like body text (D-226). When `hard` is the binding cap and it cannot hold
-/// the next unit's overhead plus one word of body (a word longer than a whole chunk counts
-/// by one char), the chunk takes nothing and is `stopped`. Otherwise an empty chunk always
-/// takes one piece, at least one char, so a plan always makes progress.
+/// against the cap like body text (D-226). A first word longer than the budget (the smaller of
+/// `chunk_tokens` and `hard`, in chars) is cut by characters (D-227). When `hard` is the
+/// binding cap and it cannot hold the next unit's overhead plus one char of body, the chunk
+/// takes nothing and is `stopped`. Otherwise an empty chunk always takes one piece, at least
+/// one char, so a plan always makes progress.
 fn next_chunk(units: &[Unit], pos: Pos, chunk_tokens: usize, hard: Option<usize>) -> Chunk {
     // `chunk_tokens` is a caller option: a huge value saturates instead of overflowing.
     let chunk_cap = chunk_tokens.max(1).saturating_mul(CHARS_PER_TOKEN);
     let hard_cap = hard.map_or(usize::MAX, |h| h.saturating_mul(CHARS_PER_TOKEN));
     let cap = chunk_cap.min(hard_cap);
-    // Under max_tokens a piece holds at least one word; without it one char is enough.
-    let word_cap = if hard.is_some() { chunk_cap } else { 0 };
+    // Under max_tokens a piece holds at least one whole word when that word (with the unit's
+    // overhead) fits this read's budget; a longer word is cut by characters (D-204, D-227), so
+    // a read never comes back empty while its budget can hold the overhead plus one char.
+    // Without max_tokens one char is enough.
+    let word_cap = if hard.is_some() { cap } else { 0 };
     let mut used = 0usize;
     let mut pieces: Vec<Piece> = Vec::new();
     let mut cur = pos;
@@ -1171,8 +1198,8 @@ fn piece_overhead(u: &Unit, start: usize) -> usize {
 /// End byte of the biggest piece of `u` from `start` whose text fits `room` chars: the whole
 /// rest with its suffix when that fits, else a cut (D-204) that leaves the suffix to a later
 /// piece. `None` when `room` cannot hold the overhead plus the least body: one word, or one
-/// char when the word with the overhead is longer than `word_cap` (no chunk could hold it;
-/// `0` means one char is always enough) (D-226).
+/// char when the word with the overhead is longer than `word_cap` (this read's budget could
+/// not hold it; `0` means one char is always enough) (D-226, D-227).
 fn fit_piece(u: &Unit, start: usize, room: usize, word_cap: usize) -> Option<usize> {
     let rest = rest_of(u, start);
     if rest.is_empty() {
@@ -1328,8 +1355,23 @@ fn word_count(s: &str) -> usize {
 }
 
 /// Sections (heading + words) with any content at or after `from`. Text before the first
-/// heading is reported as `(top)`.
+/// heading is reported as `(top)`. Past [`OUTLINE_MAX`] sections the rest fold into one
+/// `+N more sections` entry whose `words` counts every word left in them (D-227).
 fn outline_from(units: &[Unit], from: Pos) -> Vec<OutlineEntry> {
+    let mut out = sections_from(units, from);
+    if out.len() > OUTLINE_MAX {
+        let rest = out.split_off(OUTLINE_MAX);
+        let n = rest.len();
+        out.push(OutlineEntry {
+            heading: format!("+{n} more {}", if n == 1 { "section" } else { "sections" }),
+            words: rest.iter().map(|e| e.words).sum(),
+        });
+    }
+    out
+}
+
+/// Every section with content at or after `from`, uncapped.
+fn sections_from(units: &[Unit], from: Pos) -> Vec<OutlineEntry> {
     let mut out: Vec<OutlineEntry> = Vec::new();
     let mut current: Option<OutlineEntry> = None;
     let mut current_live = false;
@@ -2584,11 +2626,11 @@ let x"
 
     #[test]
     fn tiny_remainder_stops_the_read_instead_of_overshooting() {
-        // B-201 P4, D-226 (2): the last token cannot hold `## ` plus a word
+        // B-201 P4, D-226 (2): the last token cannot hold a code fence line plus one char
         let blocks = vec![
             heading(1, "Aaaa"),
             heading(2, "Bbbb"),
-            heading(3, "Cccc"),
+            block(3, 0, BlockKind::Code, vec![text("let a = 1;")]),
             para(4, &words("w", 50)),
         ];
         let outs = read_within(&blocks, 5, 0);
@@ -2613,8 +2655,21 @@ let x"
             },
         );
         let body = body_of(&more.markdown);
-        assert!(body.starts_with("## Cccc\n\nw00"), "{body:?}");
+        assert_eq!(body, "```\nlet a = 1;\n```", "{}", more.markdown);
         assert!(estimate(body) <= 15, "{} tokens: {body:?}", estimate(body));
+
+        // D-227: `## ` plus one char fits the last token, the word does not: it is cut by
+        // characters instead of stopping
+        let blocks = vec![
+            heading(1, "Aaaa"),
+            heading(2, "Bbbb"),
+            heading(3, "Cccc"),
+            para(4, &words("w", 50)),
+        ];
+        let outs = read_within(&blocks, 5, 0);
+        assert_eq!(outs.len(), 3, "{:?}", outs.iter().map(|o| &o.markdown));
+        assert_eq!(body_of(&outs[2].markdown), "## C", "{}", outs[2].markdown);
+        assert!(outs[2].cursor.is_none());
 
         // a code block whose fence lines do not fit stops too
         let blocks = vec![
@@ -2623,6 +2678,140 @@ let x"
         ];
         let outs = read_within(&blocks, 4, 0);
         assert!(outs.iter().all(|o| !o.markdown.contains('`')), "{outs:?}");
+    }
+
+    /// A 6000-char token (a long URL, base64, minified text) with no whitespace in it.
+    fn long_token() -> String {
+        let mut s = String::new();
+        let mut i = 0u32;
+        while s.len() < 6000 {
+            s.push_str(&format!("{i:x}"));
+            i += 1;
+        }
+        s.truncate(6000);
+        s
+    }
+
+    fn alnum(s: &str) -> String {
+        s.chars().filter(|c| c.is_alphanumeric()).collect()
+    }
+
+    #[test]
+    fn long_first_word_is_cut_by_characters_under_max_tokens() {
+        // review round 5 blocking, D-227: a first word longer than the budget (here the
+        // max_tokens remainder, smaller than a default chunk) is cut by characters (D-204);
+        // the read never comes back empty while text is left
+        let tok = long_token();
+        let pages: Vec<(&str, Vec<TextBlock>, usize)> = vec![
+            (
+                "first",
+                vec![main_block(para(1, &format!("{tok} tail words")))],
+                0,
+            ),
+            (
+                "after intro",
+                vec![
+                    main_block(para(1, "intro words here")),
+                    main_block(para(2, &format!("{tok} tail words"))),
+                ],
+                1,
+            ),
+            (
+                "code line",
+                vec![code_block(1, &format!("let x = \"{tok}\";\nlet y = 2;"))],
+                1,
+            ),
+        ];
+        for (name, blocks, cut_read) in &pages {
+            let full = alnum(body_of(&read(&[], blocks, &opts(0)).markdown));
+            for m in [100usize, 500, 1000, 1499] {
+                // every read within what is left, the chain ends truncated
+                let outs = read_within(blocks, m, 0);
+                let first = body_of(&outs[0].markdown);
+                assert!(!first.trim().is_empty(), "{name} max {m}: empty first read");
+                // the read that reaches the token takes a char-cut piece filling what is left
+                let spent: usize = outs[..*cut_read]
+                    .iter()
+                    .map(|o| estimate(body_of(&o.markdown)))
+                    .sum();
+                let cut = outs.get(*cut_read).map_or("", |o| body_of(&o.markdown));
+                assert_eq!(estimate(cut), m - spent, "{name} max {m}: {cut:?}");
+                assert!(alnum(cut).contains(tok.get(..64).unwrap_or("")), "{name}");
+                // following cursors reads on with no gap and no repeat
+                let stream: String = outs.iter().map(|o| alnum(body_of(&o.markdown))).collect();
+                assert!(stream.len() > 64, "{name} max {m}");
+                assert!(
+                    full.starts_with(&stream),
+                    "{name} max {m}: gap or repeat in the cursor chain"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remaining_outline_is_capped_in_entries_and_label_length() {
+        // review round 5 should-fix 1, D-227: 2000 sections with 190-char headings at
+        // max_tokens 50 gave a 103,788-token read; the outline now lists 20 sections with
+        // labels of at most 80 chars, then one `+N more sections, W words` entry
+        let mut blocks = Vec::new();
+        for i in 0..2000u32 {
+            let mut h = format!("hdr{i:04}");
+            while h.chars().count() < 190 {
+                h.push_str(" ééé");
+            }
+            let h: String = h.chars().take(190).collect();
+            blocks.push(main_block(heading(2 * i + 1, &h)));
+            blocks.push(main_block(para(2 * i + 2, &words("w", 5))));
+        }
+        let out = read(
+            &[],
+            &blocks,
+            &ReadOpts {
+                max_tokens: Some(50),
+                ..opts(0)
+            },
+        );
+        let body = body_of(&out.markdown);
+        assert!(estimate(body) <= 50, "{body:?}");
+        assert_eq!(out.remaining.len(), OUTLINE_MAX + 1, "{:?}", out.remaining);
+        for e in &out.remaining[..OUTLINE_MAX] {
+            assert!(
+                e.heading.chars().count() <= OUTLINE_LABEL_MAX,
+                "{:?}",
+                e.heading
+            );
+            assert!(e.heading.ends_with("..."), "{:?}", e.heading);
+        }
+        assert!(out.remaining[0].heading.starts_with("## hdr0000 "));
+        assert!(out.remaining[OUTLINE_MAX - 1]
+            .heading
+            .starts_with("## hdr0019 "));
+        // the last entry folds every section past the cap with all the words left in them
+        let more = &out.remaining[OUTLINE_MAX];
+        assert_eq!(more.heading, "+1980 more sections");
+        assert_eq!(more.words, 1980 * 5);
+        let returned = body
+            .split_whitespace()
+            .filter(|t| t.starts_with('w'))
+            .count();
+        let listed: usize = out.remaining.iter().map(|e| e.words).sum();
+        assert_eq!(listed, 2000 * 5 - returned);
+        assert!(out
+            .markdown
+            .contains("\n- +1980 more sections, 9900 words\n\ntruncated:"));
+        assert_eq!(out.markdown.matches("\n- ").count(), OUTLINE_MAX + 1);
+        // the whole read is a few hundred tokens, not 100k
+        assert!(
+            estimate(&out.markdown) <= 700,
+            "{}",
+            estimate(&out.markdown)
+        );
+
+        // a single section past the cap reads as one
+        let out = read(&[], &blocks[..42], &opts(1));
+        assert_eq!(out.remaining.len(), OUTLINE_MAX + 1);
+        assert_eq!(out.remaining[OUTLINE_MAX].heading, "+1 more section");
+        assert_eq!(out.remaining[OUTLINE_MAX].words, 5);
     }
 
     #[test]
