@@ -192,10 +192,11 @@ tasks:
   - id: T-03b
     step: follow-up
     wave: 2
-    owner: core
+    owner: core/suborch
     branch: swarm/core-T03b
     title: "T-03 red acceptance rows after merge 960c7b1: D-115 typo inside a longer subject (Vasnth in Vasanth Raghavan) must still hit (bench/results/accept-T-03.md)."
-    status: todo
+    status: doing
+    claimed_at: "2026-10-25"
     from: T-03
   - id: T-04b
     step: follow-up
