@@ -40,7 +40,77 @@ const EXTRA = {
     '<p>Press and hold the mic button to talk</p><button type="button">Mic</button>' +
     '<section><h2>Are you human?</h2><p>A short quiz.</p><button type="button">Start</button></section>' +
     '<div id="px"><p>Press &amp; Hold to confirm you are a human (and not a bot).</p><div id="px-captcha" style="width:300px;height:50px"></div></div></main>'),
+  // D-435 (1): an SPA login that swaps #app; the app page's pre-filled fields match nothing
+  "/spa-login.html": html(`<title>SPA login</title><script>function signIn() {
+    const app = document.createElement("div"); app.id = "app";
+    app.innerHTML = '<h1>Profile</h1><input id="dn" aria-label="Display name" value="Ada Lovelace">' +
+      '<input name="city" placeholder="City" value="London"><label>Bio <textarea id="bio">Mathematician</textarea></label>';
+    document.getElementById("app").replaceWith(app); }</script>`,
+  `<div id="app"><form><input id="email" aria-label="Email"><input id="pw" type="password" name="password" aria-label="Password" placeholder="Password">
+    <button id="go" type="button" onclick="signIn()">Sign in</button></form></div>`),
+  // D-435 (1): a show toggle that replaceWith-swaps in an input sharing no identity
+  "/swap-neutral.html": html(`<title>Swap</title><script>function swapPw() { const o = document.getElementById("pw");
+    const n = document.createElement("input"); n.id = "plain"; n.name = "shown"; n.setAttribute("aria-label", "Visible text");
+    n.value = o.value; o.replaceWith(n); }</script>`,
+  `<form><input id="user" aria-label="User"><span><input id="pw" type="password" aria-label="Password"></span>
+    <button id="swap" type="button" onclick="swapPw()">Show</button></form>`),
+  // D-435 (2): same-identity rebuilds split by a microtask, a timer, or more than 2 s
+  "/split.html": html(`<title>Split</title><script>
+    function copyOf(o) { const n = document.createElement("input"); n.type = "text"; n.id = o.id + "-copy";
+      n.setAttribute("aria-label", o.getAttribute("aria-label")); n.value = o.value; return n; }
+    async function splitMicro() { const o = document.getElementById("k1"); const p = o.parentNode; const n = copyOf(o);
+      o.remove(); await null; p.appendChild(n); }
+    function splitTimer() { const o = document.getElementById("k2"); const p = o.parentNode; const n = copyOf(o);
+      o.remove(); setTimeout(() => p.appendChild(n), 30); }
+    function removeK3() { const o = document.getElementById("k3"); window.k3 = [copyOf(o), o.parentNode]; o.remove(); }
+    function addK3() { window.k3[1].appendChild(window.k3[0]); }</script>`,
+  `<form><div><input id="k1" type="password" aria-label="Key one"></div><div><input id="k2" type="password" aria-label="Key two"></div>
+    <div><input id="k3" type="password" aria-label="Key three"></div></form>`),
 };
+// D-436: a quiz heading and hold text next to passive v3 markers, or next to a visible v2 checkbox
+const QUIZ = '<section><h2>Are you human?</h2><p>Take our quiz about what makes us human.</p>' +
+  '<p>Press and hold the button to start</p><button type="button">Start the quiz</button></section>';
+EXTRA["/quiz-v3.html"] = html("<title>Quiz</title>", "<main>" + QUIZ +
+  '<form><input aria-label="Email"><button class="g-recaptcha" data-sitekey="k" data-callback="cb" type="submit">Send</button></form></main>' +
+  '<div class="grecaptcha-badge" style="position:fixed;right:0;bottom:14px;width:256px;height:60px"><div class="grecaptcha-logo">' +
+  '<iframe title="reCAPTCHA" srcdoc="&lt;p&gt;badge&lt;/p&gt;" style="width:256px;height:60px"></iframe></div>' +
+  '<textarea name="g-recaptcha-response" class="g-recaptcha-response" style="display:none"></textarea></div>' +
+  '<div style="visibility:hidden;position:absolute;top:-9999px"><iframe title="recaptcha challenge expires in two minutes" srcdoc="&lt;p&gt;c&lt;/p&gt;"></iframe></div>');
+EXTRA["/quiz-v2.html"] = html("<title>Quiz</title>", "<main>" + QUIZ +
+  '<div class="g-recaptcha" data-sitekey="k" style="width:304px;height:78px"><iframe title="reCAPTCHA" width="304" height="78" ' +
+  'srcdoc="&lt;p&gt;checkbox&lt;/p&gt;"></iframe></div></main>');
+
+// Read through every __sb reader in world sb while counting value getter calls on the given ids.
+function readCounting(o, ids) {
+  return o.ev(async (watch) => {
+    const proto = HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    const reads = {};
+    Object.defineProperty(proto, "value", {
+      configurable: true,
+      get() {
+        if (watch.includes(this.id)) reads[this.id] = (reads[this.id] || 0) + 1;
+        return desc.get.call(this);
+      },
+      set: desc.set,
+    });
+    try {
+      const sb = globalThis.__sb;
+      sb.walk({ dirty: true });
+      const index = sb.index();
+      const out = [index, sb.text()];
+      for (const id of watch) {
+        const el = document.getElementById(id);
+        if (el) out.push(sb.state(el), sb.name(el));
+      }
+      sb.walk({});
+      out.push(sb.index());
+      return { reads, blob: JSON.stringify(out), index };
+    } finally {
+      Object.defineProperty(proto, "value", desc);
+    }
+  }, ids);
+}
 
 before(async () => {
   [A, B] = await Promise.all([serve(EXTRA), serve(EXTRA)]);
@@ -414,10 +484,12 @@ test("challenge text in Chromium (D-429 (2)): press-and-hold UI and a quiz headi
   const px = await o.ev(() => globalThis.__sb.id(document.querySelector("#px p")));
   const box = await o.ev(() => globalThis.__sb.id(document.getElementById("px-captcha")));
   assert.ok(ch.some((r) => r.id === px) && ch.some((r) => r.id === box), JSON.stringify(ch));
-  // with the #px-captcha widget on the page "Are you human?" counts as a prompt; once the
-  // widget is gone nothing on the page is CHALLENGE
+  // with the #px-captcha widget on the page "Are you human?" and press-and-hold text count as
+  // prompts (D-429 (2), D-435 (3)), while the controls next to them stay ordinary rows; once
+  // the widget is gone nothing on the page is CHALLENGE
   assert.ok(byName(rows, "Are you human?", "heading").flags.challenge);
-  assert.ok(!ch.some((r) => /Shift|mic/i.test(r.name)), JSON.stringify(ch));
+  assert.ok(byName(rows, "Press and hold Shift to select several files.").flags.challenge);
+  assert.ok(!ch.some((r) => /^(Files|Mic|Start)$/.test(r.name)), JSON.stringify(ch));
   await o.page.evaluate(() => document.getElementById("px").remove());
   await o.ev(() => globalThis.__sb.walk({ dirty: true }));
   const after = fill(await o.ev(() => globalThis.__sb.index()));
@@ -425,6 +497,78 @@ test("challenge text in Chromium (D-429 (2)): press-and-hold UI and a quiz headi
   assert.ok(byName(after, "Are you human?", "heading"));
   const text = (await o.ev(() => globalThis.__sb.text())).map((b) => b.spans.map((x) => x.text).join("")).join(" / ");
   assert.match(text, /Press and hold Shift/);
+});
+
+test("an SPA login swap in Chromium: the app page's pre-filled fields read their values (D-435 (1))", async () => {
+  const o = await open("spa-login.html");
+  await o.page.fill("#email", "ada@example.org");
+  await o.page.fill("#pw", "spa-canary-435");
+  assert.deepEqual(byName(fill(await o.ev(() => globalThis.__sb.index())), "Password").state.value, { kind: "filled" });
+  await o.page.click("#go");
+  const r = await readCounting(o, ["pw", "dn"]);
+  assert.ok(!r.blob.includes("spa-canary"), r.blob);
+  assert.equal(r.reads.pw, undefined);
+  const rows = fill(r.index);
+  assert.deepEqual(byName(rows, "Display name").state.value, { kind: "text", text: "Ada Lovelace" });
+  assert.deepEqual(byName(rows, "City").state.value, { kind: "text", text: "London" });
+  assert.deepEqual(byName(rows, "Bio").state.value, { kind: "text", text: "Mathematician" });
+});
+
+test("a show toggle that replaceWith-swaps in an unrelated input never reads the value (D-435 (1))", async () => {
+  const o = await open("swap-neutral.html");
+  await o.page.fill("#user", "ada");
+  await o.page.fill("#pw", "swap-canary-435");
+  await o.ev(() => globalThis.__sb.index());
+  await o.page.click("#swap");
+  assert.equal(await o.page.evaluate(() => document.getElementById("plain").value), "swap-canary-435");
+  const r = await readCounting(o, ["plain"]);
+  assert.deepEqual(r.reads, {}, "the value getter of the swapped-in field was called");
+  assert.ok(!r.blob.includes("canary"), r.blob);
+  const rows = fill(r.index);
+  assert.deepEqual(byName(rows, "Visible text").state.value, { kind: "filled" });
+  assert.deepEqual(byName(rows, "User").state.value, { kind: "text", text: "ada" });
+});
+
+test("same-identity rebuilds split by a microtask or a timer stay sensitive; after 2 s they read (D-435 (2))", async () => {
+  const o = await open("split.html");
+  // a controllable clock for injected.js: world sb's own performance.now
+  await o.ev(() => {
+    const real = performance.now.bind(performance);
+    let off = 0;
+    Object.defineProperty(performance, "now", { configurable: true, value: () => real() + off });
+    globalThis.__advance = (ms) => { off += ms; };
+  });
+  await o.page.fill("#k1", "split-canary-1");
+  await o.page.fill("#k2", "split-canary-2");
+  await o.page.fill("#k3", "not a secret");
+  await o.ev(() => globalThis.__sb.index());
+  await o.page.evaluate(() => globalThis.splitMicro());
+  await o.page.evaluate(() => globalThis.splitTimer());
+  await o.page.waitForFunction(() => !!document.getElementById("k2-copy"));
+  await o.page.evaluate(() => globalThis.removeK3());
+  await o.ev(() => globalThis.__advance(2100));
+  await o.page.evaluate(() => globalThis.addK3());
+  const r = await readCounting(o, ["k1-copy", "k2-copy"]);
+  assert.deepEqual(r.reads, {}, "a rebuilt field's value getter was called");
+  assert.ok(!r.blob.includes("split-canary"), r.blob);
+  const rows = fill(r.index);
+  assert.deepEqual(byName(rows, "Key one").state.value, { kind: "filled" });
+  assert.deepEqual(byName(rows, "Key two").state.value, { kind: "filled" });
+  assert.deepEqual(byName(rows, "Key three").state.value, { kind: "text", text: "not a secret" });
+});
+
+test("passive reCAPTCHA v3 markers are not challenge context in Chromium; a visible v2 checkbox is (D-436, D-435 (3))", async () => {
+  const v3 = await open("quiz-v3.html");
+  const r3 = fill(await v3.ev(() => globalThis.__sb.index()));
+  assert.deepEqual(r3.filter((r) => r.flags.challenge).map((r) => r.role + "|" + r.name), []);
+  assert.ok(byName(r3, "Are you human?", "heading"));
+  const t3 = (await v3.ev(() => globalThis.__sb.text())).map((b) => b.spans.map((x) => x.text).join("")).join(" / ");
+  assert.match(t3, /Press and hold the button to start/);
+  const v2 = await open("quiz-v2.html");
+  const r2 = fill(await v2.ev(() => globalThis.__sb.index()));
+  assert.ok(byName(r2, "Are you human?", "heading").flags.challenge, JSON.stringify(r2));
+  assert.ok(byName(r2, "Press and hold the button to start").flags.challenge);
+  assert.ok(!byName(r2, "Start the quiz").flags.challenge);
 });
 
 test("register fixtures (D-405 (10)) match the live index() and text()", async () => {

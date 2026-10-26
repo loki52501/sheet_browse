@@ -1118,7 +1118,11 @@ test("A11 challenge text (D-429 (2), D-422): press-and-hold UI and an Are-you-hu
   const chNames = JSON.stringify(rows1.filter((r) => r.flags.challenge).map(sig));
   for (const sel of ["#hc", "#px-p", "#px-captcha", "#robot", "#vh"]) assert.ok(ch1.has(await idOf(sel)), sel + " is CHALLENGE: " + chNames);
   assert.ok(byName(rows1, "Are you human?", "heading").flags.challenge, "with a widget on the page the quiz heading is a prompt (D-429 (2))");
-  assert.ok(!rows1.some((r) => r.flags.challenge && /Shift|mic|voice|Hold to talk|Mic|Files|Start the quiz/.test(r.name)), chNames);
+  // D-435 (3): with a widget on the page press-and-hold text is a prompt too; the controls stay ordinary
+  for (const n of ["Press and hold Shift to select several files.", "Press and hold the mic button to talk"]) {
+    assert.ok(byName(rows1, n) && byName(rows1, n).flags.challenge, n + ": " + chNames);
+  }
+  assert.ok(!rows1.some((r) => r.flags.challenge && /^(Hold to talk|Mic|Files|Start the quiz)$/.test(r.name)), chNames);
   assert.deepEqual((await timedAct(o, await idOf("#px-captcha"))).r, { why: "challenge" });
   assert.equal(typeof (await timedAct(o, await idOf("#mic"))).r.x, "number", "the mic button stays actionable next to a real widget");
   // widgets removed again: back to no CHALLENGE (the context change forces a full walk)

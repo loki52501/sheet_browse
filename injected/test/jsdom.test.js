@@ -661,3 +661,193 @@ test("icon-only link falls back to its last path segment; empty-text button stay
   assert.equal(rows[0].name, "shopping cart");
   assert.equal(rows[1].name, "Help centre");
 });
+
+// ------------------------------------------------------------------ D-435, D-436
+// A frozen, controllable clock for injected.js in this window (now() reads performance.now()
+// on use): only advance() moves it, so the 2000 ms boundary is exact whatever the machine load.
+function fakeClock(win) {
+  const t0 = win.performance.now();
+  let off = 0;
+  Object.defineProperty(win.performance, "now", { configurable: true, value: () => t0 + off });
+  return (ms) => { off += ms; };
+}
+const tmpl = (doc, html) => {
+  const t = doc.createElement("template");
+  t.innerHTML = html;
+  return t.content.firstElementChild;
+};
+
+test("an SPA login swap keeps reading the new page's unrelated fields (D-435 (1))", async () => {
+  const CANARY = "spa-canary-435";
+  const c = { reads: 0 };
+  const { doc, win, sb } = jsdom('<div id="root"><div id="app"><form><input id="u" aria-label="Email">' +
+    '<input id="p" type="password" name="password" placeholder="Password" aria-label="Password">' +
+    "<button>Sign in</button></form></div></div>");
+  spied(win, doc.getElementById("p"), CANARY, c);
+  sb.walk({ base: 1 });
+  // the app page replaces #app in one record: pre-filled fields that match nothing, and one
+  // field that keeps the password's label (a rebuilt password field) and carries the value
+  const app = tmpl(doc, '<div id="app"><h1>Profile</h1><input id="dn" aria-label="Display name" value="Ada Lovelace">' +
+    '<input name="city" placeholder="City" value="London"><label>Bio <textarea id="bio">Mathematician</textarea></label>' +
+    '<input id="again" type="text" aria-label="Password"></div>');
+  spied(win, app.querySelector("#again"), CANARY, c);
+  doc.getElementById("app").replaceWith(app);
+  sb.walk({ dirty: true });
+  const rows = sb.index();
+  assert.equal(c.reads, 0);
+  assert.ok(!JSON.stringify(rows).includes(CANARY));
+  same(byName(rows, "Display name").state.value, { kind: "text", text: "Ada Lovelace" });
+  same(byName(rows, "City").state.value, { kind: "text", text: "London" });
+  same(byName(rows, "Bio").state.value, { kind: "text", text: "Mathematician" });
+  same(byName(rows, "Password").state.value, { kind: "filled" });
+});
+
+test("rebuild match keys (D-435 (1)): each of id, name, autocomplete, aria-label, placeholder, label text inherits; no match reads", async () => {
+  const CANARY = "key-canary-435";
+  // [attributes of the old field, html next to the old field, attributes of the new field, html next to it]
+  const cases = {
+    id: ['id="acct"', "", 'id="acct"', ""],
+    name: ['name="login_key"', "", 'name="login_key"', ""],
+    autocomplete: ['autocomplete="section-a username"', "", 'autocomplete="username"', ""],
+    "aria-label": ['aria-label="Account key"', "", 'aria-label="Account key"', ""],
+    placeholder: ['placeholder="Your key"', "", 'placeholder="Your key"', ""],
+    "label for": ['id="lbl"', '<label for="lbl">Account key:</label>', 'id="lbl2"', '<label for="lbl2">Account key</label>'],
+    labelledby: ['aria-labelledby="cap"', '<span id="cap">Account key</span>', 'aria-labelledby="cap2"', '<span id="cap2">Account key</span>'],
+    "wrapping label": ["", "", "", ""],
+    // the label[for] leaves with the field: found in the removed subtree
+    "label for, removed with the field": ['id="lbl5"', '<label for="lbl5">Account key</label>', 'id="lbl6"', '<label for="lbl6">Account key</label>'],
+    // a walked field's row name (here from its title, which is not a key itself)
+    "walked row name": ['title="Account key"', "", 'aria-label="Account key"', ""],
+  };
+  for (const [k, [oldAt, oldX, newAt, newX]] of Object.entries(cases)) {
+    const c = { reads: 0 };
+    const wrap = k === "wrapping label";
+    const oldF = wrap ? '<label id="ol">Account key <input id="o" type="password"></label>'
+      : '<input type="password" ' + (oldAt.startsWith("id=") ? oldAt : 'id="o" ' + oldAt) + ">";
+    // the old field arrives after the base walk, so no walk has named it (except "walked row
+    // name"): each key is tested on its own, not through the cached row name
+    const { doc, win, sb } = jsdom('<form><div id="host"></div><div id="b">' + newX + "</div></form>");
+    sb.walk({ base: 1 });
+    doc.getElementById("host").innerHTML = '<div id="a">' + oldX + oldF + "</div>";
+    const old = doc.querySelector("#a input");
+    spied(win, old, CANARY, c);
+    await tick();
+    if (k === "walked row name") sb.walk({ dirty: true });
+    // two records (remove, then append elsewhere): not a one-for-one swap, only the match counts
+    (wrap ? doc.getElementById("ol") : k.includes("removed with") ? doc.getElementById("a") : old).remove();
+    const nf = tmpl(doc, wrap ? "<label>Account key <input></label>" : "<input " + newAt + ">");
+    const input = nf.localName === "input" ? nf : nf.querySelector("input");
+    spied(win, input, CANARY, c);
+    doc.getElementById("b").appendChild(nf);
+    sb.walk({ dirty: true });
+    const st = sb.state(input);
+    assert.equal(c.reads, 0, k);
+    assert.ok(!JSON.stringify(st).includes(CANARY), k);
+    same(st.value, { kind: "filled" }, k);
+  }
+  // control: a replacement that shares nothing (autocomplete=off on both) reads its value
+  const { doc, win, sb } = jsdom('<form><div id="a"><input id="o" type="password" aria-label="Account key" autocomplete="off"></div><div id="b"></div></form>');
+  spied(win, doc.getElementById("o"), CANARY, { reads: 0 });
+  sb.walk({ base: 1 });
+  doc.getElementById("o").remove();
+  const nf = tmpl(doc, '<input id="nick" aria-label="Nickname" autocomplete="off" value="ada">');
+  doc.getElementById("b").appendChild(nf);
+  sb.walk({ dirty: true });
+  same(sb.state(nf).value, { kind: "text", text: "ada" });
+});
+
+test("a one-for-one replaceWith inherits with no shared identity (D-435 (1))", async () => {
+  const CANARY = "swap-canary-435";
+  const c = { reads: 0 };
+  const { doc, win, sb } = jsdom('<form><span><input id="p" type="password" aria-label="Password"></span>' +
+    '<input id="u" aria-label="User" value="ada"></form>');
+  spied(win, doc.getElementById("p"), CANARY, c);
+  sb.walk({ base: 1 });
+  const t = spied(win, tmpl(doc, '<input id="plain" name="shown" aria-label="Visible text">'), CANARY, c);
+  doc.getElementById("p").replaceWith(t);
+  await tick();
+  sb.walk({ dirty: true });
+  const rows = sb.index();
+  assert.equal(c.reads, 0);
+  assert.ok(!JSON.stringify(rows).includes(CANARY));
+  same(byName(rows, "Visible text").state.value, { kind: "filled" });
+  same(byName(rows, "User").state.value, { kind: "text", text: "ada" });
+});
+
+test("a rebuild split by a microtask or a later task within 2 s inherits; after 2 s it reads (D-435 (2))", async () => {
+  const CANARY = "split-canary-435";
+  const c = { reads: 0 };
+  const { doc, win, sb } = jsdom('<form><div id="w1"><input id="k1" type="password" aria-label="Key one"></div>' +
+    '<div id="w2"><input id="k2" type="password" aria-label="Key two"></div>' +
+    '<div id="w3"><input id="k3" type="password" aria-label="Key three"></div></form>');
+  const advance = fakeClock(win);
+  for (const id of ["k1", "k2", "k3"]) spied(win, doc.getElementById(id), CANARY, c);
+  sb.walk({ base: 1 });
+  const rebuild = (id, label) => spied(win, tmpl(doc, '<input id="' + id + '" type="text" aria-label="' + label + '">'), CANARY, c);
+  // 1. remove; await a microtask; append: two observer batches in one task
+  let batches = 0;
+  const count = new win.MutationObserver(() => { batches++; });
+  count.observe(doc, { subtree: true, childList: true });
+  await (async () => {
+    doc.getElementById("k1").remove();
+    await null;
+    doc.getElementById("w1").appendChild(rebuild("k1", "Key one"));
+  })();
+  await tick();
+  count.disconnect();
+  assert.equal(batches, 2, "the microtask split delivered two batches");
+  // 2. remove now, append in a later task 2000 ms later (the window is inclusive)
+  doc.getElementById("k2").remove();
+  await tick();
+  advance(2000);
+  doc.getElementById("w2").appendChild(rebuild("k2", "Key two"));
+  await tick();
+  // 3. remove now, append 2001 ms later: the memory has aged out, the field is a new one
+  doc.getElementById("k3").remove();
+  await tick();
+  advance(2001);
+  const late = tmpl(doc, '<input id="k3" type="text" aria-label="Key three">');
+  late.value = "plain text";
+  doc.getElementById("w3").appendChild(late);
+  await tick();
+  sb.walk({ dirty: true });
+  const rows = sb.index();
+  assert.equal(c.reads, 0);
+  assert.ok(!JSON.stringify(rows).includes(CANARY));
+  same(byName(rows, "Key one").state.value, { kind: "filled" });
+  same(byName(rows, "Key two").state.value, { kind: "filled" });
+  same(byName(rows, "Key three").state.value, { kind: "text", text: "plain text" });
+});
+
+test("press and hold is CHALLENGE text with challenge context, not without (D-435 (3))", () => {
+  const p = "<p>Press and hold the button to continue</p><button>Hold</button>";
+  const no = walked("<main>" + p + "</main>");
+  assert.ok(!no.sb.index().some((r) => r.flags.challenge), JSON.stringify(no.sb.index()));
+  const yes = walked("<main>" + p + '<div class="vendor-captcha-box"></div></main>');
+  assert.ok(byName(yes.sb.index(), "Press and hold the button to continue").flags.challenge);
+});
+
+test("passive reCAPTCHA v3 markers are not challenge context; a visible v2 widget is (D-436)", () => {
+  const prompts = "<h2>Are you human?</h2><p>Press and hold the button to continue</p><button>Start the quiz</button>";
+  const passive = {
+    badge: '<div class="grecaptcha-badge" style="position:fixed;right:0;bottom:14px;width:256px;height:60px">' +
+      '<div class="grecaptcha-logo"><iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?k=k&amp;size=invisible"></iframe></div>' +
+      '<textarea id="g-recaptcha-response" name="g-recaptcha-response" class="g-recaptcha-response" style="display:none"></textarea></div>',
+    "bound button": '<form><input aria-label="Email"><button class="g-recaptcha" data-sitekey="k" data-callback="cb">Send</button></form>',
+    "bound script": '<script data-sitekey="k"></script>',
+    "invisible widget": '<div class="g-recaptcha" data-sitekey="k" data-size="invisible"></div>',
+    "hidden bframe": '<div style="visibility:hidden"><iframe title="recaptcha challenge expires in two minutes" src="https://www.google.com/recaptcha/api2/bframe?k=k"></iframe></div>',
+    "hidden widget": '<div class="h-captcha" data-sitekey="k" style="display:none"></div>',
+  };
+  for (const [k, m] of Object.entries(passive)) {
+    const it = walked("<main>" + prompts + "</main>" + m);
+    const rows = it.sb.index();
+    assert.ok(byName(rows, "Are you human?", "heading"), k);
+    same(rows.filter((r) => r.flags.challenge).map((r) => r.name), [], k);
+    assert.match(it.sb.text().map((b) => b.spans.map((x) => x.text).join("")).join(" / "), /Press and hold the button/, k);
+  }
+  const rows = walked("<main>" + prompts + '<div class="g-recaptcha" data-sitekey="k"><iframe title="reCAPTCHA" ' +
+    'src="https://www.google.com/recaptcha/api2/anchor?k=k&amp;size=normal"></iframe></div></main>' + passive.badge).sb.index();
+  assert.ok(byName(rows, "Are you human?", "heading").flags.challenge);
+  assert.ok(byName(rows, "Press and hold the button to continue").flags.challenge);
+});

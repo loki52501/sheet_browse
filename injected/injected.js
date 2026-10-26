@@ -108,9 +108,11 @@
   const CHALLENGE_FRAME_RE =
     /captcha|turnstile|cloudflare security challenge|verify you are human|human verification|verification challenge|arkose|funcaptcha|geetest/i;
   const CHALLENGE_BOX_RE = /captcha|turnstile|geetest|funcaptcha|arkose/i;
-  // A human-check prompt on its own (D-422). "Press and hold" counts only next to a human, robot
-  // or bot word, and "are you (a) human" only with a challenge widget, response field or
-  // challenge frame in the document (D-429 (2)): file pickers, voice buttons and quizzes say them.
+  // A human-check prompt on its own (D-422). "Press and hold" counts next to a human, robot or
+  // bot word, or with challenge context (D-435 (3)); "are you (a) human" only with challenge
+  // context (D-429 (2)): file pickers, voice buttons and quizzes say them. Challenge context is a
+  // visible challenge widget, a response field or a challenge frame; passive reCAPTCHA v3
+  // markers are not (D-436).
   const CHALLENGE_TEXT_RE =
     /verify (that )?you(['’]re| are) (a )?human|verify you are not a (ro)?bot|are you a robot|i(['’]m| am) not a robot|human verification/i;
   const HOLD_TEXT_RE = /press (and|&) hold/i;
@@ -177,6 +179,7 @@
     respBox: new WeakSet(), // parents of captcha response fields (D-405 (4))
     chCtx: false, // the document holds a challenge widget, response field or frame (D-429 (2))
     lastFill: new WeakMap(), // sensitive element -> last empty|filled evidence (D-426)
+    gone: [], // [{ t, keys }] removed sensitive field signatures, oldest first (D-435 (2))
     ids: new WeakMap(), // Element -> id
     refs: new Map(), // id -> WeakRef<Element>
     rec: new WeakMap(), // Element -> walk decision (cached between walks)
@@ -376,20 +379,49 @@
   // Short text that asks for a human check (D-422, D-429 (2)).
   function challengeWords(t) {
     if (CHALLENGE_TEXT_RE.test(t)) return true;
-    if (HOLD_TEXT_RE.test(t) && HUMAN_WORD_RE.test(t)) return true;
+    if (HOLD_TEXT_RE.test(t) && (S.chCtx || HUMAN_WORD_RE.test(t))) return true;
     return S.chCtx && WEAK_TEXT_RE.test(t);
   }
-  // Challenge context for the weak prompts: a response field, a named widget box or a challenge
-  // frame in the light DOM (one querySelector plus a pass over the frames, once per walk).
+  // Challenge context for the weak prompts (D-429 (2), D-435 (3)): a response field, a visible
+  // named widget box or a visible challenge frame in the light DOM, once per walk. Passive
+  // reCAPTCHA v3 markers never count (D-436, D-405 (5), B-402): anything inside the badge or an
+  // invisible-size widget, a v3-bound data-sitekey button, link, input or script, and widgets
+  // or frames that are not displayed (the hidden bframe).
   const CTX_SEL = RESPONSE_SEL + ',[data-sitekey],[data-hcaptcha-widget-id],#px-captcha,' +
     '[class*="captcha" i],[id*="captcha" i],[class*="turnstile" i],[id*="turnstile" i],' +
     '[class*="geetest" i],[id*="arkose" i],[id*="funcaptcha" i]';
+  const PASSIVE_SEL = '.grecaptcha-badge,[data-size="invisible"]';
   function challengeContext() {
+    let list = [];
     try {
-      if (doc.querySelector(CTX_SEL)) return true;
+      list = doc.querySelectorAll(CTX_SEL);
     } catch (e) { /* an engine without the i flag: the frames below still count */ }
-    for (const fr of doc.querySelectorAll("iframe,frame")) if (challengeFrameEl(fr)) return true;
+    for (const el of list) {
+      if (closestComposed(el, PASSIVE_SEL)) continue;
+      if (el.matches(RESPONSE_SEL)) return true; // response fields are hidden by design
+      const tag = el.localName;
+      if (NOT_BOX_TAGS.has(tag) || tag === "script") continue;
+      if (displayed(el)) return true;
+    }
+    for (const fr of doc.querySelectorAll("iframe,frame")) {
+      if (challengeFrameEl(fr) && !passiveFrame(fr, displayed(fr))) return true;
+    }
     return false;
+  }
+  // Rendered and not visibility-hidden (itself or an ancestor). jsdom has no checkVisibility:
+  // walk the ancestors' computed display and visibility instead.
+  function displayed(el) {
+    if (typeof el.checkVisibility === "function") {
+      try {
+        return el.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true });
+      } catch (e) { /* fall through */ }
+    }
+    for (let n = el; n && n.nodeType === 1; n = parentOf(n)) {
+      if (n.hidden) return false;
+      const cs = style(n);
+      if (cs.display === "none" || cs.visibility === "hidden" || cs.visibility === "collapse") return false;
+    }
+    return true;
   }
   // This document is a challenge page: a challenge host or path, the Cloudflare interstitial
   // title, or a frame whose owner element (same origin) is a challenge widget.
@@ -1800,28 +1832,120 @@
   }
 
   // A show-password toggle that rebuilds the element (replaceWith, a re-render) hands the value
-  // to a new node. Every input or textarea added by the same batch that removed a sensitive
-  // field, in the parent it was removed from (or inside that parent), inherits sensitivity
-  // (D-429 (1)). The wider net (a re-render that swaps a whole form) only costs text values
-  // shown as empty|filled; a missed field would leak a password (rule 5).
+  // to a new node. The new field inherits sensitivity only when it matches a removed sensitive
+  // field (D-435 (1)): a one-for-one swap (in one batch, one parent lost exactly one field, a
+  // sensitive one, and gained exactly one field, counting subtrees: replaceWith of the input or
+  // of its wrapper, remove + append), or a shared id, name, autocomplete token, aria-label,
+  // placeholder or label text. A re-rendered page whose other fields match nothing (an SPA
+  // login swap removes at least two fields) keeps reading their values. Removed sensitive fields
+  // are remembered (signature and removal time, never a value) for SENS_KEEP_MS, so a rebuild
+  // split by a microtask or a later task still matches (D-435 (2)); entries age out on use.
+  const SENS_KEEP_MS = 2000;
+  const SENS_KEEP_MAX = 32;
+  const KEY_CAP = 120;
+  // Autocomplete tokens every kind of field shares: never a match on their own.
+  const AC_GENERIC = new Set(["on", "off", "shipping", "billing", "home", "work", "mobile", "fax", "pager", "webauthn"]);
+
+  const foldKey = (v) => String(v || "").replace(/\s+/g, " ").trim().replace(/[\s:*]+$/, "").toLowerCase().slice(0, KEY_CAP);
+  // An element with this id: in the document, else inside root (a detached subtree).
+  function byIdIn(id, root) {
+    const d = doc.getElementById(id);
+    if (d) return d;
+    if (!root || root.nodeType !== 1) return null;
+    if (root.id === id) return root;
+    for (const e of root.querySelectorAll("[id]")) if (e.id === id) return e;
+    return null;
+  }
+  // Labels of a field: el.labels when attached, else the wrapping label and label[for] in the
+  // removed subtree or the document.
+  function fieldLabels(f, root) {
+    const out = new Set();
+    try {
+      if (f.isConnected && f.labels) {
+        for (const l of f.labels) out.add(l);
+        return out;
+      }
+    } catch (e) { /* no labels API */ }
+    const wrap = f.parentNode && f.parentNode.closest ? f.parentNode.closest("label") : null;
+    if (wrap) out.add(wrap);
+    if (f.id) {
+      const pools = [doc];
+      if (root && root.nodeType === 1 && !root.isConnected) pools.push(root);
+      for (const pool of pools) for (const l of pool.querySelectorAll("label[for]")) if (l.htmlFor === f.id) out.add(l);
+    }
+    return out;
+  }
+  // Identity keys of a field. Attributes and label text only: textOf skips field contents,
+  // so a value (or a textarea's default text) never enters a key.
+  function fieldKeys(f, root) {
+    const keys = new Set();
+    const add = (k, v) => {
+      const x = foldKey(v);
+      if (x) keys.add(k + x);
+    };
+    add("id:", f.id);
+    add("name:", attr(f, "name"));
+    for (const tok of attr(f, "autocomplete").toLowerCase().split(/\s+/)) {
+      if (tok && !AC_GENERIC.has(tok) && !tok.startsWith("section-")) add("ac:", tok);
+    }
+    add("t:", attr(f, "aria-label"));
+    add("t:", attr(f, "placeholder"));
+    for (const l of fieldLabels(f, root)) add("t:", textOf(l, f));
+    for (const ref of attr(f, "aria-labelledby").split(/\s+/)) {
+      const e = ref ? byIdIn(ref, root) : null;
+      if (e && e !== f) add("t:", textOf(e, f));
+    }
+    const r = S.rec.get(f);
+    if (r && r.row && r.row.el === f && r.row.name) add("t:", r.row.name);
+    return keys;
+  }
+
   function inheritSensitive(recs) {
-    let from = null;
+    const t = now();
+    if (S.gone.length && t - S.gone[0].t > SENS_KEEP_MS) S.gone = S.gone.filter((g) => t - g.t <= SENS_KEEP_MS);
+    let swap = null; // parent -> { out: removed fields, sens: sensitive among them, add: added fields }
     for (const m of recs) {
       if (m.type !== "childList" || !m.removedNodes.length) continue;
       for (const r of m.removedNodes) {
-        if (fieldsIn(r).some(sensitive)) {
-          (from || (from = new Set())).add(m.target);
-          break;
+        for (const f of fieldsIn(r)) {
+          const e = (swap || (swap = new Map())).get(m.target) || { out: 0, sens: 0, add: null };
+          swap.set(m.target, e);
+          e.out++;
+          if (!sensitive(f)) continue;
+          e.sens++;
+          let keys;
+          try {
+            keys = fieldKeys(f, r);
+          } catch (err) {
+            keys = new Set(); // no identity: the one-for-one rule still applies
+          }
+          if (keys.size) S.gone.push({ t, keys: Array.from(keys) });
         }
       }
     }
-    if (!from) return;
+    if (swap) {
+      for (const m of recs) {
+        const e = m.type === "childList" && m.addedNodes.length ? swap.get(m.target) : null;
+        if (!e) continue;
+        for (const a of m.addedNodes) for (const f of fieldsIn(a)) (e.add || (e.add = [])).push(f);
+      }
+      for (const e of swap.values()) if (e.out === 1 && e.sens === 1 && e.add && e.add.length === 1) S.sens.add(e.add[0]);
+    }
+    if (S.gone.length > SENS_KEEP_MAX) S.gone.splice(0, S.gone.length - SENS_KEEP_MAX);
+    if (!S.gone.length) return;
     for (const m of recs) {
       if (m.type !== "childList" || !m.addedNodes.length) continue;
-      let hit = from.has(m.target);
-      if (!hit) for (const p of from) if (p !== m.target && p.contains && p.contains(m.target)) hit = true;
-      if (!hit) continue;
-      for (const a of m.addedNodes) for (const f of fieldsIn(a)) S.sens.add(f);
+      for (const a of m.addedNodes) {
+        for (const f of fieldsIn(a)) {
+          if (S.sens.has(f) || sensitive(f)) continue;
+          let hit = true; // a field whose keys cannot be read while a removal is remembered: sensitive
+          try {
+            const keys = fieldKeys(f, null);
+            hit = S.gone.some((g) => g.keys.some((k) => keys.has(k)));
+          } catch (e) { /* fail closed */ }
+          if (hit) S.sens.add(f);
+        }
+      }
     }
   }
 

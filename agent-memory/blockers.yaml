@@ -138,6 +138,11 @@ blockers:
     question: "What if a tool file's @name differs from its file name?"
     default_taken: "The loader skips it with why '@name x does not match file name y.js' (D-306 report). tools.health, the archive and record() all key on the file name, so the two must agree."
     needs_user: false
+  - id: B-414
+    task: T-19
+    question: "D-435 (1) names 'a one-for-one input swap in a single mutation record (replaceWith)'. Does that cover a wrapper replaceWith (div holding the password replaced by a div holding one neutral input) and a remove + append into the same parent in one batch (two records)? Read literally they read the value, and accept-T-19 A10 (accept-pw.html #w-in, #r3) fails on a hard rule 5 leak."
+    default_taken: "Yes: in one observer batch, a parent that lost exactly one field (subtrees counted), a sensitive one, and gained exactly one field hands sensitivity to it. An SPA login swap removes at least two fields (user + password) so its new fields still read (D-435 (1) intent). Only a one-field login step swapped for a one-field page over-marks that one field as empty|filled."
+    needs_user: false
 
 interface_changes:
   - id: B-401
