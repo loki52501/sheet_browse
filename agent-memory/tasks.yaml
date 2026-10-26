@@ -75,8 +75,8 @@ tasks:
     claimed_at: "2026-10-23"
     done_at: "2026-10-23"
     reports: [bench/results/review-T-11.md, bench/results/accept-T-11.md]
-    shipped: [T-1, T-2, T-3, T-4, T-7, T-9, G-4, "T-5 (reforge, ask, confirm; not auto @expects)", D-53, D-300..D-311]
-    deferred: "T-6 growth, T-8 promotion and T-5 auto @expects are reflect/toolforge work (T-16, T-28); G-5 hand-edit reset needs a content hash tools.health lacks; vault canary row waits for T-05 (B-312: switch to harness_core::vault::vault_refs then)."
+    shipped: [T-1, T-2, T-3, T-4, T-7, T-9, G-4, "T-5 (reforge, ask, confirm; not auto @expects)", D-53, D-300..D-311, "D-78 batch, merged to main 83bfdb5: B-31 (1) lower-case names and reforge @name check (D-312), (2) check_repair refuses @kind change and @phase lowering (D-313), (3) G-4 canary fed into the re-forge source, (4) archive fails closed with mtime set before rename, sweep logs ok:false per failed file and goes on (D-314); tool_path/archive_path #[deprecated] (D-72); fingerprint role aliases from sb_sheet::data::{aria_roles, alias_for}, built-in map dropped (D-59, B-300); tests/contract_paths.rs"]
+    deferred: "T-6 growth, T-8 promotion and T-5 auto @expects are reflect/toolforge work (T-16, T-28); G-5 hand-edit reset needs a content hash tools.health lacks; real-vault canary plant waits for T-05 (accept-T-11.md Deferred; B-312: switch vault_keys to harness_core::vault::vault_refs then). B-33: (3) loader skips a retired row whose file is still in place, with (1) retire/archive ledger contradiction and (2) contract_paths gaps, before servers T-13 merges; (4) relocate synonym table, pre-D-312 upper-case orphans, ok:false dedup before toolforge T-28."
     follow_up: "D-78 batch done 2026-10-25 on swarm/store after the f493fd3 merge: B-31 items 1-5, D-72 deprecations, D-59/B-300 role aliases from sb_sheet::data; D-312, D-313, D-314. Commits 93a2e4d, 66f74a6 (sweep survives a read-only or failed archive), tests 119a5db, cb55252; review-T-11.md approve, accept-T-11.md green 63/63."
   - id: T-12
     step: 2
