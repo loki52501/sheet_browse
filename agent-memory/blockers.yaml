@@ -240,5 +240,10 @@ interface_changes:
     interface: "harness_core::sched (I-13 draft, D-80)"
     change: "Additive: trait Launcher gains a provided method fn before_run(&self) -> Result<(), LaunchError> (default Ok); Runner::execute calls it first, before the prompt is scrubbed, and when it fails returns the new variant SchedError::BeforeRun(LaunchError) without creating a folder or runs row. Existing Launcher impls compile unchanged; a match on SchedError without a wildcard arm needs the new arm (none in the workspace). The harness crate adds daemon::ReopenVault (harnessd's launcher wrapper that re-opens the vault in before_run) and launcher::{DISALLOWED_TOOLS, DEFAULT_SESSION_CAP, SESSION_CAP_VAR, DEFAULT_MAX_ANSWER_BYTES, ANSWER_SCRUB_SLACK, parse_session_cap, session_cap_from_env, answer_text}, with ClaudeLauncher fields max_session and max_answer_bytes (D-124)."
     why: "review-T-08 should-fix 7: harnessd must scrub a vault value added after it started, and the prompt is scrubbed inside Runner::execute, so the re-open has to happen there, before anything is written. Default until supreme answers: as implemented in T-08 round 2."
+  - id: IC-305
+    from: store
+    interface: I-7
+    change: "Additive, per D-315 (B-33 (3)): toolstore::ToolStore::{scan_live(&self, store: &dyn MemoryStore, domain: &str, path: &str) -> Result<LoadReport, StoreError>, load_live(&self, store: &dyn MemoryStore, domain: &str, path: &str) -> Result<Vec<Tool>, StoreError>} (async). They skip tools whose tools.health row is retired. Behaviour per D-316: a retire whose archive fails is an ok:true tools.retire plus an ok:false tools.archive event, and record() returns Ok for it. Proposed for wave 4: #[deprecated] on the sync load/scan in favour of the live pair."
+    why: "Runtime callers (srv-web T-13, sb-mcp, toolforge) must not serve a retired tool whose file is still in place; load cannot see tools.health without MemoryStore. Default until supreme answers: callers use load_live; load/scan stay for tests and offline tooling."
 
 proposals:
