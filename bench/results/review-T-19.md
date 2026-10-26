@@ -1,116 +1,185 @@
-# Review: T-19 combined (B-5, B-7, I-10, I-11, D-435, D-436, D-437)
+# Review: T-19 combined (B-5, B-7, I-10, I-11, D-435..D-440)
 
-reviewer-9, 2026-10-25. Branch swarm/page at b0ecf58. This file is the one the merge gate
-reads. It covers both halves:
+reviewer-10, 2026-10-25, round 5 (D-89 final round). Pinned to 5fed11f on swarm/page (the
+D-440 code is 1fe3caf; D-438 and D-439 are 343a533..edd30e4). This file is the one the merge
+gate reads. Round 4 (reviewer-9) is at `git show 71aa8c0:bench/results/review-T-19.md`, and its
+probes are in runs/reviewer-9/.
 
-- injected.js: round 4 of 343a533. Details, probes and repros are in
-  `bench/results/review-T-19-js.md`, "Round 4".
-- sb-act: the round 5 verdict in `bench/results/review-T-19-sb-act.md`, plus 086d248
-  (`crates/sb-act/tests/contract_paths.rs`).
+Only question this round: is round 4's Blocking item closed? That item was D-435 (2), hard
+rule 5: an add-first password rebuild split across observer batches leaks the value through
+index(), state() or text().
 
-The tester's uncommitted `injected/test/accept-t19.test.js` (A12, A13) and three new
-`bench/pages/accept-*.html` files are not part of this review.
+Method:
+- Every run used a `git archive 5fed11f injected bench/pages` snapshot in
+  runs/reviewer-10/snap, never the live worktree.
+- For comparison, the same probes ran on a 1fe3caf^ (pre-D-440) snapshot in
+  runs/reviewer-10/pre440.
+- Probes (not committed):
+  - runs/reviewer-10/r9-probe-jsdom2.js and r9-probe-chromium.js are reviewer-9's probes,
+    re-pointed at the snapshot.
+  - runs/reviewer-10/probe-r10-jsdom.js holds new variants.
+  - runs/reviewer-10/probe-r10-chromium.js holds Chromium variants. They count value getter
+    calls inside world sb by redefining HTMLInputElement.prototype.value there.
 
-Gates:
-- `node --test injected/test/`: 75/75.
-- `cargo test -p sb-act`: all pass (lib 60, classify 16, forms 11, quote_fuzz 6, round2 18,
-  round3 15, round4 8, round5 7, contract_paths 1, wire 3).
-- `cargo clippy -p sb-act --all-targets -- -D warnings` is clean, and
-  `cargo fmt -p sb-act --check` is clean.
+Gates at 5fed11f:
+- `node --test injected/test/` (snapshot): 93/93 pass, 0 fail.
+- sb-act is unchanged since round 4 (`git diff 71aa8c0 5fed11f -- crates/sb-act` is
+  empty), so the round-5 sb-act approval stands.
+- A copy of the snapshot with D-437's count relaxed to `e.out < 1 || e.sens < 1` fails
+  jsdom.test.js:1020, so that mutant is killed.
+
+Probe results. reads is the number of value getter calls on canary fields; leak means the
+canary appears in index(), text() or state().
+
+| # | Case | 5fed11f | 1fe3caf^ |
+|---|---|---|---|
+| r9 A | `o.after(n); await null; o.remove()`, same id and aria-label | ok, reads 0 | |
+| r9 A2 | same, one batch | ok, reads 0 | |
+| r9 B | same, split by a later task | ok, reads 0 | |
+| r9 B3 | Vue out-in (remove, later task, add) | ok, reads 0 | |
+| r9 F | S.gone cap with 40 hidden inputs | ok, reads 0 | |
+| r9 Chromium fade.html | transitionend, read during the transition and after it | ok, ok | |
+| r9 Chromium wrapcb.html / modal.html | | ok / ok | |
+| C shared | Chromium fade, shared name and aria-label | mid ok, after ok, getter 0 | same |
+| V1 | add-first wrapper, shared keys, later task | ok, reads 0 | |
+| V2 | add-first wrapper, neutral, later task | ok, reads 0 | |
+| V3 | add-first sibling, neutral, later task | ok, reads 0 | |
+| V4 / V4b | 3 batches (empty wrapper, input into it, remove old), shared keys | ok / ok | |
+| V6 | aria-label set in a later batch, before the removal | ok | |
+| V7d | D-440: the removal batch moves n itself into the swap | ok | |
+| V7k | D-440 skip path, n shares aria-label | ok | |
+| V11 | other parent, shared label text only | ok | |
+| V12 | neutral sibling, removal deeper in the tree | ok | |
+| V13 | 3 microtask batches, shared keys | ok | |
+| **V7** | **D-440 skip: neutral n added next to the password, later batch replaceWith's the password with another value field** | **LEAK, reads 4** | ok, reads 0 |
+| **C d440** | **V7 in Chromium (n inserted, old replaced by `#hint` on transitionend)** | **after: LEAK, getter 3** | after ok |
+| V3m / C neutral / C wrap | neutral, read while both fields exist | mid LEAK, getter 3, after ok | same |
+| V5 | 3 batches, neutral, n in a new wrapper (cross-parent) | LEAK, reads 3 | LEAK |
+| V8 | same parent: n, then another field, then the removal, neutral | LEAK, reads 4 | LEAK |
+| V9 | S.born cap: n in another parent (shared keys), 70 fields added before the removal | LEAK | LEAK |
+
+Round 4's repro is closed: every shape it named, and every variant sharing a key, reads 0
+times and never emits the value. Committed tests pin it:
+- jsdom.test.js:886, microtask and later task, with and without shared keys;
+- jsdom.test.js:960, the overlap with shared keys;
+- browser.test.js:560, fade-show.html, transitionend, with counted getters;
+- accept-t19 A16.
+
+The general class of round-4 Blocking, "an add-first rebuild split across observer batches
+leaks", is still open in one shape, and 1fe3caf (D-440) reintroduced it. That shape is
+below.
 
 ## Blocking
 
-- injected.js:1903-1949 (D-435 (2), hard rule 5): an add-first rebuild split across observer
-  batches leaks the password, even when the new field shares name and aria-label with it.
-  - Cause: inheritSensitive matches only fields added after a removal has been remembered.
-  - Repro, Chromium: a show toggle inserts `<input type=text name=acct aria-label="Account key">`
-    after the password, copies the value, and removes the old field on transitionend. This is
-    the order of AnimatePresence sync mode, the Vue `<Transition>` default and Svelte outros.
-    After the removal, index() and state() carry the canary
-    (runs/reviewer-9/probe-chromium.js, fade.html).
-  - jsdom: `o.after(n); await null; o.remove()` leaks (probe-jsdom2.js A), and so does the
-    same with a later task (B).
-  - Fix: remember recently added non-sensitive fields for the same 2000 ms window. On a
-    sensitive removal, match them by key, and mark the matches sensitive and dirty. Test it in
-    jsdom (microtask and later task) and in Chromium (transitionend), counting getter calls.
+- injected.js:2010 (D-440, hard rule 5; a regression from 1fe3caf): an add-first rebuild
+  whose new field shares no key leaks once the batch that removes the password also adds one
+  other value field to the same parent.
+  - Why: that batch's D-437 swap sets `e.swap`, which empties `inParent`. The field that
+    really carries the value (added earlier, the single born field in that parent) is then
+    never marked, and the swap marks the wrong field.
+  - Repro, Chromium (runs/reviewer-10/probe-r10-chromium.js, mode d440):
+    1. "Show" inserts `<input type=text id=q9>` after `#acct` with its value.
+    2. On transitionend, `old.replaceWith(<input id=hint placeholder=Hint>)`.
+    3. After the removal, index() and state() carry the canary, with 3 getter calls.
+  - Repro, jsdom: V7 in probe-r10-jsdom.js (4 reads).
+  - At 1fe3caf^ both repros are ok (reads 0).
+  - D-440's why says "without opening a leak". These repros show that it does.
+  - D-440's text allows this leak, and the committed test jsdom.test.js:1275 ("remove + append
+    next to the neighbour") pins the same structure as readable. So the fix needs supreme to
+    amend D-440. Under the fix below, 1275 stays green only because jsdom's document is still
+    loading at that point.
+  - Proposed fix: under a swap, skip the same-parent rule only for born entries recorded
+    while `document.readyState === "loading"` (B-415's #nick is parser-inserted). Mark every
+    other single born neighbour, as D-438 (1) did.
+  - Tried as a 3-line change in a scratch copy (runs/reviewer-10/fix):
+    1. Add `ld: doc.readyState === "loading"` to the S.born entry.
+    2. Carry `ld` into `prior`.
+    3. Use `inParent = prior.filter((x) => x.p === g.parent && !(g.e.swap && x.ld))`.
+  - Result: `node --test injected/test/` passes 93/93, and A10, A14, A18 and
+    jsdom.test.js:1253 stay green. Chromium d440 then reads 0 times after the removal. V7
+    reads 0 times once the document has loaded (in jsdom readyState stays "loading" until the
+    first tick, so a test must await one first).
+  - Add V7 as a jsdom test and as a Chromium test that counts getter calls.
 
 ## Should fix
 
-- injected.js:1828, 1932: the D-437 swap counts every input type. A wrapper that also holds a
-  show-password checkbox or a hidden input is not a one-for-one swap, so a replacement with no
-  shared key reads.
-  - Chromium repro: wrapcb.html leaks.
-  - Fix: count only value-bearing fields.
-  - Also, fieldLabels (1861) misses a label[for] removed as a sibling node of the same record
-    (jsdom D5).
-- injected.js:1917-1921: a fieldKeys error on the removed sensitive field remembers nothing.
-  That fails open, while the commit message says "fail closed". Push a match-all entry
-  instead.
-- Test gap: no committed test pins D-437's "lost exactly one field". Mutant
-  `e.out >= 1 && e.sens >= 1` passes the jsdom and committed accept-t19 suites. Add a test
-  where a two-field login is replaced by a one-field pre-filled page, and the new field reads
-  its text.
-- injected.js:339 (pre-existing, now also used by challengeContext): passiveFrame's
-  `[?&]size=invisible` also matches inside a `#hash`. A visible hCaptcha challenge frame with
-  `&size=invisible` in its hash gets no CHALLENGE row (probe-v3.js), which is the hard rule 3
-  direction. Confirm the shape against a real capture, then limit the test to the query
-  string of reCAPTCHA anchor frames.
-- Add-first overlap window: while both fields exist, a walk reads the new one. settle()
-  usually waits the transition out. Close it together with the Blocking fix by matching each
-  added field against connected sensitive fields in the same parent.
+- Add-first overlap window, neutral identity (carried from round 4, partly resolved).
+  - Resolved: D-438 (1) closed the overlap for fields that share a key, in the same parent or
+    its subtree (C shared mid: getter 0).
+  - Open: a neutral copy is still read while both fields exist (C neutral, C wrap: mid getter
+    3, canary in index()). settle() usually waits the transition out (reviewer-9 gotcha), so
+    the driver path rarely reads it.
+  - Fix: while an un-walked field added within 2 s shares a parent with a connected sensitive
+    field, report it as `filled` without reading it (an over-mark that lasts at most 2 s).
+- Neutral-identity residue outside D-438's letter (pre-existing, not a regression; supreme
+  should rule or file a follow-up):
+  - V5: a 3-batch build (empty wrapper, then the input into it, then the removal) is
+    cross-parent, so the same-parent rule never sees it.
+  - V8: a second field added to the parent before the removal means there is no "single
+    field".
+
+  Both read the value. The vault scrub is not a backstop for a password the user typed.
+- Caps are untested (carried). V9 shows the S.born cap of 64 evicts a key-matched copy when
+  more than 64 value fields are added inside the window. It is contrived, but a grid
+  rendered during the toggle hits it. The S.gone (32) and NEAR_MAX (64) caps are also
+  untested.
+- Resolved since round 4, each with a test:
+  - The D-437 swap counted every input type. Fixed by D-438 (2) and NONVALUE_TYPES
+    (injected.js:1843). Chromium wrapcb.html is ok, and jsdom.test.js:979 covers it.
+  - fieldLabels missed a label[for] removed as a sibling node. Fixed by D-438 (3)
+    (injected.js:1907). Chromium modal.html is ok.
+  - The remove-side fieldKeys catch failed open. It now remembers a match-all entry,
+    `keys: null` (injected.js:1969). jsdom.test.js:1031 covers it.
+  - No test pinned D-437 "lost exactly one". Now pinned by jsdom.test.js:1020, and the
+    relaxed-count mutant is killed (above).
+  - passiveFrame matched `size=invisible` in a #hash. Fixed by D-438 (4)
+    (injected.js:338-350): an hCaptcha frame=challenge frame is never passive by URL.
+    jsdom.test.js:1072 covers it. No real capture was taken (js-coder-5 not_done 5).
 - sb-act: none.
 
 ## Notes
 
-- injected.js, D-436:
-  - Passive v3 markers are dropped only as context for weak prompt text. Vendor widgets still
-    get CHALLENGE rows through challengeBox and the captcha name/id rule.
-  - A shown v2-invisible bframe is CHALLENGE, and a badge alone is not.
-  - The `script` exclusion (403) cannot trigger, so its test cases cannot fail because of it.
-    Harmless.
-- injected.js, over-marking (efficiency only): an OTP `name=code` key catches a later "Coupon"
-  `name=code` field, and D-437's accepted one-field swap cost shows up as expected.
-- injected.js, the S.gone cap of 32 is untested, and a contrived batch of 40 sensitive-named
-  hidden inputs can push the password out. Should item 1's filter fixes it.
-- injected.js, S.gone holds keys only, never a value: textOf skips fields, and S.gone is never
-  emitted.
-- injected.js, conformance:
+- injected.js, D-436: unchanged since round 4. Passive v3 markers are dropped only as context
+  for weak prompt text. Vendor widgets still get CHALLENGE rows. The `script` exclusion
+  cannot trigger (harmless).
+- Over-marking (efficiency only, still open):
+  - OTP and SSN name matches (`name=code`, footprint, businessName).
+  - D-437 and D-439 one-field swaps mark an unrelated single field.
+  - The fix proposed under Blocking adds one more case of the same kind.
+- S.gone and S.born hold keys, WeakRefs and times only, never a value. textOf skips field
+  contents, and neither list is emitted.
+- Conformance at 5fed11f:
   - I-11 shapes are unchanged.
   - No timers or sleeps were added (hard rule 6).
   - Rules 1, 2 and 7 do not apply.
-  - Spec ids: D-435 (1)-(3), D-436 and D-437 are implemented. The only additions beyond the
-    spec are keys (labelledby, row name), AC_GENERIC and the cap, and they only raise
-    protection.
-- sb-act, round 5 (reviewer-7, 361b28d, D-409): approve, with no Blocking or Should items.
-  - D-409 closes R4 Blocking 1 (Enter chords lowering Delete) and R4 Should 1 and 2, all with
-    raise-only changes.
-  - A diff of 361b28d^ against 361b28d over 12,864 steps found 1,206 raised and 0 lowered.
-  - Open nits from earlier rounds: the "New password" field without autocomplete, and the
-    250 ms wall-clock bound in the tester-owned `accept_t19_round3.rs`.
-- sb-act, 086d248 `crates/sb-act/tests/contract_paths.rs`: it names every I-10 path at the
-  `sb_act::` root, and a wrong path fails compilation (pr-ready section 4, D-74). The paths:
-  - `parse`, `quote`, `classify`, `classify_step` and `check_planner`, each with a typed fn
-    pointer;
-  - `ActClass`, `Step`, `Scroll`, `ParseError` and `PlannerError`;
-  - `PlannerError::ChallengeTarget { step }`, constructed and matched;
-  - `MAX_WAIT`, asserted to be 30 s (D-431).
-
-  The test passes, and clippy and fmt are clean.
+  - Commit 1fe3caf claims D-440 and implements it as written. The issue is D-440's premise,
+    not a drift from the spec.
+- sb-act, round 5 (reviewer-7, 361b28d, D-409): approve, and nothing has changed since.
+  086d248 `contract_paths.rs` names all 11 I-10 paths (details in 71aa8c0). Open nits: the
+  "New password" field without autocomplete, and the 250 ms wall-clock bound in the
+  tester-owned `accept_t19_round3.rs`.
 
 ## Resolved in earlier rounds
 
+- Round 4 Blocking (343a533, D-435 (2)): add-first rebuild split across batches, shared keys.
+  Fixed by D-438 (1) in edd30e4 and later commits. r9 A, A2, B and fade.html all read 0 times,
+  and jsdom.test.js:886 and browser.test.js:560 pin it. Full text:
+  `git show 71aa8c0:bench/results/review-T-19.md`.
 - injected.js R1 B1: a field that had been a password was read after a type swap. Fixed by the
   sticky S.sens and masked-text detection (D-405 (1)).
-- injected.js R1 B2: id reuse before the first `walk({base})`. Fixed by B-412 / D-73 (`{why:
-  "no base"}`).
+- injected.js R1 B2: id reuse before the first `walk({base})`. Fixed by B-412 / D-73
+  (`{why: "no base"}`).
 - sb-act R2 B1 to B3: control-character keys, Enter dropping the form max, and the
   one-time-code exemption hiding CVC. Fixed by D-406.
 - sb-act R4 B1: Enter chords lowering Delete. Fixed by D-409 (1).
 
 ## Verdict
 
-The sb-act half is approved (round 5, plus a contract_paths test that is complete). The
-injected.js half has one hard rule 5 leak inside D-435 (2): an add-first rebuild split across
-observer batches.
+The round-4 leak is closed for every shape it named, with tests. D-440 (1fe3caf) reopened a
+narrow add-first split leak: a neutral copy plus a one-for-one swap in the removing batch.
+Chromium shows the value in index() and state() after the rebuild, so hard rule 5 is
+broken. The fix needs a supreme amendment to D-440 (proposal above). A 3-line version passes
+93/93 in a scratch copy. If supreme instead accepts the trade-off explicitly in D-440, this item
+becomes a Should fix.
 
 Verdict: request changes
