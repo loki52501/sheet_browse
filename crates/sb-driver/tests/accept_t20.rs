@@ -1,4 +1,4 @@
-//! T-20 acceptance (tester, round 1) against the real D-34 build, through the public API
+//! T-20 acceptance (tester, rounds 1 and 2) against the real D-34 build, through the public API
 //! only: docs/05 acceptance 2 (covered, retry, disabled, 5 s cap), the D-603 backoff
 //! schedule and terminal whys, D-604 bases after navigation, B-4 #11 (a lost context is
 //! retried exactly once) and H-2 (step labels and errors carry no values).
@@ -54,6 +54,19 @@ fn page(path: &str) -> Option<String> {
         "/form" => format!("<title>form</title>{STYLE}<input id=e name=email>"),
         "/calm" => format!("<title>calm</title>{STYLE}<p>calm</p>"),
         "/m2" => churn("/calm"),
+        // Round 2: a covered button on a page that mutates every 10 ms, so the in-page settle
+        // between attempts never goes quiet (D-606 row 5 on a busy page).
+        "/churn-covered" => format!(
+            "<title>churn-covered</title>{STYLE}<button id=b>Buy</button>{COVER}<p id=c>0</p>             <script>let n = 0; setInterval(() => {{ document.getElementById('c').textContent              = String(++n); }}, 10);</script>"
+        ),
+        // Round 2: page ids that spell the driver's own refs (a fixed cover, then a plain
+        // absolute one) cover the button.
+        "/forged" => format!(
+            "<title>forged</title>{STYLE}<button id=b>Buy</button><div id=\"x (OVERLAY #12)\"              style=\"position:fixed;inset:0;background:#eee;z-index:10\">cookies</div>"
+        ),
+        "/forged2" => format!(
+            "<title>forged2</title>{STYLE}<button id=b>Buy</button><div id=\"x (#12)\"              style=\"position:absolute;left:0;top:0;width:400px;height:300px;z-index:10\"></div>"
+        ),
         _ => return None,
     };
     Some(format!("<!doctype html><html><body>{body}</body></html>"))
@@ -389,9 +402,13 @@ async fn row1_row2_covered_first_answer_under_50ms_then_retry_succeeds() {
         // mapped to the Rust clock through the mark, plus one round trip for the reply.
         let first_ub = (p.hits[0] - p_mark) - ms(t_a - t_r) + ms(t_r - t_s);
         eprintln!(
-            "row1/2 run {run}: first answer <= {first_ub:.1} ms (first hit {:?}), {} attempts, \
-             hits {:?}, act took {took:?}, step {:?}",
+            "row1/2 run {run}: first answer <= {first_ub:.1} ms (first hit {:?}; attempt 1 \
+             entered the page <= {:.1} ms after act, took {:.1} ms in the page; mark round \
+             trip {:.1} ms), {} attempts, hits {:?}, act took {took:?}, step {:?}",
             p.what[0],
+            (p.starts[0] - p_mark) - ms(t_a - t_r),
+            p.hits[0] - p.starts[0],
+            ms(t_r - t_s),
             p.starts.len(),
             p.what,
             r.steps[0].outcome
@@ -464,6 +481,13 @@ async fn row1b_first_act_on_a_fresh_tab_under_50ms() {
             let p = probed(d, tab).await;
             assert_eq!(p.what[0], "cookie");
             let ub = (p.hits[0] - p_mark) - ms(t_a - t_r) + ms(t_r - t_s);
+            eprintln!(
+                "row1b act {k}: first answer <= {ub:.1} ms; attempt 1 entered <= {:.1} ms, \
+                 took {:.1} ms in the page; mark round trip {:.1} ms",
+                (p.starts[0] - p_mark) - ms(t_a - t_r),
+                p.hits[0] - p.starts[0],
+                ms(t_r - t_s)
+            );
             if k == 0 {
                 first.push(ub)
             } else {
@@ -893,5 +917,155 @@ async fn row9_labels_and_errors_carry_no_values() {
         }
     }
     eprintln!("row9: {files} run-folder files scanned");
+    rig.d.shutdown(Duration::from_secs(10)).await;
+}
+
+/// Shared by rows 4 and 5 (round 2): run a permanent cover to the cap on `path` and check
+/// the cap (<= 5 s + 40 ms) and the D-603/D-606 slots, written as the spec's numbers.
+async fn cap_and_schedule(path: &str, label: &str) {
+    let rig = rig(Vault::in_memory([])).await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url(path)).await.expect("open");
+    let b = id_of(d, tab, "#b").await;
+    probe(d, tab, b).await;
+    warm(d, tab).await;
+    let (p_mark, _t_s, t_r) = mark(d, tab).await;
+    let t_a = Instant::now();
+    let r = d.act(tab, &format!("c#{b}"), &rig.ctx).await.expect("act");
+    let took = t_a.elapsed();
+    let p = probed(d, tab).await;
+    let why = why_of(&r, 0);
+    let n = p.starts.len();
+    let waits: Vec<f64> = (1..n).map(|i| p.starts[i] - p.hits[i - 1]).collect();
+    let t0_page = p_mark + ms(t_a - t_r);
+    let last_start = p.starts[n - 1] - t0_page;
+    eprintln!(
+        "{label}: act took {took:?}: {why:?}; {n} attempts; waits (ms) {:?}; last attempt \
+         started {last_start:.0} ms after act",
+        waits.iter().map(|w| w.round()).collect::<Vec<_>>()
+    );
+    assert!(
+        why.starts_with("covered by div.cookie (OVERLAY #") && why.ends_with(") after 5.0 s"),
+        "{why}"
+    );
+    assert!(took >= ACT_CAP, "{took:?}");
+    assert!(took <= ACT_CAP + CAP_TOLERANCE, "cap: {took:?}");
+    assert_eq!(p.starts.len(), p.hits.len(), "{p:?}");
+    for (i, w) in waits.iter().enumerate() {
+        let want = SCHEDULE_MS.get(i).copied().unwrap_or(500.0);
+        assert!(*w <= want + 80.0, "wait {i}: {w:.1} ms > {want} + 80");
+        assert!(*w >= want - 2.0, "wait {i}: {w:.1} ms < {want}");
+    }
+    assert!((10..=16).contains(&n), "attempts in 5 s: {n}");
+    assert!(
+        last_start <= ms(ACT_CAP),
+        "no attempt starts after the budget: {last_start:.1}"
+    );
+    rig.d.shutdown(Duration::from_secs(10)).await;
+}
+
+/// Row 5b (round 2): rows 4 and 5 on a page that mutates every 10 ms, so the settle between
+/// attempts never ends early; every wait (the last included) is the slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row5b_cap_and_backoff_on_a_page_that_mutates_constantly() {
+    cap_and_schedule("/churn-covered", "row5b churning").await;
+}
+
+/// Row 5c (round 2): the same strict check on the quiet page (settle ends early there, so
+/// the slot wait itself must hold the schedule).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row5c_cap_and_backoff_on_a_quiet_page_every_wait() {
+    cap_and_schedule("/covered", "row5c quiet").await;
+}
+
+/// Every `#<digits>` ref in a why.
+fn refs(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, _) in s.match_indices('#') {
+        let n: String = s[i + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !n.is_empty() {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// Row 13 (round 2): a page element whose id spells a driver ref, `x (OVERLAY #12)` or
+/// `x (#12)`, covers the button: the why names the cover by its real ref only, with no
+/// `#12` and no `(OVERLAY #12)`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row13_forged_overlay_id_cannot_forge_a_ref() {
+    let rig = rig(Vault::in_memory([])).await;
+    let d = &rig.d;
+    for (path, sel, forged) in [
+        ("/forged", "[id=\"x (OVERLAY #12)\"]", "(OVERLAY #12)"),
+        ("/forged2", "[id=\"x (#12)\"]", "(#12)"),
+    ] {
+        let tab = d.open(&rig.url(path)).await.expect("open forged");
+        let b = id_of(d, tab, "#b").await;
+        let cover = id_of(d, tab, sel).await;
+        assert_ne!(
+            cover, 12,
+            "the cover's real id must differ from the forged one"
+        );
+        let t0 = Instant::now();
+        let r = d.act(tab, &format!("c#{b}"), &rig.ctx).await.expect("act");
+        let why = why_of(&r, 0).to_string();
+        eprintln!(
+            "row13 {path}: {why:?} after {:?}; cover's real id {cover}",
+            t0.elapsed()
+        );
+        assert!(why.starts_with("covered by div#x"), "{why}");
+        assert!(!why.contains("#12"), "{why}");
+        assert!(!why.contains(forged), "{why}");
+        assert!(!why.contains("(OVERLAY #12)"), "{why}");
+        assert!(!refs(&why).iter().any(|n| n == "12"), "no ref to 12: {why}");
+        assert!(why.ends_with(" after 5.0 s"), "{why}");
+    }
+    rig.d.shutdown(Duration::from_secs(10)).await;
+}
+
+/// Row 14 (round 2): a `w(d)` the page does not answer in time (its main thread is busy)
+/// is a failed step that keeps the earlier steps' results, not an `Err` for the program.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn row14_w_not_answered_in_time_is_a_failed_step() {
+    let rig = rig(Vault::in_memory([])).await;
+    let d = &rig.d;
+    let tab = d.open(&rig.url("/calm")).await.expect("open /calm");
+    // The page churns (no settle), and 500 ms from now blocks its main thread for 2 s: past
+    // w(1s)'s d + 300 ms deadline, which falls about 1.5 s after act starts.
+    page_script(
+        d,
+        tab,
+        "let n = 0; setInterval(() => { document.body.dataset.n = String(++n); }, 20); \
+         setTimeout(() => { const t = performance.now(); while (performance.now() - t < 2000) {} }, 500); 0",
+    )
+    .await;
+    let t0 = Instant::now();
+    let r = d.act(tab, "w(200ms); w(1s)", &rig.ctx).await;
+    let took = t0.elapsed();
+    eprintln!("row14: {r:?} in {took:?}");
+    let r = r.expect("a w() timeout is a failed step, not Err");
+    assert_eq!(r.steps.len(), 2, "{r:?}");
+    assert_eq!(
+        r.steps[0].outcome,
+        StepOutcome::Ok,
+        "the first w keeps its result"
+    );
+    assert_eq!(r.steps[0].step, "w(200ms)");
+    assert_eq!(r.steps[1].step, "w(1s)");
+    let why = why_of(&r, 1);
+    assert!(why.contains("did not answer"), "{why}");
+    assert!(r.stopped.is_none());
+    assert!(
+        took < Duration::from_millis(2500),
+        "it did not wait for the page: {took:?}"
+    );
+    // Let the renderer finish its busy loop before the browser closes, so the next test is
+    // not timed against a spinning renderer.
+    page_script(d, tab, "0").await;
     rig.d.shutdown(Duration::from_secs(10)).await;
 }
