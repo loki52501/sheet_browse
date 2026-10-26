@@ -258,7 +258,7 @@ tasks:
     wave: 2
     owner: sheet
     branch: swarm/sheet-T10c
-    title: "T-10 review round 6 should-fix (bench/results/review-T-10.md, 14ae910) plus B-202: (1) a remaining: outline label cut to 80 chars with a trailing '...' (D-227) cannot be passed back as region, heading_section never matches it (one wasted turn); strip the trailing '...' and match by prefix. (2) an indented code line longer than a chunk gets its cut point inside the leading indent, so the first chunk is an empty code fence and the text starts one read later (W-5). (3) B-202: a table header separator wider than chunk_tokens is unsplittable, so without max_tokens a page can force an oversized chunk."
+    title: "T-10 review round 6 should-fix (bench/results/review-T-10.md, 14ae910) plus B-202: (1) a remaining: outline label cut to 80 chars with a trailing '...' (D-227) cannot be passed back as region, heading_section never matches it (one wasted turn); strip the trailing '...' and match by prefix. (2) an indented code line longer than a chunk gets its cut point inside the leading indent, so the first chunk is an empty code fence and the text starts one read later (W-5). (3) B-202: a table header separator wider than chunk_tokens is unsplittable, so without max_tokens a page can force an oversized chunk. (4) B-204: two text blocks with the same order make a read cursor chain cycle (chunk 2, 3, 2, 3) and never end; break ties by input position or reject duplicates."
     status: todo
     from: T-10b
   - id: T-11b
