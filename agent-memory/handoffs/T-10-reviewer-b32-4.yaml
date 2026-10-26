@@ -1,0 +1,16 @@
+from: reviewer
+to: next
+task: T-10
+date: "2026-10-25"
+state: "Round 7 review of c550253 (D-229/D-230), 9f74cf2 (test only) and a402967 (merge, no crates/sb-sheet change). Verdict changes, one Blocking item. Gates green: fmt, clippy -D warnings, cargo test -p sb-sheet (lib 87, acceptance_t10 20, b32 16, d226 9, d227 8, contract_paths 1, find_register 8, read_article 11, skeleton_sheet 8; 0 ignored). Black-box probes of read/skeleton/sheet over many chunk/max settings: every link-form join (plain+link, link+plain, plain+link+plain, alias label, list, quote, code, heading into remaining: and the skeleton, Kx7 | Zq9w across cells, two overlapping values, multibyte) is hidden. 8ca6ec8 leaked each of these. 13,000 fuzz cases: no panic, every chain ended, no real leak. The hit loop terminates (monotone over finite Hide sets)."
+not_done: "Blocking: a value holding both the cell separator ' | ' and an in-cell pipe (e.g. 'x | y|z', cells 'x' and 'y|z') shows in the row with the in-cell pipe written as backslash-pipe, plain or link cells alike. table_row_tagged copies the inserted backslash with Shows::Always (reader.rs:928), so no joined_hits reading drops it, and escaped_spellings never makes the mixed spelling. This was already there at 8ca6ec8. Fix: let one reading drop the escape backslash, and add lib and acceptance cases. Should-fix: round-6 items 1-2 and B-202 (T-10c); reads are about 6-8x slower with a password and 2x slower without one (tagged build before the secrets.is_empty() check, reader.rs:1239-1242; the per-cell inline at :641); no skeleton or acceptance-level table test for joined values."
+gotchas:
+  - "guard_write blocks the Write tool outside the worktree, including the scratchpad. Write probe files under target/tmp (gitignored) and cp them to the scratchpad crate copy with Bash."
+  - "Bash heredocs containing emoji or some quote mixes fail to parse in this shell, and backslashes can get mangled. Use Rust unicode escapes in probe sources, and write YAML with the Write tool."
+  - "Probe leak checkers flag false positives for 1-3 char values (fence markup, skeleton counts like '1 link', sheet syntax). Read each hit before calling it a leak."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-10.md
+  - agent-memory/handoffs/T-10-reviewer-b32-4.yaml
+verify: "python scripts/swarm/merge_gate.py (reads bench/results/review-T-10.md); cargo test -p sb-sheet"
