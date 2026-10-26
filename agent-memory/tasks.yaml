@@ -251,7 +251,7 @@ tasks:
     owner: sheet
     branch: swarm/sheet-T10b
     title: "B-32 follow-up (plain-span escaping first, then items 2-7) as already committed on swarm/sheet after 607eda5; merge it as its own PR."
-    status: todo
+    status: done
     from: T-10
   - id: T-10c
     step: follow-up
