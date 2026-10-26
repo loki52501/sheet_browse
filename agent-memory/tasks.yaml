@@ -111,10 +111,18 @@ tasks:
   - id: T-13
     step: 2
     title: "Seed tools/ashbyhq.com/list_jobs.js (@phase 1) and step-2 acceptance; ladder rungs 1, 2, 4"
-    status: doing
+    status: done
     owner: servers/suborch
     claimed_at: 2026-10-25
+    done_at: 2026-10-26
     blocked_by: [T-12]
+    notes: "review-T-13 approve (round 1); accept-T-13 all pass (offline and live Ashby) except docs/03 item 3 (reflect, T-16). Ladder rungs 1, 2, 4 moved to T-13b (they need srv-files T-14 and a Claude Code session over MCP)."
+  - id: T-13b
+    step: 2
+    title: "T-13 follow-ups: Phase 1 ladder rungs 1, 2, 4 over MCP (with srv-files); concurrent repairs can record version 3 (per-tool repair lock or skip Relocated when @fingerprint already matches); D-561 re-enables a missed tool within the run, amending T-4 (B-561); assert registry class Read after re-register; site-tool-level password/challenge test (docs/03 item 4 mapping); B-560 page.api cap for large boards; toolstore relocate should refuse \\r U+2028 U+2029 in names it writes into headers (B-33 family)"
+    docs: [docs/03-TOOL-STORE.md, docs/08-USE-CASES-AND-TESTS.md]
+    status: todo
+    owner: servers
   - id: T-14
     step: 3
     title: "srv-files: fs, shell classification, docs wrappers, csv.clean, diff, history.search"

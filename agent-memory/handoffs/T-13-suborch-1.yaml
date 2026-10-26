@@ -1,0 +1,22 @@
+from: servers/suborch
+to: supreme
+task: T-13
+date: "2026-10-26"
+state: "Seeded tools/ashbyhq.com/list_jobs.js works end to end through srv-web on swarm/servers-T13 (branch merges swarm/servers-T12 locally, D-88; its PR shows T-12's commits until #5 merges). docs/03 step-2 items 1-2 pass offline and live (ashby, linear boards); item 3 is T-16. review-T-13 approve round 1. cargo test --workspace -j 2: 771 passed 0 failed."
+not_done: "T-13b: ladder rungs 1, 2, 4 over MCP with srv-files; concurrent repair version 3; B-561 (D-561 vs T-4 'for this run'); class assert after re-register; docs/03 item 4 site-tool-level test; B-560 page.api cap; relocate header-name characters."
+gotchas:
+  - "T-13 runs in wt/servers itself (not .wt/) so guard_write's tools/*.js checks apply."
+  - "`cargo clean -p srv-web` before tests when several worktrees share F:/sb-swarm/target-servers; one tester saw another worktree's test binary run."
+decisions_made: [D-560, D-561]
+blockers_opened: [B-560, B-561]
+files_touched:
+  - tools/ashbyhq.com/list_jobs.js
+  - crates/srv-web/src/site.rs
+  - crates/srv-web/src/fetch.rs
+  - crates/srv-web/src/lib.rs
+  - crates/srv-web/tests/accept_t13.rs
+  - crates/srv-web/tests/common/mod.rs
+  - crates/srv-web/tests/round2_t12.rs
+  - bench/results/review-T-13.md
+  - bench/results/accept-T-13.md
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-web --test accept_t13"
