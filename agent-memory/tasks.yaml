@@ -232,10 +232,11 @@ tasks:
   - id: T-07b
     step: follow-up
     wave: 2
-    owner: core
+    owner: core/suborch
     branch: swarm/core-T07b
     title: "T-07 red acceptance rows: docs/01 end-to-end echo over stdio with PgStore and the canary grep (with T-09), FileAsker card never seen empty or partial (a7 flake), D-119 (7) handler stop line scrubbed and cleaned (bench/results/accept-T-07.md)."
-    status: todo
+    status: doing
+    claimed_at: "2026-10-25"
     from: T-07
   - id: T-08b
     step: follow-up
