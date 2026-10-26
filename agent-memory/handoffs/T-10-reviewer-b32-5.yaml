@@ -1,0 +1,16 @@
+from: reviewer
+to: next
+task: T-10
+date: "2026-10-26"
+state: "Round 8 review of 465e9b8 (D-231: esc-dropping reading, inline_str/code_str fast path, could_show prefilter), b9e1a9d (tester), c8bd2e4 and 7eb3c10 (agent-memory). Verdict approve, Blocking none. Gates green on a clean git-archive export of HEAD: fmt, clippy -D warnings, cargo test -p sb-sheet (lib 93, acceptance_t10 20, b32 16, d226 9, d227 8, d229 7, contract_paths 1, find_register 8, read_article 11, skeleton_sheet 8; 0 ignored). The round-7 blocker is fixed: every in-cell-pipe cross-cell probe is hidden in reads, remaining:, skeleton and sheet at every chunk/max. Differential fuzz (27,000 cases, 7 seeds, alphabet with * \\ | backticks brackets quotes NBSP tab and emoji) showed normal output byte-identical to the forced full check (no fast path, no prefilter) in every case, the no-password cases included. No panic, every chain ended. Perf: no password 5.7 ms first read; values on every line 34 ms, chain@200 1.48 s."
+not_done: "Should-fix 1: could_show's soundness comment (reader.rs:1368-1372) overclaims. Hiding a char inside a cut backtick run uncovers backticks the unhidden line dropped, so a spelling with *** between backticks could skip the prefilter. The final ctx.scrub at reader.rs:684 still catches it literally. Fix: skip '`' in `needed` like '*', or reword the comment. T-10c items stay open: the region with a '...' label, the empty fenced chunk from an indented long code line, B-202, B-204."
+gotchas:
+  - "The tester works in the same worktree and runs mutations in place: crates/sb-sheet/src/reader.rs can be dirty while you review. Run gates and probes on `git archive HEAD crates/sb-sheet | tar -x -C target/tmp/<dir>` with a minimal workspace Cargo.toml (serde, serde_json, thiserror), not in place."
+  - "To probe the prefilter and fast path from integration tests, change the copy's non-test joined_forced() to read a pub thread_local in lib.rs. The repo's FORCE_JOINED is cfg(test) only. The probe sources are in target/tmp/r8ws/crates/sb-sheet/tests/probe3.rs (diff_fuzz, pipes3, backtick_reveal)."
+  - "Leak checkers flag false positives: 1-2 char values after collapse, and at tiny chunk_tokens a link form cut mid-way can pair with '(top)' in remaining: and pick up digits from the 'chunk N of M' header. Read each hit before calling it a leak."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-10.md
+  - agent-memory/handoffs/T-10-reviewer-b32-5.yaml
+verify: "python scripts/swarm/merge_gate.py (reads bench/results/review-T-10.md); cargo test -p sb-sheet"

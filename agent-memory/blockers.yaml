@@ -140,6 +140,26 @@ blockers:
     question: "What if a tool file's @name differs from its file name?"
     default_taken: "The loader skips it with why '@name x does not match file name y.js' (D-306 report). tools.health, the archive and record() all key on the file name, so the two must agree."
     needs_user: false
+  - id: B-201
+    task: T-10
+    question: "Left after the B-32 rounds (91f9e46, 0994380): (P4) when max_tokens leaves fewer characters than a block's fixed overhead (code fence lines, a table header separator), the reader must still make progress and the returned piece can exceed the remainder by that overhead; (P5) the skeleton URL line still uses the plain clean, so a URL can carry a `[a](#3)` look-alike, and a page title starting with `! ` or `landmarks:` can pose as a skeleton line."
+    default_taken: "P5 fixed in the same change (skeleton.rs escape_lead: link_text on the URL line, a leading backslash on a title or URL line that starts like a skeleton line). P4 is not a blocker for T-12: it overshoots by a few tokens at most and only on a tiny remainder; area sheet fixes it before step 3 (live browser readers) by dropping an overhead-only piece when the remainder cannot hold it (return truncated)."
+    needs_user: false
+  - id: B-202
+    task: T-10
+    question: "Review round 5 should-fix 2: a table header separator cannot be split, so without max_tokens a page with thousands of empty columns sets the chunk size (3000 columns gave a 3002-token chunk holding only the separator). max_tokens still holds."
+    default_taken: "Not a T-12 blocker. Area sheet caps rendered table width (columns beyond a fixed limit folded into one `+N columns` cell) before step 3 (live browser readers)."
+    needs_user: false
+  - id: B-203
+    task: T-10
+    question: "D-229 says every span that contributes characters to a joined hit renders as `***`. Read literally, that blanks a whole plain span, and the tester's acceptance_t10_d227 d227_label_is_scrubbed_before_the_cut then fails: its heading's first plain span `Golf ggg... <value prefix>(` becomes `***`, so no `## Golf` label is left in remaining:. Should a plain span lose all its text or only the characters it gives to the hit?"
+    default_taken: "A link span that gives a character to a hit renders as `***` with no link form, as D-229 says. A plain span (no link syntax, so D-229's why does not apply to it) hides only the characters it gives to the hit, one `***` per run. Every character of the value is hidden either way, and the line is checked again until no hit is left. Both the D-227 label test and w5b_body_never_shows_a_value_joined_across_a_link_form pass. If supreme wants whole plain spans blanked, set SpanKind::Plain hits to Hide.all in Ctx::scrub_joined (crates/sb-sheet/src/reader.rs) and amend the D-227 label test."
+    needs_user: false
+  - id: B-204
+    task: T-10
+    question: "Found while writing D-231 tests (not a D-231 change, present at c550253): when two TextBlocks share an `order`, a read cursor chain never ends. A header row and a body row both at order 5 with chunk_tokens 4 give chunk 1, 2, 3, 2, 3, 2, ... because the cursor names a block by its order. Should read() guard against duplicate orders from the extractor?"
+    default_taken: "Not taken in D-231 (the D-231 test page uses distinct orders). Proposed for T-10c: read() sorts blocks by order and, when orders repeat, keys the cursor by position in that sorted list (or renumbers repeats), so every chain makes progress whatever the extractor sends."
+    needs_user: false
 
   - id: B-175
     task: T-07
