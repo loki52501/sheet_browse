@@ -143,6 +143,11 @@ blockers:
     question: "D-435 (1) names 'a one-for-one input swap in a single mutation record (replaceWith)'. Does that cover a wrapper replaceWith (div holding the password replaced by a div holding one neutral input) and a remove + append into the same parent in one batch (two records)? Read literally they read the value, and accept-T-19 A10 (accept-pw.html #w-in, #r3) fails on a hard rule 5 leak."
     default_taken: "Yes: in one observer batch, a parent that lost exactly one field (subtrees counted), a sensitive one, and gained exactly one field hands sensitivity to it. An SPA login swap removes at least two fields (user + password) so its new fields still read (D-435 (1) intent). Only a one-field login step swapped for a one-field page over-marks that one field as empty|filled."
     needs_user: false
+  - id: B-415
+    task: T-19
+    question: "D-438 (1)'s add-first same-parent rule treats fields the HTML parser inserted at load as 'added in the last 2000 ms'. On accept-pw.html the parser's record (target form#f1, added a label holding #nick) puts #nick in S.born with parent f1; a wrapper swap of #w-in in f1 within 2 s of load (a same-batch one-for-one swap that D-437 already resolves) makes #nick 'the single field added to the same parent', so it reads empty|filled. accept-t19 A10 ('control: the ordinary field is read') and A14 ('after nick', toggleWrap in form#toggles of accept-d435.html) fail whenever the clicks land within 2 s of load: in full-suite runs on HEAD 2ec0d4f and on edd30e4 alike, intermittently when run alone. Should the rule skip such fields?"
+    default_taken: "None (outside D-439; js-coder-6 left D-438 as written). Proposed default: skip the born same-parent rule for a parent that gained a value field in the same batch (its one-for-one swap already handed the value on, D-437); optionally do not remember adds made while document.readyState is 'loading'. Either should fix A10/A14 (not tried); the first drops the same-parent mark when a later batch both removes the old field and adds a different one to that parent."
+    needs_user: false
 
 interface_changes:
   - id: B-401
