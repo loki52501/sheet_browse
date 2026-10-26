@@ -225,6 +225,9 @@ struct CallInfo {
     args: Value,
     /// The classifier's hints: a mid-call ask meets the same hint rules as its call.
     hints: Vec<String>,
+    /// The classifier's domain, scrubbed: a mid-call card with no site is checked against
+    /// the call's own site, so its domain rules (a stop rule, a strict ask) still apply.
+    domain: Option<String>,
 }
 
 /// Per-call context handed to a handler. Holds the vault privately: a handler can resolve
@@ -291,7 +294,8 @@ impl ToolCtx {
     ///
     /// The card is sanitised like a gate card (scrubbed, [`clean_card`], scrubbed again), the
     /// timer is [`crate::gate::ASK_TIMEOUT`], and the card's class and site go through
-    /// [`Gate::check`] with the call's hints and the run's `strict` (D-119 (1), rule 4):
+    /// [`Gate::check`] with the call's hints and the run's `strict` (D-119 (1), rule 4); a
+    /// card with no site is checked against the call's classified domain (D-123):
     ///
     /// * a `Challenge` card or a gate `Stop` is never shown: it is logged as a core stop and
     ///   returns `TimeoutSkip` (D-5; the handler should return `ToolOutput::stopped`);
@@ -326,7 +330,7 @@ impl ToolCtx {
             server: self.call.server.clone(),
             tool: self.call.tool.clone(),
             class: card.class,
-            domain: card.site.clone(),
+            domain: card.site.clone().or_else(|| self.call.domain.clone()),
             recipients: Vec::new(),
             hints: self.call.hints.clone(),
             args: self.call.args.clone(),
@@ -336,7 +340,7 @@ impl ToolCtx {
         };
         let gate_timeout = match Gate::new(self.store.clone()).check(&call).await {
             Ok(Decision::Stop(reason)) => {
-                self.write_stop(&scrub_stop(&self.vault, reason)).await;
+                self.write_stop(&clean_stop(&self.vault, reason)).await;
                 return AskOutcome::TimeoutSkip;
             }
             Ok(Decision::Ask(g)) => g.on_timeout,
@@ -886,6 +890,7 @@ pub async fn dispatch(
         tool: spec.name.clone(),
         args: args_scrubbed.clone(),
         hints: Vec::new(),
+        domain: None,
     };
 
     // Classify: the declared class is the floor (rule 4, H-1.5). A panic is an error here.
@@ -932,6 +937,7 @@ pub async fn dispatch(
             .collect(),
         strict,
     };
+    ctx.call.domain = call.domain.clone();
     let decision = Gate::new(harness.store.clone())
         .check(&call)
         .await
@@ -964,7 +970,7 @@ pub async fn dispatch(
             outcome_mode(outcome)
         }
         Decision::Stop(reason) => {
-            let reason = scrub_stop(vault, reason);
+            let reason = clean_stop(vault, reason);
             ctx.ledger
                 .write(ctx.stop_event(&reason))
                 .await
@@ -1105,11 +1111,15 @@ pub fn scrub_value(vault: &Vault, v: &Value) -> Value {
     }
 }
 
-fn scrub_stop(vault: &Vault, r: StopReason) -> StopReason {
+/// A stop reason (the gate's, or a handler's `stopped`) as one clean line each for `why`
+/// and `element` (D-119 (7)): [`clean_line`] scrubs, cleans and scrubs again, so no control
+/// sequence or line break reaches the ledger `why`, the returned `stopped` or the model's
+/// `stopped: ...` line.
+fn clean_stop(vault: &Vault, r: StopReason) -> StopReason {
     StopReason {
         class: r.class,
-        why: vault.scrub(&r.why),
-        element: r.element.map(|e| vault.scrub(&e)),
+        why: clean_line(vault, &r.why),
+        element: r.element.map(|e| clean_line(vault, &e)),
     }
 }
 
@@ -1123,7 +1133,7 @@ fn scrub_output(vault: &Vault, out: ToolOutput) -> ToolOutput {
             .into_iter()
             .map(|f| PathBuf::from(vault.scrub(&f.to_string_lossy())))
             .collect(),
-        stopped: out.stopped.map(|r| scrub_stop(vault, r)),
+        stopped: out.stopped.map(|r| clean_stop(vault, r)),
     }
 }
 

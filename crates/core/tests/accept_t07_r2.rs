@@ -846,7 +846,6 @@ fn d119_4_answer_racing_the_timeout_is_never_lost() {
 /// polls the card path while FileAsker::ask publishes it. A small card (many iterations)
 /// and a large card (serialisation happens after `create_new`, so the window is wide).
 #[test]
-#[ignore = "red-first T-07 round 3: ask::write_card claims <n>.json with create_new and only then serialises and writes it, so a reader sees an empty card (the a7 flake); publish the card whole, e.g. temp file + no-clobber hard_link as claim() does"]
 fn file_asker_card_is_never_seen_empty_or_partial() {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1145,7 +1144,6 @@ async fn d119_7_stop_lines_are_one_clean_scrubbed_line() {
 /// D-119 (7) for a handler's stopped output (ToolOutput::stopped): the why and element land
 /// in the ledger (tool event and core stop), the returned output and the model's stop line.
 #[tokio::test]
-#[ignore = "red-first T-07 round 3: dispatch only scrubs a handler StopReason (why, element); D-119 (7) wants scrub, gate::clean_card, scrub before it reaches the ledger why, the returned stopped and the model stop line"]
 async fn d119_7_handler_stop_line_is_one_clean_scrubbed_line() {
     let c = canary();
     let dirty = format!("turnstile\x1b[31m on {ADDR}\r\nnext {c}");

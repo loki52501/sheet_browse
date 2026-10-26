@@ -7,11 +7,21 @@
 //! `asks/` folder capped at `card.timeout`; no polling (rule 6). On timeout the card's
 //! `on_timeout` applies.
 //!
+//! The card is published whole (D-123): written to a temp file, then hard-linked to
+//! `<n>.json`, which is atomic and no-clobber, so a reader never sees an empty or partial
+//! card and several processes on one run never share one `n` (a taken `n` moves on to the
+//! next). If the write fails, no card is left behind.
+//!
 //! Fail closed (D-119 (4)): if the card cannot be written, nobody saw it, so the ask is
 //! `TimeoutSkip` whatever the card says. `<n>.answer` is claimed no-clobber (temp file and
 //! `hard_link`) by whoever closes the ask first: the user's answer, or the asker's own
 //! timeout, which writes `timeout`. So [`answer`] refuses an ask that is already closed
-//! instead of writing an answer nobody reads.
+//! instead of writing an answer nobody reads. The asker claims `<n>.answer` on every path
+//! where it stops waiting (D-123): its timer, a dropped ask future (the wrapper's cap), a
+//! card that landed after the asker gave up, and, if the temp-file claim fails, a bare
+//! `create_new` as a last try. If even that fails the ask is `TimeoutSkip`: a late answer
+//! might still be taken, so nothing proceeds on the timeout. [`answer`] also refuses a
+//! card file that is not a complete JSON object.
 
 use crate::gate::{AskCard, AskOutcome, Asker, OnTimeout};
 use crate::mcp::clean_line;
@@ -20,13 +30,39 @@ use crate::vault::Vault;
 use async_trait::async_trait;
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// What the asker writes into `<n>.answer` when the card times out unanswered.
 const TIMED_OUT: &str = "timeout";
+
+/// A published card whose `<n>.answer` the asker has not settled yet. Dropping it while
+/// still open (the ask future was dropped, e.g. by the wrapper's cap, or the card landed
+/// after the asker stopped waiting) closes the ask with `timeout`, best effort, so a late
+/// `harness ask` is refused instead of reported as taken (D-123).
+struct OpenAsk {
+    n: u64,
+    answer: PathBuf,
+    open: bool,
+}
+
+impl OpenAsk {
+    fn settled(&mut self) {
+        self.open = false;
+    }
+}
+
+impl Drop for OpenAsk {
+    fn drop(&mut self) {
+        if self.open {
+            // Inline rather than on the blocking pool: a few small file calls, and the ask
+            // is closed before the dropping caller (the wrapper's cap) reports its skip.
+            let _ = close_answer(&self.answer);
+        }
+    }
+}
 
 /// `runs/<run>/asks/`.
 pub fn asks_dir(run_dir: &Path) -> PathBuf {
@@ -83,7 +119,7 @@ impl FileAsker {
         eprintln!("{}", clean_line(&self.vault, msg));
     }
 
-    /// The card document with `n = 0`; [`write_card`] fills in the claimed number.
+    /// The card document with `n = 0`; [`write_card`] fills in the number it claims.
     fn card_doc(&self, card: &AskCard) -> CardFile {
         let scrub = |s: &str| self.vault.scrub(s);
         CardFile {
@@ -103,9 +139,11 @@ impl FileAsker {
         }
     }
 
-    /// Creates `asks/` and writes the card off the async executor. `None` = nobody can see
-    /// the card (already reported on stderr).
-    async fn publish(&self, card: &AskCard) -> Option<u64> {
+    /// Creates `asks/` and publishes the card off the async executor. `None` = nobody can
+    /// see the card (already reported on stderr). The [`OpenAsk`] is made on the blocking
+    /// thread the moment the card exists and handed over by a oneshot: if this future is
+    /// dropped first, the guard is dropped with the channel and closes the ask.
+    async fn publish(&self, card: &AskCard) -> Option<OpenAsk> {
         let dir = asks_dir(&self.run_dir);
         let d = dir.clone();
         if let Err(e) = blocking(move || std::fs::create_dir_all(&d)).await {
@@ -117,23 +155,35 @@ impl FileAsker {
         }
         let doc = self.card_doc(card);
         let (run_dir, next) = (self.run_dir.clone(), self.next.clone());
-        match blocking(move || write_card(&run_dir, &next, doc)).await {
-            Ok(n) => Some(n),
-            Err(e) => {
-                self.diag(&format!(
-                    "ask: cannot write the card: {e}; skipped, nobody saw it"
-                ));
-                None
-            }
-        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let published = write_card(&run_dir, &next, doc).map(|n| OpenAsk {
+                n,
+                answer: answer_path(&run_dir, n),
+                open: true,
+            });
+            // A failed send hands the guard back and drops it here: the ask is closed.
+            let _ = tx.send(published);
+        });
+        let err = match rx.await {
+            Ok(Ok(open)) => return Some(open),
+            Ok(Err(e)) => e,
+            Err(_) => io::Error::other("ask: file task failed"),
+        };
+        self.diag(&format!(
+            "ask: cannot write the card: {err}; skipped, nobody saw it"
+        ));
+        None
     }
 
     /// The card's timer ran out (or nothing more can arrive): claim `<n>.answer` with
     /// `timeout`. If the user's answer got there first, it counts.
-    async fn close(&self, card: &AskCard, n: u64) -> AskOutcome {
-        let path = answer_path(&self.run_dir, n);
+    async fn close(&self, card: &AskCard, open: &mut OpenAsk) -> AskOutcome {
+        let (n, path) = (open.n, open.answer.clone());
         let p = path.clone();
-        match blocking(move || claim(&p, &format!("{TIMED_OUT}\n"))).await {
+        let closed = blocking(move || close_answer(&p)).await;
+        open.settled();
+        match closed {
             Ok(()) => timed_out(card),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match read_answer(&path).await {
                 Some(yes) => answered(yes),
@@ -144,7 +194,8 @@ impl FileAsker {
                 self.diag(&format!("ask {n}: cannot close the ask: {e}"));
                 match read_answer(&path).await {
                     Some(yes) => answered(yes),
-                    None => timed_out(card),
+                    // Not closed: a late answer may still be taken, so never proceed.
+                    None => AskOutcome::TimeoutSkip,
                 }
             }
         }
@@ -163,23 +214,18 @@ where
         .unwrap_or_else(|_| Err(io::Error::other("ask: file task failed")))
 }
 
-/// Claims the next free `n` by creating `<n>.json` with `create_new`, then writes `doc`.
+/// Publishes `doc` as `<n>.json` for the next free `n` through [`claim`]: the whole card
+/// appears at once, and a taken `n` (another ask, another process) moves on to the next.
 fn write_card(run_dir: &Path, next: &AtomicU64, mut doc: CardFile) -> io::Result<u64> {
     let mut n = next.load(Ordering::Relaxed).max(1);
     loop {
-        let path = card_path(run_dir, n);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut f) => {
-                next.store(n + 1, Ordering::Relaxed);
-                doc.n = n;
-                doc.answer_with = format!("harness ask {} {n} yes|no", doc.run);
-                let mut bytes = serde_json::to_vec_pretty(&doc).map_err(io::Error::other)?;
-                bytes.push(b'\n');
-                f.write_all(&bytes)?;
+        doc.n = n;
+        doc.answer_with = format!("harness ask {} {n} yes|no", doc.run);
+        let mut text = serde_json::to_string_pretty(&doc).map_err(io::Error::other)?;
+        text.push('\n');
+        match claim(&card_path(run_dir, n), &text) {
+            Ok(()) => {
+                next.fetch_max(n + 1, Ordering::Relaxed);
                 return Ok(n);
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
@@ -188,10 +234,34 @@ fn write_card(run_dir: &Path, next: &AtomicU64, mut doc: CardFile) -> io::Result
     }
 }
 
+/// Closes an ask: claims `answer` with `timeout`. If the temp-file claim fails for an I/O
+/// reason, a bare `create_new` still closes it (an empty answer is not a yes or no, and
+/// [`answer`] refuses a closed ask). `AlreadyExists` when the ask was already closed.
+fn close_answer(answer: &Path) -> io::Result<()> {
+    let err = match claim(answer, &format!("{TIMED_OUT}\n")) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    if err.kind() == io::ErrorKind::AlreadyExists {
+        return Err(err);
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(answer)
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) => Err(err),
+    }
+}
+
 /// Writes `text` to `target` only if `target` does not exist yet: a temp file, then
 /// `hard_link` (atomic and no-clobber, so a reader never sees a partial file). Where the
-/// filesystem has no hard links it falls back to `create_new`, still no-clobber; a reader
-/// can then see the file before its bytes, which [`parse_answer`] reads as no answer yet.
+/// filesystem has no hard links, `create_new` claims the name and one rename replaces the
+/// empty placeholder with the whole temp file: still no-clobber, and a reader sees an empty
+/// file or all of `text`, never a part (an empty answer is no answer yet, an empty card is
+/// refused by [`answer`]). On failure the temp file is removed and no placeholder is left.
 /// `AlreadyExists` when `target` exists.
 fn claim(target: &Path, text: &str) -> io::Result<()> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -207,22 +277,30 @@ fn claim(target: &Path, text: &str) -> io::Result<()> {
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&tmp, text)?;
-    let linked = std::fs::hard_link(&tmp, target);
+    let claimed =
+        std::fs::write(&tmp, text).and_then(|()| match std::fs::hard_link(&tmp, target) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists || target.exists() => {
+                Err(io::Error::new(io::ErrorKind::AlreadyExists, e.to_string()))
+            }
+            Err(_) => claim_without_links(&tmp, target),
+        });
+    // Gone already after a rename; otherwise the link (if any) keeps the bytes.
     let _ = std::fs::remove_file(&tmp);
-    match linked {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists || target.exists() => {
-            Err(io::Error::new(io::ErrorKind::AlreadyExists, e.to_string()))
-        }
-        Err(_) => {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(target)?;
-            f.write_all(text.as_bytes())
-        }
-    }
+    claimed
+}
+
+/// [`claim`] where hard links are not available: an empty `create_new` placeholder takes
+/// the name, then the full temp file replaces it in one rename. The placeholder is removed
+/// if the rename fails.
+fn claim_without_links(tmp: &Path, target: &Path) -> io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    std::fs::rename(tmp, target).inspect_err(|_| {
+        let _ = std::fs::remove_file(target);
+    })
 }
 
 /// `yes`/`no` (also `y`/`n`, any case, surrounding whitespace ignored); anything else is
@@ -262,9 +340,11 @@ impl Asker for FileAsker {
     async fn ask(&self, card: &AskCard) -> AskOutcome {
         let deadline = tokio::time::Instant::now() + card.timeout;
         // Nobody saw a card that could not be written: never proceed on that (D-119 (4)).
-        let Some(n) = self.publish(card).await else {
+        // From here on, `open` closes the ask if this future is dropped (D-123).
+        let Some(mut open) = self.publish(card).await else {
             return AskOutcome::TimeoutSkip;
         };
+        let n = open.n;
         // The watch is armed after the card exists; the one read right after arming catches
         // an answer that landed in between, so none can slip past.
         let dir = asks_dir(&self.run_dir);
@@ -273,7 +353,7 @@ impl Asker for FileAsker {
             let _ = tx.send(());
         })
         .and_then(|mut w| w.watch(&dir, RecursiveMode::NonRecursive).map(|()| w));
-        let path = answer_path(&self.run_dir, n);
+        let path = open.answer.clone();
         eprintln!(
             "{}",
             clean_line(
@@ -299,12 +379,13 @@ impl Asker for FileAsker {
                 // No file events available: wait out the card's timer (the deadline is the
                 // condition), then close the ask, which reads an answer that landed.
                 tokio::time::sleep_until(deadline).await;
-                return self.close(card, n).await;
+                return self.close(card, &mut open).await;
             }
         };
 
         // The watch is armed: one check catches an answer that landed before it was.
         if let Some(yes) = read_answer(&path).await {
+            open.settled();
             return answered(yes);
         }
         let wait = async {
@@ -316,18 +397,23 @@ impl Asker for FileAsker {
             None
         };
         match tokio::time::timeout_at(deadline, wait).await {
-            Ok(Some(yes)) => answered(yes),
+            Ok(Some(yes)) => {
+                open.settled();
+                answered(yes)
+            }
             // Timer ran out, or the watcher stopped delivering events (nothing more can
             // arrive that we could see): close the ask.
-            Ok(None) | Err(_) => self.close(card, n).await,
+            Ok(None) | Err(_) => self.close(card, &mut open).await,
         }
     }
 }
 
 /// `harness ask <run> <n> yes|no`: claims `runs_root/<run>/asks/<n>.answer` (temp file,
 /// then a no-clobber link). `NotFound` if the run folder or `asks/<n>.json` does not exist;
-/// `InvalidInput` if `run` is not a plain folder name; `AlreadyExists` if the ask is
-/// already closed (answered, or timed out: then nothing was done with this answer).
+/// `InvalidData` if `asks/<n>.json` is not a complete JSON object (nothing is answered for
+/// a card nobody could read); `InvalidInput` if `run` is not a plain folder name;
+/// `AlreadyExists` if the ask is already closed (answered, or timed out: then nothing was
+/// done with this answer).
 pub fn answer(runs_root: &Path, run: &RunId, n: u64, yes: bool) -> io::Result<()> {
     let folder = RunFolder::open(runs_root, run)?;
     let card = card_path(&folder.dir, n);
@@ -335,6 +421,16 @@ pub fn answer(runs_root: &Path, run: &RunId, n: u64, yes: bool) -> io::Result<()
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!("no ask {n} in run {run}"),
+        ));
+    }
+    let complete = std::fs::read(&card)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .is_some_and(|v| v.is_object());
+    if !complete {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("ask {n} in run {run} is not a complete card; nothing was answered"),
         ));
     }
     let target = answer_path(&folder.dir, n);
