@@ -528,8 +528,6 @@ fn meta_charset(bytes: &[u8]) -> Option<String> {
     (!label.is_empty()).then(|| label.to_string())
 }
 
-/// Parses an http(s) URL from a tool argument. Credentials in the URL are refused (they
-/// would be logged with the arguments; headers through `api` are the way to send them).
 /// Longest URL a tool hands the model as a value (a feed link, a search hit).
 pub(crate) const URL_MAX: usize = 2000;
 
@@ -542,6 +540,8 @@ pub(crate) fn clean_url(s: &str) -> Option<String> {
     (u.len() <= URL_MAX).then_some(u)
 }
 
+/// Parses an http(s) URL from a tool argument. Credentials in the URL are refused (they
+/// would be logged with the arguments; headers through `api` are the way to send them).
 pub(crate) fn parse_url(s: &str) -> Result<Url, String> {
     let s = s.trim();
     let url = Url::parse(s).map_err(|_| "not a valid absolute URL".to_string())?;

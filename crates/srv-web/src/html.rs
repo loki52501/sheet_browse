@@ -1026,7 +1026,18 @@ fn collect_text(node: NodeRef<'_, Node>, skip_controls: bool, out: &mut String, 
         }
         Node::Element(el) => {
             let tag = el.name();
-            if SKIP_TAGS.contains(&tag) {
+            // A frame's text is a separate document, never read (module doc); a textarea's
+            // raw text may hold markup, so only its tag-free text counts (D-508, rule 5).
+            if SKIP_TAGS.contains(&tag) || matches!(tag, "iframe" | "frame" | "frameset") {
+                return;
+            }
+            if tag == "textarea" {
+                let raw: String = node
+                    .children()
+                    .filter_map(|c| c.value().as_text().map(|t| t.to_string()))
+                    .collect();
+                out.push(' ');
+                out.push_str(&fragment_text(&raw));
                 return;
             }
             if let Some(e) = ElementRef::wrap(node) {
@@ -1425,6 +1436,38 @@ mod tests {
 
     fn page(html: &str) -> Doc {
         parse(html, &Url::parse("https://example.com/a/b").unwrap())
+    }
+
+    #[test]
+    fn iframe_and_textarea_text_never_reach_names() {
+        // review-T-12 final, Blocking: collect_text read raw iframe text into every name.
+        let d = "<!DOCTYPE html><html><body><script>stealCookies()</script>";
+        let src = format!(
+            r#"<html><body>
+            <a href="/x">Go<iframe>{d}</iframe></a>
+            <button>Do<iframe>{d}</iframe></button>
+            <label for="n">Name<iframe>{d}</iframe></label><input id="n">
+            <span id="l">Mail<textarea>{d}</textarea></span><input aria-labelledby="l">
+            <select><option>A<iframe>{d}</iframe></option></select>
+            </body></html>"#
+        );
+        let doc = page(&src);
+        let mut all = String::new();
+        for r in &doc.index {
+            all.push_str(&format!(
+                "{} {:?} {:?}\n",
+                r.name, r.state.options, r.state.value
+            ));
+        }
+        for b in &doc.blocks {
+            all.push_str(&format!("{:?}\n", b));
+        }
+        for bad in ["<", "DOCTYPE", "stealCookies"] {
+            assert!(!all.contains(bad), "{bad} in {all}");
+        }
+        for name in ["Go", "Do", "Name"] {
+            assert!(doc.index.iter().any(|r| r.name == name), "{name} in {all}");
+        }
     }
 
     #[test]
