@@ -129,28 +129,45 @@ tasks:
     step: 6
     title: "sb-cdp Pipe transport, launch, flattened sessions, pipelining; registry skeleton"
     docs: [docs/05-BROWSER.md]
-    status: todo
+    status: done
+    owner: driver/suborch
+    claimed_at: "2026-10-25"
+    branch: swarm/driver-T18
     note: "gated by swarm.yaml (area driver needs page merged), not by T-17 (D-43)"
   - id: T-19
     step: 6
     title: "injected.js: identity, walk, names, roles, states, flags, collapse, dirty re-walk; acceptance 1"
     docs: [docs/05-BROWSER.md]
-    status: todo
+    status: done
+    owner: page/suborch
+    claimed_at: "2026-10-23"
     note: "area page, wave 1; includes the sb-act half of B-7 (I-10). Not gated by T-17 (D-43)"
   - id: T-20
     step: 6
     title: "act(id) in page + Rust retry/backoff/5 s cap; acceptance 2"
-    status: todo
+    status: done
+    owner: driver/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/driver-T20
+    note: "branch = main + swarm/driver-T18 + swarm/page (bb520c8) merged locally (D-88)"
     blocked_by: [T-18, T-19]
   - id: T-21
     step: 6
     title: "input synthesis + consequence capture; acceptance 3"
-    status: todo
+    status: done
+    owner: driver/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/driver-T21
+    note: "branch = main + swarm/driver-T20 (with T-18) + swarm/page (0a87891) merged locally (D-88)"
     blocked_by: [T-20]
   - id: T-22
     step: 6
     title: "registry complete + settle(); acceptance 4, 5"
-    status: todo
+    status: done
+    owner: driver/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/driver-T22
+    note: "branch = main + swarm/driver-T21 (with T-18, T-20) + swarm/page (2b6ada5, PR #10) merged locally (D-88)"
     blocked_by: [T-21]
   - id: T-23
     step: 6
@@ -266,6 +283,53 @@ tasks:
     wave: 2
     owner: page
     branch: swarm/page-T19b
-    title: "page review items: Blocking in review-T-19.md, add-first password-field rebuild split across observer batches leaks the password into index()/state() (D-435 (2), hard rule); then its should-fix items."
+    title: "page T-19 follow-ups (review-T-19.md round 10 Should fix, D-444/D-445 open lists). The round-4 Blocking add-first leak is closed at 7dfc6f1 (D-442..D-445)."
     status: todo
     from: T-19
+    items:
+      - "Remaining password-leak shapes (hard rule 5, ruled Should fix as not produced by mainstream toggles): V5 cross-parent three-batch build; X1, X1b, Y1, Y1g copies with no structural or key link; V9 and S.born cap eviction order (evict entries whose parent holds no sensitive field first, fakeClock tests for S.born 64, S.gone 32, NEAR_MAX 64); X2w, X2w0, X5 hidden trick input in the removal count; O4, O5, O6 exits longer than 2000 ms (r12 long.html, r13 y1g late); the 2 s born-window edge on slow clocks (r11 dbg k >= 50); Y2c jsdom only."
+      - "TWIN_DEPTH 6 (injected.js:922, :965): twins 7 or more levels below their common ancestor leak (review round 10 M10, Vuetify 2 v-col > v-card > v-card__text > v-text-field). Raise to 12 or 16 and add an M10-shaped test."
+      - "Masked fields with no evidence report empty, a false state (probe-r14-cost c1..c4: pre-filled email or textarea next to a hidden or off-screen password; identifier-first email reads filled so the agent cannot verify it). Report filled or a masked kind when unsure."
+      - "B-415 accepted over-mark (D-442 (3)): an unrelated field in the same parent reads empty or filled when a password is rebuilt within 2 s of load; accept-t19 A18 pins it and must be relaxed if this is fixed."
+      - "Acceptance gaps: no accept-t19 rows for D-443 (2) and (3); no fixture for D-444 (1)'s accepted cost."
+      - "D-443 (1) scope (accept-T-19 round 6 open item 2): nearOf counts every sensitive field anywhere under the add's parent, so with body as the parent any field the parser inserts after a password anywhere on the page reads empty or filled for 2 s after load. Decide whether to limit it to direct children and their single-field wrappers (efficiency, fails closed today)."
+  - id: T-18b
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T18b
+    title: "D-601: first-run download of the pinned Chrome for Testing 156.0.8078.4 into <SB_HOME or cwd>/chromium/, without blocking the transport."
+    status: todo
+    from: T-18
+  - id: T-18c
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T18c
+    title: "review-T-18 leftovers: run the Unix Pipe launch on Linux (only compiled and clippy-checked); a real-Chromium test for getFrameTree seeding and prerender activation (restored me tab with iframes, with T-22 acceptance 4); session_events channel after detach; CdpError::Closed keeps the method; sweep stale profiles/bench-* after a crash; B-601 tab titles (T-22)."
+    status: todo
+    from: T-18
+  - id: T-20b
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T20b
+    title: "review-T-20 round 2 leftovers: D-606 settle inside wait_slot has no effect (drop it or let it run past the slot; supreme to amend D-606); skip the last wait when the next slot is at or past the deadline; D-607 first-paint wait costs 3 s on a page that never paints; open dropped during Target.createTarget leaks the tab; open accepts any URL scheme; dead NoBase path and unused force in based_ctx; a challenge overlay is retried as a cover; open can wait up to 3 x OPEN_CAP; row 1 < 50 ms flaked once in 20 (72 ms, cause unknown, diagnostics added). B-606 (me scheduling, newWindow focus) needs the user; B-607 is area page."
+    status: todo
+    from: T-20
+  - id: T-21b
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T21b
+    title: "review-T-21 round 2 leftovers: (1) closed shadow roots: k#/t# on a closed host with focus inside passes the exact-focus check (rule 4 residual, review asks supreme whether to escalate); fail closed with a DOM.describeNode pierce check plus a test; (2) live test of the D-615 delegatesFocus exception (text accepted, password refused); (3) mock-CDP unit tests for the non-2xx re-fetch refusal and the file: scheme refusal; (4) until T-22 network settle, no NoVisibleChange for frame-0 steps classed Submit or higher; (5) take the event mark before the open-dialog check at the top of the act loop (act.rs:304/320); (6) tabs()/frames() rely on core install_global and have no cut-prefix rule (B-613)."
+    status: todo
+    from: T-21
+  - id: T-22b
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T22b
+    title: "accept-T-22 round 3 row 18 and review-T-22 round 2 leftovers: (1) re-run rows 03 and 13b on a quiet host; three single overruns of the 3 s + 40 ms bound (row13b2 no-nav 3.053 s, row03d w(3s) EventSource 3.083 s, row03f open() 3.042 s) happened only while the host was memory-starved; decide whether real-browser wall-clock bounds belong in the default workspace run or behind a timing gate, since they can make cargo test --workspace flaky on a loaded host; (2) D-625 counts every in-flight request with no age limit, so a page holding a long-poll (Gmail channel, docs/07 mail path) never reports settled: supreme to rule, with a long-poll fixture; (3) D-626 says the post-commit walk ends by commit + 3 s but open() calls based_ctx with OPEN_CAP; bind it; (4) D-627 hidden-page window can still report NoVisibleChange (POST_FN should return hidden and suppress the claim); (5) the gap-count test can pass with the counter off; (6) B-615 same-origin child frames in settle, B-616 worker requests, B-617 page-side mutation counter; (7) D-629 trade-off: a multi-frame program whose last step fails before input after the previous window deadline drops another frame's diff rows."
+    status: todo
+    from: T-22

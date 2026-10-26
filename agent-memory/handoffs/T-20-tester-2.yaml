@@ -1,0 +1,18 @@
+from: tester-2 (driver area, T-20 round 2)
+to: driver/suborch, then reviewer for T-20 round 2
+task: T-20
+date: "2026-10-26"
+state: "Acceptance round 2 against 84f8294 (handoff ec14c21): bench/results/accept-T-20.md has 18 rows, all pass, Verdict green. New in crates/sb-driver/tests/accept_t20.rs: row5b (cap and D-606 slots on a page that mutates every 10 ms), row5c (the same strict check on a quiet page, every wait including the last), row13 (page ids 'x (OVERLAY #12)' and 'x (#12)' give 'covered by div#x__OVERLAY__12_ (OVERLAY #2)' and 'covered by div#x___12_ (#2)'), row14 (w(1s) on a blocked page gives a failed step 'the page did not answer within 1300 ms' and keeps step 1). Row 1 now asserts every sample < 50 ms, and row 1b runs without #[ignore]: 14 of 14 runs green, first acts 4.7 to 18.3 ms. Cap 5.0025 to 5.0117 s with a 40 ms tolerance. 7 mutations all red except the expected greens (no_slot_wait on the churning page, odd-list-only on row13), each file restored. Workspace run: 941 passed, 0 failed, 5 ignored (none T-20). Vault canary sbcanary-t20r2-*: 0 hits in 33 outputs, runs/ (absent), jsonl (none), git grep, working tree."
+not_done: "1. Row 1 had one 72.1 ms sample in 20 runs (the first full run, before per-attempt diagnostics). Not reproduced in 19 runs after it, 6 of them in the same test order. Recorded as a note; if it comes back, the row1 eprintln now shows attempt entry and in-page time. 2. Round-1 mutations M1 to M9 were not re-run on round 2 code. 3. Row 13 cannot separate ACT_FN's odd list from neutral_desc on top-level ids; the coder's unit test covers the odd-only case; shadow-DOM ids remain B-607."
+gotchas:
+  - "The scratchpad is shared across tester sessions (round-1 files are there too). Count only your own files when you grep for the canary or aggregate timings."
+  - "libtest runs tests in name order under --test-threads=1, and row14_ sorts before row1_ ('4' < '_'). A test that spins a renderer runs just before row 1, so row 14 waits for its page before shutdown."
+  - "The workspace run is captured without --nocapture, so it prints no timing samples; the accept_t20 result line is its only evidence."
+  - "vault::tests::global_scrub_before_and_after_install prints a 'panicked' line on purpose (catch_unwind); it passes."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-driver/tests/accept_t20.rs
+  - bench/results/accept-T-20.md
+  - agent-memory/handoffs/T-20-tester-2.yaml
+verify: "cargo test -j 2 -p sb-driver --test accept_t20 -- --test-threads=1 --nocapture"

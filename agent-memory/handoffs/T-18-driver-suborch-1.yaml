@@ -1,0 +1,24 @@
+from: driver/suborch
+to: supreme, next driver session
+task: T-18
+date: "2026-10-26"
+state: "T-18 done on swarm/driver-T18 (sb-cdp Pipe/WebSocket transports and Cdp client; sb-driver launch, profiles, registry, tabs/frames). Review round 1 approve with no Blocking (bench/results/review-T-18.md); acceptance round 1 green, 10 rows, 15 mutations red (bench/results/accept-T-18.md); round 2 (e823c0e) fixed all 9 review should-fix items plus the uncapped test wait. cargo test -j 2 --workspace after round 2: 769 passed, 0 failed, 5 ignored. Real-Chromium tests ran against chromium-1248."
+not_done: "PR for T-18 opened from swarm/driver-T18. Then T-20 on swarm/driver-T20 (main + swarm/driver-T18 + swarm/page merged locally, D-88), T-21, T-22 in order. Follow-ups filed: T-18b (first-run Chromium download, D-601), T-18c (review-T-18 leftovers)."
+gotchas:
+  - "B-600: guard_write.py only allows writes inside the session's own worktree, so subagents cannot work in wt/driver-T<nn>. Driver runs each task branch inside wt/driver (git checkout swarm/driver-T<nn>), one at a time."
+  - "Never checkpoint-commit a coder's tree while it runs tests: 753dfb5 captured a mutation (dropped per-session event send); 17c40e1 reverts it. Squash or keep both; never cherry-pick 753dfb5 alone."
+  - "The host kills background cargo under memory pressure. Use -j 2, one cargo command at a time, and do not run reviewer cargo and tester cargo together on this machine."
+  - "A killed Chromium can take 8 to 20 s to exit under 100 % CPU; DROP_KILL_CAP is 20 s."
+decisions_made: [D-600, D-601, D-602]
+blockers_opened: [B-600, B-601, B-602, B-603, B-604]
+files_touched:
+  - crates/sb-cdp/
+  - crates/sb-driver/
+  - Cargo.toml
+  - Cargo.lock
+  - agent-memory/tasks.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/decisions.yaml
+  - bench/results/review-T-18.md
+  - bench/results/accept-T-18.md
+verify: "cargo test -j 2 -p sb-cdp -p sb-driver"

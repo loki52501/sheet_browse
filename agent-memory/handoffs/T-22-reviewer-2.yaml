@@ -1,0 +1,16 @@
+from: driver/reviewer-2
+to: driver/suborch
+task: T-22
+date: "2026-10-26"
+state: "Round 2 review of 32cbd6c (handoff c14c17b), diff a28d0bb..HEAD, written to bench/results/review-T-22.md. Verdict: approve, Blocking none. Round-1 Blocking 1 (honest() on every net_settle exit), 2 (act window calls bounded by input + 3 s, index-only call after INDEX_ROOM) and 3 (exhaustive row scrub, role included, mock and real-browser tests) are closed. All 6 round-1 should-fix items are addressed: refusal at call time in based_ctx and act, level-by-level index() that never reads below a CHALLENGE row, definite-only owner cache, tabs()/frames() escaping, and the missing tests. No cargo was run, per the brief."
+not_done: "Should-fix: (1) D-625 counts every tracked request with no age limit, so a page that keeps a long-poll open (Gmail channel) or has a stale inflight entry is settled false on every settle()/w(d); needs a long-poll fixture and a supreme ruling. (2) D-626 says the walk and its reply end by commit + 3 s, but open() calls based_ctx with an OPEN_CAP (30 s) deadline (lib.rs:657, 673); only the in-page settle is capped. (3) D-627: a hidden-page window returns its index at once and the quiet check (act.rs:435) ignores that, so NoVisibleChange can be claimed on a tab hidden for a reason other than an opened tab."
+gotchas:
+  - "The coder edited accept_t22_tester.rs (row 03 bound now from the commit, D-626); the tester should confirm it."
+  - "GAP_FN runs only in frame 0's sb world (count_gaps only in settle_tab); it does not count mutations during the first network wait."
+  - "The CHALLENGE registry mark exists only after an index(); it survives the frame's navigation (fail closed) until the parent is read again."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-22.md
+  - agent-memory/handoffs/T-22-reviewer-2.yaml
+verify: "python scripts/swarm/merge_gate.py driver --worktree ."

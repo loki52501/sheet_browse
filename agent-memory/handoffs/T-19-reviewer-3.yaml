@@ -1,0 +1,16 @@
+from: page/reviewer
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Re-reviewed the sb-act half of T-19 after fix rounds e0ee962 (D-403) and 51f1c7e (D-404), with the tester's 46c92c4. fmt and clippy clean, cargo test -p sb-act 99/99. Every round 1 Blocking and Should item is resolved and tested. Report bench/results/review-T-19-sb-act.md, Verdict: changes, 3 Blocking items. (1) classify.rs:117-121,158-165: control-char keys (raw CR, \\n, \\t, \\u7f, \\u8, \\u3) classify as Fill in a text field. A CR/LF keypress submits the form implicitly in Blink, so a card form's Pay runs as Fill, and D-403 (1) exempts only printable characters. (2) classify.rs:270-272: Enter on an activator row (button/link/option/switch/tab...) in a form no longer takes the D-433 max over the form's submits. A native checkbox with role=switch in a Checkout form is Fill (round 1 gave Pay), an unsanctioned lowering. (3) classify.rs:369: a one-time-code autocomplete field is never a card field, even when it is labelled CVC. That lowers D-403 (5) and is recorded in no decision."
+not_done: "rust-coder fixes the 3 Blocking items with tests, or suborch records a decision for (2)/(3), then re-review. Should items in order: check_planner should run a challenge pass over all steps before the ?s rule (c#14; c#42; ?s returns MissingStop, not ChallengeTarget); Enter on a submitish field skips the form's buttons (Submit instead of Pay); Enter is O(submits x rows), 2.5 s release for 200 x 1,700; a non-submit Confirm whose own heading is 'Delete account?' with no form or dialog is Navigate; Backspace and Gmail '#' on rows are not Delete; Pay/Account/Delete word gaps need a decision (Submit order, Complete order, Book now, Upgrade, authenticator app, passkey, Clear history...). Supreme still has to accept B-401 (PlannerError::ChallengeTarget)."
+gotchas:
+  - "guard_write blocks Write outside the worktree, so probes ran as a temporary crates/sb-act/tests/zz_review3_probe_tmp.rs, deleted before the commit. A concurrent tester's cargo test picked it up while it held a slow perf case, and I killed both processes. Keep probe perf cases small, or name the file so other agents' runs skip it."
+  - "Perf probes need --release. A 3,000-button form Enter takes 7 s even in release."
+  - "merge_gate.py accepts only a last line 'Verdict: approve'; 'Verdict: changes' blocks the merge, as intended."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19-sb-act.md
+  - agent-memory/handoffs/T-19-reviewer-3.yaml
+verify: "cargo test -p sb-act"

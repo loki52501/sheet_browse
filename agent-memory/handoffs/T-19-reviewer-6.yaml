@@ -1,0 +1,15 @@
+from: page/reviewer-6
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Round 4 review of the sb-act half of T-19 at 0554c29 (D-408), with main merged (73e2aa0). fmt --check and clippy --all-targets -D warnings are clean. cargo test -p sb-act is all green (lib 59, classify 16, forms 11, quote_fuzz 6, round2 18, round3 15, wire 3). R3 Should 1 and 2 are resolved within D-408 scope, and so are Leave group and Wipe device. Report: bench/results/review-T-19-sb-act.md, Round 4 section. Verdict: request changes, with one Blocking item."
+not_done: "1) Blocking for the coder: classify.rs:203-205, names_enter returns enter(row) before the D-404 (3) Delete merge and the DEL-char merge. On non-text rows, Enter+Delete, Enter+Del, Control+Enter+Delete, Return+Shift+Delete, Enter\\u{7f} and \\u{7f}Enter dropped from Delete to Navigate, Submit or Account. The old->new probe found 378 lowered steps across common::ALL plus extra rows. Fix raise-only: merge Delete when any segment is delete/del or the key holds U+007F on a non-text row, then add a test. 2) Should, also fix: Delete+Enter (Delete not last) is Navigate on a mail row. This predates D-408. 3) Should, needs a suborch ruling: a formless Pay button, or one sharing a heading with a card form in another frame (Stripe iframe), is still Navigate. Proposal: pay_words (not PAY_TOKENS) on any button or menuitem name. 4) Should, carried: split-heading 2SV set-up is still Submit. 5) Tester: add Enter+Delete chords to the item-18 lowering guard. accept_t19_round3.rs still has a 250 ms bound."
+gotchas:
+  - "Do not share one CARGO_TARGET_DIR between two git-archive snapshots of the same workspace. Cargo hashes workspace members by relative path, and archive mtimes are old, so the second run reuses the first binary and the diff shows no change. Use a separate target dir per snapshot."
+  - "The probes ran from scratchpad snapshots (git archive 0554c29^ and HEAD), not from the worktree, so the tester's crates/sb-act/tests/ files were never touched."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19-sb-act.md
+  - agent-memory/handoffs/T-19-reviewer-6.yaml
+verify: "cargo test -p sb-act"

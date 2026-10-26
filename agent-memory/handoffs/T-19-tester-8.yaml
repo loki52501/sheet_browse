@@ -1,0 +1,26 @@
+from: page/tester-8
+to: page/suborch
+task: T-19
+date: "2026-10-25"
+state: "Round-3 combined acceptance of T-19 (sb-act B-7/I-10 and injected B-4 #4 #6 #8, B-5, B-9, I-11, D-82, D-435..D-440), pinned to 46dba59 (injected.js blob from edd30e4, D-439). Verdict: red, 31 rows, 27 pass, 4 fail (J6 A10, J14 A14, J21 A18, J19 suite). All 4 fails are one D-435 (1) over-mark: D-438 (1)'s born same-parent rule takes parser-inserted fields, so a wrapper swap within 2 s of load marks the untouched Nickname field (reads filled instead of its text). This is B-415, and D-440 resolves it, but D-440 is not implemented at 46dba59. It is not a leak. Leak rows are all green at 46dba59: A14 toggles, A16 (D-438), A17 (D-439), A5/A10 canary, and 4 SB_VAULT_CANARY greps with 0 hits. HEAD moved 4 times during the run, so every JS result comes from a git-archive snapshot, never the worktree's uncommitted injected.js. At 343a533, A16 failed every time (all add-first fields leaked: review round 4 Blocking confirmed). At 688d647, A17 failed every time (D-439 leak, the canary reached __sb output in-page). Both are fixed at 46dba59. sb-act: cargo test -p sb-act 145/145, clippy -D warnings and fmt clean; contract_paths killed 2 of 2 mutants. node --test injected/test/ at 46dba59: 89/92 three times (A10, A14, A18). MUTATION_STATE New tests A12..A18 in injected/test/accept-t19.test.js; fixtures accept-v3-quiz, accept-d435, accept-d438, accept-d439, accept-media-refusal."
+not_done: "1) D-440 not implemented at 46dba59: re-run A10, A14, A18 and the full suite (3x) once it lands. A18 is the deterministic check: it swaps the wrapper about 200 ms after load. A10 and A14 only fail when their swap lands inside the 2 s window (they passed once at 688d647, in g4). 2) A3b overran once: 3056 ms against the 3050 assertion, under 36 concurrent rustc from other agents (17:53 run). The other 12 valid runs peaked at 3016 ms. Re-check on a quiet machine. 3) D-439's add-side fail-closed path is only reachable from the same JS world (jsdom); the Chromium acceptance cannot test it. Caps (S.gone 32, S.born 64, NEAR_MAX 64) are untested. 4) Not covered by design: un-observed open shadow roots, fields built detached, rebuilds later than 2 s. 5) review-T-19.md is the reviewer's and was not touched."
+gotchas:
+  - "Other agents commit to swarm/page and edit injected/ in this worktree while you test. Pin a commit: git archive <sha> injected bench/pages into runs/<you>/<snap>, copy the uncommitted test file and fixtures in, and run there with NODE_PATH=<worktree>/injected/test/node_modules. A run that loads the worktree's injected.js may be testing someone's half-done edit (full-4..6 of this round were void)."
+  - "merge_gate.check_accept: one table per file; any line starting with | is a table row, so no | inside cells, not even in backticks or names like group|captcha. Turn earlier rounds' tables into git show pointers."
+  - "Leak tests: compare values inside world sb and return only kinds, counts and booleans. Otherwise a real leak prints the canary into the TAP, and the stdout grep turns one fail into two. A14..A18 do this; the older A10 messages still print states on failure."
+  - "Mutation baselines: when HEAD already fails some tests, run a no-op mutant ('none') and judge kills by new failing tests or a different first error line (mutrun.sh records both). A test that fails at HEAD cannot be killed; show it discriminates instead (passes at an older commit, on the coder's WIP, or with the guilty rule removed)."
+  - "Bash heredocs containing apostrophes fail in this harness; write JS with the Write/Edit tools. Python heredocs with only double quotes work."
+  - "The parser's own insertions reach the MutationObserver (installed at document start), so anything 'remembered for 2 s after an add' also remembers the whole initial page."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - injected/test/accept-t19.test.js
+  - bench/pages/accept-v3-quiz.html
+  - bench/pages/accept-d435.html
+  - bench/pages/accept-d438.html
+  - bench/pages/accept-d439.html
+  - bench/pages/accept-media-refusal.html
+  - bench/results/accept-T-19-js.md
+  - bench/results/accept-T-19.md
+  - agent-memory/handoffs/T-19-tester-8.yaml
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page node --test injected/test/ && cargo test -p sb-act && python -c \"import sys,pathlib; sys.path.insert(0,'scripts/swarm'); import merge_gate as g; print(g.check_accept(pathlib.Path('bench/results/accept-T-19.md').resolve()))\""

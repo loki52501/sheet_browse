@@ -1,0 +1,19 @@
+from: tester-2 (driver area, T-21 round 2)
+to: driver/suborch, then supreme for merge
+task: T-21
+date: "2026-10-26"
+state: "Acceptance round 2 against 08b898e (implementation d895155): bench/results/accept-T-21.md has 21 rows, all pass, Verdict green. crates/sb-driver/tests/accept_t21_tester.rs now has 16 tests (public API, real chromium-1248). Round-1 reds closed: row10b (an off-screen frame click now scrolls the frame into view and hits the 8 px target) and row14b (workspace 998 passed, 0 failed, 5 ignored, 668 s, not killed). New: row10c (iframe in iframe, both below the fold, hit, inner counter 1), row15 long echo (a 172-char @vault value in 6 headings incl. diff cuts at 9/8/7 value chars, index cuts at 150, title, URL, opened-tab title, alert, GET form; checked in Debug, serde, diff, consequences, tabs(), frames(): no canary and no 8-char prefix), row16 focus (modal <dialog> takes focus itself, Pay 0; div dialog with autofocused Pay fails 'did not take focus', Pay 0, keys 0; t# on a div group or fieldset with a focused password field types nothing), row17 timer dialog between steps (937 ms with a 900 ms timer, 22 ms at 0 ms, no stall), row18 non-2xx re-fetch (500 and 404) not saved, Cf names clean, row19 stale target after navigation is Failed 'stale' (and removed element 'gone'), never a stop. 6 of 6 mutations red and restored (MA1 prefix rule off, MA2 tabs unscrubbed, MB descendant focus, M10 no frame scroll, MC dialog race off, ME stale check off). Canary sweep 0 hits everywhere. accept_t18, accept_t20 (12/12), coder accept_t21 (10/10), clippy and fmt green."
+not_done: "Nothing for T-21 acceptance. Notes for later: (1) tabs()/frames() scrub only via the process-wide vault, so they need install_global (MCP does it) and get no cut-prefix rule (B-613). (2) Chromium already maps U+202E/U+200B/U+FEFF/U+2066 in download names to '_', so the driver's Cf filter is only proven by its unit test. (3) The reviewer's closed-shadow-root focus residual (review round 2 Should-fix 1) is untested by the tester."
+gotchas:
+  - "The process-wide scrubber is shared across tests in one binary: row06 installs a vault holding the canary. A test that wants to prove the driver's own scrub must install an unrelated vault first (neutral_global in the tester file)."
+  - "Under Fill, t# or k# on a container that is not an index row (div role=group) is stopped by the gate as Submit (D-402) before the focus check runs. Use Pay to reach the focus rule."
+  - "A modal <dialog> element takes focus itself on focus(); to test a focused descendant use a div role=dialog with <button autofocus>."
+  - "Do not put the ActResult in an assertion message before the vault checks: a failing mutation would print the canary into the log."
+  - "Bash heredocs with Rust string continuations (backslash at line end) are fragile here; write edit scripts with the Write tool into target/scratch/<you>/ and run them."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-driver/tests/accept_t21_tester.rs
+  - bench/results/accept-T-21.md
+  - agent-memory/handoffs/T-21-tester-2.yaml
+verify: "SB_VAULT_CANARY=sbcanary-<unique-with-dash> cargo test -j 2 -p sb-driver --test accept_t21_tester -- --test-threads=1 --nocapture"

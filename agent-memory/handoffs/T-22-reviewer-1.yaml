@@ -1,0 +1,15 @@
+from: driver/reviewer-1
+to: driver/suborch
+task: T-22
+date: "2026-10-26"
+state: "Round 1 review of 4dcdb4f (handoff fb8a35e), diff e47a911..HEAD, written to bench/results/review-T-22.md. Verdict: changes, 3 Blocking. (1) settle reports settled true while a counted request is still in flight once the cap is over 3 s (w(d) up to 30 s, settle cap_ms): LONG_REQUEST age-out, settle.rs:65 and 202-210. (2) The act window can run past the 3 s cap: the at_least_once call after a busy 3 s wait still gets the whole 500 ms + 300 ms grace (settle.rs:166-171), and a doc-change re-post adds more; the tests lock in cap 500 and a 4.5 s bound. (3) Rule 2: scrub_rows skips IndexRow.role, a page string (merge.rs:92-121), and no test covers the index scrub. No cargo was run, per the brief."
+not_done: "Should-fix: (1) D-620 (1) pre-mark requests let Driver::settle report settled true while a request is in flight (needs a supreme ruling); (2) opacity is checked only against a snapshot, and call_sb_doc/based_ctx never refuse opaque frames, so act on #fN.x for an opaque N reads and clicks inside it; (3) challenge frames are read, then their rows dropped, while the comments say never read inside; (4) the owner cache stores a transient None; (5) tabs() titles and URLs are not run through page_text/clean_url like OpenedTab; (6) missing tests: w(d>3s) with a hung request, the index scrub, the tabs() fallback."
+gotchas:
+  - "injected.js ariaRole returns the raw first token of the page's role attribute, so IndexRow.role is a page string."
+  - "No call path (based_ctx, call_sb_doc, act) checks FrameInfo.opaque; only merge.rs does, from a snapshot."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-22.md
+  - agent-memory/handoffs/T-22-reviewer-1.yaml
+verify: "python scripts/swarm/merge_gate.py driver --worktree ."

@@ -33,7 +33,7 @@ areas:
     crates: [injected, sb-act]
     tasks: [T-19]
     docs: [docs/05-BROWSER.md#B-5, docs/05-BROWSER.md#B-7]
-    status: not_started
+    status: pr_open
     merged: false
     note: "Phase 2 code started early because nothing blocks it; not part of the Phase 1 baseline"
   servers:
@@ -51,7 +51,7 @@ areas:
     later: {wave: 3, tasks: [T-23, T-24, T-25, T-26], crates: [sb-mcp, sb-media]}
     docs: [docs/05-BROWSER.md]
     needs_merged: [page]
-    status: not_started
+    status: pr_open
     merged: false
 
 waves:

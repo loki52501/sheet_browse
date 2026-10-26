@@ -1,0 +1,16 @@
+from: page/reviewer-13
+to: page/suborch
+task: T-19
+date: "2026-10-26"
+state: "Round 8 leak check at a9e246a (code 8fb00b4, D-443) in bench/results/review-T-19.md: Verdict request changes, one Blocking item. node --test injected/test/ 103/103 on a git-archive snapshot (177 s). D-443 closes round 7 (Chromium O1..O3 and C neutral/wrap/d440 mid read 0, settled true; jsdom V3m mid, X7, X7f, N5 read 0). Mutants on the snapshot: no nearLivePw call, no D-443 (3) rule and no 2 s limit are all killed. Every reviewer-10..12 probe re-run (jsdom 4 modes, Chromium all) in runs/reviewer-13/out; the coder's still-leaking list reproduces as reported. Tests are honest (A14 moves the D-435 (1) text check to r3 after the window, and the canary and reads checks cover r1..r3). fieldValue is the only value getter call site and no reader bypasses the S.nearPw mask. sb-act and interfaces.yaml unchanged."
+not_done: "1) Blocking, needs supreme: visibility-swap show toggles. Y7: a twin text input present from load, synced, Show flips display; Y6: clone and hide, the copy added and the password set to display:none and kept. Click, settle (settled true), read puts the password in index/text/state, and it persists (runs/reviewer-13/probe-r13-chromium.js). No add/remove rule applies, and it leaked at every earlier round. Prototype in runs/reviewer-13/fix (fix.diff, 12 lines): fieldValue masks a value field whose parent directly holds a sensitive field that is not displayed(). Y5, Y6 and Y7 read 0 and node --test stays 103/103. Cost: a visible field next to a hidden password in one parent reads empty|filled. Supreme: amend (D-444, with Y6/Y7 browser tests), or re-accept in writing citing Y6/Y7 (then Should fix). 2) Should fix: V5, X1/Y1/X1b cross-parent, V9 S.born cap, N2/N2b/dbg real clock (a jsdom artifact: jsdom took 3 to 5 s to add the fields, and a frozen clock reads 0), O4. Correct D-443's wording: the boundary is the 2 s window, not the settle cap; O5 (2.5 s CSS fade) settles true and leaks, O6 (2.5 s JS exit) leaks after the removal. X2w/X2w0/X5 (masked mid now, leak after the removal). Y1g (copy at the grandparent, the wrapper stays). Y3/Y3d (a password moved in the copy's batch is skipped by nearOf at injected.js:2095, a D-443 (1) gap). Y5 (D-443 (3) stands down on the new hidden password's key match)."
+gotchas:
+  - "probe-r11-dbg*.js and probe-r10-jsdom-snap2.js have no FROZEN switch: their FROZEN column is real clock. Use runs/reviewer-13/dbg3-timed.js for a frozen run."
+  - "Y2c (detach the parent, remove the password while detached, reattach) leaks in jsdom only: jsdom has no transient registered observers; Chromium reads 0."
+  - "probe-r13-chromium.js takes argv[2] as the tree root, so pass runs/reviewer-13/fix to check the prototype."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19.md
+  - agent-memory/handoffs/T-19-reviewer-13.yaml
+verify: "TMP=F:/sb-swarm/tmp-page NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules node runs/reviewer-13/probe-r13-chromium.js (Y7 same/next/late leak=true, Y6 late leak=true at a9e246a; pass F:/sb-swarm/wt/page/runs/reviewer-13/fix as argv[2] for leak=false) and node --test injected/test/ in runs/reviewer-13/snap (103/103)"

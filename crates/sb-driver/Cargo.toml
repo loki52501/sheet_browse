@@ -12,4 +12,15 @@ sb-act.workspace = true
 sb-cdp.workspace = true
 sb-sheet.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+percent-encoding.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+harness-core = { workspace = true, features = ["testing"] }
+bytes.workspace = true
+tokio = { workspace = true, features = ["net", "test-util"] }

@@ -1,0 +1,83 @@
+<!doctype html>
+<!--
+  bench/pages/accept-d444b.html: a password moved or re-attached in its copy's batch, and a
+  new password with the old one's key (review-T-19 round 8 Y3, Y3x, Y3d, Y5, Y5v; D-444 (2),
+  (3)) for the T-19 acceptance (tester-10, round 5). The test opens the page once per case and
+  clicks one button. Every copy is a neutral text input (no password-like name or label).
+    show-y3   one batch appends the copy and moves the password after it (w.append(copy, pw)),
+              password removed 300 ms later
+    show-y3x  the same move into another parent (#z-y3x), password removed 300 ms later
+    show-y3d  the password is detached, then a later task appends the copy and re-attaches the
+              password in one batch, password removed 300 ms later
+    show-y5   one batch replaces the password with [copy, a display:none password with the same
+              name and label]
+    show-y5v  the same with a visible new password
+  Control: #user reads its text.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Moved and keyed passwords · acceptance fixture</title>
+<style>body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; } div { margin-top: 4px; min-height: 8px; }</style>
+<script>
+  const $ = (id) => document.getElementById(id);
+  function copyOf(o, k) {
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = "copy-" + k;
+    n.name = "entry_" + k;
+    n.setAttribute("aria-label", "Shown entry " + k);
+    n.value = o.value;
+    return n;
+  }
+  function newPw(o, k, hidden) {
+    const p = document.createElement("input");
+    p.type = "password";
+    p.id = "pw2-" + k;
+    p.name = o.name;
+    p.setAttribute("aria-label", o.getAttribute("aria-label"));
+    if (hidden) p.style.display = "none";
+    p.value = o.value;
+    return p;
+  }
+  function y3() { const o = $("pw-y3"); $("w-y3").append(copyOf(o, "y3"), o); setTimeout(() => o.remove(), 300); }
+  function y3x() { const o = $("pw-y3x"); $("z-y3x").append(copyOf(o, "y3x"), o); setTimeout(() => o.remove(), 300); }
+  function y3d() {
+    const o = $("pw-y3d");
+    const w = $("w-y3d");
+    const n = copyOf(o, "y3d");
+    o.remove();
+    setTimeout(() => { w.append(n, o); setTimeout(() => o.remove(), 300); }, 50);
+  }
+  function y5() { const o = $("pw-y5"); o.replaceWith(copyOf(o, "y5"), newPw(o, "y5", true)); }
+  function y5v() { const o = $("pw-y5v"); o.replaceWith(copyOf(o, "y5v"), newPw(o, "y5v", false)); }
+</script>
+</head>
+<body>
+<main>
+  <h1>Accounts</h1>
+  <form id="f0" action="/profile" method="post">
+    <label>User <input id="user" name="user" value="ada"></label>
+  </form>
+  <form id="f-y3" action="/a" method="post">
+    <div id="w-y3"><input id="pw-y3" name="password" type="password" aria-label="Password"></div>
+    <button id="show-y3" type="button" onclick="y3()">Show password</button>
+  </form>
+  <form id="f-y3x" action="/b" method="post">
+    <div id="w-y3x"><input id="pw-y3x" name="password" type="password" aria-label="Password"></div>
+    <div id="z-y3x"></div>
+    <button id="show-y3x" type="button" onclick="y3x()">Show password</button>
+  </form>
+  <form id="f-y3d" action="/c" method="post">
+    <div id="w-y3d"><input id="pw-y3d" name="password" type="password" aria-label="Password"></div>
+    <button id="show-y3d" type="button" onclick="y3d()">Show password</button>
+  </form>
+  <form id="f-y5" action="/d" method="post">
+    <div id="w-y5"><input id="pw-y5" name="pw" type="password" aria-label="Account key"></div>
+    <button id="show-y5" type="button" onclick="y5()">Show key</button>
+  </form>
+  <form id="f-y5v" action="/e" method="post">
+    <div id="w-y5v"><input id="pw-y5v" name="pw" type="password" aria-label="Account key"></div>
+    <button id="show-y5v" type="button" onclick="y5v()">Show key</button>
+  </form>
+</main>
+</body>
+</html>

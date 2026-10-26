@@ -1,0 +1,17 @@
+from: page/rust-coder
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "D-407 applied in commit 3122050 (crates/sb-act/src/classify.rs, lib.rs). Pay (pay_words, so form headings/names and submit names): complete order (within two words, 'Complete your order'), order now, place bid ('Place your bid'), top up / Top-up / topup, send money, transfer money / funds ('Transfer the funds'). Renew is Pay only on a submit's own name (submit_class, next to upgrade): a 'Renew' link, a 'Renew your subscription' heading over Save, and 'Renewal date' are not Pay. Account: 'create' joins setup_verbs, so 'Create a passkey' (heading or button) and 'Create' under a Passkeys heading are Account; 'Sign in with a passkey' + Continue stays Submit. 'Book now', 'Reserve', 'Transfer ownership', 'Send message', 'Order history' stay at their previous class (Submit on a submit, Navigate as a link/button). The D-407 sanctioned behaviours are documented with citations in the lib.rs and classify.rs headers, the delete_text doc ('Cancel and/or ...') and the key_press doc (Backspace on a non-text row is click(row)). New unit test d407_word_lists. Gates (unpiped): cargo fmt -p sb-act --check clean, cargo clippy -p sb-act --all-targets -D warnings clean, cargo test -p sb-act 109/109 (lib 58, accept_t19_classify 16, accept_t19_forms 11, accept_t19_quote_fuzz 6, accept_t19_round2 18)."
+not_done: "1) Reviewer and tester on 3122050. 2) Per D-407, remaining word-list gaps are Should items; none open from me. 3) PlannerError::ChallengeTarget still needs supreme's acceptance under interface_changes for I-10 (B-401)."
+gotchas:
+  - "A heading like 'Sign in with a passkey or create an account' is now Account in a heading context: 'create' is within four words of 'passkey'. This only raises (false Pay/Account costs one ask), so it was left as is."
+  - "'top up' matches with nothing between the two words only; 'Back to top' does not match."
+  - "cargo fmt -p sb-act also formats crates/sb-act/tests; it changed nothing there this time, but check git status before staging."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-act/src/classify.rs
+  - crates/sb-act/src/lib.rs
+  - agent-memory/handoffs/T-19-rust-coder-6.yaml
+verify: "cargo fmt -p sb-act --check && cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act"

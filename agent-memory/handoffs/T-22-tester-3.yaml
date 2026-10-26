@@ -1,0 +1,18 @@
+from: tester-3 (driver area, T-22 round 3)
+to: driver/suborch, then supreme (a call on row 18)
+task: T-22
+date: "2026-10-26"
+state: "Narrow acceptance re-check of row 13b-2 at 146afc0 (implementation 98641c1, D-629): bench/results/accept-T-22.md, Verdict red, on one new row (18) only. Row 13b-2 is pass: with the navigation to a busy page (the round-2 red) 0 of 54 samples go over the bound, worst 3.021 s from the click; round 2 was 3.063 to 3.065 s in 5 of 5 runs. Mutation B3 (window calls not cut at the deadline) is now red on row13b2 (3.070 s, 3.065 s), and P1 (fresh CALL_CAP and no reads_end guard in program_rows) is red (3.068 s, 3.071 s); each ran twice and git status was empty after each. Full accept_t22_tester binary 26/26. Package run 2 (cargo test -j 2 -p sb-driver -p sb-cdp --no-fail-fast -- --test-threads=1) green in every binary. fmt and clippy clean. Canary sbcanary-t22r3-<hex> (with '-'): 0 hits in 34 logs, the worktree, bench/results and the temp dir; no runs/, no jsonl. Workspace not run by the tester (caller's order); the coder's number 1059 passed, 0 failed, 5 ignored is quoted as the coder's. No test or implementation file was changed in round 3."
+not_done: "Row 18 is red: 3 one-off overruns of a 3 s + 40 ms bound in unmutated runs, none repeated: row13b2 without navigation 3.053 s from the click (run 5 of the first five alone), row03d w(3s) on the EventSource page 3.083 s and row03f open() commit-to-return 3.042 s (both in package run 1, where open() navigation took 1.2 s instead of 0.3 to 0.4 s). Round 3 did not change these paths. The host was starved during the round (other worktrees running cargo test with about 100 chrome-headless-shell processes, 1.1 to 1.5 GB free of 16 GB, one fork failed with 0xC000012D). No code cause was found. Supreme or the suborch must decide: re-run rows 03 and 13b on a quiet host, or accept these as host noise. Still open from earlier rounds: B-615, B-616, B-617, D-617 frame merging, B-4 #10."
+gotchas:
+  - "row13b2 stops at its first overrun, so a single slow sample fails the whole run. Count samples, not runs: a python pass over the 'row13b busy nav at' lines of every log gives per-case n, max and count over 3.04 s."
+  - "Plain cargo test stops at the first failing binary; add --no-fail-fast to see every binary."
+  - "Python files in the scratchpad cannot be written by the Write tool (guard_write hook: outside the worktree). Put helper scripts under target/scratch/tester-t22/ (git-ignored). Heredocs with escaped quotes break in this bash; write the script with the Write tool and run it."
+  - "python -I hides user site-packages, so scripts/swarm/merge_gate.py (needs yaml) must be run without -I. merge_gate.check_accept(path) can be called directly to check the report."
+  - "mutate2.py now has P1 (round 3). mut2.sh was switched to canary3 and logs to mut3-<ID>.log."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/accept-T-22.md
+  - agent-memory/handoffs/T-22-tester-3.yaml
+verify: "SB_VAULT_CANARY=sbcanary-<unique-with-dash> cargo test -j 2 -p sb-driver --test accept_t22_tester -- --test-threads=1 --nocapture row13b2"

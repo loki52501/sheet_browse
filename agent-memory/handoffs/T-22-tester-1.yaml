@@ -1,0 +1,19 @@
+from: tester-1 (driver area, T-22 round 1)
+to: driver/suborch, then rust-coder for round 2
+task: T-22
+date: "2026-10-26"
+state: "Acceptance round 1 against ef5047e (implementation 4dcdb4f): bench/results/accept-T-22.md, Verdict red. New crates/sb-driver/tests/accept_t22_tester.rs, 19 tests (real chromium-1248, pages written in the test): 13 pass, 6 fail. Green: row 1 acceptance 4 (window.open and target=_blank popups with opener 1, same-origin iframe plus nested, cross-port and cross-site OOPIF one OPAQUE row each, opaque marker never in index/skeleton, document order), row 2 acceptance 5 skeletons (400 ms SPA, 1.5 s fetch SPA, two-fetch chain), row 3a settle() cap (max 3.015 s over 5 runs x 5 pages: endless mutations, never-ending fetch, CSS animation loop, EventSource, mix), row 3b w(3s) cap (max 3.014 s), row 4 request started after settle began holds it (1.47 s, 1.24 s) and settled false at the cap (3.014 s), row 5 slow submit (900 ms XHR and fetch give '+ heading Saved', never-answering ones 3.02 s, no NoVisibleChange), row 6a fresh titles, row 6b canary scrubbed in tabs() after install_global, row 7 close (TabGone everywhere, sessions gone, target gone, b works, 0 events for a), row 8 password in a frame Empty/Filled only, row 9 no new sleeps, row 10 9/9 mutations red and restored, row 11a regressions (accept_t22 7, accept_t18 1+5, accept_t20 12, accept_t21 10, accept_t21_tester 16, clippy, fmt). Workspace run (cargo test -j 2 --workspace --no-fail-fast -- --test-threads=1) ran to the end, not killed: 92 binaries, 1032 passed, 6 failed (exactly the 6 tester red tests), 5 ignored (pre-existing T-08 red-first and child helpers); accept_t20 row1b passed under load. Canary sweep 0 hits."
+not_done: "Red rows for the coder: (1) row 3c: open() on a page that never settles takes 3.29 to 3.62 s total (3.03 to 3.11 s from the main-frame commit); the in-page settle in the based walk is capped at 3 s from when the walk call reaches the page, with paint wait, walk, reply and navigation on top. open needs one deadline and an in-page cap of the time left minus a reply margin. (2) row 6c: tabs() titles (and URLs) are only scrubbed, not escaped: '@vault(pw) #12 [x](#3)' comes back raw; apply diff.rs page_text / clean_url as consequences do. Then re-run the verify command with the filters row03f to row03j and row06c."
+gotchas:
+  - "A request must start while settle is still running to hold it: on a quiet page settle() returns after about 160 ms (150 ms quiet window), so a setTimeout of 200 ms starts too late. Use 50 to 100 ms."
+  - "Chromium allows 6 connections per host:port; never-answered fetches must go to the second server's port or they starve the page's own requests and the next open()."
+  - "A click on a plain button on a quiet page produces no CDP events at all; to prove events still flow for a tab, make it fetch something."
+  - "Python on Windows writes CRLF in text mode: write implementation mutations with newline='' (mutate.py does) or git warns and the restore looks dirty."
+  - "Settled.changed does not count mutations that happen while the Rust side waits for the network between in-page calls (row 4 shows changed 0 while #o changed)."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-driver/tests/accept_t22_tester.rs
+  - bench/results/accept-T-22.md
+  - agent-memory/handoffs/T-22-tester-1.yaml
+verify: "SB_VAULT_CANARY=sbcanary-<unique-with-dash> cargo test -j 2 -p sb-driver --test accept_t22_tester -- --test-threads=1 --nocapture"

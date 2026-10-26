@@ -1,0 +1,19 @@
+from: tester-1 (driver area, T-20 round 1)
+to: driver/suborch, then rust-coder for T-20 follow-up
+task: T-20
+date: "2026-10-26"
+state: "Acceptance for docs/05 acceptance 2 plus B-4 #3, #6, #11, D-603, D-604 and D-605 is written as crates/sb-driver/tests/accept_t20.rs: 7 real-Chromium tests plus 1 #[ignore]d strict timing test, public API only. The report is bench/results/accept-T-20.md: 13 rows pass, 1 row fails (1b), Verdict red. Passing: covered gives the cover with a median first answer of about 11 ms; the retry succeeds after the cover goes; disabled gives 'disabled after 5.0 s'; the 5 s cap holds at 5.012 to 5.023 s; the D-603 backoff was observed in the page (waits 2, 55, 118, 256, 514, then about 510 ms, the last one capped); gone, stale and challenge each take 1 attempt and a challenge sets stopped; D-604 ids after navigation run 1..7, then 100001.., then 200001.., with no repeats; B-4 #11 retries exactly once; no vault value or t# text in labels or errors (canary 0 hits everywhere); no sleeps. All 12 mutations went red and each file was restored. Workspace: 928 passed, 3 failed, all from the tester and re-run green. accept_t18 passed 5 of 5 alone and 1 of 1 in the workspace run (flake not reproduced)."
+not_done: "1. Row 1b (fail): the first act after browser launch, on its first tab, answered in 104 to 154 ms in 6 of 15 samples, because __sb.act waits out nextFrame's 100 ms fallback (rAF did not fire in the first window). Every other sample of about 90 was 5 to 18 ms. Fix: the first act after launch must not wait on an animation frame the compositor has not produced. For example, open() could await one rendered frame in its settle-and-walk round trip. Re-check with: cargo test -j 2 -p sb-driver --test accept_t20 row1b -- --ignored --nocapture, run about 6 times. 2. Observation for T-21/T-22, outside acceptance 2: under heavy load, w(50ms) can miss its d + 300 ms call deadline. Driver::act then returns Err(Timeout(\"w()\")) for the whole program instead of a failed step that keeps the earlier steps' results."
+gotchas:
+  - "__sb is frozen (Object.defineProperty plus Object.freeze), so act cannot be wrapped. To count attempts, wrap what act calls, inside the sb world: Number.isInteger (resolve calls it once on entry, with the id) and document.elementFromPoint (one hit test per attempt). The page world cannot see either wrapper."
+  - "Never call __sb.id in a new document before the driver has walked it. Run any driver call first (act 'w(50ms)'); otherwise the answer is 'no base'."
+  - "Browser tests in one test binary run in parallel by default. Seven Chromiums at once broke the timing rows (wait 1 was 133 ms, w(50ms) timed out). accept_t20.rs holds a static tokio Mutex for each test's lifetime."
+  - "core-pg accept_t03_r3 requires SB_VAULT_CANARY to contain 'sbcanary'. Use sbcanary-<unique> when you export it for a workspace run."
+  - "Registry::frame_url is pub(crate). Integration tests read the main-frame URL from Registry::tabs()."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-driver/tests/accept_t20.rs
+  - bench/results/accept-T-20.md
+  - agent-memory/handoffs/T-20-tester-1.yaml
+verify: "cargo test -j 2 -p sb-driver --test accept_t20 -- --test-threads=1 --nocapture"

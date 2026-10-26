@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fade show toggle with a swap on leave</title>
+<style>
+  input { transition: opacity .3s; }
+  .out { opacity: 0; }
+</style>
+<script>
+  // D-441: an add-first show toggle whose leave is a swap. show() mounts a field that shares no
+  // key with the password, after it in the same parent, holding its value. When the password's
+  // fade ends (transitionend) it is replaceWith'd by a different, empty field, so the removing
+  // batch is a one-for-one swap (D-437) and the field added after load must still inherit.
+  // fade() starts the leave, so a test can act between the two steps.
+  function show() {
+    const o = document.getElementById("acct");
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = "q9";
+    n.value = o.value;
+    o.after(n);
+    o.addEventListener("transitionend", () => {
+      const h = document.createElement("input");
+      h.type = "text";
+      h.id = "hint";
+      h.placeholder = "Hint";
+      o.replaceWith(h);
+    }, { once: true });
+  }
+  function fade() {
+    document.getElementById("acct").classList.add("out");
+  }
+</script>
+</head>
+<body>
+<form>
+  <div id="w"><input id="acct" name="acct" type="password" aria-label="Account key"></div>
+  <button id="toggle" type="button" onclick="show()">Show</button>
+  <input id="user" aria-label="User">
+</form>
+</body>
+</html>

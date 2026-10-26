@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Accept D-445: Vue v-show component twin and an off-screen password</title>
+<style>
+  .field{margin:4px 0}
+  .field .help{margin:0;font-size:12px}
+  .gone-up{position:absolute;top:-9999px;left:auto}
+</style>
+<script>
+  // A23 (tester-11, round 6): D-445 (1) and (2) in tester-written shapes.
+  // v: a Vue BaseInput rendered twice under v-show (div.field > label + div.control > input + p.help).
+  //    Show sets style.display on the components, the inputs keep their own style. The plain
+  //    twin shares no key with the password and is kept in sync by an input listener.
+  // o: the password moved off the top of the page (position absolute, top -9999px, full-size
+  //    box), the twin moved back in. Neither input changes display.
+  const $ = (id) => document.getElementById(id);
+  const sync = (from, to) => { $(to).value = from.value; };
+  function showV() { $("pw-v").closest(".field").style.display = "none"; $("twin-v").closest(".field").style.display = ""; }
+  function showO() { $("pw-o").classList.add("gone-up"); $("twin-o").classList.remove("gone-up"); }
+</script>
+</head>
+<body>
+<h1>Sign in</h1>
+<!-- control before every password and alone in its label: D-443 (1) never masks it, whatever
+     batches the parser inserts the page in -->
+<p><label>Display name <input id="user" name="display"></label></p>
+<form id="fv" onsubmit="return false"><div id="wv">
+  <div class="field"><label for="pw-v">Password</label><div class="control"><input id="pw-v" type="password" autocomplete="current-password" oninput="sync(this, 'twin-v')"></div><p class="help">At least 8 characters</p></div>
+  <div class="field" style="display:none"><label for="twin-v">Password</label><div class="control"><input id="twin-v" type="text" autocomplete="off"></div><p class="help">At least 8 characters</p></div>
+</div>
+  <button id="show-v" type="button" onclick="showV()">Show password</button></form>
+<form id="fo" onsubmit="return false"><div id="wo"><label for="pw-o">Passcode</label>
+  <input id="pw-o" type="password" autocomplete="current-password" oninput="sync(this, 'twin-o')"><input id="twin-o" type="text" class="gone-up" aria-label="Passcode shown"></div>
+  <button id="show-o" type="button" onclick="showO()">Show passcode</button></form>
+</body>
+</html>

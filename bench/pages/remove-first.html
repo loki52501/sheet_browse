@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Remove-first show toggle</title>
+<script>
+  // D-439: a show toggle in the order of Vue <Transition mode="out-in"> or a re-render split
+  // by a timer: the old field leaves now, and in a later task a new field that shares nothing
+  // with it (id, name, label, type) enters the same parent with the value.
+  function reveal() {
+    const o = document.getElementById("key");
+    const p = o.parentNode;
+    const v = o.value;
+    o.remove();
+    setTimeout(() => {
+      const n = document.createElement("input");
+      n.id = "shown";
+      n.setAttribute("aria-label", "Visible text");
+      n.value = v;
+      p.appendChild(n);
+    }, 0);
+  }
+</script>
+</head>
+<body>
+<form>
+  <div id="w"><input id="key" type="password" aria-label="Account key">
+    <button id="show" type="button" onclick="reveal()">Show</button></div>
+  <input id="user" aria-label="User">
+</form>
+</body>
+</html>
