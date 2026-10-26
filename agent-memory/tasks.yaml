@@ -129,7 +129,7 @@ tasks:
     step: 6
     title: "sb-cdp Pipe transport, launch, flattened sessions, pipelining; registry skeleton"
     docs: [docs/05-BROWSER.md]
-    status: doing
+    status: done
     owner: driver/suborch
     claimed_at: "2026-10-25"
     branch: swarm/driver-T18
@@ -272,3 +272,19 @@ tasks:
     title: "page review items: Blocking in review-T-19.md, add-first password-field rebuild split across observer batches leaks the password into index()/state() (D-435 (2), hard rule); then its should-fix items."
     status: todo
     from: T-19
+  - id: T-18b
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T18b
+    title: "D-601: first-run download of the pinned Chrome for Testing 156.0.8078.4 into <SB_HOME or cwd>/chromium/, without blocking the transport."
+    status: todo
+    from: T-18
+  - id: T-18c
+    step: follow-up
+    wave: 2
+    owner: driver
+    branch: swarm/driver-T18c
+    title: "review-T-18 leftovers: run the Unix Pipe launch on Linux (only compiled and clippy-checked); a real-Chromium test for getFrameTree seeding and prerender activation (restored me tab with iframes, with T-22 acceptance 4); session_events channel after detach; CdpError::Closed keeps the method; sweep stale profiles/bench-* after a crash; B-601 tab titles (T-22)."
+    status: todo
+    from: T-18
