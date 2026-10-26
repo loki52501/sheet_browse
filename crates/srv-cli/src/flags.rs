@@ -52,7 +52,7 @@ struct FlagsFile {
 
 /// Parses and checks `flags.toml`: provider names are folded to ASCII lowercase (two names
 /// that fold together are an error), every `auth` references a vault entry, every `api` is
-/// an http(s) URL. A missing file is no providers.
+/// an https URL (plain http only to a loopback host). A missing file is no providers.
 pub fn load_providers(path: &Path) -> Result<BTreeMap<String, Provider>, ToolError> {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -87,9 +87,8 @@ fn parse_providers(src: &str) -> Result<BTreeMap<String, Provider>, String> {
             ))
             }
         }
-        match url::Url::parse(&p.api) {
-            Ok(u) if matches!(u.scheme(), "https" | "http") && u.host_str().is_some() => {}
-            _ => return Err(format!("provider {key}: api must be an http(s) URL")),
+        if let Err(e) = http::secure_base(&p.api) {
+            return Err(format!("provider {key}: {e}"));
         }
         if out.insert(key.clone(), p).is_some() {
             return Err(format!(
@@ -310,5 +309,20 @@ mod tests {
             "[providers.y]\napi = \"ftp://x\"\nauth = \"@vault(f)\"\nread = \"/\"\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn api_must_be_https_unless_loopback() {
+        let p = |api: &str| {
+            parse_providers(&format!(
+                "[providers.y]\napi = \"{api}\"\nauth = \"@vault(f)\"\nread = \"/\"\n"
+            ))
+        };
+        assert!(p("http://flags.example.com/api").is_err());
+        assert!(p("http://10.0.0.5/api").is_err());
+        assert!(p("https://flags.example.com/api").is_ok());
+        assert!(p("http://127.0.0.1:8080/api").is_ok());
+        assert!(p("http://[::1]:8080/api").is_ok());
+        assert!(p("http://localhost:8080/api").is_ok());
     }
 }

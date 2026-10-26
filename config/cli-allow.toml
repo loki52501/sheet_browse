@@ -10,7 +10,8 @@
 #   write = ["sub", ...]          first arguments that change state: class Account (asks)
 #   delete = ["sub", ...]         first arguments that delete: class Delete (asks)
 #   default = "refuse"            any other first argument: read | write | delete | refuse
-#   deny_flags = ["-x", "--y"]    refused anywhere: as given, as --y=value, and -xvalue
+#   deny_flags = ["-x", "--y"]    refused anywhere: as given, as --y=value, -xvalue, and a
+#                                 short letter anywhere in a single-dash cluster (-ax, -abx)
 #   timeout_secs = 60             optional cap on one run
 #
 # Shipped with read-only examples only. Add write entries yourself; each one asks first.
@@ -20,6 +21,10 @@ read = ["status", "log", "diff", "show", "rev-parse", "ls-files", "blame"]
 default = "refuse"
 # -c and --config-env set config that can run commands; --output writes files; the rest
 # change which repository or helper programs are used.
+# The cwd must be trusted: even read subcommands (status, diff, log, show, blame) can run
+# programs the repository's own config or attributes name (core.fsmonitor, diff.external,
+# textconv drivers). cli always runs in the server's cwd, and -c/-C are denied, so only
+# that repository can set these.
 deny_flags = [
   "-c",
   "-C",

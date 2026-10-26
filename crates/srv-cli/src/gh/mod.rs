@@ -5,11 +5,15 @@
 //! `repo view`, `workflow list|view`, `search ...`, `status`, and `api` with GET or HEAD);
 //! `--web`/`-w` on a read opens a browser and is Navigate. `api` with `-X`/`--method` POST,
 //! PUT, PATCH or any other method is Account, DELETE is Delete, and any `-f`, `-F`,
-//! `--field`, `--raw-field` or `--input` makes it Account even with `-X GET`. Any
-//! `<group> delete` is Delete. `gh auth` is refused outright: `gh auth token` prints a
-//! credential the vault does not know, so the scrubber cannot catch it. Everything else
-//! (`pr merge`, `release ...`, `workflow run`, extensions, aliases, unknown commands) is
-//! Account.
+//! `--field`, `--raw-field` or `--input` makes it Account even with `-X GET`. Clustered
+//! short flags are read letter by letter (`-iXPOST`, `-iftitle=x`, `-cw`); an unknown `api`
+//! flag is Account. Any `<group> delete` is Delete. `gh auth` and `gh config` are refused
+//! outright: `gh auth token` and `gh config get oauth_token` print a credential the vault
+//! does not know, so the scrubber cannot catch it (D-540, D-542). An `api` endpoint that is
+//! a full URL (or starts with `//`) and `--hostname` must name a GitHub API host
+//! (`https://api.github.com`, or a configured GHE host), which becomes the gate domain;
+//! anything else is refused. Everything else (`pr merge`, `release ...`, `workflow run`,
+//! extensions, aliases, unknown commands) is Account.
 //!
 //! `run view <id> --log` (or `--log-failed`) saves the whole log, scrubbed, to
 //! `runs/<run>/files/gh-run-<id>.log` and returns only the first failing step.
@@ -83,8 +87,30 @@ fn gh_argv(args: &Value) -> Result<Vec<String>, ToolError> {
     Ok(v)
 }
 
-/// The class of `gh <argv>` (see the module doc). `Err` for `gh auth` and an empty command.
+/// The gate's view of one `gh` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhCall {
+    pub class: Class,
+    /// The gate domain: `github.com`, or the GitHub API host an `api` call names (a full
+    /// `https://api.github.com/...` endpoint, a configured GHE host, `--hostname`).
+    pub domain: String,
+}
+
+/// The default gh host, and the gate domain of every call that names no other host.
+const GITHUB: &str = "github.com";
+/// The only github.com host a full-URL `api` endpoint may name.
+const GITHUB_API: &str = "api.github.com";
+
+/// The class of `gh <argv>` with no GHE hosts configured (see [`classify_with`]).
 pub fn classify_args(argv: &[String]) -> Result<Class, ToolError> {
+    classify_with(argv, &[]).map(|c| c.class)
+}
+
+/// The class and gate domain of `gh <argv>` (see the module doc). `ghe_hosts` are the
+/// GitHub Enterprise hosts an `api` call may reach besides github.com ([`Config::gh_hosts`]).
+/// `Err` for `gh auth`, `gh config`, an empty command, and an `api` call that would reach a
+/// host that is not a GitHub API host.
+pub fn classify_with(argv: &[String], ghe_hosts: &[String]) -> Result<GhCall, ToolError> {
     let group = argv
         .first()
         .ok_or_else(|| ToolError::Args("gh needs a command, e.g. \"run list\"".into()))?;
@@ -95,10 +121,24 @@ pub fn classify_args(argv: &[String]) -> Result<Class, ToolError> {
                 .into(),
         ));
     }
-    let sub = argv.get(1).map(String::as_str);
+    if group == "config" {
+        return Err(ToolError::Args(
+            "gh config is refused: `gh config get oauth_token` and `gh config list` can print a \
+             credential the harness cannot scrub. Change gh settings in your own terminal."
+                .into(),
+        ));
+    }
+    let rest = &argv[1..];
+    let sub = rest.first().map(String::as_str);
+    let mut domain = GITHUB.to_string();
+    if group == "api" {
+        if let Some(host) = api_host(rest, ghe_hosts)? {
+            domain = host;
+        }
+    }
     let class = match (group.as_str(), sub) {
         (_, Some("delete")) => Class::Delete,
-        ("api", _) => api_class(&argv[1..]),
+        ("api", _) => api_class(rest),
         ("run", Some("list" | "view"))
         | ("pr", Some("view" | "list" | "diff" | "checks" | "status"))
         | ("issue", Some("view" | "list" | "status"))
@@ -108,48 +148,192 @@ pub fn classify_args(argv: &[String]) -> Result<Class, ToolError> {
         ("search", Some(s)) if !s.starts_with('-') => Class::Read,
         _ => Class::Account,
     };
-    let web = argv[1..]
-        .iter()
-        .any(|a| a == "--web" || a == "-w" || a.starts_with("--web="));
-    Ok(if web {
+    let class = if opens_web(rest) {
         class.max(Class::Navigate)
     } else {
         class
+    };
+    Ok(GhCall { class, domain })
+}
+
+/// `--web`, `--web=..`, or a `w` anywhere in a single-dash cluster (`-w`, `-cw`): the call
+/// opens a browser. On the read allowlist `-w` is the only short flag that changes the
+/// class, so a `w` that is really part of another flag's value (`-Rw`) only makes the call
+/// stricter.
+fn opens_web(rest: &[String]) -> bool {
+    rest.iter().any(|a| {
+        a == "--web"
+            || a.starts_with("--web=")
+            || (short_cluster(a).is_some_and(|c| c.contains('w')))
     })
 }
 
+/// The letters of a single-dash flag token (`-iXPOST` -> `iXPOST`); `None` for `--long`,
+/// `-` and anything that is not a flag.
+fn short_cluster(t: &str) -> Option<&str> {
+    t.strip_prefix('-')
+        .filter(|c| !c.is_empty() && !c.starts_with('-'))
+}
+
+/// Short flags of `gh api` that take a value (`--method`, `--raw-field`, `--field`,
+/// `--header`, `--preview`, `--jq`, `--template`).
+const API_SHORT_VALUE: &str = "XfFHpqt";
+/// Boolean short flags of `gh api` (`--include`, `--help`).
+const API_SHORT_BOOL: &str = "ih";
+/// Long flags of `gh api` that take a value.
+const API_LONG_VALUE: [&str; 10] = [
+    "method",
+    "field",
+    "raw-field",
+    "header",
+    "preview",
+    "jq",
+    "template",
+    "input",
+    "hostname",
+    "cache",
+];
+/// Boolean long flags of `gh api`.
+const API_LONG_BOOL: [&str; 6] = ["include", "paginate", "slurp", "silent", "verbose", "help"];
+
 /// `gh api ...`: the highest class any method or field flag anywhere in the arguments implies.
-/// Every token is checked, including ones that may be another flag's value, so a value
-/// cannot hide a write (a value that only looks like a write makes the call stricter).
+/// Every token is checked on its own, including ones that may be another flag's value, so a
+/// value cannot hide a write (a value that only looks like a write makes the call stricter).
+/// A single-dash token is read letter by letter the way gh's flag parser reads it (`-iXPOST`
+/// is `--include --method POST`): a letter that takes a value ends the token, its value being
+/// the rest of the token or the next token. An unknown letter or long flag fails closed
+/// (Account).
 fn api_class(rest: &[String]) -> Class {
     let mut class = Class::Read;
+    for (i, t) in rest.iter().enumerate() {
+        let next = || rest.get(i + 1).map(String::as_str);
+        if let Some(long) = t.strip_prefix("--") {
+            let (name, inline) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (long, None),
+            };
+            match name {
+                // A missing value fails closed.
+                "method" => class = class.max(method_class(inline.or(next()).unwrap_or("?"))),
+                "field" | "raw-field" | "input" => class = class.max(Class::Account),
+                n if API_LONG_VALUE.contains(&n) || API_LONG_BOOL.contains(&n) => {}
+                _ => class = class.max(Class::Account),
+            }
+            continue;
+        }
+        let Some(cluster) = short_cluster(t) else {
+            continue;
+        };
+        for (j, c) in cluster.char_indices() {
+            if API_SHORT_BOOL.contains(c) {
+                continue;
+            }
+            match c {
+                'X' => {
+                    let tail = &cluster[j + 1..];
+                    let m = if tail.is_empty() {
+                        next().unwrap_or("?")
+                    } else {
+                        tail.strip_prefix('=').unwrap_or(tail)
+                    };
+                    class = class.max(method_class(m));
+                }
+                'f' | 'F' => class = class.max(Class::Account),
+                c if API_SHORT_VALUE.contains(c) => {}
+                _ => class = class.max(Class::Account),
+            }
+            break;
+        }
+    }
+    class
+}
+
+/// The host a `gh api` call reaches when it names one: a full-URL endpoint (`https://...`)
+/// or `--hostname`. Only GitHub API hosts are allowed: `api.github.com` over https (or
+/// `github.com` as `--hostname`) and the configured GHE hosts. Anything else, a scheme other
+/// than https, or an endpoint starting with `//` is refused, so gh cannot be used to fetch an
+/// arbitrary page (rule 5) under the wrong gate domain (rule 4).
+///
+/// Tokens that are the value of a known value-taking flag (`-f body=https://...`) are not
+/// endpoints; after an unknown flag the next token is still checked (fails closed).
+fn api_host(rest: &[String], ghe_hosts: &[String]) -> Result<Option<String>, ToolError> {
+    let ghe = |h: &str| ghe_hosts.iter().any(|g| g.eq_ignore_ascii_case(h));
+    let refuse = |what: &str| {
+        ToolError::Args(format!(
+            "gh api {:?}: gh api only reaches GitHub API hosts (https://{GITHUB_API}{}); \
+             use a path like repos/o/r, or the web tools for other sites",
+            text::line(what, 200),
+            if ghe_hosts.is_empty() {
+                String::new()
+            } else {
+                format!(" or {}", ghe_hosts.join(", "))
+            }
+        ))
+    };
+    let mut host: Option<String> = None;
+    let mut url_host: Option<String> = None;
+    let mut positional_only = false;
     let mut i = 0;
     while i < rest.len() {
         let t = rest[i].as_str();
-        let method: Option<&str> = if t == "-X" || t == "--method" {
-            // A missing value fails closed.
-            Some(rest.get(i + 1).map(String::as_str).unwrap_or("?"))
-        } else if let Some(m) = t.strip_prefix("--method=") {
-            Some(m)
-        } else if let Some(m) = t.strip_prefix("-X") {
-            (!m.is_empty()).then(|| m.strip_prefix('=').unwrap_or(m))
-        } else {
-            None
-        };
-        if let Some(m) = method {
-            class = class.max(method_class(m));
-        }
-        let field = matches!(t, "-f" | "-F" | "--field" | "--raw-field" | "--input")
-            || t.starts_with("--field=")
-            || t.starts_with("--raw-field=")
-            || t.starts_with("--input=")
-            || ((t.starts_with("-f") || t.starts_with("-F")) && !t.starts_with("--"));
-        if field {
-            class = class.max(Class::Account);
-        }
         i += 1;
+        if !positional_only {
+            if t == "--" {
+                positional_only = true;
+                continue;
+            }
+            if let Some(long) = t.strip_prefix("--") {
+                let (name, inline) = match long.split_once('=') {
+                    Some((n, v)) => (n, Some(v.to_string())),
+                    None => (long, None),
+                };
+                let takes_value = API_LONG_VALUE.contains(&name);
+                let value = match inline {
+                    Some(v) => Some(v),
+                    None if takes_value => {
+                        i += 1;
+                        rest.get(i - 1).cloned()
+                    }
+                    None => None,
+                };
+                if name == "hostname" {
+                    let h = value.unwrap_or_default();
+                    let h = h.trim();
+                    if !(h.eq_ignore_ascii_case(GITHUB) || ghe(h)) {
+                        return Err(refuse(&format!("--hostname {h}")));
+                    }
+                    host = Some(h.to_ascii_lowercase());
+                }
+                continue;
+            }
+            if let Some(cluster) = short_cluster(t) {
+                for (j, c) in cluster.char_indices() {
+                    if API_SHORT_BOOL.contains(c) {
+                        continue;
+                    }
+                    if API_SHORT_VALUE.contains(c) && cluster[j + 1..].is_empty() {
+                        // The value is the next token.
+                        i += 1;
+                    }
+                    break;
+                }
+                continue;
+            }
+        }
+        if t.starts_with("//") {
+            return Err(refuse(t));
+        }
+        if t.contains("://") {
+            let h = url::Url::parse(t)
+                .ok()
+                .filter(|u| u.scheme() == "https" && u.username().is_empty())
+                .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+                .filter(|h| h == GITHUB_API || ghe(h))
+                .ok_or_else(|| refuse(t))?;
+            url_host.get_or_insert(h);
+        }
     }
-    class
+    Ok(url_host.or(host))
 }
 
 /// GET and HEAD read, DELETE deletes, anything else (POST, PUT, PATCH, unknown) is Account.
@@ -205,11 +389,11 @@ fn log_file_name(argv: &[String]) -> String {
 impl ToolHandler for Gh {
     async fn classify(&self, _ctx: &ToolCtx, args: &Value) -> Result<Classified, ToolError> {
         let argv = gh_argv(args)?;
-        let class = classify_args(&argv)?;
+        let call = classify_with(&argv, &self.cfg.gh_hosts)?;
         let shown = text::line(&argv::show(&argv), 300);
         Ok(Classified {
-            class: Some(class),
-            domain: Some("github.com".into()),
+            class: Some(call.class),
+            domain: Some(call.domain),
             what: Some(format!("run gh {shown}")),
             values: vec![("args".into(), shown)],
             ..Classified::default()
@@ -218,7 +402,7 @@ impl ToolHandler for Gh {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput, ToolError> {
         let argv = gh_argv(&args)?;
-        if classify_args(&argv)? > ctx.class {
+        if classify_with(&argv, &self.cfg.gh_hosts)?.class > ctx.class {
             return Err(ToolError::Failed(
                 "gh: the call's class is above what the gate approved; not run".into(),
             ));
@@ -362,6 +546,27 @@ mod tests {
             ("repo delete o/r --yes", Class::Delete),
             ("run delete 5", Class::Delete),
             ("release delete v1", Class::Delete),
+            // Clustered short flags, read the way gh's flag parser reads them.
+            ("api -iXPOST repos/o/r/issues", Class::Account),
+            ("api -iX POST repos/o/r", Class::Account),
+            ("api -iX=PATCH repos/o/r", Class::Account),
+            ("api repos/o/r/issues -iftitle=x", Class::Account),
+            ("api repos/o/r -iF a=1", Class::Account),
+            ("api -iXDELETE repos/o/r", Class::Delete),
+            ("api -iX", Class::Account),
+            ("api -iXGET repos/o/r", Class::Read),
+            ("api -i repos/o/r", Class::Read),
+            ("api -iq .name repos/o/r", Class::Read),
+            ("api -H Accept:x -i repos/o/r", Class::Read),
+            ("api --paginate --jq .[] repos/o/r", Class::Read),
+            ("api -iz repos/o/r", Class::Account),
+            ("api -XGET -fa=b repos/o/r", Class::Account),
+            ("api --bogus repos/o/r", Class::Account),
+            ("api --method", Class::Account),
+            ("pr view 5 -cw", Class::Navigate),
+            ("pr view 5 -wc", Class::Navigate),
+            ("run view 1 --web=true", Class::Navigate),
+            ("pr view 5 -c", Class::Read),
         ];
         for (cmd, want) in table {
             assert_eq!(c(cmd).unwrap(), *want, "gh {cmd}");
@@ -369,10 +574,96 @@ mod tests {
     }
 
     #[test]
-    fn auth_and_empty_are_refused() {
-        assert!(matches!(c("auth token"), Err(ToolError::Args(_))));
-        assert!(matches!(c("auth status"), Err(ToolError::Args(_))));
-        assert!(matches!(c(""), Err(ToolError::Args(_))));
+    fn auth_config_and_empty_are_refused() {
+        for bad in [
+            "auth token",
+            "auth status",
+            "config get oauth_token -h github.com",
+            "config list",
+            "config set editor vim",
+            "",
+        ] {
+            assert!(matches!(c(bad), Err(ToolError::Args(_))), "gh {bad}");
+        }
+    }
+
+    #[test]
+    fn api_hosts_are_github_api_hosts_only() {
+        let w = |s: &str, hosts: &[&str]| {
+            let hosts: Vec<String> = hosts.iter().map(|h| h.to_string()).collect();
+            classify_with(&argv::split(s).unwrap(), &hosts)
+        };
+        for bad in [
+            "api https://any.host/page",
+            "api HTTPS://any.host/page",
+            "api //any.host/page",
+            "api http://api.github.com/repos/o/r",
+            "api https://github.com/o/r",
+            "api https://user@api.github.com/x",
+            "api https://api.github.com.evil.example/x",
+            "api -H x https://any.host/page",
+            "api --bogus https://any.host/page",
+            "api -iz https://any.host/page",
+            "api repos/o/r -- https://any.host/page",
+            "api 'search/code?q=https://any.host'",
+            "api --hostname any.host repos/o/r",
+            "api --hostname=any.host repos/o/r",
+            "api --hostname",
+        ] {
+            assert!(matches!(w(bad, &[]), Err(ToolError::Args(_))), "gh {bad}");
+        }
+        assert!(matches!(
+            w("api https://ghe.corp/api/v3/x", &[]),
+            Err(ToolError::Args(_))
+        ));
+        let ok = |s: &str, hosts: &[&str], class: Class, domain: &str| {
+            assert_eq!(
+                w(s, hosts).unwrap(),
+                GhCall {
+                    class,
+                    domain: domain.into()
+                },
+                "gh {s}"
+            );
+        };
+        ok("api repos/o/r", &[], Class::Read, "github.com");
+        ok("run list", &[], Class::Read, "github.com");
+        ok(
+            "api https://api.github.com/repos/o/r",
+            &[],
+            Class::Read,
+            "api.github.com",
+        );
+        ok(
+            "api -X POST repos/o/r/issues -f body=see-https://any.host/x",
+            &[],
+            Class::Account,
+            "github.com",
+        );
+        ok(
+            "api -iH x:https://any.host repos/o/r",
+            &[],
+            Class::Read,
+            "github.com",
+        );
+        ok(
+            "api --hostname github.com repos/o/r",
+            &[],
+            Class::Read,
+            "github.com",
+        );
+        ok(
+            "api --hostname=GHE.corp repos/o/r",
+            &["ghe.corp"],
+            Class::Read,
+            "ghe.corp",
+        );
+        ok(
+            "api https://ghe.corp/api/v3/repos/o/r -X DELETE",
+            &["ghe.corp"],
+            Class::Delete,
+            "ghe.corp",
+        );
     }
 
     #[test]

@@ -186,6 +186,26 @@ lint\tclippy\t2024-05-01T10:01:00.0000000Z ##[error]other failure\n";
     }
 
     #[test]
+    fn failing_and_context_lines_are_capped() {
+        let line = |text: String| format!("b\ts\t2024-05-01T10:00:00.0000000Z {text}\n");
+        // 15 context lines, then one error marker: context keeps the last 10.
+        let mut log: String = (0..15).map(|i| line(format!("ctx {i}"))).collect();
+        log.push_str(&line("##[error]boom".into()));
+        let f = first_failing_step(&log).unwrap();
+        assert_eq!(f.context.len(), MAX_CONTEXT);
+        assert_eq!(f.context[0], "ctx 5");
+        assert_eq!(f.context[MAX_CONTEXT - 1], "ctx 14");
+        // 30 distinct failing lines: only the first 20 are kept, and no context.
+        let mut log = line("##[error]first".into());
+        log.extend((0..30).map(|i| line(format!("error {i}"))));
+        let f = first_failing_step(&log).unwrap();
+        assert_eq!(f.failing.len(), MAX_FAILING);
+        assert_eq!(f.failing[0], "[error] first");
+        assert_eq!(f.failing[MAX_FAILING - 1], "error 18");
+        assert!(f.context.is_empty());
+    }
+
+    #[test]
     fn no_error_marker_is_none() {
         assert!(first_failing_step("a\tb\t2024-05-01T10:00:00.0000000Z fine\n").is_none());
         assert!(summary("x\n", "files/gh-run.log").starts_with("no failing step"));

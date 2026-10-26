@@ -78,20 +78,44 @@ pub fn join(base: &str, path: &str) -> Result<Url, ToolError> {
     {
         return Err(bad("must be a plain API path"));
     }
-    let base_url =
-        Url::parse(base).map_err(|e| ToolError::Failed(format!("API base is not a URL: {e}")))?;
+    let base_url = secure_base(base).map_err(ToolError::Failed)?;
     let url = Url::parse(&format!("{}{}", base.trim_end_matches('/'), path))
         .map_err(|_| bad("is not a valid URL path"))?;
     let prefix = base_url.path().trim_end_matches('/');
-    if url.origin() != base_url.origin() || !url.path().starts_with(prefix) {
+    // At a segment boundary: `/client/v4x` is not under `/client/v4`.
+    let under = url.path() == prefix || url.path().starts_with(&format!("{prefix}/"));
+    if url.origin() != base_url.origin() || !under {
         return Err(bad("leaves the API base"));
     }
     Ok(url)
 }
 
+/// An API base that may carry a vault-resolved header: https, or plain http only to a
+/// loopback host (127.0.0.0/8, ::1, localhost; local test servers), so the credential never
+/// crosses a network in cleartext or through a plain-http proxy.
+pub fn secure_base(base: &str) -> Result<Url, String> {
+    let u = Url::parse(base).map_err(|e| format!("API base {base:?} is not a URL: {e}"))?;
+    let loopback = match u.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => return Err(format!("API base {base:?} has no host")),
+    };
+    match u.scheme() {
+        "https" => Ok(u),
+        "http" if loopback => Ok(u),
+        _ => Err(format!(
+            "API base {base:?} must be https (plain http only to a loopback host): it carries a \
+             vault credential"
+        )),
+    }
+}
+
 /// What came back.
 pub struct Reply {
     pub status: u16,
+    /// The `Content-Type` header, capped.
+    pub content_type: Option<String>,
     pub body: String,
     pub cut: bool,
 }
@@ -145,6 +169,11 @@ pub async fn send(
         ToolError::Failed(format!("{host}: {why}"))
     })?;
     let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| text::line(s.trim(), 100));
     let mut kept: Vec<u8> = Vec::new();
     let mut cut = false;
     loop {
@@ -168,14 +197,42 @@ pub async fn send(
     }
     Ok(Reply {
         status,
+        content_type,
         body: String::from_utf8_lossy(&kept).into_owned(),
         cut,
     })
 }
 
-/// `HTTP <status>` and the body, neutral and capped; a non-2xx status is an error.
+/// JSON (`application/json`, `application/*+json`) or `text/plain`: a body the model may
+/// read. Anything else (an HTML error page from a proxy or WAF, a binary) is not shown.
+fn readable(content_type: Option<&str>) -> bool {
+    let Some(ct) = content_type else {
+        return false;
+    };
+    let essence = ct
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    essence == "application/json"
+        || essence == "text/plain"
+        || (essence.starts_with("application/") && essence.ends_with("+json"))
+}
+
+/// `HTTP <status>` and the body, neutral and capped; a non-2xx status is an error. A body
+/// that is not JSON or plain text is replaced by its content type (rule 5: no raw HTML).
 pub fn reply_text(label: &str, r: Reply) -> Result<String, ToolError> {
-    if !(200..300).contains(&r.status) {
+    let ok = (200..300).contains(&r.status);
+    if !r.body.trim().is_empty() && !readable(r.content_type.as_deref()) {
+        let t = format!(
+            "{label}: HTTP {}, content type {}: body not shown (not JSON or plain text)",
+            r.status,
+            r.content_type.as_deref().unwrap_or("(none)")
+        );
+        return if ok { Ok(t) } else { Err(ToolError::Failed(t)) };
+    }
+    if !ok {
         return Err(ToolError::Failed(format!(
             "{label}: HTTP {}: {}",
             r.status,
@@ -238,9 +295,68 @@ mod tests {
             "/a b",
             "/x\\y",
             "/http://x",
+            "/%2e%2e/v4x",
         ] {
             assert!(join(base, bad).is_err(), "{bad} accepted");
         }
+        assert!(join(base, "/").is_ok());
+    }
+
+    #[test]
+    fn vault_bases_are_https_unless_loopback() {
+        for bad in [
+            "http://api.example.com/client/v4",
+            "http://10.0.0.1/x",
+            "ftp://api.example.com/",
+            "HTTP://api.example.com/",
+        ] {
+            assert!(join(bad, "/zones").is_err(), "{bad} accepted");
+        }
+        for ok in [
+            "https://api.example.com/client/v4",
+            "http://127.0.0.1:9/client/v4",
+            "http://[::1]:9/x",
+            "http://localhost:9/x",
+        ] {
+            assert!(join(ok, "/zones").is_ok(), "{ok} refused");
+        }
+    }
+
+    fn reply(status: u16, ct: Option<&str>, body: &str) -> Reply {
+        Reply {
+            status,
+            content_type: ct.map(str::to_string),
+            body: body.into(),
+            cut: false,
+        }
+    }
+
+    #[test]
+    fn only_json_and_plain_text_bodies_are_shown() {
+        let html = "<html><body>blocked by WAF</body></html>";
+        let t = reply_text("cf", reply(200, Some("text/html; charset=utf-8"), html)).unwrap();
+        assert!(!t.contains("<html") && !t.contains("WAF"), "{t}");
+        assert!(t.contains("text/html") && t.contains("HTTP 200"), "{t}");
+        let Err(ToolError::Failed(e)) = reply_text("cf", reply(403, Some("text/html"), html))
+        else {
+            panic!("403 is an error")
+        };
+        assert!(!e.contains("<html") && e.contains("HTTP 403"), "{e}");
+        let t = reply_text("cf", reply(200, None, html)).unwrap();
+        assert!(!t.contains("<html") && t.contains("(none)"), "{t}");
+        for ct in [
+            "application/json",
+            "application/json; charset=utf-8",
+            "application/problem+json",
+            "text/plain",
+        ] {
+            let t = reply_text("cf", reply(200, Some(ct), "{\"ok\":true}")).unwrap();
+            assert!(t.contains("{\"ok\":true}"), "{ct}: {t}");
+        }
+        assert_eq!(
+            reply_text("cf", reply(204, None, "")).unwrap(),
+            "cf: HTTP 204"
+        );
     }
 
     #[test]

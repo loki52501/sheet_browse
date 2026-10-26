@@ -11,7 +11,8 @@
 //! write = ["fetch"]                    # first arguments that change state: Account
 //! delete = []                          # first arguments that delete: Delete
 //! default = "refuse"                   # any other first argument: read|write|delete|refuse
-//! deny_flags = ["-c", "--output"]      # refused anywhere (also as --flag=value, -cvalue)
+//! deny_flags = ["-c", "--output"]      # refused anywhere (also as --flag=value, -cvalue,
+//!                                      # and a short letter anywhere in a cluster: -pc)
 //! timeout_secs = 60                    # optional cap, default the server's
 //! ```
 //!
@@ -147,11 +148,17 @@ pub fn check(cmd: &[String], allow: &BTreeMap<String, Program>) -> Result<Checke
     };
     let args = &cmd[1..];
     for a in args {
+        // The letters of a single-dash token: short flags may be clustered (`dig -4f x`),
+        // and which letters take a value differs per program, so a denied letter anywhere
+        // in the cluster (even inside what may be a value) is a hit. Fails closed.
+        let cluster = a
+            .strip_prefix('-')
+            .filter(|c| !c.is_empty() && !c.starts_with('-'));
         for f in &p.deny_flags {
             let short = f.len() == 2 && !f.starts_with("--");
             let hit = a == f
                 || a.starts_with(&format!("{f}="))
-                || (short && a.starts_with(f.as_str()) && !a.starts_with("--"));
+                || (short && cluster.is_some_and(|c| c.contains(&f[1..])));
             if hit {
                 return Err(ToolError::Args(format!(
                     "{key}: flag {f} is denied by config/cli-allow.toml; nothing ran"
@@ -331,6 +338,8 @@ deny_flags = ["-f"]
         assert_eq!(chk("git fetch origin").unwrap().class, Class::Account);
         assert_eq!(chk("git clean -fd").unwrap().class, Class::Delete);
         assert_eq!(chk("dig example.com MX").unwrap().class, Class::Read);
+        assert_eq!(chk("dig -4 example.com").unwrap().class, Class::Read);
+        assert_eq!(chk("git log -p --stat").unwrap().class, Class::Read);
         assert_eq!(chk("GIT.EXE log").unwrap().argv[0], "git");
     }
 
@@ -344,6 +353,9 @@ deny_flags = ["-f"]
             "git log --output=x",
             "git log -cfoo",
             "dig -f names.txt",
+            "dig -4f names.txt",
+            "dig -46fnames.txt",
+            "git log -pc",
             "/usr/bin/git status",
             "C:git status",
         ] {
@@ -363,5 +375,9 @@ deny_flags = ["-f"]
         assert_eq!(git("git status").unwrap().class, Class::Read);
         assert!(git("git push").is_err());
         assert!(git("git -c x=y status").is_err());
+        let dig = |s: &str| check(&argv::split(s).unwrap(), &a);
+        assert!(dig("dig -4f names.txt").is_err());
+        assert!(dig("dig -4k key.conf").is_err());
+        assert!(dig("dig -6y hmac:n:s").is_err());
     }
 }

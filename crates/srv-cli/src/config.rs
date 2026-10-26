@@ -15,7 +15,11 @@ pub const CLOUDFLARE_AUTH: &str = "Bearer @vault(cf_token)";
 pub struct Config {
     /// The program (and any leading arguments) that runs `gh`. `SB_GH_BIN`, default `gh`.
     pub gh: Vec<String>,
-    /// Cloudflare API base URL. `SB_CLOUDFLARE_API`, default [`CLOUDFLARE_API`].
+    /// GitHub Enterprise hosts `gh api` may reach besides github.com (lowercase).
+    /// `SB_GH_HOSTS`, comma-separated, default none.
+    pub gh_hosts: Vec<String>,
+    /// Cloudflare API base URL. `SB_CLOUDFLARE_API`, default [`CLOUDFLARE_API`]. Must be
+    /// https (plain http only on loopback): the vault-resolved token goes in its header.
     pub cloudflare_api: String,
     /// Header value template for Cloudflare; must reference a vault entry.
     pub cloudflare_auth: String,
@@ -39,6 +43,7 @@ impl Default for Config {
         let dir = PathBuf::from("config");
         Config {
             gh: vec!["gh".into()],
+            gh_hosts: Vec::new(),
             cloudflare_api: CLOUDFLARE_API.into(),
             cloudflare_auth: CLOUDFLARE_AUTH.into(),
             cloudflare_domain: "cloudflare.com".into(),
@@ -52,13 +57,20 @@ impl Default for Config {
 }
 
 impl Config {
-    /// [`Config::default`] with `SB_GH_BIN`, `SB_CLOUDFLARE_API`, `SB_CONFIG_DIR`,
+    /// [`Config::default`] with `SB_GH_BIN`, `SB_GH_HOSTS`, `SB_CLOUDFLARE_API`, `SB_CONFIG_DIR`,
     /// `SB_FLAGS_CONFIG` and `SB_CLI_ALLOW` applied (blank values are ignored).
     pub fn from_env() -> Config {
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let mut c = Config::default();
         if let Some(gh) = env("SB_GH_BIN") {
             c.gh = vec![gh];
+        }
+        if let Some(hosts) = env("SB_GH_HOSTS") {
+            c.gh_hosts = hosts
+                .split(',')
+                .map(|h| h.trim().to_ascii_lowercase())
+                .filter(|h| !h.is_empty())
+                .collect();
         }
         if let Some(api) = env("SB_CLOUDFLARE_API") {
             c.cloudflare_api = api;
