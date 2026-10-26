@@ -188,10 +188,9 @@ fn r3_1_set_refuses_short_value_before_touching_anything() {
 }
 
 // ---------------------------------------------------------------------------------------
-// R3-2. ValueTooShort names only the key.
+// R3-2. ValueTooShort names only the key (round 4: and tells the user how to repair it).
 
 #[test]
-#[ignore = "red-first T-05 round 4: ValueTooShort text gained the repair hint; tester updates the fixed string"]
 fn r3_2_value_too_short_error_names_only_the_key() {
     let c = canary();
     let mut v = mem(&[("test", &c)]);
@@ -201,19 +200,60 @@ fn r3_2_value_too_short_error_names_only_the_key() {
     let shown = format!("{err} | {err:?} | {err:#?}");
     assert!(shown.contains("state_code"), "the key is named");
     assert!(shown.contains('4'), "the floor is named");
+    assert!(
+        err.to_string().contains("`harness vault set state_code`"),
+        "the repair hint names the command for this key"
+    );
     assert!(!shown.contains(short), "the value leaked into the error");
     assert!(!shown.contains('\u{2603}'), "part of the value leaked");
     assert!(!shown.contains(&c), "another value leaked into the error");
     assert!(std::error::Error::source(&err).is_none());
-    // A short value whose bytes spell part of the canary is not echoed either.
-    let prefix: String = c.chars().take(3).collect();
-    let err = v.set("x", &prefix, EntryKind::Personal).unwrap_err();
-    let shown = format!("{err}");
+    // The text depends on the key alone: every short value set under one key gives the
+    // same Display and Debug, byte for byte, so no part of any value can be in it. The
+    // values include canary prefixes, a canary suffix and multi-byte characters.
+    let chars: Vec<char> = c.chars().collect();
+    let prefix3: String = chars.iter().take(3).collect();
+    let prefix1: String = chars.iter().take(1).collect();
+    let suffix3: String = chars[chars.len().saturating_sub(3)..].iter().collect();
+    let shorts = [
+        prefix3.as_str(),
+        prefix1.as_str(),
+        suffix3.as_str(),
+        short,
+        "Zq7",
+        "\u{e9}\u{65e5}\u{672c}",
+        "x",
+        "   ",
+    ];
+    let mut texts: Vec<(String, String)> = Vec::new();
+    for s in shorts {
+        match v.set("x", s, EntryKind::Personal) {
+            Err(e @ VaultError::ValueTooShort { .. }) => {
+                texts.push((e.to_string(), format!("{e:?}")));
+            }
+            Err(other) => panic!("expected ValueTooShort, got {other}"),
+            Ok(()) => panic!("a value under the floor was accepted"),
+        }
+    }
     assert!(
-        shown
-            == "vault entry \"x\" is shorter than 4 characters; a value that short cannot be scrubbed without destroying ordinary text",
-        "error text is fixed and names only the key"
+        texts.windows(2).all(|w| w[0] == w[1]),
+        "the error text changes with the value"
     );
+    let (display, debug) = &texts[0];
+    assert!(display.contains("\"x\"") && display.contains('4'));
+    assert!(
+        display.contains("`harness vault set x`"),
+        "no repair hint in the Display"
+    );
+    assert!(debug.contains("\"x\"") && debug.contains("min: 4"));
+    for s in [short, "Zq7", "\u{e9}\u{65e5}\u{672c}"] {
+        assert!(
+            !display.contains(s) && !debug.contains(s),
+            "a value leaked into the error"
+        );
+    }
+    assert!(!display.contains(&c) && !debug.contains(&c));
+    assert_eq!(v.names().len(), 1, "a refused set changed the vault");
 }
 
 // ---------------------------------------------------------------------------------------
@@ -337,23 +377,36 @@ fn r3_4_empty_value_allowed_and_scrubs_nothing() {
 
 // ---------------------------------------------------------------------------------------
 // R3-5. Scrub output is a fixed point and keeps known literals parseable (D-118 (2)), over a
-// corpus built from awkward pieces, with values at the floor and values that spell parts
-// of `@vault(name)`.
+// corpus built from awkward pieces, with values at the floor and values that touch or
+// overlap parts of `@vault(name)` without lying inside one. Round 4: values that lie
+// inside a literal (`vault`, `ault`, `test` with an entry named `test`, a name whose
+// literal holds a value) are refused with ValueInLiteral, so they are asserted refused
+// here instead of planted.
 
 #[test]
-#[ignore = "red-first T-05 round 4: values vault/ault/test are now refused as ValueInLiteral; tester updates the corpus"]
 fn r3_5_scrub_output_is_a_parseable_fixed_point() {
     let c = canary();
     let dir = TempDir::new("fixpoint");
     let path = dir.0.join("vault.toml.age");
     let key = KeySource::IdentityFile(dir.0.join("vault.key"));
     let mut v = Vault::open(&path, &key).unwrap();
-    v.set("test", &c, EntryKind::Secret).unwrap();
-    v.set("pin", "7Kq2", EntryKind::Personal).unwrap();
-    v.set("v", "vault", EntryKind::Personal).unwrap();
-    v.set("a", "ault", EntryKind::Personal).unwrap();
-    v.set("t", "test", EntryKind::Personal).unwrap();
-    let known = ["a", "pin", "t", "test", "v"];
+    // Every value is at the floor or touches the edge of a literal: `@@vA` ends in the
+    // start of an opener, `t)Qz` starts with the end of `@vault(test)`, `vault(Z` is an
+    // opener plus a char no name starts with, `)xyz1` follows a literal, `<c>@` precedes one.
+    let values: Vec<(&str, String)> = vec![
+        ("test", c.clone()),
+        ("pin", "7Kq2".to_owned()),
+        ("o", "@@vA".to_owned()),
+        ("e", "t)Qz".to_owned()),
+        ("m", "vault(Z".to_owned()),
+        ("k", ")xyz1".to_owned()),
+        ("p", format!("{c}@")),
+    ];
+    for (n, val) in &values {
+        v.set(n, val, EntryKind::Personal).unwrap();
+    }
+    let v = Vault::open(&path, &key).unwrap();
+    let known = ["e", "k", "m", "o", "p", "pin", "test"];
     let json_c = serde_json::to_string(&c).unwrap();
     let pieces: Vec<String> = vec![
         "hello".into(),
@@ -364,15 +417,22 @@ fn r3_5_scrub_output_is_a_parseable_fixed_point() {
         "7kQ2".into(),
         "@vault(test)".into(),
         "@vault(pin)".into(),
-        "@vault(v)".into(),
-        "@vault(a)".into(),
-        "@vault(t)".into(),
+        "@vault(o)".into(),
+        "@vault(e)".into(),
+        "@vault(m)".into(),
+        "@vault(k)".into(),
+        "@vault(p)".into(),
         "Vault".into(),
         "ault".into(),
         "TEST".into(),
         "@".into(),
+        "@@".into(),
         "(".into(),
         ")".into(),
+        "Qz".into(),
+        "Z".into(),
+        "xyz1".into(),
+        "t".into(),
         "q=".into(),
         "%2D".into(),
         "{\"k\":".into(),
@@ -388,6 +448,7 @@ fn r3_5_scrub_output_is_a_parseable_fixed_point() {
     let mut bad_fixed = 0usize;
     let mut bad_parse = 0usize;
     let mut leaks = 0usize;
+    let mut withheld = 0usize;
     let mut first_bad: Option<usize> = None;
     for i in 0..4000 {
         let n = 1 + (next() % 8) as usize;
@@ -395,8 +456,12 @@ fn r3_5_scrub_output_is_a_parseable_fixed_point() {
             .map(|_| pieces[(next() % pieces.len() as u64) as usize].as_str())
             .collect();
         let once = v.scrub(&s);
-        if has_ci(&once, &c) {
+        if values.iter().any(|(_, val)| has_ci(&once, val)) {
             leaks += 1;
+            first_bad.get_or_insert(i);
+        }
+        if once.contains("output withheld") {
+            withheld += 1;
         }
         if v.scrub(&once) != once {
             bad_fixed += 1;
@@ -409,7 +474,11 @@ fn r3_5_scrub_output_is_a_parseable_fixed_point() {
             first_bad.get_or_insert(i);
         }
     }
-    assert_eq!(leaks, 0, "canary survived scrub");
+    assert_eq!(
+        leaks, 0,
+        "a whole vault value survived scrub (first at {first_bad:?})"
+    );
+    assert_eq!(withheld, 0, "ordinary text hit the pass cap");
     assert_eq!(
         bad_fixed, 0,
         "scrub(scrub(s)) != scrub(s) (first at {first_bad:?})"
@@ -419,18 +488,56 @@ fn r3_5_scrub_output_is_a_parseable_fixed_point() {
         "known literals no longer parse (first at {first_bad:?})"
     );
     // Explicit cases.
+    let cxyz = format!("a {c}xyz1 b");
+    let cpin = format!("a {c} 7KQ2 b");
     for (s, want) in [
         (
-            "@vault(test) @vault(pin) @vault(v) @vault(a)",
-            "@vault(test) @vault(pin) @vault(v) @vault(a)",
+            "@vault(test) @vault(pin) @vault(o) @vault(e) @vault(m)",
+            "@vault(test) @vault(pin) @vault(o) @vault(e) @vault(m)",
         ),
-        ("Vault test ault", "@vault(v) @vault(t) @vault(a)"),
-        ("@vault(zzz)", "@vault(zzz)"),
+        ("Vault test ault", "Vault test ault"),
+        ("@vault(qqq)", "@vault(qqq)"),
+        // `vault(Z` overlaps the opener of an unknown literal, so it is kept and widened.
+        ("@vault(zzz)", "@vault(m)zz)"),
+        ("a @@vault(pin) b", "a @vault(o) b"),
+        ("a @vault(test)Qz b", "a @vault(e) b"),
+        (cxyz.as_str(), "a @vault(k) b"),
+        (cpin.as_str(), "a @vault(test) @vault(pin) b"),
     ] {
         let once = v.scrub(s);
-        assert_eq!(once, want);
-        assert_eq!(v.scrub(&once), once);
+        assert!(once == want, "explicit case scrubbed wrong: {want}");
+        assert!(v.scrub(&once) == once, "not a fixed point");
+        assert!(vault_refs(&once).is_ok());
     }
+
+    // The round-3 corpus values are refused now, before the file is touched, and the error
+    // names only the entry.
+    let before = std::fs::read(&path).unwrap();
+    let mut w = Vault::open(&path, &key).unwrap();
+    for (name, value) in [("v", "vault"), ("a", "ault"), ("t", "test"), ("t2", "TEST")] {
+        match w.set(name, value, EntryKind::Personal) {
+            Err(e @ VaultError::ValueInLiteral { .. }) => {
+                let shown = format!("{e} | {e:?}");
+                assert!(shown.contains(&format!("\"{name}\"")), "entry not named");
+                assert!(
+                    shown.contains(&format!("harness vault set {name}")),
+                    "no repair hint"
+                );
+                assert!(!shown.contains(&c), "a value leaked");
+            }
+            Err(other) => panic!("{name}: expected ValueInLiteral, got {other}"),
+            Ok(()) => panic!("{name}: a value inside a literal was accepted"),
+        }
+    }
+    // A new name whose literal would hold an existing value (the pin) is refused, naming
+    // the entry of the value, not the new name.
+    match w.set("x_7kq2", "unrelated-value", EntryKind::Secret) {
+        Err(VaultError::ValueInLiteral { name }) => assert_eq!(name, "pin"),
+        Err(other) => panic!("expected ValueInLiteral, got {other}"),
+        Ok(()) => panic!("a name holding a value was accepted"),
+    }
+    assert!(std::fs::read(&path).unwrap() == before, "file rewritten");
+    assert_eq!(w.names().len(), values.len(), "a refused set changed it");
 }
 
 // ---------------------------------------------------------------------------------------
