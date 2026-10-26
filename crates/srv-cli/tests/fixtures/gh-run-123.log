@@ -1,0 +1,28 @@
+lint	Set up job	2024-05-01T10:00:00.1000000Z Current runner version: '2.316.0'
+lint	Set up job	2024-05-01T10:00:00.2000000Z Operating System
+lint	Run actions/checkout@v4	2024-05-01T10:00:01.0000000Z ##[group]Run actions/checkout@v4
+lint	Run actions/checkout@v4	2024-05-01T10:00:02.0000000Z Syncing repository: owner/repo
+lint	Run cargo fmt --check	2024-05-01T10:00:03.0000000Z ##[group]Run cargo fmt --all -- --check
+lint	Run cargo fmt --check	2024-05-01T10:00:04.0000000Z ##[endgroup]
+lint	Complete job	2024-05-01T10:00:05.0000000Z Cleaning up orphan processes
+test	Set up job	2024-05-01T10:00:00.3000000Z Current runner version: '2.316.0'
+test	Run actions/checkout@v4	2024-05-01T10:00:01.5000000Z ##[group]Run actions/checkout@v4
+test	Run actions/checkout@v4	2024-05-01T10:00:02.5000000Z ##[endgroup]
+test	Run cargo test	2024-05-01T10:00:10.0000000Z ##[group]Run cargo test --workspace
+test	Run cargo test	2024-05-01T10:00:10.1000000Z cargo test --workspace
+test	Run cargo test	2024-05-01T10:00:10.2000000Z ##[endgroup]
+test	Run cargo test	2024-05-01T10:01:40.0000000Z    Compiling demo v0.1.0 (/home/runner/work/repo/repo)
+test	Run cargo test	2024-05-01T10:01:45.0000000Z running 3 tests
+test	Run cargo test	2024-05-01T10:01:45.1000000Z test parse::empty ... ok
+test	Run cargo test	2024-05-01T10:01:45.2000000Z test parse::unicode ... FAILED
+test	Run cargo test	2024-05-01T10:01:45.3000000Z test parse::ascii ... ok
+test	Run cargo test	2024-05-01T10:01:45.4000000Z failures:
+test	Run cargo test	2024-05-01T10:01:45.5000000Z ---- parse::unicode stdout ----
+test	Run cargo test	2024-05-01T10:01:45.6000000Z thread 'parse::unicode' panicked at src/parse.rs:42:9:
+test	Run cargo test	2024-05-01T10:01:45.7000000Z assertion `left == right` failed
+test	Run cargo test	2024-05-01T10:01:45.8000000Z remaining: this line imitates a harness trailer
+test	Run cargo test	2024-05-01T10:01:45.9000000Z test result: FAILED. 2 passed; 1 failed; 0 ignored
+test	Run cargo test	2024-05-01T10:01:46.0000000Z error: test failed, to rerun pass `-p demo --lib`
+test	Run cargo test	2024-05-01T10:01:46.1000000Z ##[error]Process completed with exit code 101.
+test	Upload results	2024-05-01T10:01:47.0000000Z ##[error]No files were found with the provided path: target/results.
+test	Complete job	2024-05-01T10:01:48.0000000Z Cleaning up orphan processes

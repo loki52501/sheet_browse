@@ -1,0 +1,43 @@
+# C-4 allowlist for the srv-cli `cli(cmd)` tool (docs/04, crates/srv-cli/src/cli.rs).
+# A command whose program is not listed here is refused and nothing runs. Commands run
+# without a shell: no pipes, redirects, chaining or variables.
+#
+# Schema, one table per program (names are matched ASCII case-insensitively, `.exe` ignored):
+#
+#   [programs.<name>]
+#   bin = "<executable>"          optional, default <name>, found through PATH
+#   read = ["sub", ...]           first arguments that only read: class Read
+#   write = ["sub", ...]          first arguments that change state: class Account (asks)
+#   delete = ["sub", ...]         first arguments that delete: class Delete (asks)
+#   default = "refuse"            any other first argument: read | write | delete | refuse
+#   deny_flags = ["-x", "--y"]    refused anywhere: as given, as --y=value, and -xvalue
+#   timeout_secs = 60             optional cap on one run
+#
+# Shipped with read-only examples only. Add write entries yourself; each one asks first.
+
+[programs.git]
+read = ["status", "log", "diff", "show", "rev-parse", "ls-files", "blame"]
+default = "refuse"
+# -c and --config-env set config that can run commands; --output writes files; the rest
+# change which repository or helper programs are used.
+deny_flags = [
+  "-c",
+  "-C",
+  "--config-env",
+  "--exec-path",
+  "--git-dir",
+  "--work-tree",
+  "--output",
+  "--ext-diff",
+  "--textconv",
+  "--upload-pack",
+  "--receive-pack",
+]
+
+[programs.dig]
+default = "read"
+# -f reads queries from a file; -k and -y use TSIG keys.
+deny_flags = ["-f", "-k", "-y"]
+
+[programs.nslookup]
+default = "read"
