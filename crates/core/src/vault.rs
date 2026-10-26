@@ -15,8 +15,8 @@
 //!
 //! Scrubbing (D-102): an ASCII-case-insensitive aho-corasick automaton over every value
 //! and its encoded spellings (JSON, Rust Debug, every common percent-encoding including
-//! the browser's WHATWG URL sets, double percent-encoding, and Unicode case forms; see
-//! [`spellings`]). All overlapping matches are found and the union of their spans is
+//! the browser's WHATWG URL sets, double percent-encoding, Unicode case forms, and
+//! base64 and base64url at every byte alignment, B-151; see [`spellings`]). All overlapping matches are found and the union of their spans is
 //! replaced, so two entries that overlap in the text leave no fragment behind. A match
 //! lying wholly inside an `@vault(name)` literal of an existing entry (or inside the
 //! `@vault(` of any opener) is ignored; a match that only overlaps one is kept and widened
@@ -1099,10 +1099,13 @@ const OUTER_PCT_SETS: &[PctSet] = &[
 /// [`OUTER_PCT_SETS`] set (double encoding, `%25XX`). Duplicates up to ASCII case are
 /// dropped, so upper and lower hex are one pattern.
 ///
-/// Not covered (known limits, tracked with deadlines): base64 and base64url (B-151,
-/// before step 2); input masks for phone, card and date numbers, values split across
-/// DOM nodes or ellipsis-truncated, and mixed Unicode case such as CSS `capitalize`
-/// (B-152, before step 3).
+/// Each base text, and its JSON forms (serde and ASCII-only) where they differ, is also
+/// spelled in base64 and base64url ([`push_base64_spellings`], B-151, D-77): HTTP Basic
+/// `user:<value>`, JWT payloads, `data:` URLs.
+///
+/// Not covered (known limits, tracked with deadlines): input masks for phone, card and
+/// date numbers, values split across DOM nodes or ellipsis-truncated, and mixed Unicode
+/// case such as CSS `capitalize` (B-152, before step 3).
 ///
 /// Every temporary is a `Zeroizing<String>` sized up front so it never reallocates.
 fn spellings(v: &str) -> Vec<Zeroizing<String>> {
@@ -1118,6 +1121,17 @@ fn spellings(v: &str) -> Vec<Zeroizing<String>> {
     let mut out = Vec::new();
     for t in &bases {
         push_spellings(t, &mut out);
+        // base64 is case-sensitive over bytes: each case base is encoded on its own,
+        // and the JSON forms only where they differ byte for byte from `t`.
+        push_base64_spellings(t.as_bytes(), &mut out);
+        let json = json_escape(t, false);
+        if json.as_str() != t.as_str() {
+            push_base64_spellings(json.as_bytes(), &mut out);
+        }
+        let ascii = json_escape(t, true);
+        if ascii.as_str() != t.as_str() && ascii.as_str() != json.as_str() {
+            push_base64_spellings(ascii.as_bytes(), &mut out);
+        }
     }
     out.extend(bases);
     dedup_ascii_ci(&mut out);
@@ -1158,6 +1172,85 @@ fn push_spellings(t: &str, out: &mut Vec<Zeroizing<String>>) {
         }
     }
     out.extend(single);
+}
+
+/// The shortest base64 spelling scrub adds, counted without `=` padding (B-151, D-77).
+/// The trimmed core of a short value is a handful of characters that, matched ignoring
+/// ASCII case, would hit unrelated base64 blobs and ordinary words: the D-118 floor for
+/// the encoded form. A 4-character value gets no base64 spelling, a 6-character value
+/// gets some alignments, and from 8 characters on every alignment is covered.
+const MIN_BASE64_CHARS: usize = 8;
+
+const BASE64_STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// Appends base64 of `bytes` in `alphabet` to `out`, without padding; a final partial
+/// character has its missing low bits zero, as at the end of a real encoding.
+fn base64_into(bytes: &[u8], alphabet: &[u8; 64], out: &mut String) {
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        // 2, 3 or 4 characters carry the chunk's 8, 16 or 24 bits.
+        for i in 0..=chunk.len() {
+            let idx = (n >> (18 - 6 * i)) & 0x3f;
+            out.push(char::from(alphabet[idx as usize]));
+        }
+    }
+}
+
+/// The base64 and base64url spellings of `t` inside a larger encoded blob (B-151, D-77).
+///
+/// The value may start at any byte offset of the blob, so for each alignment `k` in
+/// 0, 1, 2 (offset mod 3) it is encoded after `k` placeholder bytes, and the leading
+/// characters that carry placeholder bits (`ceil(8k / 6)`) are dropped. Three forms per
+/// alignment and alphabet: the core, also cut before the last character that carries
+/// bits of whatever follows the value (the value mid-blob); the tail, which keeps that
+/// character with its fill bits zero (the value ends the blob, unpadded as in JWTs);
+/// and the tail with its `=` padding. Overlapping matches are unioned, so where the
+/// value ends the blob the tail forms widen the redaction over the last character and
+/// the padding. Only the edge characters that depend on neighbouring bytes survive a
+/// scrub, and they hold at most 4 bits of the value each. A form with fewer than
+/// [`MIN_BASE64_CHARS`] characters (padding not counted) is skipped.
+///
+/// Cost: at most 18 patterns per encoded text (3 alignments x 2 alphabets x 3 forms),
+/// fewer after the case-insensitive dedup (the alphabets agree where no character is
+/// 62 or 63, and an aligned tail is the core), each about 4/3 of the text's length. The
+/// automaton is built once per `open` or `set` and its size is linear in the total
+/// pattern bytes, so this grows the build roughly in proportion and stays far below
+/// aho-corasick's limits for any real vault.
+fn push_base64_spellings(t: &[u8], out: &mut Vec<Zeroizing<String>>) {
+    let n = t.len();
+    for k in 0..3 {
+        let mut blob = Zeroizing::new(Vec::with_capacity(k + n));
+        blob.resize(k, 0);
+        blob.extend_from_slice(t);
+        let lead = (8 * k).div_ceil(6);
+        let core_end = 8 * (k + n) / 6;
+        let tail_end = (8 * (k + n)).div_ceil(6);
+        let pad = (3 - (k + n) % 3) % 3;
+        for alphabet in [BASE64_STD, BASE64_URL] {
+            let mut enc = Zeroizing::new(String::with_capacity(tail_end + pad));
+            base64_into(&blob, alphabet, &mut enc);
+            if core_end >= lead + MIN_BASE64_CHARS {
+                out.push(Zeroizing::new(enc[lead..core_end].to_owned()));
+            }
+            if tail_end >= lead + MIN_BASE64_CHARS {
+                if tail_end > core_end {
+                    out.push(Zeroizing::new(enc[lead..tail_end].to_owned()));
+                }
+                if pad > 0 {
+                    for _ in 0..pad {
+                        enc.push('=');
+                    }
+                    out.push(Zeroizing::new(enc[lead..].to_owned()));
+                }
+            }
+        }
+    }
 }
 
 /// Sorts and drops spellings equal up to ASCII case (the automaton ignores it anyway).
@@ -1798,6 +1891,175 @@ mod tests {
         let s = format!("{}\u{1}\u{200b}e\u{301}\"'\\", canary());
         let full = format!("{s:?}");
         assert!(*debug_inner(&s) == full[1..full.len() - 1]);
+    }
+
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    use base64::engine::GeneralPurpose;
+    use base64::Engine as _;
+
+    /// Both alphabets, padded and unpadded (B-151).
+    const ENGINES: [&GeneralPurpose; 4] =
+        [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD];
+
+    /// Asserts that `out` is `before`, then `enc` with one `@vault(name)` in place of
+    /// everything but its edge characters, then `after`. The value is the `n` bytes at
+    /// byte `off` of the blob `enc` encodes: only the characters that carry bits of the
+    /// bytes before it (`ceil(8 off / 6)`) or after it may survive. Prints no value.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_only_edges(
+        what: &str,
+        out: &str,
+        before: &str,
+        enc: &str,
+        after: &str,
+        name: &str,
+        off: usize,
+        n: usize,
+    ) {
+        assert!(
+            out.len() >= before.len() + after.len()
+                && out.starts_with(before)
+                && out.ends_with(after),
+            "{what}: the text around the blob changed"
+        );
+        let mid = &out[before.len()..out.len() - after.len()];
+        let lit = vault_literal(name);
+        let Some(i) = mid.find(&lit) else {
+            panic!("{what}: no {lit} in the scrubbed blob (off {off})");
+        };
+        let (left, right) = (&mid[..i], &mid[i + lit.len()..]);
+        assert!(
+            enc.starts_with(left) && enc.ends_with(right),
+            "{what}: the kept edges are not the blob's own (off {off})"
+        );
+        assert!(
+            left.len() <= (8 * off).div_ceil(6),
+            "{what}: {} characters kept before the literal (off {off})",
+            left.len()
+        );
+        assert!(
+            enc.len() - right.len() >= 8 * (off + n) / 6,
+            "{what}: {} characters kept after the literal (off {off})",
+            right.len()
+        );
+    }
+
+    #[test]
+    fn base64_into_matches_the_base64_crate() {
+        let bytes: Vec<u8> = canary()
+            .bytes()
+            .chain([0x00, 0xfb, 0xff, 0x3e, 0x7f, 0x80])
+            .collect();
+        for len in 0..=bytes.len() {
+            let b = &bytes[..len];
+            for (alphabet, engine) in [(BASE64_STD, STANDARD_NO_PAD), (BASE64_URL, URL_SAFE_NO_PAD)]
+            {
+                let mut s = String::new();
+                base64_into(b, alphabet, &mut s);
+                assert!(s == engine.encode(b), "length {len}");
+            }
+        }
+    }
+
+    #[test]
+    fn scrub_basic_auth_header() {
+        let c = canary();
+        let v = vault_with(&[("pw", c.clone())]);
+        let creds = format!("user:{c}");
+        let before = "Authorization: Basic ";
+        for engine in ENGINES {
+            let enc = engine.encode(&creds);
+            let out = v.scrub(&format!("{before}{enc}"));
+            // `user:` is 5 bytes: its bits fill the first 7 characters (ceil(40 / 6)), and
+            // the value ends the blob, so the last character and the padding go too.
+            assert!(
+                out == format!("{before}{}@vault(pw)", &enc[..7]),
+                "Basic credentials not fully scrubbed"
+            );
+        }
+    }
+
+    #[test]
+    fn scrub_jwt_payload() {
+        let c = canary();
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+        let sig = URL_SAFE_NO_PAD.encode([0xfb_u8; 32]);
+        let before = format!("Bearer {header}.");
+        let after = format!(".{sig}");
+        // The second value is JSON-escaped in the payload, so only its JSON form's
+        // base64 is in the token.
+        for value in [c.clone(), format!("{c}\"/q")] {
+            let v = vault_with(&[("pw", value.clone())]);
+            let payload =
+                serde_json::json!({ "sub": "user", "pw": value, "iat": 1_700_000_000 }).to_string();
+            let quoted = serde_json::to_string(&value).unwrap();
+            let inner = &quoted[1..quoted.len() - 1];
+            let off = payload.find(inner).unwrap();
+            let enc = URL_SAFE_NO_PAD.encode(&payload);
+            let out = v.scrub(&format!("{before}{enc}{after}"));
+            assert_only_edges("JWT", &out, &before, &enc, &after, "pw", off, inner.len());
+        }
+    }
+
+    #[test]
+    fn scrub_base64_at_every_alignment() {
+        let c = canary();
+        let prefix = [0xa5_u8, 0xff, 0x00, 0x7e, 0xfb, 0x3f];
+        let suffix = [0xff_u8, 0xfe];
+        let mut alphabets_differ = false;
+        // `~~~???` puts characters 62 and 63, where the alphabets differ, in the value's
+        // encoding at every alignment.
+        for value in [c.clone(), format!("{c}~~~???")] {
+            let v = vault_with(&[("c", value.clone())]);
+            for off in 0..prefix.len() {
+                for tail in 0..=suffix.len() {
+                    let mut blob = prefix[..off].to_vec();
+                    blob.extend_from_slice(value.as_bytes());
+                    blob.extend_from_slice(&suffix[..tail]);
+                    let encs = ENGINES.map(|e| e.encode(&blob));
+                    alphabets_differ |= encs[0] != encs[2];
+                    for enc in &encs {
+                        let out = v.scrub(&format!("x {enc} y"));
+                        assert_only_edges("aligned", &out, "x ", enc, " y", "c", off, value.len());
+                    }
+                }
+            }
+        }
+        assert!(alphabets_differ, "no blob exercised the url alphabet");
+    }
+
+    #[test]
+    fn base64_spellings_respect_the_floor() {
+        let c = canary();
+        for len in 1..=24 {
+            let t: Vec<u8> = c.bytes().cycle().take(len).collect();
+            let mut out = Vec::new();
+            push_base64_spellings(&t, &mut out);
+            assert!(
+                out.iter()
+                    .all(|p| p.trim_end_matches('=').len() >= MIN_BASE64_CHARS),
+                "length {len}: a base64 spelling under the floor"
+            );
+            if len <= 5 {
+                assert!(out.is_empty(), "length {len}: short value got base64");
+            }
+            if len >= 7 {
+                // A core per alignment and alphabet.
+                assert!(out.len() >= 6, "length {len}: an alignment is missing");
+            }
+        }
+        // No over-scrubbing: the base64 of a 4-character value is left alone.
+        let short = "q7Zk";
+        let v = vault_with(&[("s", short.to_owned())]);
+        for off in 0..3 {
+            let mut blob = [0xa5_u8, 0xff][..off].to_vec();
+            blob.extend_from_slice(short.as_bytes());
+            blob.push(0xfe);
+            for engine in ENGINES {
+                let s = format!("x {} y", engine.encode(&blob));
+                assert_eq!(v.scrub(&s), s);
+            }
+        }
     }
 
     #[test]
