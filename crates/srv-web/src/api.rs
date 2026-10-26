@@ -5,20 +5,25 @@
 //!
 //! Vault (rule 2, H-2): `@vault(k)` is allowed only inside header values and is resolved
 //! with `ctx.resolve_into` straight into a sensitive `HeaderValue`, built inside the sink.
-//! It is refused in the URL and the body (those are logged and echoed by servers). Redirects
-//! are followed only within the same host, so a resolved header never travels to another
-//! host. Errors are our own text naming only the host (never `reqwest::Error`'s message,
-//! which carries the URL). The wrapper scrubs the returned text against every vault value.
+//! It is refused in the URL and the body (those are logged and echoed by servers), and on a
+//! plain-http URL unless the host is this machine (127/8, ::1, localhost). Redirects are
+//! followed only within the same host (never https to http); with a vault header only within
+//! the same scheme, host and port, so a resolved header never travels anywhere else. Errors
+//! are our own text naming only the host (never `reqwest::Error`'s message, which carries
+//! the URL). The wrapper scrubs the returned text against every vault value.
 //!
-//! An HTML response is refused with a pointer to `fetch` (rule 5).
+//! An HTML response, by content type or by its first bytes, is refused with a pointer to
+//! `fetch` (rule 5). A challenge stops the call like fetch (D-5). JSON strings cannot spell
+//! a `[text](#id)` link form ([`escape::json_strings`]).
 
 use crate::http::{self, host_of};
-use crate::{escape, opt_str, req_str, Web};
+use crate::{escape, fetch, html, opt_str, req_str, Web};
 use async_trait::async_trait;
 use harness_core::{Class, Classified, ToolCtx, ToolError, ToolHandler, ToolOutput, ToolSpec};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
 use reqwest::{Method, Url};
 use serde_json::{json, Value};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 /// Response text shown to the model, in characters.
@@ -97,7 +102,9 @@ fn no_vault(s: &str, place: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn parse(args: &Value) -> Result<Req, ToolError> {
+/// `overrides` are the config's DNS overrides (for the loopback check of a vault header
+/// over plain http).
+fn parse(args: &Value, overrides: &[(String, SocketAddr)]) -> Result<Req, ToolError> {
     let url_s = req_str(args, "url")?;
     no_vault(url_s, "url")?;
     let url = http::parse_url(url_s).map_err(|e| ToolError::Args(format!("url: {e}")))?;
@@ -171,6 +178,16 @@ fn parse(args: &Value) -> Result<Req, ToolError> {
             ))
         }
     }
+    // Rule 2: a resolved value never crosses a network in clear text.
+    if headers.iter().any(|(_, t)| has_vault(t))
+        && url.scheme() != "https"
+        && !http::is_loopback(&url, overrides)
+    {
+        return Err(ToolError::Args(format!(
+            "@vault(...) headers are sent only over https (or to this machine); {} is plain http",
+            host_of(&url)
+        )));
+    }
     Ok(Req {
         url,
         method,
@@ -187,7 +204,7 @@ struct Api {
 #[async_trait]
 impl ToolHandler for Api {
     async fn classify(&self, _ctx: &ToolCtx, args: &Value) -> Result<Classified, ToolError> {
-        let req = parse(args)?;
+        let req = parse(args, &self.web.cfg.resolve)?;
         let host = host_of(&req.url);
         let mut values = Vec::new();
         for (name, tmpl) in &req.headers {
@@ -218,9 +235,13 @@ impl ToolHandler for Api {
     }
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput, ToolError> {
-        let req = parse(&args)?;
+        let req = parse(&args, &self.web.cfg.resolve)?;
         let host = host_of(&req.url);
         let clients = self.web.clients()?;
+        if let Some(why) = html::challenge_url(&req.url) {
+            return Ok(fetch::challenge_output(&req.url, &why));
+        }
+        let vault = req.headers.iter().any(|(_, t)| has_vault(t));
         let mut hm = HeaderMap::new();
         for (name, tmpl) in &req.headers {
             let value = if has_vault(tmpl) {
@@ -254,7 +275,13 @@ impl ToolHandler for Api {
                 HeaderValue::from_static("application/json, text/plain;q=0.9, */*;q=0.5"),
             );
         }
-        let mut rb = clients.api.request(req.method.clone(), req.url.clone());
+        // A vault header only follows redirects within the same scheme, host and port.
+        let client = if vault {
+            &clients.api_vault
+        } else {
+            &clients.api
+        };
+        let mut rb = client.request(req.method.clone(), req.url.clone());
         match req.body {
             Some(Body::Json(v)) => {
                 if !hm.contains_key(CONTENT_TYPE) {
@@ -281,6 +308,10 @@ impl ToolHandler for Api {
         let body = http::read_capped(resp, self.web.cfg.max_bytes)
             .await
             .map_err(|e| ToolError::Failed(format!("api: {e}")))?;
+        // D-5: a challenge stops the call, whatever the status and content type.
+        if let Some(stop) = fetch::challenge_stop(&body, "api").await? {
+            return Ok(stop);
+        }
         let text = render(&body, &req.method)?;
         Ok(ToolOutput {
             summary: Some(format!(
@@ -315,7 +346,9 @@ fn render(body: &http::Body, method: &Method) -> Result<String, ToolError> {
     if *method == Method::HEAD || body.bytes.is_empty() {
         return Ok(head);
     }
-    if mime == "text/html" || mime == "application/xhtml+xml" {
+    // Rule 5: HTML is refused by its declared type and by its first bytes, so a page sent as
+    // text/plain, XML or with no type never reaches the model as text.
+    if fetch::is_html(mime, &body.bytes) {
         return Err(ToolError::Failed(format!(
             "api: {host} answered with HTML (HTTP {}); use fetch(url) to read web pages",
             body.status
@@ -323,7 +356,10 @@ fn render(body: &http::Body, method: &Method) -> Result<String, ToolError> {
     }
     let shown = if mime.contains("json") || mime.is_empty() || mime == "text/plain" {
         match serde_json::from_slice::<Value>(&body.bytes) {
-            Ok(v) => Some(serde_json::to_string_pretty(&v).unwrap_or_default()),
+            Ok(mut v) => {
+                escape::json_strings(&mut v);
+                Some(serde_json::to_string_pretty(&v).unwrap_or_default())
+            }
             Err(_) => None,
         }
     } else {

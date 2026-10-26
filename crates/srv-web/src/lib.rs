@@ -15,19 +15,24 @@ pub mod feed;
 pub mod fetch;
 pub mod html;
 mod http;
+mod pin;
 pub mod search;
 mod site;
 
 pub use config::Config;
 
 use harness_core::{ToolError, ToolSpec};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 /// State shared by every tool of one server: config, HTTP clients, the page cache.
 pub(crate) struct Web {
     pub cfg: Config,
     clients: Result<http::Clients, String>,
     pub cache: cache::Cache,
+    /// Site tools (`<site>.<name>`) disabled for the rest of this process by a fingerprint
+    /// miss (T-4, D-506): never registered again, refused if still called.
+    pub disabled: Mutex<HashSet<String>>,
 }
 
 impl Web {
@@ -37,7 +42,22 @@ impl Web {
             cfg,
             clients,
             cache: cache::Cache::default(),
+            disabled: Mutex::new(HashSet::new()),
         }
+    }
+
+    pub fn is_disabled(&self, name: &str) -> bool {
+        self.disabled
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(name)
+    }
+
+    pub fn disable(&self, name: &str) {
+        self.disabled
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string());
     }
 
     pub fn clients(&self) -> Result<&http::Clients, ToolError> {

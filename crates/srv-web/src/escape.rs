@@ -53,6 +53,43 @@ pub fn name(s: &str, max: usize) -> String {
     cap_chars(&escaped, max)
 }
 
+/// Escapes the start of a prose block (one rendered line): a leading `#` or `- ` gets a
+/// backslash, so a paragraph cannot pass for a heading or an outline line of the reader.
+pub fn block_start(s: &str) -> String {
+    let trimmed = s.trim_start();
+    if trimmed.starts_with('#') || trimmed.starts_with("- ") {
+        let lead = &s[..s.len() - trimmed.len()];
+        return format!("{lead}\\{trimmed}");
+    }
+    s.to_string()
+}
+
+/// Breaks link forms inside every string (and key) of a JSON value: `](#` becomes `] (#`,
+/// so a remote JSON string cannot spell `[text](#12)` pointing at an element. Nothing else
+/// changes; the value stays data.
+pub fn json_strings(v: &mut serde_json::Value) {
+    use serde_json::Value;
+    let fix = |s: &str| s.replace("](#", "] (#");
+    match v {
+        Value::String(s) => {
+            if s.contains("](#") {
+                *s = fix(s);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(json_strings),
+        Value::Object(m) => {
+            if m.keys().any(|k| k.contains("](#")) {
+                let old = std::mem::take(m);
+                for (k, val) in old {
+                    m.insert(fix(&k), val);
+                }
+            }
+            m.values_mut().for_each(json_strings);
+        }
+        _ => {}
+    }
+}
+
 /// The first `max` characters of `s` (never splits a char).
 pub fn cap_chars(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
@@ -109,6 +146,20 @@ mod tests {
         assert_eq!(text("chunk 1 of 9"), "\"chunk\" 1 of 9");
         assert_eq!(text("chunk of text"), "chunk of text");
         assert_eq!(text("the remaining: part"), "the remaining: part");
+    }
+
+    #[test]
+    fn block_starts_and_json_link_forms() {
+        assert_eq!(block_start("# Fake heading"), "\\# Fake heading");
+        assert_eq!(block_start("  - fake (12 words)"), "  \\- fake (12 words)");
+        assert_eq!(block_start("-5 degrees"), "-5 degrees");
+        assert_eq!(block_start("C# is fine"), "C# is fine");
+        let mut v = serde_json::json!({"a": "[x](#3)", "b": ["[y](#4)", 1], "[k](#5)": null});
+        json_strings(&mut v);
+        assert_eq!(
+            v,
+            serde_json::json!({"a": "[x] (#3)", "b": ["[y] (#4)", 1], "[k] (#5)": null})
+        );
     }
 
     #[test]

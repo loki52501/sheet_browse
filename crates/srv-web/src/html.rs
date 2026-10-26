@@ -196,7 +196,11 @@ pub fn plain_text(text: &str) -> Doc {
             table: None,
             header: false,
             spans: vec![Span {
-                text: escape::text(para),
+                text: escape::text(para)
+                    .split('\n')
+                    .map(escape::block_start)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
                 elem: None,
             }],
         });
@@ -542,7 +546,7 @@ impl<'a> Walker<'a> {
             return;
         }
         let kind = b.kind.unwrap_or(BlockKind::Paragraph);
-        let spans: Vec<Span> = b
+        let mut spans: Vec<Span> = b
             .spans
             .into_iter()
             .map(|s| Span {
@@ -554,6 +558,12 @@ impl<'a> Walker<'a> {
                 elem: s.elem,
             })
             .collect();
+        // A prose block cannot open with `# ` or `- ` and pass for a heading or outline line.
+        if !matches!(kind, BlockKind::Code | BlockKind::Heading) {
+            if let Some(first) = spans.first_mut().filter(|s| s.elem.is_none()) {
+                first.text = escape::block_start(&first.text);
+            }
+        }
         let plain = spans
             .iter()
             .map(|s| s.text.as_str())

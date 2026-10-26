@@ -10,7 +10,6 @@ use crate::http;
 use crate::{escape, opt_usize, req_str, Web};
 use async_trait::async_trait;
 use harness_core::{Class, Classified, ToolCtx, ToolError, ToolHandler, ToolOutput, ToolSpec};
-use reqwest::header::ACCEPT;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -139,11 +138,7 @@ impl ToolHandler for Search {
             ))
         };
         let clients = self.web.clients()?;
-        let resp = clients
-            .page
-            .get(url)
-            .header(ACCEPT, "application/json")
-            .send()
+        let resp = http::get_following(&self.web.cfg, &clients.page, &url, "application/json")
             .await
             .map_err(|_| down())?;
         let body = http::read_capped(resp, self.web.cfg.max_bytes)

@@ -4,12 +4,15 @@
 //! Item text is untrusted: HTML in summaries is reduced to text, everything is escaped
 //! ([`crate::escape`]) and capped, and the output is JSON, so a feed cannot forge harness
 //! syntax.
+//!
+//! A challenge (the `cf-mitigated` header, a challenge URL or page) stops the call like
+//! fetch does (D-5). An HTML body is refused as not-a-feed whatever its content type
+//! (rule 5). Redirects go through [`http::get_following`] (private-address guard).
 
 use crate::http::{self, host_of};
-use crate::{escape, opt_usize, req_str, Web};
+use crate::{escape, fetch, html, opt_usize, req_str, Web};
 use async_trait::async_trait;
 use harness_core::{Class, Classified, ToolCtx, ToolError, ToolHandler, ToolOutput, ToolSpec};
-use reqwest::header::ACCEPT;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -87,20 +90,31 @@ impl ToolHandler for Feed {
         };
         let host = host_of(&url);
         let clients = self.web.clients()?;
-        let resp = clients
-            .page
-            .get(url.clone())
-            .header(ACCEPT, ACCEPT_FEED)
-            .send()
+        if let Some(why) = html::challenge_url(&url) {
+            return Ok(fetch::challenge_output(&url, &why));
+        }
+        let resp = http::get_following(&self.web.cfg, &clients.page, &url, ACCEPT_FEED)
             .await
-            .map_err(|e| ToolError::Failed(format!("feed: {}", http::map_err(&e, &host))))?;
+            .map_err(|e| ToolError::Failed(format!("feed: {e}")))?;
         let body = http::read_capped(resp, self.web.cfg.max_bytes)
             .await
             .map_err(|e| ToolError::Failed(format!("feed: {e}")))?;
+        // D-5 before anything else: a challenge (any status) stops the call.
+        if let Some(stop) = fetch::challenge_stop(&body, "feed").await? {
+            return Ok(stop);
+        }
         if !(200..300).contains(&body.status) {
             return Err(ToolError::Failed(format!(
                 "feed: {host} answered HTTP {}",
                 body.status
+            )));
+        }
+        // Rule 5: an HTML page is not a feed, whatever its content type says.
+        if fetch::is_html(&body.mime, &body.bytes) {
+            return Err(ToolError::Failed(format!(
+                "feed: {} did not answer with RSS, Atom, JSON Feed or iCal (it sent an HTML \
+                 page); use fetch(url) to read it",
+                host_of(&body.url)
             )));
         }
         let parsed = parse(&body.bytes).ok_or_else(|| {
