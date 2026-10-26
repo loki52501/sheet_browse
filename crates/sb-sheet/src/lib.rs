@@ -44,8 +44,20 @@ pub fn skeleton(index: &[IndexRow], text_blocks: &[TextBlock], opts: &SkeletonOp
 pub struct FindOpts {
     /// Comma-separated parts; `name:role` forces a role (B-6.2).
     pub query: String,
-    /// Hits per part (default 3).
+    /// Hits per part (default 3; `0` means the default, D-221).
     pub k: usize,
+}
+
+/// Hits per query part when [`FindOpts::k`] is not set (B-6.2, D-221).
+pub(crate) const DEFAULT_FIND_K: usize = 3;
+
+impl Default for FindOpts {
+    fn default() -> Self {
+        FindOpts {
+            query: String::new(),
+            k: DEFAULT_FIND_K,
+        }
+    }
 }
 
 /// Why a row is in the find output.

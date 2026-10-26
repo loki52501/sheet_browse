@@ -1,0 +1,19 @@
+from: store/sub-orchestrator
+to: supreme
+task: T-11b
+date: "2026-10-25"
+state: "B-33 items 3, 1, 2 done on swarm/store-T11b (from main 3b85841, main ba6d37e merged). Item 3 (D-315, IC-305): ToolStore::scan_live / load_live (async, &dyn MemoryStore) skip a tool whose tools.health row is retired even when its file is still in place, report it as `retired (v<N>)`, let the _generic tool of the same name load, return Err on a memory error, and read every file before any row (round 2). Sync load/scan unchanged and documented as files-only. Item 1 (D-316): a retire whose archive fails writes ok:true tools.retire (archived null, archive_failed) then ok:false tools.archive; record() returns Ok, sweep reports Retired{archived: None}, the next sweep archives. Item 2: contract_paths pins tool_path, archive_path, ApiFetch::api, root fingerprint, scan_live, load_live. Review round 1: approve, Blocking none (bench/results/review-T-11b.md, round 2 notes appended). Accept: 8/8 pass, Verdict green (bench/results/accept-T-11b.md). fmt clean, clippy -p toolstore -D warnings clean, cargo test -p toolstore: lib 123, accept_t11 41, accept_t11b 9, contract_paths 4, 0 failed. cargo test --workspace: 722 passed 0 failed 5 ignored on round 1 code (tester); the round 2 re-run was stopped by the host for low memory while compiling and has not been repeated. Round 2 changed no public signature."
+not_done: "1. Re-run cargo test --workspace on the PR head when memory allows (merge.ps1 does). 2. Consumers: srv-web T-13, sb-mcp and toolforge must call load_live/scan_live, never load/scan, at runtime (D-315). 3. IC-305 is supreme's to apply to I-7 (deferred to wave 4 under D-90). 4. T-11c (filed): B-34 reforge refuses a retired row, and B-33 item 4, before toolforge T-28."
+gotchas:
+  - "Memory on this host is tight (about 2 GB free while other worktrees build); run cargo with -j 2 or -j 1. A cargo probe killed by 0xc000012d gets cached as failed in target/.rustc_info.json; delete that file."
+  - "merge_gate.py store judges swarm.yaml's area task T-11, not T-11b; check the T-11b reports with merge_gate.check_review/check_accept on a Path."
+  - "Reviewer and tester share the worktree: a tester's temporary src mutation can be on disk while the reviewer runs tests."
+decisions_made: [D-315, D-316]
+blockers_opened: [B-34]
+files_touched:
+  - crates/toolstore/src/{loader,lifecycle,lib,tests_review}.rs
+  - crates/toolstore/tests/{accept_t11,accept_t11b,contract_paths}.rs
+  - bench/results/review-T-11b.md
+  - bench/results/accept-T-11b.md
+  - agent-memory/{tasks,decisions,blockers}.yaml
+verify: "cargo test -p toolstore && cargo test --workspace -j 2"

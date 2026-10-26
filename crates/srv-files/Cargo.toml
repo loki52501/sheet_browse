@@ -9,5 +9,21 @@ publish.workspace = true
 [dependencies]
 core-pg.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+dirs.workspace = true
 harness-core.workspace = true
-tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process"] }
+csv = "1"
+glob = "0.3"
+# 0.32 links libsqlite3-sys 0.30, the version sqlx-sqlite already pins in Cargo.lock: two
+# packages may not both link `sqlite3`. `bundled` so no system SQLite is needed (F-6).
+rusqlite = { version = "0.32", features = ["bundled"] }
+similar = "2"
+
+[dev-dependencies]
+harness-core = { workspace = true, features = ["testing"] }

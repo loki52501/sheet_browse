@@ -1,0 +1,22 @@
+from: rust-coder-3
+to: reviewer
+task: T-15
+date: "2026-10-25"
+state: "Round-2 review fixes for srv-cli committed in d597c2d on swarm/servers-T15. Blocking: (1) gh clustered short flags read letter by letter like pflag (-iXPOST, -iX POST, -iftitle=x Account; -iXDELETE Delete; unknown api letter or long flag Account; a w anywhere in a single-dash cluster is --web, pr view 5 -cw Navigate), cases in gh::tests::classification_table; (2) gh api endpoint containing :// or starting with // refused (ToolError::Args) unless https to api.github.com or a GHE host from SB_GH_HOSTS (Config::gh_hosts), --hostname checked the same way, that host is the gate domain (gh::classify_with returns GhCall{class, domain}; classify_args kept as a wrapper), test gh::tests::api_hosts_are_github_api_hosts_only. Should fix: (3) whole gh config group refused, D-542, test gh::tests::auth_config_and_empty_are_refused; (4) cli deny_flags match a denied short letter anywhere in a single-dash cluster, tests cli::tests::refusals (dig -4f, dig -46fnames.txt, git log -pc) and cli::tests::shipped_allowlist_parses (dig -4f/-4k/-6y); (5) http::secure_base: vault-bearing bases (SB_CLOUDFLARE_API via join, flags api via parse_providers) must be https, http only to loopback, tests http::tests::vault_bases_are_https_unless_loopback and flags::tests::api_must_be_https_unless_loopback; (6) Reply.content_type; reply_text shows only status and content type for a non-empty body that is not application/json, application/*+json or text/plain (2xx Ok, else Failed), test http::tests::only_json_and_plain_text_bodies_are_shown. Notes taken: join compares the base path at a segment boundary (/%2e%2e/v4x refused, in http::tests::join_stays_on_the_base); MAX_FAILING/MAX_CONTEXT asserted in gh::log::tests::failing_and_context_lines_are_capped; cli-allow.toml says git reads can run repo-configured programs (cwd must be trusted). cargo fmt --all -- --check clean, cargo clippy -p srv-cli --all-targets -- -D warnings clean, cargo test -p srv-cli: 51 passed, 0 failed, 1 ignored."
+not_done: "1. Re-review (round 2). 2. Plain-http loopback bases still use reqwest's system proxy settings (an http proxy env var would see a loopback request); only tests use loopback. 3. gh alias set can map a name to `auth token` or `config get`; both steps are Account and ask, so not silent, but not refused. 4. Clustered-letter matching fails closed: a w inside another flag's value (-Rw) is Navigate, a denied cli letter inside a value (git log -Sconfig) is refused. 5. .cmd shims killed on timeout may leave grandchildren (from rust-coder-2)."
+gotchas:
+  - "Shared target dir F:/sb-swarm/target-servers is locked by other builds; the first clippy waited about 9 minutes on the file lock. Use -j 2."
+  - "classify_args ignores GHE hosts; the handler uses classify_with(argv, &cfg.gh_hosts)."
+  - "api_class scans every token on its own (values included, stricter); api_host consumes values of known value-taking flags so -f body=https://x is not an endpoint, and after an unknown flag the next token is still checked as an endpoint."
+decisions_made: [D-542]
+blockers_opened: []
+files_touched:
+  - crates/srv-cli/src/gh/mod.rs
+  - crates/srv-cli/src/gh/log.rs
+  - crates/srv-cli/src/cli.rs
+  - crates/srv-cli/src/config.rs
+  - crates/srv-cli/src/flags.rs
+  - crates/srv-cli/src/http.rs
+  - config/cli-allow.toml
+  - agent-memory/decisions.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -p srv-cli -j 2"

@@ -1,0 +1,19 @@
+from: tester (T-10 round 4)
+to: sheet sub-orchestrator
+task: T-10
+date: "2026-10-25"
+state: "Round-4 acceptance after the B-32 follow-up (91f9e46, 0994380, 6357f07), run at HEAD 0e0207b. The code is the same as 6357f07; later commits are review and decision files only. Verdict red: 41 of 44 rows pass, 3 fail, and all 3 fails come from one test. All 20 tests from rounds 1 to 3 pass. New file crates/sb-sheet/tests/acceptance_t10_b32.rs has 16 black-box tests: B-32 (1) to (7), D-223, D-224, D-225 (body lines, and skeleton/sheet names), B-201 P5, a canary test over the new escapes (pass), the new W5-b outline test (FAIL), and an ignored B-201 P4 test. Sixteen mutations of the B-32/D-22x code paths each turned their test red, and every mutation was restored. The failing test is w5b_outline_never_shows_a_password_split_across_heading_spans. In it, a password value split over two heading spans is scrubbed in the body (`## Key *** end`) but shows in the `remaining:` outline with one space inserted. The label comes from reader.rs plain_text, which joins spans with a space, so the scrub misses the value. This is D-226 (3), which is not implemented yet. The contiguous SB_VAULT_CANARY grep had 0 hits everywhere (logs, worktree, target/debug/deps, tracked tree), and runs/ and leaks.log are absent. clippy and fmt are clean. The skeleton CLI exits 0 with CHALLENGE and OVERLAY lines. Report: bench/results/accept-T-10.md, Verdict: red."
+not_done: "Re-run after area sheet implements D-226. When that lands, the W5-b outline test should go green. Un-ignore b201_p4_tiny_remainder_never_overshoots_max_tokens and add it as a row, since D-226 (1)(2) fix that edge. The live-index halves of docs/05 acc. 6/7 and the docs/04 live fetch belong to the sb-driver and srv-web waves."
+gotchas:
+  - "The contiguous canary grep cannot catch a value that a renderer re-spaces. To see such leaks, compare outputs with all whitespace removed (see the squeeze helper in acceptance_t10_b32.rs)."
+  - "Other sessions commit in this worktree while you work: HEAD moved twice during this run (d5a44ed review, 0e0207b D-226). Check `git log` before stamping a report, and stage only explicit paths."
+  - "merge_gate splits table rows on every pipe character. Never put one in a report cell."
+  - "A perl -0pi mutation with backslash-heavy Rust literals can silently fail to apply. Check `git diff --quiet` after each mutation (a line-number sed is simpler)."
+  - "libtest accepts several name filters after `--` (`cargo test --test x -- b32_3 b32_7`), so one row can run several tests."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-sheet/tests/acceptance_t10_b32.rs
+  - bench/results/accept-T-10.md
+  - agent-memory/handoffs/T-10-tester-4.yaml
+verify: "cargo test -p sb-sheet --no-fail-fast"

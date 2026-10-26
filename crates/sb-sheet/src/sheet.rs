@@ -7,6 +7,7 @@
 //! `disabled`, `hidden`, `covered`, `new-tab`, options `[a, b, c, +N more]`.
 
 use crate::data::alias_for;
+use crate::text::link_text;
 use crate::{FieldValue, FrameId, IndexRow, SheetOpts, TextBlock};
 use std::collections::HashSet;
 
@@ -34,6 +35,13 @@ pub(crate) fn clean(text: &str, cap: usize) -> String {
     out.truncate(out.trim_end().len());
     out.push_str("...");
     out
+}
+
+/// Page-derived text for a harness line: [`link_text`] then [`clean`], so neither a quote nor
+/// a `[..](#id)` look-alike survives (D-225). Use it once per name: never on text that went
+/// through `link_text` already.
+pub(crate) fn clean_name(text: &str, cap: usize) -> String {
+    clean(&link_text(text), cap)
 }
 
 /// A password-type field: its value is only ever `empty|filled` (H-2, B-5).
@@ -76,7 +84,7 @@ pub(crate) fn sealed_frames(index: &[IndexRow]) -> HashSet<FrameId> {
 /// One numbered element line: `#7 input "Email" empty` (D-203).
 pub fn sheet_line(row: &IndexRow) -> String {
     let mut out = format!("{} {}", row.elem(), alias_for(&row.role));
-    let name = clean(&row.name, NAME_CAP);
+    let name = clean_name(&row.name, NAME_CAP);
     if !name.is_empty() {
         out.push_str(&format!(" \"{name}\""));
     }
@@ -88,7 +96,7 @@ pub fn sheet_line(row: &IndexRow) -> String {
             FieldValue::Text(t) if t.is_empty() => "empty".to_string(),
             // Never the text of a password field, whatever the producer sent.
             FieldValue::Text(_) if is_password(row) => "filled".to_string(),
-            FieldValue::Text(t) => format!("\"{}\"", clean(t, VALUE_CAP)),
+            FieldValue::Text(t) => format!("\"{}\"", clean_name(t, VALUE_CAP)),
         };
         out.push(' ');
         out.push_str(&word);
@@ -115,7 +123,7 @@ pub fn sheet_line(row: &IndexRow) -> String {
             .options
             .iter()
             .take(OPTIONS_CAP)
-            .map(|o| clean(o, OPTION_CAP))
+            .map(|o| clean_name(o, OPTION_CAP))
             .collect();
         let mut opts = shown.join(", ");
         if st.options.len() > OPTIONS_CAP {
@@ -235,7 +243,7 @@ fn known_regions(
     }
     for row in &index {
         if let Some(h) = &row.heading {
-            add(format!("## {}", clean(h, 60)));
+            add(format!("## {}", clean_name(h, 60)));
         }
     }
     for b in text_blocks.iter().filter(|b| !sealed.contains(&b.frame)) {
@@ -367,6 +375,29 @@ mod tests {
             sheet_line(&s),
             "#9 select \"Plan\" [o1, o2, o3, o4, o5, +3 more]"
         );
+    }
+
+    #[test]
+    fn page_text_in_a_sheet_line_cannot_pose_as_a_link_form() {
+        // D-225: name, text value and options go through link_text as well as the quote swap
+        let mut s = row(9, "combobox", "Plan [a](#1)");
+        s.state.value = Some(FieldValue::Text("[button \"b\"](#2)".into()));
+        s.state.options = vec!["[c](#3)".into(), "ok".into()];
+        assert_eq!(
+            sheet_line(&s),
+            "#9 select \"Plan (a)(#1)\" \"(button 'b')(#2)\" [(c)(#3), ok]"
+        );
+        // the unknown-region list prints page headings the same way
+        let mut r = row(1, "link", "Home");
+        r.heading = Some("Pay [now](#4)".into());
+        let out = sheet(
+            &[r],
+            &[],
+            &SheetOpts {
+                region: Some("nope".into()),
+            },
+        );
+        assert_eq!(out, "no region \"nope\". regions: ## Pay (now)(#4)");
     }
 
     #[test]

@@ -1,0 +1,29 @@
+from: rust-coder-4
+to: next
+task: T-12
+date: "2026-10-26"
+state: "Round-3 fixes for review-T-12 round 2, one commit on swarm/servers-T12 (srv-web: rule 5 fails closed (no body passthrough), filtering resolver, single deadline (W-2, W-3, W-4, D-508)). Blocking rule 5 closed by construction (D-508): http::looks_like_html is gone; every decision runs on the decoded body (BOM first). fetch walks every body that is not a JSON, feed, media or binary type (html::parse_text for non-HTML types, <p> at blank lines), html::plain_text removed; xmp/plaintext/noembed/noframes skipped and title/textarea markup re-walked. api shows only JSON (JSON type or none, parses, XSSI line stripped) or tag-free text/plain (http::has_tag), else one Ok line `HTTP <status> <type>, <n> bytes, not shown (not JSON or plain text; use fetch to read pages)`. feed never echoes a non-feed body, sniffs iCal on decoded text, every iCal text field through html::fragment_text. Should-fix: page client has a filtering reqwest DNS resolver (http::PublicOnly) and a private target is allowed only when the user wrote a private IP literal or exactly localhost (fetch #id: the linking page's URL); 100.64/10, 198.18/15, ::a.b.c.d added to private_ip; is_loopback no longer accepts *.localhost; D-506 fail-closed removes earlier registrations; http::get_page puts redirects and body under one deadline; SITE_OUTPUT_MAX_CHARS tested. New tests: tests/round3_t12.rs (10; 8 fail on 99ed4ea, see gotchas), lib http tests (tag scan, private ranges/loopback/written_private, resolver refusing a loopback answer, overrides public). Updated: round2_t12 and web_tools api-HTML expectations (Ok not-shown line instead of an error). cargo fmt --all --check clean; clippy -p srv-web --all-targets -D warnings clean; cargo test -p srv-web -j 2: 59 passed, 0 failed, 5 ignored (lib 17, accept_t12 5+1, accept_w 6+1, contract_paths 1, live 0+3, round2_t12 7, round3_t12 10, web_tools 13); cargo test --workspace -j 2: 78 binaries, 763 passed, 0 failed, 10 ignored."
+not_done: "1) Reviewer round 3 and tester re-run (T-12 not marked done). 2) api_base64_echoed_vault_value_is_scrubbed stays ignored until T-05d (D-77). 3) B-500 and B-501 still open for supreme. 4) Proxies: reqwest honours HTTP(S)_PROXY env vars; with a proxy the PublicOnly resolver resolves the proxy host, not the target, and a proxy on a private address is refused for public URLs. No blocker opened (no proxy in the project's setup); revisit if a user runs behind one."
+gotchas:
+  - "Red evidence: the committed tests/round3_t12.rs checked out into a scratch worktree at 99ed4ea (git worktree add, removed after): 8 of 10 fail. round2_rule5_bypasses_never_reach_the_model prints 64 LEAK lines (fetch text/plain x16 bypasses; api text/plain, no type and application/xml x16 each); raw_text_elements_never_carry_markup_to_the_model prints 12 more (<plaintext>, <xmp>, <noembed>/<noframes>, <title>, <textarea> leaked markup even under text/html); one_deadline_covers_redirects_and_body: fetch gave up after 3.24 s on a 2 s config; ical_text_fields_lose_their_html, utf16_ical_is_sniffed_after_decoding, api_shows_only_json_or_tag_free_plain_text, fetch_ref_from_a_public_page_into_loopback_is_refused (fetched the loopback secret), health_read_failure_unregisters_the_sites_tools fail. site_tool_output_is_capped_at_20000_chars and feed_never_echoes_a_non_feed_body pass on 99ed4ea (a missing test, and a guard for the new code). Re-run: git worktree add --detach <dir> 99ed4ea; git -C <dir> checkout <this commit> -- crates/srv-web/tests/round3_t12.rs; cargo test -p srv-web --test round3_t12."
+  - "Page text can still contain tag-like characters from character references (&lt;script&gt;) and attribute-derived names (aria-label, title, alt): that is page-authored text a browser shows, not markup; docs pages need `Vec<T>` intact, so escape does not touch '<'."
+  - "A typed name that resolves to a private address (http://nas.lan/, a docker service name) is now refused by fetch and feed: write its IP. search is exempt (operator config)."
+  - "The resolver error is detected by downcasting the reqwest error's source chain to http::PrivateAnswer (hyper-util ConnectError keeps the boxed resolver error as its source). If a reqwest/hyper-util upgrade wraps it differently the refusal still holds (no connect) but the message degrades to 'could not connect'; the lib test a_public_name_answering_loopback_never_connects pins the message."
+  - "Test servers that answer redirects must loop over requests on one connection: reqwest pools the connection and a second tool call reuses it."
+decisions_made: [D-508]
+blockers_opened: []
+files_touched:
+  - crates/srv-web/Cargo.toml
+  - crates/srv-web/src/api.rs
+  - crates/srv-web/src/feed.rs
+  - crates/srv-web/src/fetch.rs
+  - crates/srv-web/src/html.rs
+  - crates/srv-web/src/http.rs
+  - crates/srv-web/src/search.rs
+  - crates/srv-web/src/site.rs
+  - crates/srv-web/tests/round2_t12.rs
+  - crates/srv-web/tests/round3_t12.rs
+  - crates/srv-web/tests/web_tools.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/handoffs/T-12-rust-coder-4.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -p srv-web -j 2"

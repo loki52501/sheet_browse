@@ -43,6 +43,11 @@ blockers:
     task: T-19
     question: "A SUBMIT/submitish row with no form id (SPA forms built without <form>) gets no form context, so card, password and heading evidence elsewhere on the page is not used. Should injected.js assign a pseudo form id to such groups, or should sb-act use the same frame's formless rows as context?"
     default_taken: "Button-only context (D-433). Preferred fix is in injected.js: give formless field groups a synthetic form id so sheets, fingerprints and sb-act agree."
+  - id: B-34
+    task: T-11b
+    question: "review-T-11b round 1 note, outside the T-11b diff: ToolStore::reforge (lifecycle.rs, reforge) has no check for a retired row. Since D-316 a retired row whose file is still in place (failed archive) is a normal state, and a reforge of it archives the old file, writes the new one and sets the row repaired at version+1, reviving a retired tool without register_forged (record(Relocated) on a retired row is already refused, IC-304). Also from the same review: SweepAction::Retired { archived: None } means both 'no file' and 'archive failed'; only the ledger tells them apart."
+    default_taken: "Not a T-11b blocker (gate checks still apply to the reforged tool). Area store refuses a reforge of a retired row (StoreError::Invariant, logged to tools.health.why like the other refusals; forge again goes through register_forged) as T-11c, with B-33 item 4, before toolforge T-28. SweepAction stays as is (frozen, D-90); callers read the ledger."
+    needs_user: false
   - id: B-33
     task: T-11
     question: "Supreme second-opinion review of the store D-78 follow-up (merged 83bfdb5; 0 blocking) left items for toolstore. (1) sweep logs a failed archive as an ok:false tools.retire event while retire() has already saved the row Retired, so the ledger never gets an ok:true retire for that tool and its only retire event contradicts the row (lifecycle.rs 210, 277, 614). (2) tests/contract_paths.rs does not name ToolStore::tool_path or archive_path from outside the crate (only an in-crate test does), so they could become pub(crate) unnoticed, and it does not pin ApiFetch::api(&self, &str, Duration) or the root fn fingerprint. (3) note, safety-relevant: a retire whose archive step fails leaves the retired tool's file in tools/<domain>/, where the loader still finds it. (4) notes: relocate keeps its own name-synonym table beside sb_sheet::data::synonyms (fingerprint.rs 26); tools with upper-case names written before D-312 become orphans nothing retires or reports; a file step that keeps failing appends an ok:false event every sweep with no dedup."
@@ -174,6 +179,26 @@ blockers:
     question: "D-438 (1)'s add-first same-parent rule treats fields the HTML parser inserted at load as 'added in the last 2000 ms'. On accept-pw.html the parser's record (target form#f1, added a label holding #nick) puts #nick in S.born with parent f1; a wrapper swap of #w-in in f1 within 2 s of load (a same-batch one-for-one swap that D-437 already resolves) makes #nick 'the single field added to the same parent', so it reads empty|filled. accept-t19 A10 ('control: the ordinary field is read') and A14 ('after nick', toggleWrap in form#toggles of accept-d435.html) fail whenever the clicks land within 2 s of load: in full-suite runs on HEAD 2ec0d4f and on edd30e4 alike, intermittently when run alone. Should the rule skip such fields?"
     default_taken: "None (outside D-439; js-coder-6 left D-438 as written). Proposed default: skip the born same-parent rule for a parent that gained a value field in the same batch (its one-for-one swap already handed the value on, D-437); optionally do not remember adds made while document.readyState is 'loading'. Either should fix A10/A14 (not tried); the first drops the same-parent mark when a later batch both removes the old field and adds a different one to that parent."
     needs_user: false
+  - id: B-201
+    task: T-10
+    question: "Left after the B-32 rounds (91f9e46, 0994380): (P4) when max_tokens leaves fewer characters than a block's fixed overhead (code fence lines, a table header separator), the reader must still make progress and the returned piece can exceed the remainder by that overhead; (P5) the skeleton URL line still uses the plain clean, so a URL can carry a `[a](#3)` look-alike, and a page title starting with `! ` or `landmarks:` can pose as a skeleton line."
+    default_taken: "P5 fixed in the same change (skeleton.rs escape_lead: link_text on the URL line, a leading backslash on a title or URL line that starts like a skeleton line). P4 is not a blocker for T-12: it overshoots by a few tokens at most and only on a tiny remainder; area sheet fixes it before step 3 (live browser readers) by dropping an overhead-only piece when the remainder cannot hold it (return truncated)."
+    needs_user: false
+  - id: B-202
+    task: T-10
+    question: "Review round 5 should-fix 2: a table header separator cannot be split, so without max_tokens a page with thousands of empty columns sets the chunk size (3000 columns gave a 3002-token chunk holding only the separator). max_tokens still holds."
+    default_taken: "Not a T-12 blocker. Area sheet caps rendered table width (columns beyond a fixed limit folded into one `+N columns` cell) before step 3 (live browser readers)."
+    needs_user: false
+  - id: B-203
+    task: T-10
+    question: "D-229 says every span that contributes characters to a joined hit renders as `***`. Read literally, that blanks a whole plain span, and the tester's acceptance_t10_d227 d227_label_is_scrubbed_before_the_cut then fails: its heading's first plain span `Golf ggg... <value prefix>(` becomes `***`, so no `## Golf` label is left in remaining:. Should a plain span lose all its text or only the characters it gives to the hit?"
+    default_taken: "A link span that gives a character to a hit renders as `***` with no link form, as D-229 says. A plain span (no link syntax, so D-229's why does not apply to it) hides only the characters it gives to the hit, one `***` per run. Every character of the value is hidden either way, and the line is checked again until no hit is left. Both the D-227 label test and w5b_body_never_shows_a_value_joined_across_a_link_form pass. If supreme wants whole plain spans blanked, set SpanKind::Plain hits to Hide.all in Ctx::scrub_joined (crates/sb-sheet/src/reader.rs) and amend the D-227 label test."
+    needs_user: false
+  - id: B-204
+    task: T-10
+    question: "Found while writing D-231 tests (not a D-231 change, present at c550253): when two TextBlocks share an `order`, a read cursor chain never ends. A header row and a body row both at order 5 with chunk_tokens 4 give chunk 1, 2, 3, 2, 3, 2, ... because the cursor names a block by its order. Should read() guard against duplicate orders from the extractor?"
+    default_taken: "Not taken in D-231 (the D-231 test page uses distinct orders). Proposed for T-10c: read() sorts blocks by order and, when orders repeat, keys the cursor by position in that sorted list (or renumbers repeats), so every chain makes progress whatever the extractor sends."
+    needs_user: false
 
   - id: B-175
     task: T-07
@@ -195,6 +220,15 @@ blockers:
     question: "A scheduled `claude -p` session that is allowed Bash can run `harness ask <run> <n> yes`, `harness gate set` or `harness vault set` and approve its own asks or loosen its own gate (review-T-08 note; comes from the D-105 file-based asker). Rule 4 says everything goes through the gate; should the launcher deny those commands to the session?"
     default_taken: "ClaudeLauncher passes --disallowedTools for Bash(harness ask:*), Bash(harness gate:*) and Bash(harness vault:*) on every session it starts (scheduled and `harness run`), and a T-08 test asserts the argv. Answering asks, changing gate rules and vault entries stay user-only. Supreme may prefer a decision that moves the check into the CLI (e.g. refuse when SB_RUN_ID is set) as well. Implemented as D-124 (5). review-T-08 round 2: the deny rules match command text, so a full path, `cmd /c`, `cargo run` or writing <n>.answer directly bypasses them; the deny list is defence in depth only. A sound fix needs an answer the session cannot forge (e.g. the answer file carries a MAC keyed by a secret held in the OS keychain that sessions are never given, checked by FileAsker). Needs a supreme decision before B-192 closes; core keeps the deny list meanwhile."
     needs_user: false
+  - id: B-559
+    task: T-15
+    question: "WAVE2.md (D-91) says to run parallel tasks in sibling worktrees F:/sb-swarm/wt/<area>-T<nn>, but scripts/hooks/guard_write.py refuses every Write/Edit outside ROOT (= the session's own worktree, wt/<area>), so subagents of an area session cannot write in a sibling worktree. Should the hook accept sibling wt/<area>-T* worktrees, or should launch.ps1 start one session per task worktree?"
+    default_taken: "No hook edit (hooks are supreme's). Area servers moved its task worktrees inside its own worktree (git worktree move to wt/servers/.wt/T<nn>, same branches swarm/servers-T<nn>), so the guard applies. Known gap of this layout: guard_write's path-specific checks compare the path relative to ROOT, so `tools/*.js` planner `?s` and the interfaces.yaml check do not match `.wt/T<nn>/...`; servers writes tool files (T-13) from wt/servers itself and never edits interfaces.yaml. SubagentStop and Stop read handoffs from wt/servers/agent-memory/handoffs, so coders also copy their handoff there."
+    needs_user: false
+  - id: B-540
+    task: T-15
+    question: "docs/04 C-3 says flags(provider, env) reads and that writes are Account, but names no provider, API shape or auth; C-4 names config/cli-allow.toml but no schema. Which providers and programs ship, and how are they configured?"
+    default_taken: "config/flags.toml ships with no providers and a commented example; a provider is {api, auth (header value template that must contain @vault(name)), header (default Authorization), read (GET path, {env} replaced), domain (optional gate domain)}. flags(provider, env) GETs the read path; method/path/body make writes (POST/PUT/PATCH Account, DELETE Delete). config/cli-allow.toml is [programs.<name>] {bin, read, write (Account), delete (Delete), default read|write|delete|refuse, deny_flags, timeout_secs}, shipped with read-only git, dig and nslookup entries; anything not listed is refused with nothing run. Both files are read per call and again inside the call, so an edit after the gate approved a call cannot raise its class. Provider and program names fold to ASCII lowercase."
   - id: B-600
     task: T-18
     question: "guard_write.py sets ROOT to the worktree its hook script runs from (the session's project dir), so a subagent of the wt/driver session cannot Write or Edit in a D-91 per-task worktree wt/driver-T18. Should the hook also accept sibling worktrees of the same area (wt/<area>-T<nn>)?"
@@ -214,6 +248,58 @@ blockers:
     task: T-18
     question: "D-601 gives the pinned path as <home>/chromium/156.0.8078.4/chrome-<platform>/chrome(.exe), but the macOS Chrome for Testing archive has no 'chrome' binary. And is an empty SB_CHROMIUM or SB_HOME 'set'?"
     default_taken: "macOS resolves to chrome-mac-arm64 (or chrome-mac-x64)/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing; Windows and Linux follow D-601 exactly (chrome-win64/chrome.exe, chrome-linux64/chrome). An empty SB_CHROMIUM or SB_HOME counts as unset. A set source that names a missing file is an error naming SB_CHROMIUM, never a fall-through."
+  - id: B-500
+    task: T-12
+    question: "docs/04 W-2 says fetch(mode=\"raw\") returns the cleaned HTML of <main> or the densest block (60 k chars) 'for tools that need structure', but CLAUDE.md rule 5 says the model never receives raw HTML except from screenshot and video.*. Which wins for the model-facing fetch tool?"
+    default_taken: "Rule 5 wins. fetch(mode=raw) is refused with ToolError::Args naming B-500 before any request; mode=read (with region) and mode=sheet are the structured views. The W-2 raw renderer exists as srv_web::html::raw_main_html (cleaned: no script/style/comments, attribute allowlist, no password or card values, capped at 60 k chars) for in-process site-tool hosts, and is never returned to the model. If supreme wants raw for the model, that is a CLAUDE.md change, not a srv-web one."
+    needs_user: false
+  - id: B-501
+    task: T-12
+    question: "fetch follows redirects (W-2), but the gate classified the call by the requested URL's domain. A redirect to another registrable domain therefore reads that domain without its own gate.rules lookup (a `stop` rule on the target domain does not fire). Classify again per hop, refuse cross-domain redirects, or accept for Read GETs?"
+    default_taken: "Accepted for Phase 1: fetch is a Read GET, reads only, and the browser path has the same property on navigation. The final URL is in the tool event's consequences.url, so the ledger shows where the read landed. api (W-3) does not follow redirects to another host at all. Revisit if a domain stop rule must also cover reads reached by redirect."
+  - id: B-520
+    task: T-14
+    question: "docs/04 says `shell(\"rm -rf runs/x\")` is 'Read-class-safe'. Is that the class Read, or only 'allowed like Read'? ledger::report lists Read events under Read:, so an in-runs deletion shows as a read, not under Did."
+    default_taken: "Class Read for shell commands whose every changed target is scratch (the literal reading; D-520 (4)). The explicit fs.write/move/mkdir/delete tools are declared Fill, so their in-runs writes show under Did. Supreme may prefer Fill for both."
+    needs_user: false
+  - id: B-521
+    task: T-14
+    question: "Fail-closed shell classification makes every unknown command (python script.py, node x.js, make, go build) class Delete, so each one asks and times out to skip. Is that the intended cost, or should known project commands get an allowlist (like config/cli-allow.toml for C-4)?"
+    default_taken: "Delete for unknown commands (D-520 (5)); cargo build/test/fmt/run and npm test/run/install are Fill because this repo needs them. An allowlist file can be added later without changing the parser."
+    needs_user: false
+  - id: B-522
+    task: T-14
+    question: "B-192 follow-up: srv-files now treats a run's asks/, ledger.jsonl, report.md and prompt.md (and the run folder and runs root) as outside scratch, so fs.write, fs.move, fs.delete and shell redirections into asks/<n>.answer are Delete and ask. Claude Code's built-in Write and Bash tools are not behind the gate and can still write that file."
+    default_taken: "srv-files closes its own route (D-520 (2)); the general fix stays with B-192 (an answer the session cannot forge)."
+    needs_user: false
+  - id: B-526
+    task: T-14
+    question: "For area core: harness-core test mcp_t07::file_asker_stderr_has_no_canary (crates/core/tests/mcp_t07.rs:1602) fails 3/3 when TEMP is a longer path (e.g. F:/sb-swarm/tmp-servers/t14acc-F) and passes with the default TEMP. The FileAsker stderr line 'ask: cannot create <temp path>\\asks: ...; skipped, nobody saw' is cut by the core line-length cap before 'nobody saw', so the assertion depends on the temp path length. Found by the T-14 acceptance re-run; no srv-files code involved."
+    default_taken: "Not a servers fix. Core shortens the path in that line (or puts the fail-closed words first) so the cap never cuts them, or asserts on a prefix. Until then run the workspace suite with a short TEMP."
+    needs_user: false
+  - id: B-560
+    task: T-13
+    question: "Live run 2026-10-26: ashbyhq.list_jobs works on jobs.ashbyhq.com/ashby and /linear, but fails on /openai because api.ashbyhq.com/posting-api/job-board/openai answers more than page.api's 5 MB cap (D-501; the answer carries descriptionHtml and descriptionPlain for every job, which the tool drops). Large boards therefore cannot be listed in Phase 1. Raise page.api's cap for JSON (the tool's output is capped at 64 KiB / 20 000 chars anyway), stream-parse and drop known-large fields, or accept?"
+    default_taken: "Accept for now: the 5 MB cap stays (W-2, D-501) and page.api reports a cut body as 'answered more than the 5 MB cap' instead of 'did not answer with JSON', so the model falls back to fetch/find in one turn. Proposed follow-up for the sub-orchestrator: a separate page.api cap (e.g. 32 MB, still bounded by the run's remaining wall time, D-64), since the bytes never reach the model."
+    needs_user: false
+  - id: B-561
+    task: T-13
+    question: "docs/03 T-4 says a fingerprint miss disables the tool 'for this run'. D-561 (T-13) re-registers a needs_repair or process-disabled tool within the same run when a later fetched page's fingerprint is not a miss, and repairs it on a clean run. Does that amendment of T-4 stand?"
+    default_taken: "Keep D-561: re-enabling only on a page whose fingerprint matches or partially matches is no capability gain (check_repair refuses header changes; the registry class floor holds, D-127), and it is what lets 'fixing the page flips it back via relocate with version = 2' happen without a restart. If supreme prefers the literal T-4 text, the same-run re-enable can be dropped; a needs_repair row from an earlier run still reaches relocate."
+  - id: B-562
+    task: T-13b
+    question: "Phase 1 ladder rung 2 (bench/results/ladder-phase1-servers.md, variants 1 and 3): the session put the Claude Code account's email address into a `User-Agent` header of a Read-class `api` call to crates.io, so personal data left the machine with no ask. Should srv-web's `api` refuse model-set identity headers (User-Agent, From, Cookie...) and keep its own UA, or should the gate class an outgoing header carrying contact data as Send?"
+    default_taken: "Servers fix in T-12b: `api` sends its own UA and refuses model-set User-Agent, From, Cookie and Authorization headers that are not @vault(...) templates; any other header value that looks like an email address raises the class to Send (asks, D-39 recipients = the host). A gate-level personal-data check is a core question for wave 4."
+    needs_user: false
+  - id: B-563
+    task: T-13b
+    question: "Phase 1 ladder rung 1 (variants 2, 3): `claude -p` sessions launched by `harness run` answered research prompts from memory with zero tool calls, and report.md said `Result: done` with `Read: 0`. The launcher passes only the bare prompt; the session is not told its run id, its files/ folder, or that answers must cite this run's tool results. Should the launcher (core, docs/01 H-5/H-6) prepend a short run preamble (run id, files path, 'cite sources you fetched in this run'), and should report.md mark a research run with no Read calls as not done?"
+    default_taken: "Core owns it (launcher and report). Proposed preamble: one paragraph with the run id, `runs/<id>/files/` for deliverables, and 'cite only what tools returned in this run'. Until then the ladder scores such runs as fail."
+    needs_user: false
+  - id: B-564
+    task: T-13b
+    question: "Phase 1 ladder rungs 4 and 5 (variant 3): sessions wrote deliverables (CSV, table) to their working folder instead of runs/<id>/files/, because fs.write and csv.clean resolve a bare file name against the base folder and the session never learns its run id. Should fs.write and csv.clean put a bare file name into the run's files/ the way xlsx.write already does?"
+    default_taken: "Yes, servers T-14b: a relative path with no folder component goes to runs/<id>/files/; explicit paths keep their meaning. The tool descriptions say so."
     needs_user: false
   - id: B-605
     task: T-20
@@ -390,6 +476,11 @@ interface_changes:
     interface: "harness_core::sched (I-13 draft, D-80)"
     change: "Additive: trait Launcher gains a provided method fn before_run(&self) -> Result<(), LaunchError> (default Ok); Runner::execute calls it first, before the prompt is scrubbed, and when it fails returns the new variant SchedError::BeforeRun(LaunchError) without creating a folder or runs row. Existing Launcher impls compile unchanged; a match on SchedError without a wildcard arm needs the new arm (none in the workspace). The harness crate adds daemon::ReopenVault (harnessd's launcher wrapper that re-opens the vault in before_run) and launcher::{DISALLOWED_TOOLS, DEFAULT_SESSION_CAP, SESSION_CAP_VAR, DEFAULT_MAX_ANSWER_BYTES, ANSWER_SCRUB_SLACK, parse_session_cap, session_cap_from_env, answer_text}, with ClaudeLauncher fields max_session and max_answer_bytes (D-124)."
     why: "review-T-08 should-fix 7: harnessd must scrub a vault value added after it started, and the prompt is scrubbed inside Runner::execute, so the re-open has to happen there, before anything is written. Default until supreme answers: as implemented in T-08 round 2."
+  - id: IC-305
+    from: store
+    interface: I-7
+    change: "Additive, per D-315 (B-33 (3)): toolstore::ToolStore::{scan_live(&self, store: &dyn MemoryStore, domain: &str, path: &str) -> Result<LoadReport, StoreError>, load_live(&self, store: &dyn MemoryStore, domain: &str, path: &str) -> Result<Vec<Tool>, StoreError>} (async). They skip tools whose tools.health row is retired. Behaviour per D-316: a retire whose archive fails is an ok:true tools.retire plus an ok:false tools.archive event, and record() returns Ok for it. Proposed for wave 4: #[deprecated] on the sync load/scan in favour of the live pair."
+    why: "Runtime callers (srv-web T-13, sb-mcp, toolforge) must not serve a retired tool whose file is still in place; load cannot see tools.health without MemoryStore. Default until supreme answers: callers use load_live; load/scan stay for tests and offline tooling."
   - id: B-604
     from: driver
     interface: "I-8 (sb-cdp), I-9 (sb-driver)"

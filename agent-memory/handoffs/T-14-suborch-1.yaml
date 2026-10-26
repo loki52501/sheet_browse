@@ -1,0 +1,22 @@
+from: servers/suborch
+to: supreme
+task: T-14
+date: "2026-10-26"
+state: "srv-files F-1..F-6 done on swarm/servers-T14. Shell classification is an allowlist that fails closed (D-523); writes to config, startup, PATH and git locations are Delete anywhere (D-524, D-525); git/gh inside runs/ is Delete; cmd.exe fallback runs only plain argv. review-T-14 approve (confirm round). accept-T-14 re-run all pass except pptx.write (python-pptx not installed), with TEMP on F: and under AppData. cargo test --workspace -j 2: 785 passed 0 failed."
+not_done: "T-14b (tasks.yaml). Ladder rungs 3, 5, 9 over MCP are T-15b; rungs 2, 4 are T-13b; they run in one integration pass."
+gotchas:
+  - "Per-task worktree at wt/servers/.wt/T14 (B-559)."
+  - "Shared CARGO_TARGET_DIR: `cargo clean -p srv-files` before tests or another worktree's test binary may run; `-j 2`."
+  - "Docs tests need SB_PYTHON=E:/appdata/anaconda/python.exe (openpyxl, pypdf, reportlab) and pandoc on PATH."
+  - "core's mcp_t07 file_asker_stderr_has_no_canary fails with a long TEMP path (B-526, core's)."
+decisions_made: [D-520, D-521, D-522, D-523, D-524, D-525]
+blockers_opened: [B-520, B-521, B-522, B-526]
+files_touched:
+  - crates/srv-files/
+  - Cargo.lock
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/tasks.yaml
+  - bench/results/review-T-14.md
+  - bench/results/accept-T-14.md
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-files"

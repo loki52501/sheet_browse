@@ -1,0 +1,43 @@
+from: rust-coder (T-15, implementation of the approved design)
+to: servers sub-orchestrator, then T-15 reviewer and tester
+task: T-15
+date: "2026-10-25"
+state: "srv-cli implemented in 1221877 on swarm/servers-T15 (C-1..C-4, D-540, D-541, B-540). Tools: gh, dns, cloudflare, flags, cli; tools() reads env (SB_GH_BIN, SB_CLOUDFLARE_API, SB_CONFIG_DIR, SB_FLAGS_CONFIG, SB_CLI_ALLOW), tools_with(Config) for tests. gh classification per D-540 (read allowlist, everything else Account, DELETE and `<group> delete` Delete, --web Navigate, gh auth refused); run view <id> --log saves the scrubbed log to runs/<run>/files/gh-run-<id>.log and returns the first failing step. dns via hickory-resolver 0.26.3; cloudflare and flags share src/http.rs (vault resolved inside ToolCtx::resolve_into into a sensitive HeaderValue, no redirects, paths pinned under the base, @vault in bodies refused). cli runs only config/cli-allow.toml entries (shipped: git read-only, dig, nslookup); config/flags.toml ships empty with a documented example. Programs run as argument vectors (src/proc.rs: no shell, stdin closed, timeout, capped output, kill_on_drop); shell syntax outside quotes and @vault(..) in program args are refused. All untrusted output goes through src/text.rs (controls and ANSI stripped, `](#` broken, fence/trailer lines quoted with `| `, capped with a truncated: trailer). cargo fmt --check clean, clippy -p srv-cli --all-targets -D warnings clean, cargo test -p srv-cli: 44 passed, 1 ignored (live DNS, passes with --ignored). Each acceptance test was shown to fail once under a mutation (first-step parse, missing file scrub, api field flags, cli deny flags, vault header not resolved), then restored."
+not_done: "1. main has one newer commit (ba6d37e, prompts/suborch/WAVE2.md only); not merged here, no conflict expected. 2. Review and acceptance (tester): bench/results/review-T-15.md and accept-T-15.md do not exist yet. 3. fake-gh.sh path (Unix) is untested on this Windows machine; it is plain sh and the Windows twin passes. 4. gh api graphql queries (no mutation) are Account because they need -f; a finer rule (query vs mutation) is possible later. 5. A program started through cmd.exe (.cmd) that hangs may leave grandchildren after the timeout kill; gh.exe and the shipped cli entries are real executables."
+gotchas:
+  - "The repo .gitignore has *.log: tests/fixtures/gh-run-123.log had to be added with git add -f. Edits to it stay tracked."
+  - "Files written by a tool are not scrubbed by the wrapper: save_log calls harness_core::vault::scrub (the global scrubber). Tests must call vault.install_global() or the file scrub is the identity; tests/common/mod.rs does."
+  - "text::line neutralises per line before joining, so an embedded `remaining:` line inside a TXT record shows as `| remaining:` even mid-line; this is intended."
+  - "Shared target F:/sb-swarm/target-servers: a full `cargo test --workspace` hit LNK1102 (linker out of memory) and missing-rlib errors under parallel sessions; -j 2 fixed it. harness accept_t08 then failed on the shared Postgres (EOF on create database, pool timeout), unrelated to srv-cli."
+  - "Assertions never format canary-bearing text: use common::assert_clean (contains check, fixed message)."
+decisions_made: [D-540, D-541]
+blockers_opened: [B-540]
+files_touched:
+  - Cargo.lock
+  - crates/srv-cli/Cargo.toml
+  - crates/srv-cli/src/lib.rs
+  - crates/srv-cli/src/config.rs
+  - crates/srv-cli/src/argv.rs
+  - crates/srv-cli/src/proc.rs
+  - crates/srv-cli/src/text.rs
+  - crates/srv-cli/src/http.rs
+  - crates/srv-cli/src/gh/mod.rs
+  - crates/srv-cli/src/gh/log.rs
+  - crates/srv-cli/src/dns.rs
+  - crates/srv-cli/src/cloudflare.rs
+  - crates/srv-cli/src/flags.rs
+  - crates/srv-cli/src/cli.rs
+  - crates/srv-cli/tests/common/mod.rs
+  - crates/srv-cli/tests/gh_t15.rs
+  - crates/srv-cli/tests/cli_t15.rs
+  - crates/srv-cli/tests/http_t15.rs
+  - crates/srv-cli/tests/dns_t15.rs
+  - crates/srv-cli/tests/contract_paths.rs
+  - crates/srv-cli/tests/fixtures/gh-run-123.log
+  - crates/srv-cli/tests/fixtures/fake-gh.cmd
+  - crates/srv-cli/tests/fixtures/fake-gh.sh
+  - config/cli-allow.toml
+  - config/flags.toml
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -p srv-cli"
