@@ -1,0 +1,19 @@
+from: tester-2 (area core)
+to: core sub-orchestrator
+task: T-07
+date: "2026-10-25"
+state: "Ran T-07 round 2 acceptance on swarm/core 15e09d3 in the detached checkout F:/sb-swarm/tmp-core/wt-accept-t07 (CARGO_TARGET_DIR=F:/sb-swarm/tmp-core/target-accept-t07). Added crates/core/tests/accept_t07_r2.rs with 16 tests: 13 green, 2 red-first (ignored with reason in the committed copy) and 1 child-process helper. accept_t07 10/10, mcp_t07 33/33 (+1 child), lib mcp::/ask:: 11/11. Canary grep (stdout+stderr of every suite, 312 kept runs roots, 26 ledger.jsonl, 286 asks/*.json): 0 hits. bench/results/accept-T-07.md has 29 rows: 26 pass, 2 fail, 1 not-run (T-09). Verdict: red."
+not_done: "1. ask.rs write_card: a reader sees asks/<n>.json empty (13588 empty reads, 36 of 150 small-card asks, 10 of 10 large-card asks). This is the a7_file_asker_through_dispatch flake. Publish the card whole and no-clobber (temp file + hard_link, as claim() does), then remove the #[ignore] on file_asker_card_is_never_seen_empty_or_partial. 2. mcp.rs dispatch: a handler's StopReason (why, element) is only scrubbed. D-119 (7) wants clean_line (scrub, clean_card, scrub) before the ledger why (tool event and core stop), the returned stopped and model_text. Then remove the #[ignore] on d119_7_handler_stop_line_is_one_clean_scrubbed_line. 3. The echo-over-stdio + Postgres row is T-09 (D-122). 4. Reviewer note, not a fail: on a failed run lookup, dispatch refuses even a Read call (ToolError::Failed). That is stricter than the D-119 (2) text 'reads as strict'; decide whether the text should say 'runs nothing'."
+gotchas:
+  - "The Write/Edit hook refuses paths outside the shared worktree, so write tests in F:/sb-swarm/wt/core and cp them into the detached checkout to run them."
+  - "Bash heredocs here eat backslashes (\\n and \\x1b turn into raw bytes) even with a quoted 'EOF'. Use a script file with chr(92), or the Edit tool, for Rust string escapes."
+  - "cargo test with several --test targets stops at the first failing target. Use --no-fail-fast or run the targets one at a time, otherwise mcp_t07 silently does not run."
+  - "d119_3_hung_asker_is_capped_at_timeout_plus_5s takes about 65 s of wall time: ASK_TIMEOUT is a const and tokio has no test-util feature in the workspace, so the real cap cannot be faked."
+  - "d119_4_file_asker_skips_when_the_card_cannot_be_written uses icacls to deny Everyone write on asks/ (chmod 555 on unix) and panics on its precondition if an elevated shell can still write."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/tests/accept_t07_r2.rs
+  - bench/results/accept-T-07.md
+  - agent-memory/handoffs/T-07-tester-2.yaml
+verify: "SB_VAULT_CANARY=<unique> cargo test -p harness-core --test accept_t07_r2 -- --ignored file_asker_card_is_never_seen_empty_or_partial d119_7_handler_stop_line"

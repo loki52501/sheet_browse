@@ -1,0 +1,36 @@
+from: rust-coder-1 (area core)
+to: next
+task: T-07
+date: "2026-10-23"
+state: "H-6 wrapper done in commit 7cb8691. harness_core::mcp::dispatch runs classify -> max(declared, classified) -> scrubbed gate::Call (strict from run_get) -> Gate::check -> run/ask/stop, scrubs output/errors with harness.vault and writes every event through Ledger::write (one shared Ledger per store+run folder while calls hold it). ToolCtx::ask sanitises mid-call cards and logs the outcome. serve()/serve_io() speak newline-delimited JSON-RPC 2.0 (2025-06-18) with concurrent tools/call and notifications/tools/list_changed from a private watch counter in ToolRegistry. harness_core::ask::FileAsker + answer() per D-105 (notify watch, no polling). core_pg::bootstrap() builds the Harness. Tests: crates/core/tests/mcp_t07.rs (18) + 6 new mcp unit tests + 1 ask unit test, all green; clippy -D warnings clean on harness-core lib + mcp_t07 and core-pg all targets."
+not_done: "core_pg::bootstrap() has no automated test (needs Postgres; the tester should run a server main with and without SB_RUN_ID). The rest of `cargo test -p harness-core` is green except tests/vault_accept_t05_r2.rs (2 failures, r2_4b/r2_4c, and a clippy unwrap-on-Err at line 758): that is another tester's file waiting on the vault fix, not T-07."
+gotchas:
+  - "Event shapes written: tool event {server=<server>, tool, class=approved, mode=allow|answered_proceed|timeout_proceed (stop + why=reason when ToolOutput.stopped), args scrubbed, result_summary=summary or first line of text (cap 300) or `error: <first line>`, consequences (+ {files:[..]} merged in when output.files is non-empty), duration_ms of the handler call, ok, why=error message}. Ask outcome {server=core, tool, class, mode=answered_*|timeout_*, args scrubbed, result_summary=why=card.what, duration_ms=ask wait, consequences={site, on_timeout}}. Stop {server=core, tool, class, mode=stop, result_summary=why=reason, consequences={element}}. A classify error writes a tool event with mode None, ok=false, why=`classify: ...`."
+  - "Skip returns Ok(ToolOutput{text: `skipped: you said no (<what>)` or `skipped: no answer before the ask timed out (<what>)`}); no tool event, the core outcome event is the record. A gate Stop returns Ok with stopped=Some and text `stopped: <class> at <element>: <why>`; serve appends the same stop line to a handler's partial text."
+  - "Fail closed before running: gate/run_get/ledger errors before the handler runs return ToolError::Failed and nothing runs. After the handler ran, a ledger write failure only goes to stderr (a retry by the model would repeat the side effect). ToolCtx::ask turns a proceed into a skip if its outcome cannot be logged."
+  - "ToolCtx::ask: timeout forced to ASK_TIMEOUT, on_timeout may only tighten (Proceed only if Gate::on_timeout(class, run strict) also proceeds; run_get error = strict). A Challenge card is never shown: core stop event + TimeoutSkip returned."
+  - "tools/call with a name not in the registry answers JSON-RPC -32602 (MCP spec), not isError; ToolErrors from dispatch are isError=true with the scrubbed message; a panicking handler answers isError with a fixed text (inner spawn)."
+  - "Every outgoing JSON-RPC message is scrubbed value by value (strings, keys, numbers) before serialisation, not as a serialised line: a short vault value like `1` or `true` would otherwise corrupt the JSON."
+  - "serve_io returns at reader EOF after in-flight calls answer. Over tokio::io::duplex + split, dropping the client write half is not EOF while the read half lives: call shutdown()."
+  - "FileAsker::new(runs_root, run, vault) scrubs with the given vault (tests do not install a global). Files: runs/<run>/asks/<n>.json (n claimed by create_new, pretty JSON with n, run, class, what, site, values, timeout_s, on_timeout, answer_with) and <n>.answer (`yes`/`no`, also y/n). answer() validates the run id via RunFolder::open and requires <n>.json; writes .<n>.answer.<pid>.tmp then renames."
+  - "bootstrap(): vault first (Vault::open(default_path(), default_key()) then install_global) so the run folder's prompt.md is scrubbed; SB_RUN_ID must name an existing folder under SB_RUNS_ROOT (default ./runs) else MemoryError::Invalid; without it a run `<ts>-<exe stem>` with status running is created (runs.folder = the folder path with / separators)."
+  - "mcp.rs carries a copy of gate's private card_text (card_line); B-103 proposes exposing gate::clean_card so there is one copy."
+decisions_made: []
+blockers_opened: [B-103, B-104]
+new_pub_items:
+  - "harness_core::mcp::serve_io<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(server: &str, registry: ToolRegistry, harness: Harness, reader: R, writer: W) -> Result<(), ServeError> (re-exported at crate root)"
+  - "harness_core::mcp::PROTOCOL_VERSION: &str = \"2025-06-18\""
+  - "harness_core::mcp::scrub_value(vault: &Vault, v: &Value) -> Value"
+  - "harness_core::ask (module): FileAsker { new(runs_root: &Path, run: RunId, vault: Arc<Vault>) } impl Asker; answer(runs_root: &Path, run: &RunId, n: u64, yes: bool) -> io::Result<()>; asks_dir(run_dir), card_path(run_dir, n), answer_path(run_dir, n); FileAsker re-exported at crate root"
+  - "ToolRegistry gained a private watch counter; impl Default is now manual (same behaviour). Pub API unchanged."
+files_touched:
+  - Cargo.toml
+  - Cargo.lock
+  - crates/core/Cargo.toml
+  - crates/core/src/mcp.rs
+  - crates/core/src/ask.rs
+  - crates/core/src/lib.rs
+  - crates/core-pg/src/lib.rs
+  - crates/core/tests/mcp_t07.rs
+  - agent-memory/blockers.yaml
+verify: "cargo test -p harness-core --lib --test mcp_t07"

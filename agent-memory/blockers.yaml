@@ -19,6 +19,27 @@ blockers:
     question: "Supreme second-opinion review of the store D-78 follow-up (merged 83bfdb5; 0 blocking) left items for toolstore. (1) sweep logs a failed archive as an ok:false tools.retire event while retire() has already saved the row Retired, so the ledger never gets an ok:true retire for that tool and its only retire event contradicts the row (lifecycle.rs 210, 277, 614). (2) tests/contract_paths.rs does not name ToolStore::tool_path or archive_path from outside the crate (only an in-crate test does), so they could become pub(crate) unnoticed, and it does not pin ApiFetch::api(&self, &str, Duration) or the root fn fingerprint. (3) note, safety-relevant: a retire whose archive step fails leaves the retired tool's file in tools/<domain>/, where the loader still finds it. (4) notes: relocate keeps its own name-synonym table beside sb_sheet::data::synonyms (fingerprint.rs 26); tools with upper-case names written before D-312 become orphans nothing retires or reports; a file step that keeps failing appends an ok:false event every sweep with no dedup."
     default_taken: "Not merge blockers. Area store fixes (3) before servers T-13 merges (the loader must skip a row whose status is retired even when its file is still in place), and (1) and (2) in the same change. (4) before toolforge T-28, which drives reforge and sweep."
     needs_user: false
+  - id: B-102
+    task: T-03
+    question: "The shared compose Postgres (sheetbrowse-postgres-1) restarted backends three times this session: 'server process (PID n) exited with exit code 2' at 08:34:53, 09:13:49 and 09:19:33 UTC, each followed by ~2 min of recovery mode, while several worktrees ran tests. Cause unknown (container shm is the Docker default 64 MB; HNSW builds and parallel workers use shared memory). Should compose set shm_size (e.g. 256mb) or should areas serialise DB-heavy test runs?"
+    default_taken: "No compose change from core (docker-compose.yml is supreme's T-01 file). core-pg tests stay on throwaway databases (D-100); a run that hits recovery mode is re-run, and failures are reported with the Postgres log line."
+    needs_user: false
+  - id: B-100
+    task: T-04
+    question: "H-1.3 names timeout behaviour only for Send(new), Account (proceed) and Pay, Delete (skip). What does an ask on another class time out to, e.g. the seeded ('*','Submit:job_application','ask') rule or a ('bank.com','Submit','ask') override?"
+    default_taken: "Skip. Gate::on_timeout returns Proceed only for Send and Account with strict off; every other class skips. A job application or signature that times out to proceed would be the harness acting as the user on exactly what the user reserved for themselves (H-1.2)."
+    needs_user: false
+  - id: B-151
+    task: T-05
+    question: "Known scrub limits (review-T-05 round 2) that must close before step 2 (srv-web `api` and the header-sink acceptance) and the Phase 1 'zero vault leaks' baseline: a value inside base64 or base64url (HTTP Basic `user:<value>`, JWT payloads, data: URLs) survives scrub, e.g. `Basic <base64 of user:canary>`. Owner?"
+    default_taken: "Area core closes it in the first core task of step 2, before srv-web's api acceptance: add the 3 base64 alignments of each value (standard and url alphabets, padded and unpadded) with the edge characters that depend on neighbouring bytes trimmed, and skip any trimmed pattern shorter than 8 characters so the D-118 floor still holds for the encoded form. HTML-safe JSON escapes (Go, Rails, System.Text.Json) are closed in T-05 round 3 (D-118 (1))."
+    needs_user: false
+  - id: B-152
+    task: T-05
+    question: "Known scrub limits that must close before step 3 (browser readers): (a) values a site reformats with an input mask (phone, card, date: `(415) 555-0100` for 4155550100); (b) values split across DOM nodes or truncated with an ellipsis (`canary-7f3…`); (c) mixed Unicode case from CSS text-transform: capitalize (`Émile Ærø` for `émile ærø`; only the all-lower and all-upper bases exist). Owner?"
+    default_taken: "Area core closes them in step 3 together with page's readers: (a) digit-normalised matching for personal entries (match the value's digits with any non-digit separators between them, for values with at least 7 digits); (b) readers scrub their joined text, never per node, and core adds a prefix-of-value rule for an ellipsis-truncated tail of at least 8 characters; (c) add a capitalised base (first letter of each word upper-cased) for non-ASCII values. Accepted for Phase 1 without a fix: HTML entities (readers return decoded text, rule 5), quoted-printable (mail is read through the browser UI), punycode (IDN hosts only), unzeroed library internals (memory hygiene, documented in vault.rs)."
+    needs_user: false
+
   - id: B-32
     task: T-10
     question: "Supreme second-opinion review of swarm/sheet (5 lenses, adversarial verify; 0 blocking) left seven should-fix items for sb-sheet. (1) reader.rs span_form returns plain span text unescaped, so page text such as `[button \"Continue\"](#31)` renders like a real W-5 actionable form and a code block containing ``` closes its fence (reader.rs 586-594, 622-624, 699-705). (2) skeleton h1/h2 lines join raw span text, skipping the reader's password-span and challenge-block rules (skeleton.rs 64-70, 229-234). (3) a cursor silently overrides opts.region (reader.rs 48-56). (4) the remaining: outline word counts and 'only words not yet returned' are untested. (5) FindOpts k default 3 is documented but not applied, and k = 0 drops every Match. (6) headings-only chunk fill ignores max_tokens (reader.rs 853-867). (7) a page change resets the max_tokens budget carried in the cursor (reader.rs 78-85)."
@@ -115,7 +136,52 @@ blockers:
     default_taken: "The loader skips it with why '@name x does not match file name y.js' (D-306 report). tools.health, the archive and record() all key on the file name, so the two must agree."
     needs_user: false
 
+  - id: B-175
+    task: T-07
+    question: "core_pg::bootstrap() accepts SB_RUN_ID when only the run folder exists (review-T-07 should-fix). With no runs row the wrapper now reads the run as strict (D-119 (2)), so every Send(new) or Account ask skips on timeout for that server. Should bootstrap refuse a run id with no runs row?"
+    default_taken: "The mcp side fails closed (missing row = strict). core-pg is not in the T-07 round-2 brief, so bootstrap is unchanged: its owner should make SB_RUN_ID require run_get(id) = Some (else MemoryError::Invalid), and the tester should run a server main with and without SB_RUN_ID against Postgres. Resolved in T-03 round 3 (10cb4b5): bootstrap requires run_get(id) = Some; tested by crates/core-pg/tests/bootstrap_b175.rs and accept_t03_r3_bootstrap.rs (3b66c28 confirms). Supreme may close it."
+    needs_user: false
+  - id: B-176
+    task: T-07
+    question: "harness-core has no tokio test-util dev-dependency (paused clock), so the ask cap (card.timeout + 5 s on a 60 s card) cannot be tested through dispatch without a 65 s wait. Add tokio features [test-util] to crates/core dev-dependencies?"
+    default_taken: "The cap is unit-tested on mcp::ask_capped_with with a 30 ms margin (a hung asker gives TimeoutSkip) plus an asker that claims TimeoutProceed on a Skip card. crates/core/Cargo.toml is not touched by T-07 round 2."
+    needs_user: false
+  - id: B-190
+    task: T-04
+    question: "Review-T-04 round 2 should-fix 2: rule_domain did not IDNA-map non-ASCII domains. Full UTS-46 (the idna crate) or the subset in gate.rs?"
+    default_taken: "D-120 subset, no new dependency (crates/core/Cargo.toml is outside this round's paths): full stops and full-width ASCII mapped, lowercase, Punycode per label, everything UTS-46 would map further (NFC/NFKC, compatibility letters, ignorables) refused with MemoryError::Invalid. Switching to the idna crate later only turns some refusals into mappings; no stored key changes."
+    needs_user: false
+  - id: B-192
+    task: T-08
+    question: "A scheduled `claude -p` session that is allowed Bash can run `harness ask <run> <n> yes`, `harness gate set` or `harness vault set` and approve its own asks or loosen its own gate (review-T-08 note; comes from the D-105 file-based asker). Rule 4 says everything goes through the gate; should the launcher deny those commands to the session?"
+    default_taken: "ClaudeLauncher passes --disallowedTools for Bash(harness ask:*), Bash(harness gate:*) and Bash(harness vault:*) on every session it starts (scheduled and `harness run`), and a T-08 test asserts the argv. Answering asks, changing gate rules and vault entries stay user-only. Supreme may prefer a decision that moves the check into the CLI (e.g. refuse when SB_RUN_ID is set) as well. Implemented as D-124 (5). review-T-08 round 2: the deny rules match command text, so a full path, `cmd /c`, `cargo run` or writing <n>.answer directly bypasses them; the deny list is defence in depth only. A sound fix needs an answer the session cannot forge (e.g. the answer file carries a MAC keyed by a secret held in the OS keychain that sessions are never given, checked by FileAsker). Needs a supreme decision before B-192 closes; core keeps the deny list meanwhile."
+    needs_user: false
 interface_changes:
+  - id: B-194
+    from: core
+    interface: I-4
+    change: "Additive pub items in harness_core::vault: Vault::open_for_set(path, key) -> Result<Vault, VaultError> (Vault::open without the D-118 value rules, for `harness vault set` only; set on that handle checks only the entry being set; never installed as the global scrubber) and VaultError::ValueInLiteral { name } (set or open of a value any of whose spellings occurs, ignoring ASCII case, inside `@vault(` or inside `@vault(n)` for an entry name n; names the entry only). VaultError is now #[non_exhaustive] as D-76 and the I-4 notes already say, so this and later variants break no downstream match; harness-core's own vault_accept_t05 row 5 gained a `_` arm."
+    why: "D-118 (3b): a value inside a literal is invisible to scrub, so set and open must refuse it by name; both refusals point the user to `harness vault set <name>`, which needs a way to open the file open refuses, or the repair hint loops (review-T-05 round 4). Default until supreme answers: as implemented in T-05 round 5."
+  - id: B-101
+    from: core
+    interface: I-1
+    change: "harness_core::memory::contact_key: normalise with trim() + to_ascii_lowercase() instead of Unicode to_lowercase(); signature unchanged."
+    why: "Unicode lowercasing folds compatibility characters (U+212A KELVIN SIGN -> k), so a Send to a different, look-alike address would match a known contact and be allowed without an ask (H-1.1). Mail domains are case-insensitive ASCII after IDNA; local parts beyond ASCII must stay distinct. Default until supreme answers: unchanged (contract), gate behaviour as is."
+  - id: B-103
+    from: core
+    interface: I-3
+    change: "Additive: pub fn harness_core::gate::clean_card(card: AskCard) -> AskCard (the D-110 (5) control-strip + caps the gate already applies, today the private card_text/ask_card helpers)."
+    why: "ToolCtx::ask (I-2, mid-call asks) must sanitise handler-built cards like the gate does; with the helpers private, T-07 carries a copy of card_text in mcp.rs (card_line), and two copies can drift. Default until supreme answers: keep the copy in mcp.rs, tested by mcp::tests::card_lines_are_clean."
+  - id: B-104
+    from: core
+    interface: I-2
+    change: "Additive pub items in harness_core::mcp: serve_io(server, registry, harness, reader, writer), PROTOCOL_VERSION, scrub_value(vault, &Value); new module harness_core::ask (FileAsker, answer, asks_dir, card_path, answer_path). Behaviour: tools/call for a name not in the registry answers JSON-RPC error -32602 (MCP 2025-06-18 'Unknown tool'), not isError; dispatch() still returns ToolError::Args for it."
+    why: "Listed so the contract file can name them; serve_io is the test seam for the stdio transport, answer() is what T-08's `harness ask` calls. Default: as implemented in T-07."
+  - id: B-150
+    from: core
+    interface: I-4
+    change: "Additive pub items in harness_core::vault: fn default_path() -> Result<PathBuf, VaultError> (SB_VAULT_PATH, else <config_dir>/sheetbrowse/vault.toml.age; D-101), fn default_key() -> KeySource (keychain service `sheetbrowse`, account `vault`; D-101), const MIN_VALUE_CHARS: usize = 4 (D-118). VaultError gains ValueTooShort { name, min } (set or open of a non-empty value under MIN_VALUE_CHARS characters) and ScrubUnavailable (the scrub automaton could not be built; set writes nothing). Adding variants breaks an exhaustive match on VaultError; the only one is harness-core's own test vault_accept_t05 row 5, updated."
+    why: "The CLI (`harness vault set`) and bootstrap need one definition of the D-101 defaults; D-118 needs typed errors so a refused short value and a failed scrubber are reported instead of silently over-scrubbing or withholding every output. Default until supreme answers: as implemented in T-05 round 3."
   - id: B-200
     from: sheet
     interface: I-6
@@ -146,5 +212,33 @@ interface_changes:
     interface: I-7
     change: "Completes IC-300..IC-303 (review-T-11 should-fix 5). Further pub items: runner::{ALLOWED_GLOBALS, FIND_ALL_K, table_json}; invariants::{stop_count, vault_keys}; archive::has_task_id; domain::{normalize_host, registrable, SiteConfig}; fingerprint::{fingerprint_items, role_matches, norm, parse_fingerprint, render_fingerprint, patch_fingerprint}; loader::{namespace, glob_match, url_path}; skeleton_line; lifecycle consts CLEAN_RUNS_TO_SAVE, MISSES_TO_RETIRE, EPHEMERAL_IDLE_DAYS, EPHEMERAL_IDLE_VISITS, ARCHIVE_DELETE_DAYS. Behaviour: tool_path/archive_path return an empty PathBuf on bad input (try_* return BadPath); record(Relocated) on a retired row is an error; a reforge of an ask row stays ask (D-310)."
     why: "Consumers (srv-web, sb-mcp, toolforge, harness) should see the whole surface before coding against it; these helpers are what toolforge's G-2 static check reuses."
+
+  - id: B-177
+    from: core
+    interface: I-2
+    change: "Behaviour only, no signature change (D-119). harness_core::ask::answer returns io::ErrorKind::AlreadyExists with a plain message when the ask is closed: already answered, or timed out (FileAsker claims <n>.answer with `timeout`; both sides claim it no-clobber via a temp file and hard_link). FileAsker::ask returns TimeoutSkip when it cannot write the card. dispatch and ToolCtx::ask read a missing runs row as strict, cap every Asker at card.timeout + 5 s (TimeoutSkip), and dispatch catches a handler or classifier panic (ToolError::Failed + an ok=false tool event). ToolCtx::ask runs its card through Gate::check (Stop: no card, a core stop, TimeoutSkip). serve_io answers -32700 for a non-UTF-8 line and scrubs only payload strings."
+    why: "review-T-07 blocking and should-fix items. `harness ask` (T-08) should print the AlreadyExists message to the user as is; every other change only makes the wrapper stricter."
+  - id: B-185
+    from: core
+    interface: "harness_core::sched (owned by core, not a contract module; consumer: harness)"
+    change: "Additive pub API (T-08, D-116). sched::run_loop(store) is replaced by Scheduler { runner, wake: Arc<Notify>, fired: Option<mpsc::UnboundedSender<Fired>> }::run_loop(shutdown). New: trait Launcher { launch(LaunchRequest{run, runs_root, prompt}) -> Result<LaunchExit{code}, LaunchError> } (D-106 placement moved from the harness crate to core, D-116 (1)); trait Clock { now, sleep_until } with SystemClock and ManualClock { new, set, next_deadline, deadline_where }; Runner { store, launcher, clock, runs_root } with fire(&Schedule) and execute(RunSpec{prompt, parent_run, strict, schedule}) -> Finished{run, folder, status, parent_run, schedule, launch_problem}; parse_cron (5 fields, UTC), next_after, changed_dir, notify_changed, CHANGED_DIR, FIRE_TOOL, LAUNCH_TOOL; SchedError {BadCron, NotInPhase1, Memory, Ledger, Io}. The harness crate (lib) adds Env, CliError, cli::{Cli, Cmd, Ctx, execute, SCHEDULE_ADD_TOOL}, daemon::{Daemon, watch_changes}, ClaudeLauncher."
+    why: "The scheduler loop in core must call the launcher, so the trait cannot live in the crate above it; a Clock seam makes the step-1 scheduler acceptance testable without a model or a real minute. Anything that adds or removes a schedule outside the CLI (a future srv-cli tool) must call sched::notify_changed so harnessd re-reads. Default: as implemented."
+  - id: B-191
+    from: core
+    interface: I-3
+    change: "Behaviour, no signature change (D-120): rule_domain returns the Punycode A-label form and refuses non-mappable Unicode; rule_hint accepts only ASCII a-z 0-9 _ - .; a Send AskCard's values[0] is always ('new recipients (N)', list) written by the gate, and any other value under that key (classifier, args, clean_card input) is dropped; blank Call.recipients are ignored and duplicates count once."
+    why: "Consumers that render or parse cards (FileAsker, harness ask, T-09 echo.send tests) and classifiers that emit hints must know the row and the hint alphabet; stored gate.rules keys written before this change with non-ASCII domains will no longer match and should be re-set."
+
+  - id: B-193
+    from: core
+    interface: I-3
+    change: "Names only, no behaviour change: add ANY_DOMAIN, rule_domain, rule_hint, rule_class_key and rule_key (harness_core::gate) to I-3's rust: list, and list core-pg as a consumer. D-113 makes them the one canonicaliser for gate.rules keys and core-pg calls them (crates/core-pg/src/lib.rs rule_set and rule lookup); D-81 records their behaviour but not their names."
+    why: "review-T-04 round 3 should-fix 2: their behaviour is already contract in fact, so a wave-2 consumer must be able to find them in I-3. Default: as implemented."
+
+  - id: B-195
+    from: core
+    interface: "harness_core::sched (I-13 draft, D-80)"
+    change: "Additive: trait Launcher gains a provided method fn before_run(&self) -> Result<(), LaunchError> (default Ok); Runner::execute calls it first, before the prompt is scrubbed, and when it fails returns the new variant SchedError::BeforeRun(LaunchError) without creating a folder or runs row. Existing Launcher impls compile unchanged; a match on SchedError without a wildcard arm needs the new arm (none in the workspace). The harness crate adds daemon::ReopenVault (harnessd's launcher wrapper that re-opens the vault in before_run) and launcher::{DISALLOWED_TOOLS, DEFAULT_SESSION_CAP, SESSION_CAP_VAR, DEFAULT_MAX_ANSWER_BYTES, ANSWER_SCRUB_SLACK, parse_session_cap, session_cap_from_env, answer_text}, with ClaudeLauncher fields max_session and max_answer_bytes (D-124)."
+    why: "review-T-08 should-fix 7: harnessd must scrub a vault value added after it started, and the prompt is scrubbed inside Runner::execute, so the re-open has to happen there, before anything is written. Default until supreme answers: as implemented in T-08 round 2."
 
 proposals:

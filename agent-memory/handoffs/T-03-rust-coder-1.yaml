@@ -1,0 +1,23 @@
+from: rust-coder-1
+to: next
+task: T-03
+date: "2026-10-23"
+state: "core-pg implements every MemoryStore (I-1) method on Postgres except bootstrap() (T-07, still todo!). sqlx 0.9 runtime queries, pgvector 0.4, fastembed 7.3 bge-small-en-v1.5 (384 dims). recall = cosine top 20 + OR-of-lexemes ts_rank top 20, RRF k=60 (D-103); search = exact (equality 1.0, substring 0.9) then pg_trgm on subject; neighbors = recursive CTE both directions, rel on every hop, depth min(d,4), 500 rows, ordered (depth, id); SM-2 identical to MemStore; gate rule keys canonicalised on write and lookup per D-110. fmt and clippy --all-targets -D warnings clean; cargo test -p core-pg: 4 unit + 7 integration green (integration ~10-25 s warm, against throwaway sb_t_* databases per D-100). Commit ea1befb."
+not_done: "1. Swap core-pg's private rule_domain/rule_key (src/lib.rs, marked TODO D-110) for harness_core::gate's pub canonicalisers when they land in HEAD, and keep the unit test rule_keys_are_canonical. 2. bootstrap() is T-07's."
+gotchas:
+  - "pgvector 0.4.2 resolves sqlx 0.9 (its range is >=0.8,<0.10); with sqlx 0.8 in the workspace you get two sqlx copies and no Encode impl. Hence sqlx 0.9, whose MSRV is 1.94; fastembed 7 needs 1.88. The workspace rust-version (1.85) is now below what the dependency tree needs; toolchain here is 1.99."
+  - "sqlx 0.9 rejects format!()-built SQL (SqlSafeStr): queries are &'static str literals; tests use sqlx::AssertSqlSafe for CREATE/DROP DATABASE."
+  - "The compose container's clock ran ~37 s ahead of the host. Server-side now() made review_add items not yet due for a caller passing Utc::now(). Every timestamp the store writes is bound from the process (ts_now()), never now() in SQL."
+  - "First fastembed run downloads ~128 MB into %LOCALAPPDATA%/sheetbrowse/fastembed (D-103; SB_MODEL_DIR overrides, HF_HOME overrides both inside fastembed). ort ships prebuilt binaries for MSVC; no build problem. A cold dependency build of core-pg took ~5.5 min."
+  - "The shared Postgres crashed and recovered three times during this session (log: 'server process (PID n) exited with exit code 2', then ~2 min of 'in recovery mode' while fsyncing every sb_t_* leftover). Running core-pg tests alone and 3x in full afterwards caused no crash, so the source is unconfirmed (could be other worktrees' runs). When a crash hits, every concurrent test fails in ~5 s at connect; rerun after `docker logs sheetbrowse-postgres-1` shows 'ready to accept connections'."
+  - "Backend error messages carry operation + SQLSTATE + constraint name only (plus our own RAISE text for P0001), never the server message, which can quote bound values."
+  - "recall with a Filter runs in a transaction with SET LOCAL hnsw.iterative_scan = relaxed_order so a filtered HNSW scan still yields 20 rows; without a filter it is a single round trip."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core-pg/Cargo.toml
+  - crates/core-pg/src/lib.rs
+  - crates/core-pg/src/embed.rs
+  - crates/core-pg/tests/pg.rs
+  - Cargo.toml (workspace deps fastembed, pgvector, sqlx; landed inside 49cce85 with the vault deps)
+verify: "cargo test -p core-pg"

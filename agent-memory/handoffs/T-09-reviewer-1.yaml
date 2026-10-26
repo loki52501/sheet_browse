@@ -1,0 +1,15 @@
+from: reviewer (area core)
+to: core/suborch, then rust-coder
+task: T-09
+date: "2026-10-25"
+state: "Reviewed T-09 (9fd42d7: examples/echo.rs, tests/step1_accept.rs) in a detached worktree; report bench/results/review-T-09.md. Verdict: request changes. With a fresh SB_VAULT_CANARY, step1_accept is 7/7 green (146 s) with 0 canary hits in the log; clippy -p harness --all-targets -D warnings and fmt are clean. A throwaway mutation (echo eprintln of the upper-cased resolved value) made b2 fail with 'echo stderr', so the grep works when it runs. Blocking: b2 passes silently when SB_VAULT_CANARY is unset (the SKIPPED eprintln is captured by libtest; checked: ok in 0.02 s), so merge gates never check docs/01 bullet 2."
+not_done: "(1) coder: b2 falls back to a runtime-unique canary instead of returning (as T-05/T-10 do). (2) echo.rs:204-208: require --vault-key and SB_VAULT_PATH (no keychain or default-path fallback), so the sink's length + FNV-1a line can only ever be of a test canary; otherwise drop the hash. (3) b3 (step1_accept.rs:860-867): assert the error says 'ledger is append-only' and add a TRUNCATE case. (4) Re-review, then tester writes bench/results/accept-T-09.md."
+gotchas:
+  - "A cold target dir takes about 8 min to build harness tests, and then echo_bin's nested cargo build --example echo blocks the first tests for more than 60 s (libtest prints 'running for over 60 seconds'). That is expected, not a hang."
+  - "Untracked new files need git add before `git commit -- <paths>`."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-09.md
+  - agent-memory/handoffs/T-09-reviewer-1.yaml
+verify: "SB_VAULT_CANARY=cnry-t09-$RANDOM$RANDOM-Qx cargo test -p harness --test step1_accept; and with SB_VAULT_CANARY unset, b2 must still run the grep (not finish in milliseconds)"

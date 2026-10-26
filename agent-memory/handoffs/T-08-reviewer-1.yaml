@@ -1,0 +1,16 @@
+from: reviewer-1 (area core)
+to: core/sub-orchestrator, then rust-coder for T-08
+task: T-08
+date: "2026-10-25"
+state: "First review of T-08 (b7aa4f4 as restored by 374290c; sched.rs and crates/harness only) at 15e09d3 in detached worktree tmp-core/wt-review-t08. fmt clean, clippy -p harness -p harness-core --all-targets -D warnings clean, cargo test -p harness (3 unit + 7 Postgres) and cargo test -p harness-core --lib sched:: (8) green. Verdict request changes, one blocking item: schedule list, tools list|health (and main.rs's error scrub for commands that never call install_vault) print DB text through scrub() while no vault is installed, so scrub is a no-op (rule 2). Report: bench/results/review-T-08.md."
+not_done: "Coder fix round, in order: 1. (blocking) install the vault at the top of cli::execute for every command except vault set, plus a schedule-list scrub test. 2. vault set uses Vault::open_for_set (added by fc23dd2 after T-08) so a D-118-refused vault can be repaired. 3. test D-79: answer the same ask twice, assert the exact AlreadyExists text, at the lib level and on binary stderr. 4. rule-2 tests for Runner::execute (prompt.md, runs.prompt, slug, launcher prompt) and answer.md. 5. a wall cap and stdout cap for claude -p sessions. 6. schedule add's own run is ended Failed on every error path. 7. a harness run test with the fake launcher. 8. harnessd re-opens the vault per firing or on the marker."
+gotchas:
+  - "A cold cargo test -p harness in a fresh target dir took about 5.5 minutes (core-pg + toolstore + rquickjs); run it in the background."
+  - "vault::scrub() silently returns its input when no vault is installed; any CLI path that prints must call Env::install_vault first."
+  - "Vault::open_for_set landed in fc23dd2 (T-05 r4 WIP) after T-08, so the vault set item is an integration gap, not a T-08 regression."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-08.md
+  - agent-memory/handoffs/T-08-reviewer-1.yaml
+verify: "cargo test -p harness && cargo test -p harness-core --lib sched::"

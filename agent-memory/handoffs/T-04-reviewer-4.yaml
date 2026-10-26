@@ -1,0 +1,16 @@
+from: reviewer (area core)
+to: next
+task: T-04
+date: "2026-10-25"
+state: "Reviewed T-03 round 3 (10cb4b5, a4f3224) and T-04 round 3 (bae6c45) at 15e09d3 in a detached worktree. Reports are bench/results/review-T-03.md and bench/results/review-T-04.md; both verdicts are approve. Every round-2 blocking and should-fix item is resolved and tested (T-03: gate canonicalisers in core-pg, edges.since bind, one-round-trip recall, pool() behind `testing`, 500-row cap, backend-error canary, FTS-only hit, Gate over PgStore; T-04: D-120 from_hint, IDN subset, add_contact blank, acceptance header and on_timeout). clippy -p harness-core --tests and --all-targets --all-features, and clippy -p core-pg --all-targets, are clean with -D warnings. fmt is clean. cargo test -p harness-core and -p core-pg are all green. The reported testing.rs 'items after a test module' clippy failure does not reproduce at 15e09d3."
+not_done: "(1) T-04 should-fix 1: rule_domain maps Final_Sigma (ΒΑΣ -> βας, UTS-46 gives βασ) and U+1E9E (ß, UTS-46 gives ss), and it accepts CJK compatibility ideographs (U+F900..U+FAFF, U+2F800..U+2FA1F) and Hangul compatibility jamo (U+3131..U+318E) as written. Lowercase per char, refuse or map these, add tests, or take the idna crate (B-190). (2) T-04 should-fix 2: file an interface_changes entry so I-3's rust line names ANY_DOMAIN and rule_domain/rule_hint/rule_class_key/rule_key, with core-pg as a consumer. (3) T-03 should-fix: a pg.rs test for D-114 ignore_missing (insert a future version into _sqlx_migrations, then connect again). (4) Sweep leftover sb_t_* databases: six remained on the shared server after this run, owner unknown."
+gotchas:
+  - "The shared checkout F:/sb-swarm/wt/core carries other agents' uncommitted WIP (mcp.rs, accept_t07_r2.rs, harness examples, step1_accept.rs). Verify in a detached worktree; a clippy or test failure seen there may not be in the commit."
+  - "pg.rs takes about 78 s, mostly the 510-leaf neighbors star and the embedding model."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-03.md
+  - bench/results/review-T-04.md
+  - agent-memory/handoffs/T-04-reviewer-4.yaml
+verify: "cargo clippy -p harness-core --tests -- -D warnings && cargo clippy -p core-pg --all-targets -- -D warnings && cargo test -p harness-core && cargo test -p core-pg"

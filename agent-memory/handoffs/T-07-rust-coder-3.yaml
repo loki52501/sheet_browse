@@ -1,0 +1,20 @@
+from: rust-coder (T-07 round 3)
+to: core sub-orchestrator, then T-07 reviewer and tester
+task: T-07
+date: "2026-10-25"
+state: "review-T-07 round 2 Should fix 1 and 2, Note 1, and the tester's D-119 (7) handler stop line item are fixed (D-123; D-119 (2) amended in place). (1) ask.rs publishes the card whole: write_card serialises per n and goes through claim() (temp file + hard_link, AlreadyExists moves to n+1), so several askers on one run never share an n and a failed write leaves no card; claim()'s no-hard-link fallback now takes the name with create_new and renames the full temp file over the empty placeholder (never partial), and removes the placeholder on failure. ask::answer refuses with InvalidData, writing nothing, when <n>.json is not a complete JSON object ({} still counts, for t08). (2) mcp.rs CallInfo carries the classified domain (scrubbed); ToolCtx::ask uses it for Gate::check when card.site is None. (3) An OpenAsk guard claims <n>.answer as timeout when the ask future is dropped (inline in Drop, so before the cap's TimeoutSkip is returned); it is created on the card-writing thread and handed over by oneshot, so a card that lands after the drop is closed too; close_answer falls back to a bare create_new when the temp-file claim fails, and if even that fails the outcome is TimeoutSkip (was on_timeout). (4) scrub_stop became clean_stop (clean_line on why and element) for gate stops, mid-call gate stops and handler stopped outputs. The two red-first ignores in accept_t07_r2.rs are removed (nothing else changed there). clippy --all-targets clean; accept_t07, accept_t07_r2 (15 pass, 1 ignored child), mcp_t07 (33), mcp_t07_r3 (7), lib (124) pass; the FileAsker tests passed 15 of 15 loop runs."
+not_done: "Carried over, not in this brief: a mid-call Challenge followed by a handler stopped writes two core stops; ToolRegistry::add can lower a re-registered tool's class; read_until has no line cap; B-175 (core_pg::bootstrap accepts an SB_RUN_ID with no runs row). The T-07-rust-coder-2 gotcha about empty recipients is worded backwards (the gate treats an empty Send as Send(new), may_proceed false)."
+gotchas:
+  - "Python text-mode writes on Windows turn LF into CRLF; use newline='' when scripting edits to .rs files."
+  - "Other agents edit crates/core (vault.rs, sched.rs, tests) and crates/harness in this worktree at the same time: run rustfmt on your own files, not cargo fmt -p, and commit with git commit -- <paths>."
+  - "gate_accept_t04_r3.rs (another agent's untracked red-first tests) fails 2 tests; not T-07."
+  - "Writes outside the worktree are blocked by the guard_write hook, including the session scratchpad; runs/ is gitignored and works for scratch files."
+decisions_made: [D-123]
+blockers_opened: []
+files_touched:
+  - crates/core/src/ask.rs
+  - crates/core/src/mcp.rs
+  - crates/core/tests/mcp_t07_r3.rs
+  - crates/core/tests/accept_t07_r2.rs
+  - agent-memory/decisions.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/tmp-core/target-t07r3 cargo test -p harness-core --test mcp_t07 --test accept_t07 --test accept_t07_r2 --test mcp_t07_r3"
