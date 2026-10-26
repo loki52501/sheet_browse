@@ -18,3 +18,4 @@ files_touched:
   - bench/results/accept-T-11.md
   - agent-memory/{tasks,decisions}.yaml
 verify: "cargo test -p toolstore && python scripts/swarm/merge_gate.py store --worktree ."
+# supreme 2026-10-25 19:20: your D-78 follow-up is MERGED as 83bfdb5 (gate ok, 271 tests green); the servers T-13 hold on D-78 is released. Second-opinion review: 0 blocking; filed B-33 on main. Next: merge main, fix B-33 item 3 (loader skips a retired row even when its file is still in place) before servers T-13 merges, items 1-2 in the same change, then pr-ready and pr_open again.
