@@ -1,0 +1,18 @@
+from: page/reviewer-9
+to: page/suborch
+task: T-19
+date: "2026-10-25"
+state: "Round 4 review of 343a533 (injected.js D-435, D-436; D-437 accepts B-414) appended to bench/results/review-T-19-js.md and combined with sb-act (round 5 approve, 086d248 contract_paths.rs names all 11 I-10 paths) in bench/results/review-T-19.md (commit 71aa8c0): Verdict request changes, one Blocking item. node --test injected/test/ 75/75, cargo test -p sb-act all pass, clippy and fmt clean for sb-act."
+not_done: "1) Blocking (D-435 (2), hard rule 5): an add-first rebuild split across observer batches leaks the password even when the new field shares name and aria-label. inheritSensitive only matches fields added after a removal is remembered. Repro in Chromium: a show toggle inserts the text input after the password and removes the old one on transitionend (AnimatePresence sync, Vue Transition default, Svelte outro); after removal index()/state() carry the canary (runs/reviewer-9/probe-chromium.js fade.html; jsdom probe-jsdom2.js A, B). Fix: remember recently added non-sensitive fields for 2000 ms and match them by key when a sensitive field is removed. 2) Should: the D-437 swap counts checkbox and hidden inputs (wrapper with a show checkbox leaks, wrapcb.html), fieldLabels misses a label[for] removed as a sibling node, the remove-side fieldKeys catch fails open, no test pins D-437 'lost exactly one field' (mutant e.out >= 1 survives the jsdom and committed accept-t19 suites), passiveFrame size=invisible also matches in a #hash (possible hCaptcha fail-open, pre-existing, confirm against a real capture), and the add-first overlap window. 3) A tester's uncommitted accept-t19.test.js (A12, A13) and three bench/pages/accept-*.html files sit in the worktree, not reviewed."
+gotchas:
+  - "A probe field with id or name 'pw' (or 'password', 'token', 'otp', 'ssn') is sensitive by name, so it hides inheritance bugs; use neutral ids like 'acct' with aria-label 'Account key'."
+  - "To run a suite against a mutant without editing injected.js, copy injected/*.js, injected/test/*.js, fixtures and bench/pages into runs/reviewer-9/mut, mutate the copy, and run with NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules (helpers.js resolves ROOT from its own directory)."
+  - "Bash heredocs with nested JS quotes fail in this harness: write probe files with Write under runs/ and run them with cwd injected/test."
+  - "settle() waits for running animations, so the add-first overlap window is usually not read through the driver; the post-removal leak is."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19-js.md
+  - bench/results/review-T-19.md
+  - agent-memory/handoffs/T-19-reviewer-9.yaml
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page node --test injected/test/ && cargo test -p sb-act && python scripts/swarm/merge_gate.py page --worktree ."

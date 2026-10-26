@@ -1,0 +1,46 @@
+<!doctype html>
+<!--
+  bench/pages/overlay.html: actionability fixture for docs/05 B-4 #6 and acceptance 2.
+    "Buy now"        covered by div.cookie (position:fixed, full viewport): act -> "covered by
+                     div.cookie (OVERLAY #n)" in < 50 ms; after "Accept" removes the overlay,
+                     act on "Buy now" succeeds.
+    "Pay later"      disabled: act -> disabled (enabled is checked before the hit test)
+    "Moving"         CSS animation on transform: act -> not stable (moving)
+    "Gone soon"      removed by the test: act / resolve -> gone
+    "Below the fold" act scrolls it into view first
+  Self-contained, no network.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Checkout · Overlay fixture</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 0; padding: 24px; }
+  button { padding: 10px 16px; font: inherit; margin: 8px 8px 8px 0; }
+  .cookie { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 100;
+    display: flex; align-items: flex-end; justify-content: center; }
+  .cookie-box { background: #fff; padding: 16px 24px; margin-bottom: 24px; }
+  @keyframes slide { from { transform: translateX(0); } to { transform: translateX(300px); } }
+  #mover { animation: slide 1.2s linear infinite alternate; }
+  .far { margin-top: 1400px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Checkout</h1>
+  <p>Your basket has one item.</p>
+  <button id="buy" type="button" onclick="document.getElementById('log').textContent = 'bought'">Buy now</button>
+  <button id="later" type="button" disabled>Pay later</button>
+  <button id="mover" type="button">Moving</button>
+  <button id="gone" type="button">Gone soon</button>
+  <p id="log" aria-live="polite"></p>
+  <p class="far"><button id="below" type="button">Below the fold</button></p>
+</main>
+<div class="cookie">
+  <div class="cookie-box">
+    <p>We use cookies to run this shop.</p>
+    <button type="button" onclick="document.querySelector('.cookie').remove()">Accept</button>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,18 @@
+from: page/js-coder-13
+to: page/suborch
+task: T-19
+date: "2026-10-26"
+state: "Fixed the Z7 control flake from tester-11 round 6 (J19, J26) in test and fixtures only (9590138). No injected.js change. (1) In bench/pages/d444-twins.html and d445-twins.html, #user moved from a body child after the forms into its own div#uc at the top of body, ahead of every password. A parser split anywhere can no longer put a password in an earlier batch than User in the same parent subtree. (2) Email, City and Mail two stay beside a password in form#fc and form#fp. That is the point of the controls, and a parser split before them masks them for 2 s, which D-443 (4) accepts. So browser.test.js now has pastLoadWindow(o), which waits for loadEventEnd + 2050 ms by the page clock, the same as accept-t19's pastBornWindow without since. twinCase calls it before the click, and the D-444 and D-445 control tests call it before their read. Each twin test takes about 2 s longer. Evidence: runs/js-coder-13/probe-split.js serves a fixture in two chunks split before any marker. Without the wait, the old fixture split before form#fc read User filled, Email empty and City filled. With the new fixtures and the wait, all controls read text and the copy reads filled with no leak, 3 of 3, for every split point (10 for d445, 7 for d444; runs/js-coder-13/split-new.log). Before the wait, User reads text at every split; Email and City are still masked when the split lands before them (expected). The tester's probe-chunk.js and probe-chunk-y7.js on the new fixtures: User text before the click, at same and late, 3 of 3 each. Gates: node --check ok; browser.test.js alone 51/51 twice; node --test injected/test/ 132/132 twice (full-1, full-2, parallel files, 254 s and 260 s). Discrimination kept: with 86cb048 injected.js, Z7 and Z7v still fail on the getter counter (q71/q72 read 108 times) while Y7 passes, as before. With 8fb00b4 (pre-D-444), Y6, Y7, Y7w and Y7i all fail."
+not_done: "1) Tester: re-run node --test injected/test/ 3 times and update J19 and J26 in bench/results/accept-T-19.md. full-4..6 from round 6 were never finished. 2) Reviewer question 2 from the acceptance file is still open, not answered here. nearOf(p) counts every sensitive descendant, so with p = body, any field parsed in a later batch than a password anywhere on the page is masked for 2 s. Should D-443 (1) look only at direct children and their single-field wrappers? It is an injected.js scope question for supreme or the reviewer, and I left behavior unchanged. 3) The other round-5 and round-6 open items belong to T-19b and are unchanged."
+gotchas:
+  - "A control field placed after a password in the same parent subtree (body counts) is masked for 2 s whenever the parser yields between them. Put controls ahead of every password in their own container, or wait for pastLoadWindow / pastBornWindow before reading."
+  - "runs/js-coder-13/probe-split.js <root> <fixture> <n> <marker|-> <N> <wait 0|1>: a deterministic two-chunk reproduction. CPU throttling does not reproduce it."
+  - "Run full suites one at a time in the foreground or in one background shell. Two at once run low on memory."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/pages/d444-twins.html
+  - bench/pages/d445-twins.html
+  - injected/test/browser.test.js
+  - agent-memory/handoffs/T-19-js-coder-13.yaml
+verify: "TMP=TEMP=TMPDIR=F:/sb-swarm/tmp-page NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules node --test injected/test/ (132/132); node runs/js-coder-13/probe-split.js . d445-twins.html 71 '<form id=\"fc\">' 3 1"

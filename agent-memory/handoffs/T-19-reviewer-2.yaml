@@ -1,0 +1,16 @@
+from: page/reviewer
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Reviewed the JS half of T-19 (commits 0ffb37a, 7581bf9, c779d39: injected/injected.js, injected/media.js, injected/test/*, bench/pages fixtures, D-410..D-421, B-410, B-411). node --test injected/test/ passes 32/32. Report in bench/results/review-T-19-js.md, Verdict: changes, with 2 blocking items. (1) A field that was type=password is read and emitted as text after its type changes to text (show-password toggle): injected.js:687, :651 (rule 5, and rule 2 if the value came from @vault). (2) The base is ignored unless walk({base}) is the very first call: index/text/frames/fingerprint/state/name run ensure() without a base, and id() (also via __sbMedia.list) hands out ids below the later base, which then resolve as stale while the element is live (D-55, I-11)."
+not_done: "js-coder fixes the 2 blocking items with tests, then re-review. Should-fix items in order of impact: selfChallenge URL substring empties index/text with no CHALLENGE row; CHALLENGE gaps (Verify-you-are-human paragraph or Cloudflare interstitial, Arkose, GeeTest, *-response fields); aria-level unclamped breaks TextBlock.level u8; no serde round trip of real index/text output; settle burns the cap on about:blank and PDF embed, and on body/html attribute churn plus infinite animations; media frames() has no total budget; v3 badge flagged CHALLENGE (needs a supreme decision); <form> with an accessible name is not a form landmark; D-412 needs a B-5 amendment proposal so srv-web matches; in-page alias table duplicates D-49."
+gotchas:
+  - "merge_gate.py accepts only a last line 'Verdict: approve'; 'Verdict: changes' blocks the merge, which is intended here."
+  - "Probes ran inline with node -e using injected/test/helpers.js jsdom(); no scratch files are needed and guard_write blocks writes outside the worktree."
+  - "Other agents had untracked files in the worktree at review time (injected/test/accept-t19.test.js, check-wire-shape.js, bench/pages/accept-*.html, crates/sb-act/tests/common/). They were not reviewed or committed here."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19-js.md
+  - agent-memory/handoffs/T-19-reviewer-2.yaml
+verify: "node --test injected/test/"

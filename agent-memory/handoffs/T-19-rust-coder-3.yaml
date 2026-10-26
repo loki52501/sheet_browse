@@ -1,0 +1,23 @@
+from: page/rust-coder
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Review fixes for bench/results/review-T-19-sb-act.md applied per D-403 in commit e0ee962 (crates/sb-act/src/classify.rs, lib.rs). Blocking 1: key steps go through key_press(): Tab/Shift+Tab, Escape, arrows, Home/End/PageUp/PageDown (alone or with Shift), modifiers alone, and printable chars/Space/Backspace/Delete typed into a text field are Fill; Enter/NumpadEnter/Return with any modifiers goes to enter(); every other key, unknown keys included, is click(row). Blocking 2: enter() on a submit/button/link/activator row is click(row); on any other row in a form it is max(click(row), implicit submit with form evidence and no button text, every submit row of the form); in a formless text field it is Submit raised by its heading; formless non-text rows are click(row). Should items: change-email/password, 2FA/two-factor/2-step/MFA/security-key text counts as Account even in a one-current-password form (create-account/sign-up heading text still ignored there, D-433); Delete also from form heading/form name, plus deactivate/discard/erase/revoke/close account; Pay words payment/purchase/buy/donate/donation and paid-subscription phrases; card fields by name or nearby label CVC/CVV/CSC/CVN, security code, card expiry/expiration, MM/YY, cardholder/card holder/name on card. Nits: lib.rs docs name D-58 and D-403; positive child-frame test (child_frame_submit_sees_its_own_form); MAX_WAIT left public; the cancel and/or exemption is documented on delete_text(); duplicate refs take the max over all matching rows (review nit, raise-only). Gates: cargo fmt -p sb-act --check clean, clippy --all-targets -D warnings clean, cargo test -p sb-act 78/78 (lib 45, accept_t19_classify 16, accept_t19_forms 11, accept_t19_quote_fuzz 6), cargo doc clean."
+not_done: "1) reviewer + tester on e0ee962 (a coder does not accept its own work). 2) suborch: record pub const MAX_WAIT under interface_changes for I-10. 3) Not done, proposals only (not in D-403): check_planner still accepts a step aimed at a Challenge row when ?s follows (review nit; D-5 suggests rejecting outright); a non-submit 'Confirm' button (type=button) inside a 'Delete account?' dialog is still Navigate, because heading Delete evidence applies to submits only (applying it to every button would make the dialog's Cancel a Delete); a Delete key on a non-text row (mail list) is click(row), not Delete; Enter in a formless textbox is Submit, not Send (B-431 default per D-403). 4) B-431 formless SPA submits still wait on the js-coder's synthetic form id."
+gotchas:
+  - "Class order is Read < Fill < Navigate < Submit, so an unknown key on a textbox is click(textbox) = Navigate, which is above Fill. Ctrl/Alt/Meta + a letter is not 'typing' and counts as unknown (Control+s on a textbox is Navigate, on a submit it is the submit's class)."
+  - "split_key: a trailing '+' is the plus key ('+', 'Control++'); a whitespace-only key (k#1=\" \") is Space. Key names are case-insensitive."
+  - "Enter on a checkbox/radio in a form is an implicit submission (browsers submit on it), so it is at least Submit; Space on a checkbox is click = Fill."
+  - "Implicit submission ignores the field's own label as button text (a field named 'Pay note' does not make Pay), but click(row) is merged in, so a field named 'Remove ...' does raise to Delete."
+  - "'Security code' with autocomplete one-time-code is not a card field (SMS codes). 'Expiration date' needs 'card' or MM/YY to count; DD/MM/YYYY does not."
+  - "Heading-only exemptions on the cancel rule: 'cancel anytime', 'cancel any time', 'cancel at any time' are marketing; on a button 'cancel <x>' is still Delete except 'cancel and/or ...'."
+  - "Paid subscription needs a price signal (currency symbol, 'per month', '<digits> month'); bare 'Subscribe' and 'Subscribe to our weekly newsletter' stay Submit (tester asserts newsletter Subscribe = Submit)."
+  - "The tester's crates/sb-act/tests/ files needed no assertion changes: none pinned the old lower behaviour, and accept_t19_classify.rs was already fmt-clean in this worktree when I ran cargo fmt -p sb-act --check."
+  - "2FA/2-step headings now make 2FA login challenge pages Account (one ask per such login). That is D-403 (3) as written; flag if it asks too often."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/sb-act/src/classify.rs
+  - crates/sb-act/src/lib.rs
+  - agent-memory/handoffs/T-19-rust-coder-3.yaml
+verify: "cargo fmt -p sb-act --check && cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act"

@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Show toggles with an overlap</title>
+<style>
+  /* O1: the old field fades out itself and is removed on transitionend */
+  .out { opacity: 0; transition: opacity .2s; }
+  /* O3: the exit class goes on the wrapper, the transition runs on the input inside it */
+  #w3.exit #acct3 { opacity: 0; transition: opacity .3s; }
+</style>
+<script>
+  // D-443 (review-T-19 round 7 O1..O3, runs/reviewer-12/probe-r12-chromium.js): add-first show
+  // toggles. Each mounts a field that shares no key with the password (no name, label or
+  // aria-label in common), after it in the same parent, holding its value; the password leaves
+  // later, so settle() can report settled while both fields are in the page.
+  function copyAfter(id, copyId) {
+    const o = document.getElementById(id);
+    const n = document.createElement("input");
+    n.type = "text";
+    n.id = copyId;
+    n.value = o.value;
+    o.after(n);
+    return o;
+  }
+  // O1: CSS fade on the old field, removed on transitionend
+  function showFade() {
+    const o = copyAfter("acct1", "q1");
+    o.addEventListener("transitionend", () => o.remove(), { once: true });
+    o.classList.add("out");
+  }
+  // O2: JS-timed exit, no animation at all (react-transition-group timeout, Vue duration)
+  function showTimer() {
+    const o = copyAfter("acct2", "q2");
+    setTimeout(() => o.remove(), 400);
+  }
+  // O3: exit class on the wrapper, transition on the child input, removed by a timer
+  function showChild() {
+    const o = copyAfter("acct3", "q3");
+    document.getElementById("w3").classList.add("exit");
+    setTimeout(() => o.remove(), 320);
+  }
+</script>
+</head>
+<body>
+<form id="f1"><div id="w1"><input id="acct1" type="password" aria-label="Account key one"></div>
+  <button id="b1" type="button" onclick="showFade()">Show one</button></form>
+<form id="f2"><div id="w2"><input id="acct2" type="password" aria-label="Account key two"></div>
+  <button id="b2" type="button" onclick="showTimer()">Show two</button></form>
+<form id="f3"><div id="w3"><input id="acct3" type="password" aria-label="Account key three"></div>
+  <button id="b3" type="button" onclick="showChild()">Show three</button></form>
+<input id="user" aria-label="User">
+</body>
+</html>

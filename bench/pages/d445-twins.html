@@ -1,0 +1,122 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Show toggles that swap visibility below a wrapper, or hide by opacity, position or clip</title>
+<style>
+  .stack{position:relative;height:30px}
+  .stack input{position:absolute;left:0;top:0}
+  .off{position:absolute;left:-9999px}
+  .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;padding:0;margin:-1px}
+  .vc{clip-path:inset(50%)}
+  .vr{position:absolute;clip:rect(0 0 0 0)}
+  .z0{width:0;height:0;padding:0;border:0;margin:0}
+  .vu{clip-path:url(#none445)}
+  .leave-active{transition:opacity .3s}
+  .leave-to{opacity:0}
+  .slide-active{transition:transform .3s}
+  .slide-to{transform:translateY(-6px)}
+</style>
+<script>
+  // D-445 (review-T-19 round 9 Z3..Z7, runs/reviewer-14/probes/probe-r14-chromium.js): show
+  // toggles where the twin and the password sit below wrappers (depth 2 and more, or mixed
+  // depth), or where the password is hidden by opacity 0, an off-screen box or a clip. The
+  // plain field shares no key with the password and is kept in sync by an input listener.
+  const $ = (id) => document.getElementById(id);
+  const sync = (from, to) => { $(to).value = from.value; };
+  // Z7: Angular [hidden] on component hosts, each host wraps a div around its input.
+  function z7() { $("acct71").closest("x-in").hidden = true; $("q71").closest("x-in").hidden = false; }
+  // Z7v: Vue v-show on a BaseInput component (div.base > label + div.control > input).
+  function z7v() { $("acct72").closest(".base").style.display = "none"; $("q72").closest(".base").style.display = ""; }
+  // Z7i: the same component shape, the inputs' own display flipped.
+  function z7i() { $("acct73").style.display = "none"; $("q73").style.display = ""; }
+  // Z5m: inside one label, the password in a span, the twin a direct child of the label.
+  function z5m() { $("acct51").style.display = "none"; $("q51").style.display = ""; }
+  // Z3: stacked twins, opacity flipped (a crossfade without a display change).
+  function z3() {
+    const o = $("acct31"), t = $("q31");
+    o.style.opacity = "0"; o.style.pointerEvents = "none"; t.style.opacity = "1"; t.style.pointerEvents = "";
+  }
+  // Z4: off-screen positioning swapped.
+  function z4() { $("acct41").classList.add("off"); $("q41").classList.remove("off"); }
+  // Z4v: visually hidden (sr-only: 1 px box, clip rect 0) on the password.
+  function z4v() { $("acct42").classList.add("vh"); $("q42").classList.remove("vh"); }
+  // Z4c: clip-path inset(50%) on the password, its box keeps its size.
+  function z4c() { $("acct43").classList.add("vc"); $("q43").classList.remove("vc"); }
+  // Z4r: clip rect(0 0 0 0) on an absolutely positioned password, its box keeps its size.
+  function z4r() { $("acct44").classList.add("vr"); $("q44").classList.remove("vr"); }
+  // Z4z: a zero-size box (width and height 0, no padding or border).
+  function z4z() { $("acct45").classList.add("z0"); $("q45").classList.remove("z0"); }
+  // Z4u: clip-path url() to an empty SVG clipPath (a shape notShown does not parse).
+  function z4u() { $("acct46").classList.add("vu"); $("q46").classList.remove("vu"); }
+  // Z6: Vue <Transition> + v-show: the twin is shown at once, the password fades 300 ms and
+  // gets display:none on transitionend.
+  function z6() {
+    const o = $("acct61"), t = $("q61");
+    t.style.display = "";
+    o.classList.add("leave-active");
+    requestAnimationFrame(() => requestAnimationFrame(() => o.classList.add("leave-to")));
+    o.addEventListener("transitionend", () => {
+      o.style.display = "none";
+      o.classList.remove("leave-active", "leave-to");
+    }, { once: true });
+  }
+  // Z6s: the same with a slide (transform only), so the password is still painted when the
+  // transition finishes and only the transitionend handler hides it.
+  function z6s() {
+    const o = $("acct62"), t = $("q62");
+    t.style.display = "";
+    o.classList.add("slide-active");
+    requestAnimationFrame(() => requestAnimationFrame(() => o.classList.add("slide-to")));
+    o.addEventListener("transitionend", () => {
+      o.style.display = "none";
+      o.classList.remove("slide-active", "slide-to");
+    }, { once: true });
+  }
+</script>
+</head>
+<body>
+<!-- control: User sits in its own container ahead of every password, so it reads as text
+     however the parser splits the page into mutation batches (D-443 (1) masks a field
+     parsed in a later batch than a password in the same parent subtree) -->
+<div id="uc"><input id="user" aria-label="User"></div>
+<form id="f71"><div id="w71"><x-in><div class="c"><input id="acct71" type="password" aria-label="Account key Z7" oninput="sync(this, 'q71')"></div></x-in><x-in hidden><div class="c"><input id="q71" type="text"></div></x-in></div>
+  <button id="b71" type="button" onclick="z7()">Show Z7</button></form>
+<form id="f72"><div id="w72"><div class="base"><label>Secret</label><div class="control"><input id="acct72" type="password" aria-label="Account key Z7v" oninput="sync(this, 'q72')"></div></div><div class="base" style="display:none"><label>Secret</label><div class="control"><input id="q72" type="text"></div></div></div>
+  <button id="b72" type="button" onclick="z7v()">Show Z7v</button></form>
+<form id="f73"><div id="w73"><div class="base"><div class="control"><input id="acct73" type="password" aria-label="Account key Z7i" oninput="sync(this, 'q73')"></div></div><div class="base"><div class="control"><input id="q73" type="text" style="display:none"></div></div></div>
+  <button id="b73" type="button" onclick="z7i()">Show Z7i</button></form>
+<form id="f51"><label id="w51">Secret <span class="ctl"><input id="acct51" type="password" aria-label="Account key Z5m" oninput="sync(this, 'q51')"></span><input id="q51" type="text" style="display:none"></label>
+  <button id="b51" type="button" onclick="z5m()">Show Z5m</button></form>
+<form id="f31"><div id="w31" class="stack"><input id="acct31" type="password" aria-label="Account key Z3" oninput="sync(this, 'q31')"><input id="q31" type="text" style="opacity:0;pointer-events:none"></div>
+  <button id="b31" type="button" onclick="z3()">Show Z3</button></form>
+<form id="f41"><div id="w41"><input id="acct41" type="password" aria-label="Account key Z4" oninput="sync(this, 'q41')"><input id="q41" type="text" class="off"></div>
+  <button id="b41" type="button" onclick="z4()">Show Z4</button></form>
+<form id="f42"><div id="w42"><input id="acct42" type="password" aria-label="Account key Z4v" oninput="sync(this, 'q42')"><input id="q42" type="text" class="vh"></div>
+  <button id="b42" type="button" onclick="z4v()">Show Z4v</button></form>
+<form id="f43"><div id="w43"><input id="acct43" type="password" aria-label="Account key Z4c" oninput="sync(this, 'q43')"><input id="q43" type="text" class="vc"></div>
+  <button id="b43" type="button" onclick="z4c()">Show Z4c</button></form>
+<form id="f44"><div id="w44" class="stack"><input id="acct44" type="password" aria-label="Account key Z4r" oninput="sync(this, 'q44')"><input id="q44" type="text" class="vr"></div>
+  <button id="b44" type="button" onclick="z4r()">Show Z4r</button></form>
+<form id="f45"><div id="w45"><input id="acct45" type="password" aria-label="Account key Z4z" oninput="sync(this, 'q45')"><input id="q45" type="text" class="z0"></div>
+  <button id="b45" type="button" onclick="z4z()">Show Z4z</button></form>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><clipPath id="none445"></clipPath></svg>
+<form id="f46"><div id="w46"><input id="acct46" type="password" aria-label="Account key Z4u" oninput="sync(this, 'q46')"><input id="q46" type="text" class="vu"></div>
+  <button id="b46" type="button" onclick="z4u()">Show Z4u</button></form>
+<form id="f61"><div id="w61"><input id="acct61" type="password" aria-label="Account key Z6" oninput="sync(this, 'q61')"><input id="q61" type="text" style="display:none"></div>
+  <button id="b61" type="button" onclick="z6()">Show Z6</button></form>
+<form id="f62"><div id="w62"><input id="acct62" type="password" aria-label="Account key Z6s" oninput="sync(this, 'q62')"><input id="q62" type="text" style="display:none"></div>
+  <button id="b62" type="button" onclick="z6s()">Show Z6s</button></form>
+<!-- control: an ordinary multi-div form with a visible password (component-shaped fields); the
+     other fields keep reading as text. Email, City and Mail two sit beside a password, so the
+     tests read them past load + 2 s (D-443 (4)) -->
+<form id="fc"><div class="base"><label>Email</label><div class="control"><input id="email" type="email" aria-label="Email"></div></div>
+  <div class="base"><label>Password</label><div class="control"><input id="pwc" type="password" aria-label="Control key"></div></div>
+  <div class="base"><label>City</label><div class="control"><input id="city" aria-label="City"></div></div>
+  <div class="base" style="display:none"><div class="control"><input id="note" aria-label="Note"></div></div></form>
+<!-- control: a password below the fold of a scroll pane at the end of the page is shown (it can
+     be scrolled to), so the field beside it reads -->
+<form id="fp"><div id="pane" style="height:40px;overflow:auto"><div style="height:300px"></div>
+  <div><input id="pwp" type="password" aria-label="Pane key"></div><div><input id="mail2" aria-label="Mail two" value="pane@example.com"></div></div></form>
+</body>
+</html>

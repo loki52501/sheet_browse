@@ -1,0 +1,16 @@
+from: page/reviewer-12
+to: page/suborch
+task: T-19
+date: "2026-10-26"
+state: "Round 7 leak check at 7cb7020 in bench/results/review-T-19.md: Verdict request changes, one Blocking item. node --test injected/test/ 98/98 on a git-archive snapshot (A18 took its over-mark branch at 234/219 ms). D-442 closes round 6 (M1, M4, N1 read 0); the 583eae0 code fails jsdom.test.js:1249/:1411 and browser.test.js:648/:664; all=true and all=false mutants are killed. Tests are honest (A18 pins the B-415 over-mark, A10/A14 waits are a page-clock condition, no leak hidden). sb-act and interfaces.yaml unchanged."
+not_done: "1) Blocking, needs supreme: the overlap read (neutral add-first copy read while the password still exists) happens after settle() resolves settled:true (runs/reviewer-12/probe-r12-chromium.js O1 same-evaluate read after a CSS fade, O2 JS-timed exit with no animation, O3 transition on a child of the class-changed wrapper; getter 3 each). The premise rounds 4-6 used to rule it Should fix (settle waits it out) is false, and docs/05-BROWSER.md #9 diffs after settle or 500 ms. Prototype fix in runs/reviewer-12/fix: S.born entries carry ns (born next to a sensitive field), fieldValue masks a live ns entry while its parent still holds an S.sens field; closes O1..O3, C neutral/wrap/d440 mid, V3m; 93/98 because five controls (jsdom.test.js:951, :1082, :1249 login-parent, A14, A16) read empty for up to 2 s. Supreme: amend (D-443) and add O1..O3 browser tests, or re-accept in writing citing O1..O3 (then Should fix). 2) Should (all pre-existing at 583eae0): N5, S.born cap (N2, V9), V5/X1/X1b cross-parent, X7/X7f password+confirm rebuilt (cheap: all = g.e.out === g.e.sens at injected.js:2011), X2w/X2w0/X5 CSS-hidden text input in the lost set (e.out 2 looks like an SPA login swap)."
+gotchas:
+  - "Animation.finished resolves before transitionend is dispatched: a settle().then(walk) in one evaluate reads during the overlap even with a CSS transition; a second CDP evaluate usually lands after the removal."
+  - "runningAnims counts a class-toggled node's own animations only (c.self); a transition on its child does not hold settle."
+  - "runs/reviewer-12/muta is the 583eae0 injected.js with the 7cb7020 tests; pass it as argv[2] to probe-r12-chromium.js or use the *-muta.js jsdom copies for regression checks."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19.md
+  - agent-memory/handoffs/T-19-reviewer-12.yaml
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page NODE_PATH=F:/sb-swarm/wt/page/injected/test/node_modules node runs/reviewer-12/probe-r12-chromium.js (O1 same, O2, O3 leak=true settled=true at 7cb7020; pass runs/reviewer-12/fix as argv[2] for leak=false) and node --test injected/test/ in runs/reviewer-12/snap (98/98)"

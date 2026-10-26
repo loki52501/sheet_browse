@@ -1,0 +1,25 @@
+from: page/suborch
+to: supreme
+task: T-19
+date: "2026-10-26"
+state: "T-19 (injected.js + sb-act) is PR-ready on swarm/page. WAVE2 page steps: (1) D-440 was implemented but uncommitted at restart; committed 1fe3caf, main merged 5fed11f. (2) Final leak reviews: round 5 confirmed the round-4 Blocking add-first leak closed but found D-440 reopened a narrower one; rounds 6-9 each found a further hard rule 5 leak shape (D-441 loading proxy, overlap read after settle, visibility-swap twins, depth-2 twins in Vue v-show components). Fixed in turn by D-441 (superseded), D-442, D-443, D-444, D-445; every fix was coded by a js-coder, re-reviewed by a fresh reviewer and re-accepted by a tester. Round 10 (8939453, at 7dfc6f1): Blocking none, Verdict approve; 8 mainstream toggles not seen before (MUI, Ant Design, Vuetify, Angular Material, Svelte 5, Bootstrap, Shoelace, React key remount) read 0. Acceptance round 7 (52f096e, at cc2c98b): 38/38 green, node --test injected/test/ 132/132 three times in a row, 0 canary hits. cargo test --workspace -j 2: 847 passed 0 failed; fmt and clippy -D warnings clean; merge_gate.py page: gate ok. T-19 status done; T-19b filed in tasks.yaml with every open item."
+not_done: "T-19b (tasks.yaml, branch swarm/page-T19b): remaining leak shapes ruled Should fix as not produced by mainstream toggles (V5, X1, X1b, Y1, Y1g cross-parent copies; V9 and S.born cap order; X2w, X2w0, X5; exits over 2000 ms O4..O6; slow-clock born-window edge; Y2c jsdom only); TWIN_DEPTH 6 (M10 depth 7 Vuetify 2 nesting leaks); masked fields with no evidence report empty instead of filled; B-415 accepted over-mark (A18 pins it); D-443 (1) nearOf scope (body as parent masks later-parsed fields for 2 s); acceptance gaps for D-443 (2)(3)."
+gotchas:
+  - "Every reviewer round found a new leak shape; pin each fix with a decision first and have the coder start from the reviewer's scratch prototype in runs/reviewer-NN/fix, then re-run every earlier probe in runs/reviewer-10..15 against the new tree. A proxy for 'parser-inserted' (readyState) always reopens a leak; fail closed instead."
+  - "RAM is tight on this machine (about 2-3 GB free with other areas compiling): cargo test --workspace needs -j 2 or the linker fails with alloc errors, and Chromium suites must run one at a time when a reviewer and tester run together."
+  - "An orphaned `node --test injected/test/` from runs/tester-13/full.sh full-4 (PID 17856, parent sh 37040, started 04:58) was still alive with ~100 chrome-headless-shell processes; the auto-mode classifier refused to let the suborch kill it. The user should end it."
+  - "Fixtures with a control field after the forms flake under load: the parser inserts it in a later batch and D-443 (1) masks it for 2 s. Put controls ahead of passwords or wait out the window with a condition (pastLoadWindow / pastBornWindow)."
+decisions_made: [D-441, D-442, D-443, D-444, D-445]
+blockers_opened: []
+files_touched:
+  - injected/injected.js
+  - injected/test/jsdom.test.js
+  - injected/test/browser.test.js
+  - injected/test/accept-t19.test.js
+  - bench/pages/
+  - bench/results/review-T-19.md
+  - bench/results/accept-T-19.md
+  - agent-memory/decisions.yaml
+  - agent-memory/tasks.yaml
+  - agent-memory/swarm.yaml
+verify: "TMP=F:/sb-swarm/tmp-page TEMP=F:/sb-swarm/tmp-page TMPDIR=F:/sb-swarm/tmp-page python scripts/swarm/merge_gate.py page --worktree . && node --test injected/test/ && cargo test -p sb-act"

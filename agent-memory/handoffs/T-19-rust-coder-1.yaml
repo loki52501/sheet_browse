@@ -1,0 +1,24 @@
+from: page/rust-coder
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "sb-act (the B-7 half of T-19) implemented in commit 706dc5a: parse() (crates/sb-act/src/parse.rs), classify_step() (crates/sb-act/src/classify.rs), check_planner() and classify() (lib.rs). The I-10 public names are unchanged. One public addition: sb_act::MAX_WAIT (30 s, D-431). Pure, no new deps. fmt and clippy --all-targets -D warnings are clean; cargo test -p sb-act passes 32/32: every step kind, frame refs in every ref position, whitespace tolerance, empty steps, bare and quoted values, waits plus the clamp, 42 error cases each with step and byte offset, byte (not char) offsets, quote round trip over 20 tricky strings and a 3000-case fixed-seed LCG property loop, classification tables (register, login, checkout, IBAN, hosted card iframe, unsubscribe, cancel <x>, bare Cancel/Close, links, checkables, Enter variants, CHALLENGE, missing target, frame scoping, hints), and the planner ?s rule pass and fail."
+not_done: "1) reviewer + tester on 706dc5a (a coder does not accept its own work). 2) Suborch to rule on B-430 (Pay from button text such as 'Place order' when there is no card field) and B-431 (formless SPA submits get no form context; preferred fix is a synthetic form id from injected.js, which needs the js-coder)."
+gotchas:
+  - "check_planner classifies against the index it is given. With an empty or stale index every targeted step is Submit (D-402 missing target), so every one of them needs ?s after it. The G-2 static check and toolforge should pass the fingerprinted index, or run their own shape-only check."
+  - "Empty steps are skipped and not numbered (D-430), so step n in ParseError, PlannerError and B-8 results is parse()'s Vec index + 1."
+  - "w() needs a unit: w(3) is a parse error. Values over 30 s are clamped, not rejected (D-431)."
+  - "Only \\\" \\\\ \\n are valid escapes inside quotes; \\t and others are errors (D-432). quote() never produces them."
+  - "Account from headings is skipped for a login form (exactly one password field, autocomplete current-password). injected.js must therefore emit autocomplete for password fields, or a login under a 'Sign in or create an account' heading becomes Account (D-433)."
+  - "Hints come only from submit-type steps (a SUBMIT click, or Enter in a form that has a submit) and stay attached when Pay/Account/Delete raise the class (D-434)."
+  - "agent-memory/handoffs/T-19-suborch-1.yaml and injected/test/ had uncommitted changes from other agents in this worktree. They are not mine and were left unstaged."
+decisions_made: [D-430, D-431, D-432, D-433, D-434]
+blockers_opened: [B-430, B-431]
+files_touched:
+  - crates/sb-act/src/lib.rs
+  - crates/sb-act/src/parse.rs
+  - crates/sb-act/src/classify.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/handoffs/T-19-rust-coder-1.yaml
+verify: "cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act"

@@ -1,0 +1,16 @@
+from: page/reviewer
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Reviewed the sb-act half of T-19 (706dc5a, c92695b; git diff 6e52d44 HEAD -- crates/sb-act). Report in bench/results/review-T-19-sb-act.md: Verdict: changes, 2 Blocking. clippy --all-targets -D warnings clean, cargo test -p sb-act --lib 35/35, fmt clean for src/. A scratch fuzz outside the repo (200k programs) found no panics and no non-char-boundary offsets. quote/parse round trip holds for t/s/k/u. The I-10 names and signatures match."
+not_done: "1) rust-coder: Blocking 1, keys that activate an element (Enter/Space/NumpadEnter on a non-submit button or link, Space/NumpadEnter on a submit) classify as Fill, so k#N= lowers any Delete/Pay target and check_planner passes with no ?s. Fix: such keys on button/link/submit/checkable rows classify as click(row), or invert is_enter into a list of keys known not to activate. 2) rust-coder: Blocking 2, Enter in a form with no indexed submit row is Fill (B-7 says Submit; a card-only form gives k#card=Enter -> Fill). Fix: Enter in any form is at least Submit, with form evidence still applied. 3) Should-fix items need supreme decisions: the login exemption drops change-email heading text; Delete from heading/form name; payment/buy/purchase/2FA/deactivate words; CVC/CVV/expiry card evidence; formless chat Enter (B-431). 4) Re-review after the fix commit."
+gotchas:
+  - "crates/sb-act/tests/ and the Cargo.toml serde_json dev-dep are uncommitted tester work in this worktree. cargo clippy --all-targets compiles them; cargo fmt --check fails only on tests/accept_t19_classify.rs. Use --lib to test HEAD alone."
+  - "Class order is Account < Delete < Pay (D-36), so 'Pay outranks Account/Delete' in the classify tests is correct."
+  - "State.submitish also marks Enter-target fields (sb-sheet index.rs:101), so clicking such a field is Submit and needs ?s. Over-classification, not a gate hole."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-19-sb-act.md
+  - agent-memory/handoffs/T-19-reviewer-1.yaml
+verify: "cargo clippy -p sb-act --all-targets -- -D warnings && cargo test -p sb-act --lib"

@@ -1,0 +1,50 @@
+<!doctype html>
+<!--
+  bench/pages/challenge-widgets.html: challenge widgets other than a plain reCAPTCHA v2, for
+  D-5 / D-405 (4)(5). Self-contained: frames are srcdoc, no network.
+    #arkose      Arkose / FunCaptcha container with its "Verification challenge" frame: CHALLENGE
+    .geetest_*   GeeTest v3 holder (no frame, no real control inside): CHALLENGE
+    #hc          a widget known only by its h-captcha-response field: CHALLENGE
+    .grecaptcha-badge   reCAPTCHA v3 badge with an invisible-size frame: NOT CHALLENGE (B-402)
+    #bframe-box  reCAPTCHA challenge frame, hidden until shown: NOT CHALLENGE while hidden;
+                 CHALLENGE once the test makes it visible
+    #login       an ordinary form with a v3-bound submit button (class g-recaptcha,
+                 data-sitekey): its controls stay normal rows, the button is not a challenge
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Widgets · challenge fixture</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; padding: 24px; }
+  iframe { border: 1px solid #ccc; width: 300px; height: 80px; display: block; }
+  .grecaptcha-badge { position: fixed; right: 0; bottom: 14px; width: 256px; height: 60px; overflow: hidden; }
+  .grecaptcha-badge iframe { width: 256px; height: 60px; }
+  .geetest_holder { width: 300px; height: 44px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Sign in</h1>
+  <form id="login" action="/login" method="post">
+    <label for="user">Username</label>
+    <input id="user" name="user">
+    <label for="pw">Password</label>
+    <input id="pw" name="pw" type="password">
+    <button class="g-recaptcha" data-sitekey="fixture-only" data-callback="onSubmit" type="submit">Sign in</button>
+  </form>
+
+  <h2>Other widgets</h2>
+  <div id="arkose"><iframe title="Verification challenge" srcdoc="<p>puzzle</p>"></iframe></div>
+  <div class="geetest_holder geetest_wind"><div class="geetest_btn"><div class="geetest_radar_tip"><span class="geetest_radar_tip_content">Click to verify</span></div></div></div>
+  <div id="hc"><div class="widget-frame">widget</div><textarea name="h-captcha-response" style="display:none"></textarea></div>
+  <p><a href="/help">Help</a></p>
+</main>
+
+<div class="grecaptcha-badge" data-style="bottomright">
+  <div class="grecaptcha-logo"><iframe title="reCAPTCHA" srcdoc="<p>badge</p>"></iframe></div>
+  <textarea name="g-recaptcha-response" class="g-recaptcha-response" style="display:none"></textarea>
+</div>
+<div id="bframe-box" style="visibility: hidden; position: absolute; left: 0; top: -10000px;">
+  <div><iframe title="recaptcha challenge expires in two minutes" name="c-fixture" srcdoc="<p>challenge</p>"></iframe></div>
+</div>
+</body>
+</html>

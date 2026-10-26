@@ -1,0 +1,22 @@
+from: page/tester-2
+to: page/suborch
+task: T-19
+date: "2026-10-23"
+state: "Acceptance of the injected.js half of T-19 at 7581bf9 is green: bench/results/accept-T-19-js.md, 12 rows, all pass. Covered: docs/05 acceptance 1, the in-page halves of 2 and 5, the index side of 6 including a strict I-5 wire-shape check, the password-never-read rule, main-world isolation, and the fixtures. The full suite (32 tests) plus the new injected/test/accept-t19.test.js (11 tests) passed 3 rounds in a row against a clean git-archive snapshot of 7581bf9. cargo test -p sb-sheet index_row_wire_shape passes."
+not_done: "1) FLAG: settle() burns the full 3 s cap on about:blank and on an empty-body page (D-416 condition (d)); a spec owner should decide whether sb-driver skips settle there or (d) gets a shorter give-up. 2) Uncommitted js-coder edits in the worktree (injected.js, media.js, helpers.js, jsdom.test.js) currently fail media.test.js 3/3 with why 'no base'; they need their own acceptance run. 3) injected/test/index.js and the npm test script do not load accept-t19.test.js yet (the tester may not edit existing files); the js-coder should add it."
+gotchas:
+  - "Another agent edited injected/ in this worktree during the run. To test a fixed commit, use `git archive <sha> injected bench/pages | tar -x -C runs/<dir>/snap`, copy the new tests in, and run with NODE_PATH=<worktree>/injected/test/node_modules."
+  - "helpers.openSb prefixes A.origin to any name; about:blank must be passed as a full URL, or the test silently loads the server's 404 page (which has content and settles in 150 ms)."
+  - "Main-world Object.getOwnPropertyNames on forms, selects and document is never empty: there are native indices and document.location. An expando check must exclude those."
+  - "A main-world probe that wraps functions with `{ value: function () {} }` names every wrapper `value`, so filter wrapped functions by identity, not by name."
+  - "act's covered/disabled times (20..34 ms) are mostly the two rAF stability waits that run before the hit test."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - injected/test/accept-t19.test.js
+  - injected/test/check-wire-shape.js
+  - bench/pages/accept-move.html
+  - bench/pages/accept-blank.html
+  - bench/results/accept-T-19-js.md
+  - agent-memory/handoffs/T-19-tester-2.yaml
+verify: "git archive 7581bf9 injected bench/pages | tar -x -C runs/snap && cp injected/test/accept-t19.test.js injected/test/check-wire-shape.js runs/snap/injected/test/ && cp bench/pages/accept-*.html runs/snap/bench/pages/ && cd runs/snap && NODE_PATH=$PWD/../../injected/test/node_modules node --test injected/test/accept-t19.test.js"
