@@ -8,7 +8,8 @@
 //!
 //! Safety rules (H-2, D-5, D-55, D-212): a span linking a password field (D-206: input_type
 //! or autocomplete) renders as the link form only, never its text; any password value the
-//! index carries is scrubbed from every unit before chunking, so a split cannot cut it in two;
+//! index carries is scrubbed from every unit before chunking, so a split cannot cut it in two,
+//! and also from the unit read as rendered text, link forms as their text (D-229);
 //! blocks inside a CHALLENGE or OPAQUE frame are never read, and a block linking a CHALLENGE
 //! row is reduced to the `[iframe "reCAPTCHA"](#id)` link form.
 
@@ -637,13 +638,16 @@ fn render_block(b: &TextBlock, ctx: &Ctx<'_>) -> Option<Unit> {
             let cells: Vec<String> = b
                 .spans
                 .iter()
-                .map(|s| inline(std::slice::from_ref(s), ctx).replace('|', "\\|"))
+                .map(|s| inline(std::slice::from_ref(s), ctx))
                 .collect();
             if cells.iter().all(String::is_empty) {
                 return None;
             }
             unit.table = Some((b.frame, b.table.unwrap_or(u32::MAX)));
-            unit.body = format!("| {} |", cells.join(" | "));
+            // The whole row is checked, so a value cannot join across a cell's link form or
+            // the ` | ` between cells (D-229).
+            unit.body =
+                ctx.scrub_joined(b.spans.len(), |hide| table_row_tagged(&b.spans, hide, ctx));
             if b.header {
                 unit.suffix = format!("\n|{}", "---|".repeat(cells.len()));
             }
@@ -731,11 +735,14 @@ fn outline_text(line: &str) -> String {
 /// The visible label inside a link form's brackets: the quoted label of `alias "label"`,
 /// else the whole text.
 fn form_label(inner: &str) -> &str {
+    inner.get(label_range(inner)).unwrap_or(inner)
+}
+
+/// Where [`form_label`]'s label sits in `inner` (bytes).
+fn label_range(inner: &str) -> std::ops::Range<usize> {
     match inner.find(" \"") {
-        Some(q) if inner.ends_with('"') && inner.len() > q + 2 => {
-            inner.get(q + 2..inner.len() - 1).unwrap_or(inner)
-        }
-        _ => inner,
+        Some(q) if inner.ends_with('"') && inner.len() > q + 2 => q + 2..inner.len() - 1,
+        _ => 0..inner.len(),
     }
 }
 
@@ -840,28 +847,56 @@ fn longest_backtick_run(s: &str) -> usize {
 
 /// Inline text: spans concatenated (a space inserted around link forms when the source has
 /// none), whitespace collapsed, backtick runs cut after joining (spans may meet in a run).
+/// With password values to hide, the line is scrubbed and then checked as rendered text
+/// (D-229, see [`Ctx::scrub_joined`]).
 fn inline(spans: &[Span], ctx: &Ctx<'_>) -> String {
-    let mut raw = String::new();
+    ctx.scrub_joined(spans.len(), |hide| inline_tagged(spans, 0, hide, ctx))
+}
+
+/// [`inline`] as tagged characters, before any scrub of the joined line. Span `j` is tagged
+/// `base + j` and hidden as `hide[j]` says.
+fn inline_tagged(spans: &[Span], base: usize, hide: &[Hide], ctx: &Ctx<'_>) -> Built {
+    let mut raw: Vec<TChar> = Vec::new();
+    let mut kinds = vec![SpanKind::Empty; spans.len()];
     let mut prev_link = false;
-    for s in spans {
+    for (j, s) in spans.iter().enumerate() {
         let (form, is_link) = span_form(s, ctx);
         if form.is_empty() {
             continue;
         }
-        if (is_link || prev_link) && needs_space(&raw, &form) {
-            raw.push(' ');
+        let i = base + j;
+        let h = hide.get(j);
+        let piece: Vec<TChar> = if is_link {
+            if let Some(k) = kinds.get_mut(j) {
+                *k = SpanKind::Form;
+            }
+            if h.is_some_and(|h| h.all) {
+                hidden(i)
+            } else {
+                tagged_form(&form, i)
+            }
+        } else {
+            if let Some(k) = kinds.get_mut(j) {
+                *k = SpanKind::Plain;
+            }
+            tagged_plain(&form, i, h)
+        };
+        if (is_link || prev_link)
+            && needs_space(raw.last().map(|t| t.c), piece.first().map(|t| t.c))
+        {
+            raw.push(TChar::added(' '));
         }
-        raw.push_str(&form);
+        raw.extend(piece);
         prev_link = is_link;
     }
-    cut_backticks(&collapse(&raw))
+    Built {
+        line: cut_runs_tagged(&collapse_tagged(&raw), 2),
+        kinds,
+    }
 }
 
-fn needs_space(before: &str, next: &str) -> bool {
-    let Some(a) = before.chars().last() else {
-        return false;
-    };
-    let Some(b) = next.chars().next() else {
+fn needs_space(before: Option<char>, next: Option<char>) -> bool {
+    let (Some(a), Some(b)) = (before, next) else {
         return false;
     };
     !a.is_whitespace()
@@ -870,28 +905,397 @@ fn needs_space(before: &str, next: &str) -> bool {
         && !".,;:!?)'\"".contains(b)
 }
 
+/// A table row: `| a | b |`, each span one cell (rendered as [`inline`]) with `|` escaped as
+/// `\|`.
+fn table_row_tagged(spans: &[Span], hide: &[Hide], ctx: &Ctx<'_>) -> Built {
+    let mut line: Vec<TChar> = "| ".chars().map(TChar::added).collect();
+    let mut kinds = vec![SpanKind::Empty; spans.len()];
+    for (i, s) in spans.iter().enumerate() {
+        if i > 0 {
+            line.extend(" | ".chars().map(TChar::added));
+        }
+        let cell = inline_tagged(
+            std::slice::from_ref(s),
+            i,
+            hide.get(i..=i).unwrap_or(&[]),
+            ctx,
+        );
+        if let (Some(dst), Some(src)) = (kinds.get_mut(i), cell.kinds.first()) {
+            *dst = *src;
+        }
+        for t in cell.line {
+            if t.c == '|' {
+                line.push(TChar { c: '\\', ..t });
+            }
+            line.push(t);
+        }
+    }
+    line.extend(" |".chars().map(TChar::added));
+    Built { line, kinds }
+}
+
 /// Code keeps its line breaks and its `[` `]`; trailing blank lines go. Consecutive plain
 /// spans are joined (a span that renders to nothing does not split them) before the scrub
 /// and [`break_link_shape`], so `[x]` and `(#3)` in two spans cannot meet as a link (D-223).
-/// Backtick runs are cut to nine after joining, since spans may meet in a run (D-226).
+/// Backtick runs are cut to nine after joining, since spans may meet in a run (D-226). Link
+/// forms in code are checked as rendered text too (D-229).
 fn code_text(spans: &[Span], ctx: &Ctx<'_>) -> String {
-    let mut out = String::new();
-    let mut plain = String::new();
-    for s in spans {
+    ctx.scrub_joined(spans.len(), |hide| code_tagged(spans, hide, ctx))
+}
+
+/// [`code_text`] as tagged characters, before any scrub of the joined text.
+fn code_tagged(spans: &[Span], hide: &[Hide], ctx: &Ctx<'_>) -> Built {
+    let mut out: Vec<TChar> = Vec::new();
+    let mut plain: Vec<TChar> = Vec::new();
+    let mut kinds = vec![SpanKind::Empty; spans.len()];
+    for (i, s) in spans.iter().enumerate() {
+        let h = hide.get(i);
         if s.elem.is_none() {
-            plain.push_str(&s.text);
+            if !s.text.is_empty() {
+                if let Some(k) = kinds.get_mut(i) {
+                    *k = SpanKind::Plain;
+                }
+            }
+            plain.extend(tagged_plain(&s.text, i, h));
             continue;
         }
         let (form, _) = span_form(s, ctx);
         if form.is_empty() {
             continue;
         }
-        out.push_str(&break_link_shape(&ctx.scrub(&plain)));
-        plain.clear();
-        out.push_str(&form);
+        if let Some(k) = kinds.get_mut(i) {
+            *k = SpanKind::Form;
+        }
+        out.extend(break_link_shape_tagged(
+            ctx.scrub_tagged(std::mem::take(&mut plain)),
+        ));
+        if h.is_some_and(|h| h.all) {
+            out.extend(hidden(i));
+        } else {
+            out.extend(tagged_form(&form, i));
+        }
     }
-    out.push_str(&break_link_shape(&ctx.scrub(&plain)));
-    cut_code_backticks(out.trim_end().trim_start_matches('\n'))
+    out.extend(break_link_shape_tagged(ctx.scrub_tagged(plain)));
+    // trim_end, then trim_start_matches('\n'), as the untagged code path did
+    while out.last().is_some_and(|t| t.c.is_whitespace()) {
+        out.pop();
+    }
+    let lead = out.iter().take_while(|t| t.c == '\n').count();
+    out.drain(..lead);
+    Built {
+        line: cut_runs_tagged(&out, CODE_BACKTICK_RUN_MAX),
+        kinds,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rendered text as a markdown renderer shows it (D-229).
+
+/// How a character of a rendered line shows once each link form is read as its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Shows {
+    /// Link syntax: the `[` and the `](#id)` of a form.
+    Never,
+    /// The `alias "` and closing `"` around a form's quoted label: a markdown renderer shows
+    /// them, the outline label drops them (as [`form_label`] does).
+    FormOnly,
+    /// Plain text, a link's text, a form's label, separators the renderer adds.
+    Always,
+}
+
+/// One character of a rendered line and where it came from.
+#[derive(Debug, Clone, Copy)]
+struct TChar {
+    c: char,
+    /// Span indices (inclusive range): one span, or several for a collapsed space or a `***`
+    /// that replaced text of several spans. None for text the renderer adds.
+    from: Option<(usize, usize)>,
+    /// Char index into a plain span's text, for a character [`Hide`] can hide on its own.
+    at: Option<usize>,
+    shows: Shows,
+}
+
+impl TChar {
+    /// A character the renderer adds (a space, a table separator).
+    fn added(c: char) -> TChar {
+        TChar {
+            c,
+            from: None,
+            at: None,
+            shows: Shows::Always,
+        }
+    }
+}
+
+/// What a rendered span is, for [`Hide`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpanKind {
+    /// Renders to nothing.
+    Empty,
+    /// Plain text: no link syntax, so only the characters that show a value are hidden.
+    Plain,
+    /// A link form: hidden whole, form and all.
+    Form,
+}
+
+/// What D-229 hides of one span.
+#[derive(Debug, Clone, Default)]
+struct Hide {
+    /// The whole span renders as `***` (a link form).
+    all: bool,
+    /// Char indices of a plain span's text that render as `***` (one `***` per run).
+    chars: HashSet<usize>,
+}
+
+/// A line as tagged characters and what each span rendered as.
+struct Built {
+    line: Vec<TChar>,
+    kinds: Vec<SpanKind>,
+}
+
+fn tagged(s: &str, from: Option<usize>, shows: Shows) -> impl Iterator<Item = TChar> + '_ {
+    s.chars().map(move |c| TChar {
+        c,
+        from: from.map(|i| (i, i)),
+        at: None,
+        shows,
+    })
+}
+
+/// `***` standing for span `i`.
+fn hidden(i: usize) -> Vec<TChar> {
+    tagged("***", Some(i), Shows::Always).collect()
+}
+
+/// Plain text of span `i`: each run of characters `hide` names becomes one `***`.
+fn tagged_plain(s: &str, i: usize, hide: Option<&Hide>) -> Vec<TChar> {
+    let mut out: Vec<TChar> = Vec::with_capacity(s.len());
+    let mut in_run = false;
+    for (k, c) in s.chars().enumerate() {
+        if hide.is_some_and(|h| h.all || h.chars.contains(&k)) {
+            if !in_run {
+                out.extend(hidden(i));
+            }
+            in_run = true;
+            continue;
+        }
+        in_run = false;
+        out.push(TChar {
+            c,
+            from: Some((i, i)),
+            at: Some(k),
+            shows: Shows::Always,
+        });
+    }
+    out
+}
+
+/// A link form of span `i`: `[` and `](#id)` never show, the label always does, the rest of
+/// the bracket text only in the renderer's reading.
+fn tagged_form(form: &str, i: usize) -> Vec<TChar> {
+    let close = if form.starts_with('[') {
+        form.find("](")
+    } else {
+        None
+    };
+    let Some(j) = close else {
+        return tagged(form, Some(i), Shows::Always).collect();
+    };
+    let inner = form.get(1..j).unwrap_or("");
+    let label = label_range(inner);
+    let mut out: Vec<TChar> = tagged("[", Some(i), Shows::Never).collect();
+    for (k, c) in inner.char_indices() {
+        let shows = if label.contains(&k) {
+            Shows::Always
+        } else {
+            Shows::FormOnly
+        };
+        out.push(TChar {
+            c,
+            from: Some((i, i)),
+            at: None,
+            shows,
+        });
+    }
+    out.extend(tagged(form.get(j..).unwrap_or(""), Some(i), Shows::Never));
+    out
+}
+
+fn render(line: &[TChar]) -> String {
+    line.iter().map(|t| t.c).collect()
+}
+
+fn merge(a: Option<(usize, usize)>, b: Option<(usize, usize)>) -> Option<(usize, usize)> {
+    match (a, b) {
+        (Some((a0, a1)), Some((b0, b1))) => Some((a0.min(b0), a1.max(b1))),
+        (x, None) | (None, x) => x,
+    }
+}
+
+/// [`collapse`] on tagged characters: a run of whitespace becomes one space that came from
+/// every span of the run.
+fn collapse_tagged(v: &[TChar]) -> Vec<TChar> {
+    let mut out: Vec<TChar> = Vec::with_capacity(v.len());
+    let mut gap: Option<TChar> = None;
+    for t in v {
+        if t.c.is_whitespace() {
+            if !out.is_empty() {
+                gap = Some(match gap {
+                    None => TChar { c: ' ', ..*t },
+                    Some(g) => TChar {
+                        c: ' ',
+                        from: merge(g.from, t.from),
+                        at: if g.from == t.from { g.at } else { None },
+                        shows: g.shows.max(t.shows),
+                    },
+                });
+            }
+            continue;
+        }
+        if let Some(g) = gap.take() {
+            out.push(g);
+        }
+        out.push(*t);
+    }
+    out
+}
+
+/// [`cut_backtick_runs`] on tagged characters.
+fn cut_runs_tagged(v: &[TChar], max: usize) -> Vec<TChar> {
+    let mut out: Vec<TChar> = Vec::with_capacity(v.len());
+    let mut run = 0usize;
+    for t in v {
+        if t.c == '`' {
+            run += 1;
+            if run > max {
+                continue;
+            }
+        } else {
+            run = 0;
+        }
+        out.push(*t);
+    }
+    out
+}
+
+/// [`break_link_shape`] on tagged characters.
+fn break_link_shape_tagged(mut v: Vec<TChar>) -> Vec<TChar> {
+    let mut k = 0usize;
+    while k + 1 < v.len() {
+        if v.get(k).is_some_and(|t| t.c == ']') && v.get(k + 1).is_some_and(|t| t.c == '(') {
+            if let Some(t) = v.get_mut(k) {
+                t.c = ')';
+            }
+            if let Some(t) = v.get_mut(k + 1) {
+                t.c = '(';
+            }
+            k += 2;
+        } else {
+            k += 1;
+        }
+    }
+    v
+}
+
+impl Ctx<'_> {
+    /// [`Ctx::scrub`] on tagged characters: each `***` came from the spans of the text it
+    /// replaced.
+    fn scrub_tagged(&self, mut v: Vec<TChar>) -> Vec<TChar> {
+        for secret in &self.secrets {
+            let s = render(&v);
+            if !s.contains(secret.as_str()) {
+                continue;
+            }
+            let starts: Vec<usize> = s.char_indices().map(|(b, _)| b).collect();
+            let mut out: Vec<TChar> = Vec::with_capacity(v.len());
+            let mut last = 0usize;
+            for (at, m) in s.match_indices(secret.as_str()) {
+                let a = starts.partition_point(|&b| b < at);
+                let z = starts.partition_point(|&b| b < at + m.len());
+                out.extend_from_slice(v.get(last..a).unwrap_or(&[]));
+                let from = v
+                    .get(a..z)
+                    .unwrap_or(&[])
+                    .iter()
+                    .fold(None, |acc, t| merge(acc, t.from));
+                out.extend(tagged("***", None, Shows::Always).map(|t| TChar { from, ..t }));
+                last = z;
+            }
+            out.extend_from_slice(v.get(last..).unwrap_or(&[]));
+            v = out;
+        }
+        v
+    }
+
+    /// D-229 (W-5, H-2): a line built from `n` spans by `build`, scrubbed (D-218), then read
+    /// as a markdown renderer shows it, each `[text](#id)` as `text` (and as the outline's
+    /// label, [`form_label`]). A password value that shows there, joined across a link form
+    /// where no space was put (`(` before, `.` after), is hidden: a link span that gives it a
+    /// character renders as `***` (no link form), a plain span hides the characters it gives
+    /// (plain text has no link syntax to locate the value in). The line is built and checked
+    /// again until no value shows.
+    fn scrub_joined(&self, n: usize, build: impl Fn(&[Hide]) -> Built) -> String {
+        let mut hide = vec![Hide::default(); n];
+        loop {
+            let built = build(&hide);
+            if self.secrets.is_empty() {
+                return render(&built.line);
+            }
+            let line = self.scrub_tagged(built.line);
+            let mut grew = false;
+            for (i, at) in self.joined_hits(&line) {
+                let Some(h) = hide.get_mut(i) else {
+                    continue;
+                };
+                match built.kinds.get(i) {
+                    Some(SpanKind::Form) if !h.all => {
+                        h.all = true;
+                        grew = true;
+                    }
+                    Some(SpanKind::Plain) => {
+                        if let Some(k) = at {
+                            grew |= h.chars.insert(k);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Each pass hides a character or a link not hidden before, so this ends.
+            if !grew {
+                return render(&line);
+            }
+        }
+    }
+
+    /// The characters that give a password value shown in `line` read as text, as (span,
+    /// char index in a plain span's text): the renderer's reading and the outline label's,
+    /// each as is and whitespace-collapsed. Characters from several spans (a collapsed space,
+    /// an earlier `***`) are left out: they show no part of a value on their own.
+    fn joined_hits(&self, line: &[TChar]) -> Vec<(usize, Option<usize>)> {
+        let mut hits: Vec<(usize, Option<usize>)> = Vec::new();
+        for floor in [Shows::FormOnly, Shows::Always] {
+            let shown: Vec<TChar> = line.iter().filter(|t| t.shows >= floor).copied().collect();
+            let collapsed = collapse_tagged(&shown);
+            for v in [&shown, &collapsed] {
+                let s = render(v);
+                let starts: Vec<usize> = s.char_indices().map(|(b, _)| b).collect();
+                for secret in &self.secrets {
+                    for (at, m) in s.match_indices(secret.as_str()) {
+                        let a = starts.partition_point(|&b| b < at);
+                        let z = starts.partition_point(|&b| b < at + m.len());
+                        for t in v.get(a..z).unwrap_or(&[]) {
+                            if let Some((lo, hi)) = t.from {
+                                if lo == hi {
+                                    hits.push((lo, t.at));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        hits
+    }
 }
 
 /// The block's text as words (links as their visible text), for scoring and outlines.
@@ -2882,5 +3286,108 @@ let x"
         assert!(labels.contains(&"## Plans Buy now (x)(#8)"), "{labels:?}");
         let squeezed: String = out.markdown.split_whitespace().collect();
         assert!(!squeezed.contains("hunter2pass"), "{}", out.markdown);
+    }
+
+    /// D-229: a password row whose value is `parts` joined, and the read of `blocks` (one
+    /// whole chunk) with each part shown as `<pN>`, so no assert message prints the value.
+    fn joined_read(parts: &[&str], blocks: Vec<TextBlock>) -> (String, String) {
+        joined_read_with(Vec::new(), parts, blocks)
+    }
+
+    fn joined_read_with(
+        mut rows: Vec<IndexRow>,
+        parts: &[&str],
+        blocks: Vec<TextBlock>,
+    ) -> (String, String) {
+        let mut pw = row(5, "textbox", "Password");
+        pw.state.input_type = Some("password".into());
+        pw.state.value = Some(FieldValue::Text(parts.concat()));
+        rows.push(pw);
+        let blocks: Vec<TextBlock> = blocks.into_iter().map(main_block).collect();
+        let md = read(&rows, &blocks, &opts(0)).markdown;
+        let mut shown = md.clone();
+        for (i, p) in parts.iter().enumerate() {
+            shown = shown.replace(p, &format!("<p{i}>"));
+        }
+        (md, shown)
+    }
+
+    #[test]
+    fn value_joined_across_a_table_cell_link_is_hidden() {
+        // D-229: the cell separator ` | ` and a cell's link text spell the value once link
+        // forms read as text; the link cell loses its form, the plain cell its characters.
+        let mut b = block(
+            1,
+            0,
+            BlockKind::TableRow,
+            vec![link("Kx7", ElemRef::main(99)), text("Zq9w left")],
+        );
+        b.table = Some(1);
+        let (md, shown) = joined_read(&["Kx7", " | ", "Zq9w"], vec![b]);
+        assert!(md == "| *** | *** left |", "{shown}");
+    }
+
+    #[test]
+    fn value_joined_across_a_list_item_link_is_hidden() {
+        // D-229: plain text ending in `(` gets no space before the link form.
+        let b = block(
+            1,
+            0,
+            BlockKind::ListItem,
+            vec![
+                text("pin Kx7("),
+                link("Zq9w", ElemRef::main(99)),
+                text(" end"),
+            ],
+        );
+        let (md, shown) = joined_read(&["Kx7(", "Zq9w"], vec![b]);
+        assert!(md == "- pin *** *** end", "{shown}");
+    }
+
+    #[test]
+    fn value_over_plain_link_plain_is_hidden() {
+        // D-229: the value runs from a plain span through a link into the next plain span
+        // (`(` before the form, `.` after it: no space either side). Every span that gives a
+        // character is hidden, the link with its form, and the re-check finds nothing left.
+        let b = block(
+            1,
+            0,
+            BlockKind::Paragraph,
+            vec![
+                text("go Ab9("),
+                link("Cd8", ElemRef::main(99)),
+                text(".Ef7 now"),
+            ],
+        );
+        let (md, shown) = joined_read(&["Ab9(", "Cd8", ".Ef7"], vec![b]);
+        assert!(md == "go *** *** *** now", "{shown}");
+        // The same spans in code: link forms render there too.
+        let c = block(
+            1,
+            0,
+            BlockKind::Code,
+            vec![
+                text("x = Ab9("),
+                link("Cd8", ElemRef::main(99)),
+                text(".Ef7;"),
+            ],
+        );
+        let (md, shown) = joined_read(&["Ab9(", "Cd8", ".Ef7"], vec![c]);
+        assert!(md == "```\nx = *********;\n```", "{shown}");
+    }
+
+    #[test]
+    fn value_joined_to_a_quoted_label_is_hidden() {
+        // D-229 with D-226 (3): the outline reads `[alias "label"](#id)` as its label, so a
+        // value joined to a quoted label is hidden in the body too.
+        let btn = row(8, "button", "Go");
+        let b = block(
+            1,
+            0,
+            BlockKind::Paragraph,
+            vec![text("see Kx7("), link("Zq9w", btn.elem()), text(" end")],
+        );
+        let (md, shown) = joined_read_with(vec![btn], &["Kx7(", "Zq9w"], vec![b]);
+        assert!(md == "see *** *** end", "{shown}");
     }
 }

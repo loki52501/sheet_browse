@@ -145,6 +145,11 @@ blockers:
     question: "Review round 5 should-fix 2: a table header separator cannot be split, so without max_tokens a page with thousands of empty columns sets the chunk size (3000 columns gave a 3002-token chunk holding only the separator). max_tokens still holds."
     default_taken: "Not a T-12 blocker. Area sheet caps rendered table width (columns beyond a fixed limit folded into one `+N columns` cell) before step 3 (live browser readers)."
     needs_user: false
+  - id: B-203
+    task: T-10
+    question: "D-229 says every span that contributes characters to a joined hit renders as `***`. Read literally, that blanks a whole plain span, and the tester's acceptance_t10_d227 d227_label_is_scrubbed_before_the_cut then fails: its heading's first plain span `Golf ggg... <value prefix>(` becomes `***`, so no `## Golf` label is left in remaining:. Should a plain span lose all its text or only the characters it gives to the hit?"
+    default_taken: "A link span that gives a character to a hit renders as `***` with no link form, as D-229 says. A plain span (no link syntax, so D-229's why does not apply to it) hides only the characters it gives to the hit, one `***` per run. Every character of the value is hidden either way, and the line is checked again until no hit is left. Both the D-227 label test and w5b_body_never_shows_a_value_joined_across_a_link_form pass. If supreme wants whole plain spans blanked, set SpanKind::Plain hits to Hide.all in Ctx::scrub_joined (crates/sb-sheet/src/reader.rs) and amend the D-227 label test."
+    needs_user: false
 
   - id: B-175
     task: T-07

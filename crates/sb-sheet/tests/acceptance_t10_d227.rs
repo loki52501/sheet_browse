@@ -855,7 +855,6 @@ fn d228_a_word_that_fits_the_read_budget_is_never_cut() {
 /// a markdown renderer displays: the body with each `[text](#id)` reduced to `text`. The outline
 /// already reduces link forms and scrubs after (D-226 (3)); the body must hide the value too.
 #[test]
-#[ignore = "red-first, round-6 W-5b finding: the body scrub does not see a value joined across a link form; run with --ignored"]
 fn w5b_body_never_shows_a_value_joined_across_a_link_form() {
     let c = canary();
     let before = format!("{c}(Zq9tail");
