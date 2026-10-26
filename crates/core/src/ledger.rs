@@ -37,8 +37,10 @@
 //! * a stop (gate Stop, Challenge mid-call): `server = core`, `mode = stop`, `why` = the
 //!   reason, `tool` and `args` of the call. Each stopped *call* is listed once under
 //!   `Not done` (D-121). A gate Stop is one core stop. A call the handler stops writes the
-//!   tool event with `mode = stop` and then a trailing core stop; a mid-call challenge adds
-//!   a core stop from `ToolCtx::ask` before them, written while the call ran. A tool stop
+//!   tool event with `mode = stop` and then a trailing core stop. A stop that a mid-call
+//!   `ToolCtx::ask` hits (Challenge card or gate Stop) is held while the call runs (D-127):
+//!   on a call that stopped it becomes that trailing core stop, and on a call that did not
+//!   stop it is written as a lone core stop just before the tool event. A tool stop
 //!   event is grouped with the next event of the same (tool, args) when that is a core
 //!   stop (the trailing one), and with the core stops of the same (tool, args) right
 //!   before it whose `ts` lies inside the call (`ts - duration_ms`, plus
