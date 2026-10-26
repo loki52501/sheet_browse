@@ -30,9 +30,16 @@ function jsdom(html, opts = {}) {
 }
 
 // Static server for bench/pages (plus extra in-memory routes) on an ephemeral loopback port.
+// An extra route with hold() answers only once the promise hold() returns settles (a test
+// releases it: a parser-blocking script that keeps the page "loading" with no fixed delay).
 function serve(extra = {}) {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
+      const x = extra[new URL(req.url, "http://x").pathname];
+      if (x && x.hold) Promise.resolve(x.hold()).then(() => handle(req, res), () => handle(req, res));
+      else handle(req, res);
+    });
+    const handle = (req, res) => {
       const u = new URL(req.url, "http://x");
       let body;
       let type;
@@ -67,7 +74,7 @@ function serve(extra = {}) {
       }
       res.writeHead(200, { "content-type": type, "accept-ranges": "bytes", "content-length": body.length });
       res.end(body);
-    });
+    };
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address();
       resolve({ server, port, origin: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(r)) });

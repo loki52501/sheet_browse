@@ -1863,8 +1863,9 @@
   // outros insert the new field and remove the old one later): an added field is checked at
   // once against the sensitive fields already in its parent (the overlap read), and every added
   // value field that stays non-sensitive is remembered (WeakRef and add time) for the same
-  // window, so a later removal of a sensitive field marks the ones that match its keys, or the
-  // single one added to the same parent. Remove-first across batches (D-439, Vue out-in, a
+  // window, so a later removal of a sensitive field marks the ones that match its keys and the
+  // ones added to the same parent: all of them when the parent lost only that field, else a
+  // single one (D-442). Remove-first across batches (D-439, Vue out-in, a
   // re-render split by an await): a parent that lost exactly one value field, a sensitive one,
   // and gained none is remembered (WeakRef) with the removal; the first later batch within the
   // window that adds value fields to it marks its field when it adds exactly one.
@@ -1947,8 +1948,8 @@
     const live = (x) => t - x.t <= SENS_KEEP_MS;
     if (S.gone.length && !live(S.gone[0])) S.gone = S.gone.filter(live);
     if (S.born.length && !live(S.born[0])) S.born = S.born.filter(live);
-    // parent -> { out: removed fields, sens: sensitive among them, add: added fields, gone: the
-    // S.gone entry of its sensitive field, swap: its one-for-one swap applied (D-437, D-440) }
+    // parent -> { out: removed value fields, sens: sensitive among them, add: added fields,
+    // gone: the S.gone entry of its sensitive field (D-437, D-438 (2)) }
     let swap = null;
     const lost = []; // [{ keys, parent, e }] sensitive fields this batch removed (e: swap entry)
     const gone = []; // S.gone entries of this batch
@@ -1957,7 +1958,7 @@
       const roots = Array.from(m.removedNodes);
       for (const r of roots) {
         for (const f of fieldsIn(r)) {
-          const e = (swap || (swap = new Map())).get(m.target) || { out: 0, sens: 0, add: null, gone: null, swap: false };
+          const e = (swap || (swap = new Map())).get(m.target) || { out: 0, sens: 0, add: null, gone: null };
           swap.set(m.target, e);
           e.out++;
           let s = true; // sensitivity unreadable (a throwing getter): sensitive, fail closed
@@ -1987,10 +1988,7 @@
         // one out, one in within this batch (D-437); one out and nothing in: a later batch that
         // adds exactly one value field to this parent within the window inherits (D-439)
         if (!e.add) e.gone.parent = new WeakRef(p);
-        else if (e.add.length === 1) {
-          S.sens.add(e.add[0]);
-          e.swap = true;
-        }
+        else if (e.add.length === 1) S.sens.add(e.add[0]);
       }
     }
     for (const g of gone) if (g.keys === null || g.keys.length || g.parent) S.gone.push(g);
@@ -2001,18 +1999,19 @@
       const prior = [];
       for (const b of S.born) {
         const f = b.ref.deref();
-        if (f && f.isConnected && !S.sens.has(f)) prior.push({ f, p: b.parent.deref(), keys: undefined, ld: b.ld });
+        if (f && f.isConnected && !S.sens.has(f)) prior.push({ f, p: b.parent.deref(), keys: undefined });
       }
       for (const g of lost) {
-        // D-441 (amends D-440): where this batch's one-for-one swap (D-437) already handed
-        // sensitivity to a new field of the parent, a field added to it while the document was
-        // loading (a parser-inserted neighbour) does not inherit by the same-parent rule. A field
-        // added after load still does (a post-load add-first rebuild stays fail closed). Key
-        // matches always do.
-        const inParent = prior.filter((x) => x.p === g.parent && !(g.e.swap && x.ld));
+        // Same-parent rule (D-438 (1), D-442; never skipped, also under a same-batch D-437 swap
+        // and for fields added while the document was loading): when the parent lost exactly one
+        // value field, this sensitive one, every remembered field added to it inherits; a parent
+        // that lost two or more (an SPA login swap, D-435 (1)) marks only a single remembered
+        // field. Key matches and a match-all entry always inherit.
+        const inParent = prior.filter((x) => x.p === g.parent);
+        const all = g.e.out === 1;
         for (const x of prior) {
           if (S.sens.has(x.f)) continue;
-          let hit = g.keys === null || (inParent.length === 1 && inParent[0] === x);
+          let hit = g.keys === null || (inParent.includes(x) && (all || inParent.length === 1));
           if (!hit) {
             try {
               if (x.keys === undefined) x.keys = fieldKeys(x.f, null);
@@ -2086,8 +2085,7 @@
         hit = true; // a field whose sensitivity or keys cannot be read: sensitive (fail closed)
       }
       if (hit) S.sens.add(f);
-      // ld: added while the parser was still loading (D-441); a flag, never a value
-      else S.born.push({ t, ref: new WeakRef(f), parent: new WeakRef(p), ld: doc.readyState === "loading" });
+      else S.born.push({ t, ref: new WeakRef(f), parent: new WeakRef(p) });
     }
     if (S.born.length > BORN_MAX) S.born.splice(0, S.born.length - BORN_MAX);
   }

@@ -80,6 +80,17 @@ EXTRA["/quiz-v2.html"] = html("<title>Quiz</title>", "<main>" + QUIZ +
   '<div class="g-recaptcha" data-sitekey="k" style="width:304px;height:78px"><iframe title="reCAPTCHA" width="304" height="78" ' +
   'srcdoc="&lt;p&gt;checkbox&lt;/p&gt;"></iframe></div></main>');
 
+// D-442: /slow.js is a parser-blocking script the server holds until the test releases it
+// (d442-loading.html stays "loading" for as long as the test needs, with no fixed delay).
+let slowGate = null;
+EXTRA["/slow.js"] = { body: "/* released by the test */", type: "text/javascript", hold: () => (slowGate ? slowGate.promise : null) };
+function holdSlow() {
+  let release;
+  const promise = new Promise((r) => { release = r; });
+  slowGate = { promise, release };
+  return release;
+}
+
 // Read through every __sb reader in world sb while counting value getter calls on the given ids.
 function readCounting(o, ids) {
   return o.ev(async (watch) => {
@@ -607,6 +618,65 @@ test("an add-first show toggle whose leave swaps in a different field never read
   assert.deepEqual(out[2].value, { kind: "filled" }, "q9");
   assert.deepEqual(out[4].value, { kind: "empty" }, "hint");
   assert.deepEqual(byName(fill(r.index), "User").state.value, { kind: "text", text: "ada" });
+});
+
+// D-442 (review-T-19 round 6 M1, M4): a copy added while a sync script keeps the page "loading"
+// is not a parser insert; it inherits like any other remembered field of the parent.
+async function openLoading() {
+  const o = await open("d442-loading.html", { waitUntil: "commit", base: null });
+  await o.page.waitForSelector("#toggle");
+  await o.ev(() => globalThis.__sb.walk({ base: 1 }));
+  await o.page.fill("#acct", "d442-canary");
+  await o.page.fill("#user", "ada");
+  await o.ev(() => globalThis.__sb.index());
+  assert.equal(await o.page.evaluate(() => document.readyState), "loading", "the held script keeps the page loading");
+  await o.page.click("#toggle", { noWaitAfter: true });
+  assert.equal(await o.page.evaluate(() => document.getElementById("q9").value), "d442-canary");
+  assert.equal(await o.page.evaluate(() => document.readyState), "loading", "the copy was added while loading");
+  return o;
+}
+function checkLeak(r, label) {
+  assert.deepEqual(r.reads, {}, label + ": a value getter was called after the removal");
+  assert.ok(!r.blob.includes("d442-canary"), label + ": " + r.blob);
+  // out: [index, text, state(q9), name(q9), state(hint), name(hint), index]
+  const out = JSON.parse(r.blob);
+  assert.deepEqual(out[2].value, { kind: "filled" }, label + ": q9");
+  assert.deepEqual(out[4].value, { kind: "empty" }, label + ": hint");
+  assert.deepEqual(byName(fill(r.index), "User").state.value, { kind: "text", text: "ada" }, label + ": User");
+}
+
+test("an add-first show toggle whose leave swaps in a different field while the page is loading never reads the value, then or after load (D-442)", async () => {
+  const release = holdSlow();
+  try {
+    const o = await openLoading();
+    await o.page.evaluate(() => globalThis.fade());
+    await o.page.waitForFunction(() => !document.getElementById("acct") && !!document.getElementById("hint"));
+    assert.equal(await o.page.evaluate(() => document.readyState), "loading", "the swap landed while loading");
+    checkLeak(await readCounting(o, ["q9", "hint"]), "while loading");
+    release();
+    await o.page.waitForFunction(() => document.readyState === "complete");
+    checkLeak(await readCounting(o, ["q9", "hint"]), "after load");
+  } finally {
+    release();
+  }
+});
+
+test("a copy added while the page is loading, then a swap after load within 2 s, never reads the value (D-442)", async () => {
+  const release = holdSlow();
+  try {
+    const o = await openLoading();
+    const t0 = await o.page.evaluate(() => performance.now());
+    release();
+    await o.page.waitForFunction(() => document.readyState !== "loading");
+    const dt = await o.page.evaluate(() => {
+      globalThis.swap();
+      return performance.now();
+    }) - t0;
+    assert.ok(dt < 2000, "the swap landed " + Math.round(dt) + " ms after the copy, inside the 2 s window");
+    checkLeak(await readCounting(o, ["q9", "hint"]), "after load");
+  } finally {
+    release();
+  }
 });
 
 test("a remove-first show toggle that appends an unrelated field in a later task never reads the value (D-439)", async () => {

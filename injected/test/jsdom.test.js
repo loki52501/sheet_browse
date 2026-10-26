@@ -921,8 +921,8 @@ test("an add-first rebuild split by a microtask or a later task inherits within 
     assert.ok(!r.blob.includes(CANARY), k + ": " + r.blob);
     same(r.states, [{ kind: "filled" }], k);
   }
-  // after 2000 ms the memory has aged out, and two fields added to one parent are not "the
-  // single field": they read their text
+  // after 2000 ms the memory has aged out: the copy reads its text (two fields added to one
+  // parent inherit since D-442: see the D-442 test)
   const late = {
     "key, 2001 ms": async (j) => {
       const n = j.mk('<input id="k1-copy" type="text" aria-label="Key one" value="plain one">');
@@ -940,19 +940,10 @@ test("an add-first rebuild split by a microtask or a later task inherits within 
       j.$("k2").remove();
       return [n];
     },
-    "same parent, two fields": async (j) => {
-      const a = j.mk('<input aria-label="Street" value="Elm St">');
-      const b = j.mk('<input aria-label="Town" value="Leeds">');
-      j.$("k2").after(a, b);
-      await tick();
-      j.$("k2").remove();
-      return [a, b];
-    },
   };
   const want = {
     "key, 2001 ms": [{ kind: "text", text: "plain one" }],
     "same parent, 2001 ms": [{ kind: "text", text: "plain two" }],
-    "same parent, two fields": [{ kind: "text", text: "Elm St" }, { kind: "text", text: "Leeds" }],
   };
   for (const [k, step] of Object.entries(late)) same((await addFirst(CANARY, step)).states, want[k], k);
 });
@@ -1249,9 +1240,14 @@ test("a getter that throws while a field is checked marks it sensitive and the b
   same(r.states, [{ kind: "empty" }, { kind: "filled" }]);
 });
 
-// ------------------------------------------------------------------ D-440
-test("a swap within 2 s of a neighbour added while loading leaves it readable; one added after load, key matches and batches with no swap still inherit (D-440, D-441)", async () => {
-  const CANARY = "swap-canary-440";
+// ------------------------------------------------------------------ D-442 (supersedes D-440, D-441)
+// { kind: "masked" } in want: the field is marked sensitive and reads empty or filled (a value
+// set by attribute leaves no caret or validity evidence, so it may read empty), never its text.
+function sameMasked(states, want, m) {
+  same(states.map((s, i) => (want[i] && want[i].kind === "masked" && (s.kind === "empty" || s.kind === "filled") ? { kind: "masked" } : s)), want, m);
+}
+test("a one-field swap within 2 s marks every field added to that parent, while loading and after load (D-442, B-415)", async () => {
+  const CANARY = "swap-canary-442";
   // a parse-time insert as the observer sees it: the form gains a label holding #nick
   const nick = (j) => {
     const l = j.mk('<label>Nickname <input id="nick" name="nick" value="Ann"></label>');
@@ -1259,20 +1255,32 @@ test("a swap within 2 s of a neighbour added while loading leaves it readable; o
     return l.firstElementChild;
   };
   const neutral = (j) => j.spy(j.mk('<input id="k2-plain" type="text" aria-label="Visible key">'));
+  const wrapSwap = (j) => {
+    const w = j.mk('<div id="w2b"></div>');
+    const f = neutral(j);
+    w.appendChild(f);
+    j.$("w2").replaceWith(w);
+    return f;
+  };
   const cases = {
-    // replaceWith of the password's wrapper: the form lost k2 and gained the new field
-    "wrapper swap at 1500 ms": async (j) => {
+    // replaceWith of the password's wrapper: the form lost k2 (its only lost value field) and
+    // gained the new field; #nick, added to the form 1.5 s earlier, is over-marked (B-415)
+    "wrapper swap at 1500 ms, neighbour added while loading": async (j) => {
+      assert.equal(j.doc.readyState, "loading");
       const n = nick(j);
       await tick();
       j.advance(1500);
-      const w = j.mk('<div id="w2b"></div>');
-      const f = neutral(j);
-      w.appendChild(f);
-      j.$("w2").replaceWith(w);
-      return [n, f];
+      return [n, wrapSwap(j)];
     },
-    // remove + append into the parent the neighbour was added to, one batch (D-437); the
-    // neighbour was added while the document was loading (a parser insert): it reads (D-441)
+    "wrapper swap at 1500 ms, neighbour added after load": async (j) => {
+      await tick();
+      assert.notEqual(j.doc.readyState, "loading");
+      const n = nick(j);
+      await tick();
+      j.advance(1500);
+      return [n, wrapSwap(j)];
+    },
+    // remove + append into the parent the neighbour was added to, one batch (D-437)
     "remove + append next to a neighbour added while loading": async (j) => {
       assert.equal(j.doc.readyState, "loading");
       const n = j.mk('<input id="nick" name="nick" value="Ann">');
@@ -1284,8 +1292,6 @@ test("a swap within 2 s of a neighbour added while loading leaves it readable; o
       j.$("w2").appendChild(f);
       return [n, f];
     },
-    // the same, with the neighbour added after load: the single field added to the parent
-    // inherits as D-438 (1) says, so both read filled (D-441)
     "remove + append next to a neighbour added after load": async (j) => {
       await tick();
       assert.notEqual(j.doc.readyState, "loading");
@@ -1298,20 +1304,25 @@ test("a swap within 2 s of a neighbour added while loading leaves it readable; o
       j.$("w2").appendChild(f);
       return [n, f];
     },
-    // a remembered field that matches k2 by key still inherits when the swap applied
+    // a remembered field that matches k2 by key inherits too
     "key copy elsewhere": async (j) => {
       const n = nick(j);
       const copy = j.spy(j.mk('<input id="k2-copy" type="text" aria-label="Key two">'));
       j.$("b1").appendChild(copy);
       await tick();
-      const w = j.mk('<div id="w2b"></div>');
-      const f = neutral(j);
-      w.appendChild(f);
-      j.$("w2").replaceWith(w);
-      return [n, copy, f];
+      return [n, copy, wrapSwap(j)];
     },
-    // no swap applied (the removing batch adds two fields): the earlier single field added to
-    // the parent is the rebuilt one and still inherits (D-438 (1)); the two new fields read
+    // two fields added to the parent in one batch, then the removal (no swap): both inherit
+    "two fields added, then removal": async (j) => {
+      const a = j.mk('<input aria-label="Street" value="Elm St">');
+      const b = j.mk('<input aria-label="Town" value="Leeds">');
+      j.$("k2").after(a, b);
+      await tick();
+      j.$("k2").remove();
+      return [a, b];
+    },
+    // the removing batch adds two fields (no swap): the earlier field added to the parent
+    // inherits (D-438 (1)); the two new fields read
     "add-first, then the removing batch adds two": async (j) => {
       const n = neutral(j);
       j.$("w2").appendChild(n);
@@ -1324,17 +1335,140 @@ test("a swap within 2 s of a neighbour added while loading leaves it readable; o
     },
   };
   const want = {
-    "wrapper swap at 1500 ms": [{ kind: "text", text: "Ann" }, { kind: "filled" }],
-    "remove + append next to a neighbour added while loading": [{ kind: "text", text: "Ann" }, { kind: "filled" }],
+    "wrapper swap at 1500 ms, neighbour added while loading": [{ kind: "masked" }, { kind: "filled" }],
+    "wrapper swap at 1500 ms, neighbour added after load": [{ kind: "masked" }, { kind: "filled" }],
+    "remove + append next to a neighbour added while loading": [{ kind: "masked" }, { kind: "filled" }],
     "remove + append next to a neighbour added after load": [{ kind: "filled" }, { kind: "filled" }],
-    "key copy elsewhere": [{ kind: "text", text: "Ann" }, { kind: "filled" }, { kind: "filled" }],
+    "key copy elsewhere": [{ kind: "masked" }, { kind: "filled" }, { kind: "filled" }],
+    "two fields added, then removal": [{ kind: "masked" }, { kind: "masked" }],
     "add-first, then the removing batch adds two": [{ kind: "filled" }, { kind: "text", text: "Elm St" }, { kind: "text", text: "Leeds" }],
   };
   for (const [k, step] of Object.entries(cases)) {
     const r = await addFirst(CANARY, step);
     assert.equal(r.c.reads, 0, k + ": a value getter was called");
     assert.ok(!r.blob.includes(CANARY), k + ": " + r.blob);
-    same(r.states, want[k], k);
+    sameMasked(r.states, want[k], k);
+  }
+  // controls: past the 2 s window the neighbour reads; a parent that lost two value fields
+  // (an SPA login swap, D-435 (1)) does not mark the two fields added to it
+  const controls = {
+    "wrapper swap at 2001 ms": async (j) => {
+      const n = nick(j);
+      await tick();
+      j.advance(2001);
+      return [n, wrapSwap(j)];
+    },
+    "a login parent that lost two fields": async (j) => {
+      const a = j.mk('<input aria-label="Street" value="Elm St">');
+      const b = j.mk('<input aria-label="Town" value="Leeds">');
+      j.$("k6").after(a, b);
+      await tick();
+      j.$("u6").remove();
+      j.$("k6").remove();
+      return [a, b];
+    },
+  };
+  const wantC = {
+    "wrapper swap at 2001 ms": [{ kind: "text", text: "Ann" }, { kind: "filled" }],
+    "a login parent that lost two fields": [{ kind: "text", text: "Elm St" }, { kind: "text", text: "Leeds" }],
+  };
+  for (const [k, step] of Object.entries(controls)) {
+    const r = await addFirst(CANARY, step);
+    assert.equal(r.c.reads, 0, k + ": a value getter was called");
+    same(r.states, wantC[k], k);
+  }
+});
+
+// review-T-19 rounds 5 and 6 leak shapes (runs/reviewer-10/probe-r10-jsdom.js V7, V8;
+// runs/reviewer-11/probe-r11-jsdom.js N1, N3, N3r). The password and every copy hold the canary;
+// reads counts their value getter calls. "loading" steps run synchronously after the base walk.
+async function leakShape(step, postload) {
+  const CANARY = "shape-canary-442";
+  const c = { reads: 0 };
+  const j = jsdom('<form><div id="w"><input id="acct" type="password" aria-label="Account key">' +
+    '<button type="button">Show</button></div><div id="z"></div></form>');
+  j.advance = fakeClock(j.win);
+  j.mk = (html) => tmpl(j.doc, html);
+  j.spy = (el) => spied(j.win, el, CANARY, c);
+  j.$ = (id) => j.doc.getElementById(id);
+  j.other = () => j.mk('<input id="hint" type="text" placeholder="Hint">');
+  j.spy(j.$("acct"));
+  j.sb.walk({ base: 1 });
+  j.sb.index();
+  if (postload) {
+    await tick();
+    assert.notEqual(j.doc.readyState, "loading");
+  } else assert.equal(j.doc.readyState, "loading");
+  const fields = await step(j);
+  await tick();
+  j.sb.walk({ dirty: true });
+  const states = fields.map((f) => j.sb.state(f).value);
+  const all = Array.from(j.doc.querySelectorAll("input")).map((f) => j.sb.state(f));
+  const blob = JSON.stringify([j.sb.index(), j.sb.text(), all]);
+  return { c, states: JSON.parse(JSON.stringify(states)), blob, CANARY };
+}
+
+test("review leak shapes V7, N1, V8, N3, N3r read no value and emit no canary (D-442)", async () => {
+  const v7 = async (j) => {
+    const n = j.spy(j.mk('<input id="q9" type="text">'));
+    j.$("acct").after(n);
+    await tick();
+    const o = j.other();
+    j.$("acct").replaceWith(o);
+    return [n, o];
+  };
+  const v8 = async (j) => {
+    const n = j.spy(j.mk('<input id="q9" type="text">'));
+    j.$("acct").after(n);
+    await tick();
+    const m = j.mk('<input id="q10" type="text" value="plain">');
+    n.after(m);
+    await tick();
+    j.$("acct").remove();
+    return [n, m];
+  };
+  const n3 = (swap) => async (j) => {
+    const nk = j.mk('<input id="nick" name="nick" value="Ann">');
+    j.$("w").appendChild(nk);
+    await tick();
+    assert.notEqual(j.doc.readyState, "loading");
+    const n = j.spy(j.mk('<input id="q9" type="text">'));
+    j.$("acct").after(n);
+    await tick();
+    if (!swap) {
+      j.$("acct").remove();
+      return [nk, n];
+    }
+    const o = j.other();
+    j.$("acct").replaceWith(o);
+    return [nk, n, o];
+  };
+  const cases = [
+    // V7: a neutral copy next to the password, then replaceWith by a different field
+    ["V7 while loading", false, v7, [{ kind: "filled" }, { kind: "empty" }]],
+    ["V7 after a tick", true, v7, [{ kind: "filled" }, { kind: "empty" }]],
+    // N1: the copy is added while loading, the swap comes after load
+    ["N1 copy while loading, swap after load", false, async (j) => {
+      const n = j.spy(j.mk('<input id="q9" type="text">'));
+      j.$("acct").after(n);
+      await tick();
+      assert.notEqual(j.doc.readyState, "loading");
+      const o = j.other();
+      j.$("acct").replaceWith(o);
+      return [n, o];
+    }, [{ kind: "filled" }, { kind: "empty" }]],
+    // V8: two fields added to the parent in two batches, then the password is removed
+    ["V8 while loading", false, v8, [{ kind: "filled" }, { kind: "masked" }]],
+    ["V8 after a tick", true, v8, [{ kind: "filled" }, { kind: "masked" }]],
+    // N3 / N3r: a neighbour added while loading, a copy after load, then a swap / a removal
+    ["N3 swap", false, n3(true), [{ kind: "masked" }, { kind: "filled" }, { kind: "empty" }]],
+    ["N3r plain removal", false, n3(false), [{ kind: "masked" }, { kind: "filled" }]],
+  ];
+  for (const [k, postload, step, want] of cases) {
+    const r = await leakShape(step, postload);
+    assert.equal(r.c.reads, 0, k + ": a value getter was called");
+    assert.ok(!r.blob.includes(r.CANARY), k + ": " + r.blob);
+    sameMasked(r.states, want, k);
   }
 });
 

@@ -56,6 +56,16 @@ const timedSettle = (o, opts) => o.ev(async (op) => {
   return { r, ms: performance.now() - t };
 }, opts);
 
+// D-442 (B-415 accepted): a field the parser added to a form within 2 s before a one-field
+// password swap in that form is over-marked (reads empty|filled). Controls that check an
+// ordinary field of the same form reads its text swap after that window. Test-only wait: the
+// window is a timestamp in injected.js with no event at its end, so the condition is the page
+// clock itself (2000 ms after the load event, which follows every parser insert, plus 50 ms).
+const pastBornWindow = (o) => o.page.waitForFunction(() => {
+  const n = performance.getEntriesByType("navigation")[0];
+  return !!n && n.loadEventEnd > 0 && performance.now() > n.loadEventEnd + 2050;
+}, null, { polling: 50, timeout: 15000 });
+
 const sig = (r) => `${r.role}|${r.name}|${r.form || ""}`;
 const stats = (xs) => ({
   n: xs.length,
@@ -1036,6 +1046,8 @@ test("A10 password value never in index()/text()/state()/name() after type swap,
   }, lbl);
   await o.ev(() => globalThis.__sb.walk({ base: 1 }));
   const r1 = await read("before");
+  // the nick control below needs the swaps to land after D-442's 2 s window (see A18)
+  await pastBornWindow(o);
   // the site's own handlers: show toggle and three rebuilds; masking and autocomplete dropped
   await o.page.click("#btn-show");
   await o.page.click("#btn-rebuild");
@@ -1309,6 +1321,8 @@ test("A14 D-435 (1)(2), D-437: SPA swap keeps unrelated pre-filled fields readab
     return r;
   }, lbl);
   const r1 = await read("before");
+  // the nick control below needs the swaps to land after D-442's 2 s window (see A18)
+  await pastBornWindow(o);
   // each toggle in its own task, so each is its own observer batch (the microtask one splits itself)
   for (const fn of ["toggleType", "toggleSame", "toggleNeutral", "toggleWrap", "toggleAppend", "toggleMicro", "toggleTo1", "toggleTo2"]) {
     await o.page.evaluate((f) => globalThis[f](), fn);
@@ -1485,22 +1499,37 @@ test("A16 D-438: add-first rebuilds (later task, microtask, transitionend, overl
 // A18: D-435 (1) against D-438 (1)'s same-parent rule: a wrapper swap shortly after load must
 // not mark an untouched ordinary field of the same form. A10 and A14 do much typing first, so
 // whether their swap lands inside the 2 s window varies; this test swaps at once.
-test("A18 D-435 (1): a show-password wrapper swap right after load leaves the untouched ordinary field of the same form readable", async (t) => {
+test("A18 D-442, B-415: a show-password wrapper swap within 2 s of load over-marks the parser-inserted ordinary field of the same form; after 2 s it reads", async (t) => {
   const out = {};
   for (const [page, fill, swap] of [["accept-pw.html", "#p1", "#btn-wrap"], ["accept-d435.html", "#t-wrap", null]]) {
-    const o = await open(page);
-    const t0 = await o.page.evaluate(() => performance.now());
-    await o.page.fill("#nick", "ada");
-    await o.page.fill(fill, "pw-dummy-a18");
-    if (swap) await o.page.click(swap);
-    else await o.page.evaluate(() => globalThis.toggleWrap());
-    const ms = Math.round((await o.page.evaluate(() => performance.now())) - t0);
-    const v = await o.ev(() => {
-      globalThis.__sb.walk({ dirty: true });
-      return globalThis.__sb.state(document.getElementById("nick")).value;
-    });
-    out[page] = { ms, kind: v && v.kind };
-    assert.deepEqual(v, { kind: "text", text: "ada" }, page + ": Nickname after the wrapper swap, " + ms + " ms after the first based walk");
+    for (const late of [false, true]) {
+      const o = await open(page);
+      const t0 = await o.page.evaluate(() => performance.now());
+      await o.page.fill("#nick", "ada");
+      await o.page.fill(fill, "pw-dummy-a18");
+      if (late) await pastBornWindow(o);
+      if (swap) await o.page.click(swap);
+      else await o.page.evaluate(() => globalThis.toggleWrap());
+      // performance.now() after the swap bounds the swap time from above; nick was inserted
+      // after time 0, so at <= 2000 the swap is inside its 2 s window
+      const at = await o.page.evaluate(() => performance.now());
+      const v = await o.ev(() => {
+        globalThis.__sb.walk({ dirty: true });
+        return globalThis.__sb.state(document.getElementById("nick")).value;
+      });
+      const key = page + (late ? " late" : "");
+      out[key] = { ms: Math.round(at - t0), at: Math.round(at), kind: v && v.kind };
+      if (late) {
+        assert.deepEqual(v, { kind: "text", text: "ada" }, key + ": Nickname after the 2 s window");
+      } else if (at <= 2000) {
+        // the accepted over-mark: empty|filled, never the text (page.fill leaves caret evidence)
+        assert.deepEqual(v, { kind: "filled" }, key + ": Nickname, swap " + Math.round(at) + " ms after navigation start");
+      } else {
+        // a slow machine: the swap may fall outside the window; either reading is allowed, and
+        // the diagnostic shows which
+        assert.ok(v && (v.kind === "filled" || (v.kind === "text" && v.text === "ada")), key + ": " + (v && v.kind));
+      }
+    }
   }
   t.diagnostic("ACCEPT A18 " + JSON.stringify(out));
 });
