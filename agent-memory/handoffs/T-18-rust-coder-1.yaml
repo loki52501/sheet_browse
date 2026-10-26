@@ -1,0 +1,38 @@
+from: rust-coder (driver area, T-18)
+to: driver/suborch, then reviewer and tester
+task: T-18
+date: "2026-10-25"
+state: "sb-cdp: Cdp client (one writer task, one reader task, reply map Option<HashMap> with None = closed, start() queues synchronously so sends pipeline, drop guard removes cancelled callers, 10 s COMMAND_TIMEOUT naming the method, CdpError {Protocol, Timeout, Closed}, synchronous observer then all-events and per-session broadcasts, session broadcast closes on Target.detachedFromTarget). Pipe (D-600): Windows CreateProcessW + CRT lpReserved2 (NUL on 0-2, fd 3 read 0x09, fd 4 write 0x09) + PROC_THREAD_ATTRIBUTE_HANDLE_LIST, CREATE_SUSPENDED into a kill-on-close Job, then resume; Unix F_DUPFD_CLOEXEC + dup2 to 3/4 in a new process group; one blocking thread per direction; kill(cap) terminates the job and waits on every pid. WebSocket over tokio-tungstenite plus devtools_active_port(dir, cap). ElectronNapi and ExtensionRelay are todo!() stubs (B-3). sb-driver: launch_args (exact D-601 flags), resolve_chromium (opts, SB_CHROMIUM, pinned path; set-but-missing errors naming SB_CHROMIUM), LaunchEnv, profiles (me persistent and never headless, bench temp dir removed on drop), DriverError::Launch, Registry (B-4 #2, pure, zero round trips), Driver::launch / launch_with with browser-level setDiscoverTargets + setAutoAttach{flatten, waitForDebuggerOnStart} and per-session Page.enable, Runtime.enable, nested setAutoAttach, runIfWaitingForDebugger (pipelined, from the observer). tabs() and frames() read the registry. Additive: Driver::{launch_with, cdp, with_registry, wait_registry, pid, pids, profile_dir, shutdown}. fmt, clippy -D warnings (also for x86_64-unknown-linux-gnu on sb-cdp) and all sb-cdp/sb-driver tests pass, the real-Chromium ones included (chromium-1248)."
+not_done: "1. T-20..T-22: open, act, index, text, close, dialog, download, settle, screenshot remain todo!(). 2. tabs() title freshness (B-601): Chromium sends no targetInfoChanged for document.title changes, so tabs() titles can be stale until T-22 refreshes them. 3. First-run Chromium download is T-18b (D-601). 4. Unix pipe launch is compile- and clippy-checked only (no Linux runner here)."
+gotchas:
+  - "On this machine under swarm load (CPU 100%), a terminated Chromium took 8 to 20 s to be reaped (plain TerminateProcess on a Command-spawned Chrome was just as slow), so DROP_KILL_CAP is 20 s and the tests use 30 s caps. Normal teardown is under 1 s."
+  - "Chromium 156 sends no Target.targetInfoChanged when document.title changes (B-601)."
+  - "Real Chrome attaches extension service workers and browser_ui targets at browser level; the registry ignores every type but page and iframe, the observer still runs them (runIfWaitingForDebugger)."
+  - "std::process::Command spawns inherit every inheritable handle; Pipe makes its child ends inheritable only around CreateProcessW and limits its own child via the handle list. Do not spawn Command children and Pipe launches concurrently in one test binary."
+  - "The Write/Edit hook refuses paths outside the worktree, scratch files included; use target/ (git-ignored) for throwaway files."
+  - "Checkpoint 753dfb5 (wip, by the orchestrator) was taken while a mutation test had client.rs edited: it committed `let _ = (tx, event.clone());` in read_loop, which silently drops every per-session event. The final T-18 commit restores the afbff77 line `let _ = tx.send(event.clone());`. Do not checkpoint a coder's tree mid-run; if 753dfb5 is ever cherry-picked alone, it carries the bug."
+  - "The mutation run (prove each unit test can go red) was killed by the host for low memory before it wrote any result, so 'tests can fail' (pr-ready section 6) is not yet proven by a recorded run. Unit tests for every mutated behaviour exist (cancel removes slot, 10 s timeout, session routing, close fails callers, error replies, out-of-order replies, swap detach, generation bump, opener, subtree removal, sb world contexts, exact argv, me+headless, SB_CHROMIUM message); the tester should break each once."
+decisions_made: []
+blockers_opened: [B-601, B-602, B-603]
+files_touched:
+  - crates/sb-cdp/Cargo.toml
+  - crates/sb-cdp/src/lib.rs
+  - crates/sb-cdp/src/client.rs
+  - crates/sb-cdp/src/pipe.rs
+  - crates/sb-cdp/src/pipe_windows.rs
+  - crates/sb-cdp/src/pipe_unix.rs
+  - crates/sb-cdp/src/ws.rs
+  - crates/sb-cdp/tests/common/mod.rs
+  - crates/sb-cdp/tests/chromium_pipe.rs
+  - crates/sb-cdp/tests/chromium_websocket.rs
+  - crates/sb-cdp/tests/contract_paths.rs
+  - crates/sb-driver/Cargo.toml
+  - crates/sb-driver/src/lib.rs
+  - crates/sb-driver/src/launch.rs
+  - crates/sb-driver/src/registry.rs
+  - crates/sb-driver/tests/common/mod.rs
+  - crates/sb-driver/tests/chromium_driver.rs
+  - crates/sb-driver/tests/contract_paths.rs
+  - Cargo.lock
+  - agent-memory/blockers.yaml
+verify: "cargo test -j 2 -p sb-cdp -p sb-driver"

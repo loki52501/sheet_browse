@@ -190,6 +190,25 @@ blockers:
     task: T-15
     question: "docs/04 C-3 says flags(provider, env) reads and that writes are Account, but names no provider, API shape or auth; C-4 names config/cli-allow.toml but no schema. Which providers and programs ship, and how are they configured?"
     default_taken: "config/flags.toml ships with no providers and a commented example; a provider is {api, auth (header value template that must contain @vault(name)), header (default Authorization), read (GET path, {env} replaced), domain (optional gate domain)}. flags(provider, env) GETs the read path; method/path/body make writes (POST/PUT/PATCH Account, DELETE Delete). config/cli-allow.toml is [programs.<name>] {bin, read, write (Account), delete (Delete), default read|write|delete|refuse, deny_flags, timeout_secs}, shipped with read-only git, dig and nslookup entries; anything not listed is refused with nothing run. Both files are read per call and again inside the call, so an edit after the gate approved a call cannot raise its class. Provider and program names fold to ASCII lowercase."
+  - id: B-600
+    task: T-18
+    question: "guard_write.py sets ROOT to the worktree its hook script runs from (the session's project dir), so a subagent of the wt/driver session cannot Write or Edit in a D-91 per-task worktree wt/driver-T18. Should the hook also accept sibling worktrees of the same area (wt/<area>-T<nn>)?"
+    default_taken: "Driver runs its task branches one at a time inside wt/driver (git checkout swarm/driver-T<nn>); the separate wt/driver-T18 worktree was removed. Its tasks are sequential (T-20 needs T-18), so nothing is lost. Any area that wants parallel per-task worktrees needs the hook change or a session launched with cwd in that worktree."
+    needs_user: false
+  - id: B-601
+    task: T-18
+    question: "I-9 tabs() returns (tab, url, title), but Chromium 156 (chromium-1248) sends no Target.targetInfoChanged when document.title changes: measured on an http page and a data: page, the TargetInfo title stays the commit-time value (host:port or the URL). Where should a fresh title come from?"
+    default_taken: "T-18 tabs() reads the registry only (zero round trips): the title is the last TargetInfo title, which can be stale. Proposed for T-22 (which owns tabs()): when tabs() is called, refresh titles with one pipelined Runtime.evaluate('document.title') per tab in the sb world, or have injected.js report title changes; B-4 #9 'opened tab N: title' (T-21) needs the same."
+    needs_user: false
+  - id: B-602
+    task: T-18
+    question: "B-4 #2 lists the events that feed the registry (Target.attached/detached, Page.frameAttached/Navigated/Detached, Runtime.executionContextCreated/Destroyed). Are other events allowed, and how are tabs numbered?"
+    default_taken: "Three more events are applied because the listed ones leave the state wrong without them: Target.targetInfoChanged (title), Page.navigatedWithinDocument (URL of SPA routes, no generation bump) and Runtime.executionContextsCleared (drops all contexts of a session). TabIds start at 1 in attach order and are never reused; frame ids are per tab, 0 = main frame, never reused. Frame-tree events from inside an out-of-process iframe are not tracked (the OOPIF itself is one opaque frame, B-4 #2 'never read inside'); a frame is opaque when it is out of process, cross-origin to its parent (about:blank and about:srcdoc inherit, data: and unparsable URLs are opaque) or inside an opaque frame."
+    needs_user: false
+  - id: B-603
+    task: T-18
+    question: "D-601 gives the pinned path as <home>/chromium/156.0.8078.4/chrome-<platform>/chrome(.exe), but the macOS Chrome for Testing archive has no 'chrome' binary. And is an empty SB_CHROMIUM or SB_HOME 'set'?"
+    default_taken: "macOS resolves to chrome-mac-arm64 (or chrome-mac-x64)/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing; Windows and Linux follow D-601 exactly (chrome-win64/chrome.exe, chrome-linux64/chrome). An empty SB_CHROMIUM or SB_HOME counts as unset. A set source that names a missing file is an error naming SB_CHROMIUM, never a fall-through."
     needs_user: false
 interface_changes:
   - id: B-194
@@ -280,5 +299,10 @@ interface_changes:
     interface: I-7
     change: "Additive, per D-315 (B-33 (3)): toolstore::ToolStore::{scan_live(&self, store: &dyn MemoryStore, domain: &str, path: &str) -> Result<LoadReport, StoreError>, load_live(&self, store: &dyn MemoryStore, domain: &str, path: &str) -> Result<Vec<Tool>, StoreError>} (async). They skip tools whose tools.health row is retired. Behaviour per D-316: a retire whose archive fails is an ok:true tools.retire plus an ok:false tools.archive event, and record() returns Ok for it. Proposed for wave 4: #[deprecated] on the sync load/scan in favour of the live pair."
     why: "Runtime callers (srv-web T-13, sb-mcp, toolforge) must not serve a retired tool whose file is still in place; load cannot see tools.health without MemoryStore. Default until supreme answers: callers use load_live; load/scan stay for tests and offline tooling."
+  - id: B-604
+    from: driver
+    interface: "I-8 (sb-cdp), I-9 (sb-driver)"
+    change: "Additive only; every I-8/I-9 path and signature is unchanged. sb_cdp: Cdp, CdpError, CdpSender (start, call, start_then, pending, is_closed), Event, Observer, COMMAND_TIMEOUT, Pipe::{launch, pid, pids, kill}, DROP_KILL_CAP, process_running, WebSocket::connect, devtools_active_port, parse_devtools_active_port. CdpSender::start_then(session, method, params, then) -> bool queues a command whose reply the reader task hands to `then` synchronously, in wire order with the events (no 10 s timeout; dropped uncalled on close). sb_driver: DriverError::Launch, impl From<CdpError> for DriverError, Driver::{launch_with, cdp, with_registry, wait_registry, pid, pids, profile_dir, shutdown}, Registry (with take_seeds, tracks, seed_frame_tree), Seed, ExecContext, SB_WORLD, LaunchEnv, launch_args, resolve_chromium, platform_dir, binary_name, CHROMIUM_VERSION. The registry also applies Target.targetDestroyed (removes the tab) and Target.targetInfoChanged for prerender activation (B-602 lists the events it applies)."
+    why: "review-T-18 round 1 asked for the additive items to be listed for the supreme; round 2 adds start_then and the seed API because Page.enable does not replay existing frames (review should-fix 6) and the seed must be applied at its place in the event stream. Default until supreme answers: as implemented in T-18 round 2."
 
 proposals:
