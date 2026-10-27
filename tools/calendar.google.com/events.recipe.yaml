@@ -10,7 +10,7 @@ steps:
   - tool: navigate
     args: {url: "https://calendar.google.com/calendar/u/0/r/agenda"}
   - tool: wait
-    args: {for: selector, value: "[role=main] [role=grid]"}
+    args: {for: selector, value: "[role=main] [role=grid]", timeout: 30000}  # cold loads of Google pages exceed the 10 s default
   - tool: grep
     args: {over: ax, pattern: '^\s*- row "[A-Z][a-z]+day, ', limit: "{count}"}
     returns: events

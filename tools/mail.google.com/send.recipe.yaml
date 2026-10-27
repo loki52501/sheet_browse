@@ -2,7 +2,7 @@
 name: send
 domain: mail.google.com
 kind: recipe
-description: "Compose a new message and send it"
+description: "Compose a new message and send it. to is one full email address (a partial name would let Gmail pick its top suggestion)"
 match: ["/mail/*"]
 args:
   to: {type: string, required: true}
@@ -12,7 +12,7 @@ steps:
   - tool: navigate
     args: {url: "https://mail.google.com/mail/u/0/#inbox?compose=new"}
   - tool: wait
-    args: {for: selector, value: "[role=dialog] [aria-label=\"To recipients\"]"}
+    args: {for: selector, value: "[role=dialog] [aria-label=\"To recipients\"]", timeout: 30000}  # cold loads of Google pages exceed the 10 s default
   - tool: act
     target: {role: combobox, name: "To recipients"}
     args: {kind: fill, value: "{to}"}

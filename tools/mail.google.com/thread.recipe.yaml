@@ -12,7 +12,7 @@ steps:
   - tool: navigate
     args: {url: "https://mail.google.com/mail/u/0/#search/{query}"}
   - tool: wait
-    args: {for: selector, value: "[role=main] [role=grid] [role=row]"}
+    args: {for: selector, value: "[role=main] [role=grid] [role=row]", timeout: 30000}  # cold loads of Google pages exceed the 10 s default
   - tool: act
     target: {role: row, nth: "{index}"}
     args: {kind: click}

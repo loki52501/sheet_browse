@@ -207,6 +207,9 @@ class ReviewRound1(unittest.TestCase):
 
     def test_wait_value_expects_values_read_and_grep_args(self):
         self.assertFlags(bad(lambda d: d["steps"][1]["args"].pop("value")), "no value")
+        self.assertEqual(bad(lambda d: d["steps"][1]["args"].update(timeout=30000)), [])
+        for t in (0, 30001, "30000", True):
+            self.assertFlags(bad(lambda d, t=t: d["steps"][1]["args"].update(timeout=t)), "1..30000")
         self.assertFlags(bad(lambda d: d.update(expects={"text": ""})), "expects")
         self.assertFlags(bad(lambda d: d.update(expects={"text": 3})), "expects")
         self.assertFlags(bad(lambda d: d["steps"][4]["args"].update(over="dom")), "ax or content")

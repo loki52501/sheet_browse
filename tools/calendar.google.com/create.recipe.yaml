@@ -2,7 +2,7 @@
 name: create
 domain: calendar.google.com
 kind: recipe
-description: "Create an event on the primary calendar. start and end are local times as YYYYMMDDTHHMMSS (20261028T100000)"
+description: "Create an event on the primary calendar. start and end are local times, exactly YYYYMMDDTHHMMSS (20261028T100000): Google ignores other formats and would save at its default slot"
 match: ["/calendar/*"]
 args:
   title: {type: string, required: true}
@@ -13,7 +13,7 @@ steps:
   - tool: navigate
     args: {url: "https://calendar.google.com/calendar/u/0/r/eventedit?text={title}&dates={start}/{end}&details={description}"}
   - tool: wait
-    args: {for: selector, value: "[aria-label=\"Title\"]"}
+    args: {for: selector, value: "[aria-label=\"Title\"]", timeout: 30000}  # cold loads of Google pages exceed the 10 s default
   - tool: act
     target: {role: button, name: "Save"}
     args: {kind: click}

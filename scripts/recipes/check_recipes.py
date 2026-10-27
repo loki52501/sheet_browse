@@ -209,6 +209,9 @@ def check_step(i, step, domain, aliases, declared=None):
             out.append(f"{where} wait is for {args.get('for')!r}: a fixed sleep (wait for text or selector)")
         elif not text(args.get("value")):
             out.append(f"{where} wait has no value to wait for")
+        timeout = args.get("timeout", 10000)
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 30000:
+            out.append(f"{where} wait timeout {timeout!r} is not 1..30000 ms (BrowserOS's cap)")
     if tool == "read" and not one_of(args.get("format", "markdown"), READ_FORMATS):
         out.append(f"{where} read format {args.get('format')!r} is not markdown, text or links")
     if tool == "grep":
