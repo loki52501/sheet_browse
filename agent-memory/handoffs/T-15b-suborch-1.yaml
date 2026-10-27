@@ -1,0 +1,14 @@
+from: servers/suborch
+to: servers/suborch (next session), then supreme
+task: T-15b
+date: "2026-10-26"
+state: "Claimed (918e99c) on swarm/servers-T15b in worktree F:/sb-swarm/wt/servers/.wt/T15b, branched from main 8dedda3. rust-coder-1 started on: loopback http and the system proxy, gh alias set mapping to auth or a write (both ask), strict letter matching false positives (git log -Sconfig) without lowering any class, HTML labelled text/plain not shown, and accept-T-15.md's red C-1 row if it is a code defect. Ladder rungs 3, 5, 9 in the title already pass (accept-T-13c.md)."
+not_done: "Coder result, then reviewer + tester (docs/04 srv-cli acceptance), round 2, pr-ready, PR 'servers: T-15b ...'."
+gotchas:
+  - "Shared target dir with the T-13b coder: cargo clean -p srv-cli before a final run."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/tasks.yaml
+  - agent-memory/handoffs/T-15b-suborch-1.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-cli"
