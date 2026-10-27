@@ -25,6 +25,14 @@ transcript goes to $SB_LADDER_LOGS/<run id>.jsonl (outside runs/, for scoring an
 canary grep). Claude Code's own session variables inherited from the calling session are
 dropped; ANTHROPIC_* variables are dropped too (rule 1: no API key is set or read).
 
+Two optional knobs (T-16 ladder rungs 6 to 8):
+  SB_LADDER_ALLOWED  space-separated `--allowedTools` list replacing the three above (rungs
+                     6 to 8 add mcp__harness-mem, the `harness mcp` mem server);
+  -p in argv         the launch came from harnessd (`ClaudeLauncher::print`): the prompt is
+                     what harnessd wrote on stdin (run preamble, blank line, task; B-563),
+                     not prompt.md, and the final text goes to stdout, which
+                     harnessd keeps as files/answer.md.
+
 Model calls go through Claude Code only (CLAUDE.md rule 1).
 """
 
@@ -51,8 +59,12 @@ def main() -> int:
     root = os.environ["SB_RUNS_ROOT"]
     run_id = os.environ["SB_RUN_ID"]
     run_dir = os.path.join(root, run_id)
-    with open(os.path.join(run_dir, "prompt.md"), encoding="utf-8") as f:
-        prompt = f.read()
+    if "-p" in args:
+        prompt = sys.stdin.buffer.read().decode("utf-8")
+    else:
+        with open(os.path.join(run_dir, "prompt.md"), encoding="utf-8") as f:
+            prompt = f.read()
+    allowed = os.environ.get("SB_LADDER_ALLOWED", "").split() or ALLOWED
     cap = int(os.environ.get("SB_LADDER_CAP", "900"))
     logs = os.environ["SB_LADDER_LOGS"]
     cwd = os.environ["SB_LADDER_CWD"]
@@ -65,10 +77,10 @@ def main() -> int:
     cmd = [claude, "-p", "--output-format", "stream-json", "--verbose",
            "--mcp-config", os.environ["SB_LADDER_MCP"], "--strict-mcp-config",
            "--setting-sources", "local", "--permission-mode", "default",
-           "--allowedTools", *ALLOWED,
+           "--allowedTools", *allowed,
            "--disallowedTools", *harness_deny, *EXTRA_DENY]
     with open(os.path.join(logs, run_id + ".cmd.json"), "w", encoding="utf-8") as f:
-        json.dump({"argv": cmd[1:], "cwd": cwd, "cap_s": cap}, f, indent=1)
+        json.dump({"argv": cmd[1:], "cwd": cwd, "cap_s": cap, "prompt": prompt}, f, indent=1)
 
     transcript = os.path.join(logs, run_id + ".jsonl")
     with open(transcript, "wb") as out:
@@ -96,6 +108,11 @@ def main() -> int:
                 answer = ev.get("result") or ""
     if code == 124:
         answer += f"\n\n[ladder: session killed at the {cap}s cap]\n"
+    if "-p" in args:
+        # harnessd keeps the session's stdout as files/answer.md (scrubbed, D-124).
+        sys.stdout.buffer.write(answer.encode("utf-8"))
+        sys.stdout.flush()
+        return code
     files = os.path.join(run_dir, "files")
     os.makedirs(files, exist_ok=True)
     if answer.strip():

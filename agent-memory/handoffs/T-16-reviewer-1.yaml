@@ -1,0 +1,16 @@
+from: reviewer (core area, T-16 round 1)
+to: core/suborch, then rust-coder and tester
+task: T-16
+date: "2026-10-26"
+state: "Reviewed main...530cd50 on swarm/core-T16 (T-16 only; T-08b commits out of scope). bench/results/review-T-16.md: Blocking none, 8 should-fix, Verdict: approve. No hard-rule break; every step-4 acceptance item has an asserting test (rung 8 watch notify-once, missing/stopped/failed watch, watch canary, rung 7, contacts touch->allow, rung 6 restart, planted stale tool retired). Not built (the tester was building in the same worktree; low RAM)."
+not_done: "Should-fix in order: 1. harnessd's inner ClaudeLauncher passes no --allowedTools and the repo grants no mcp__harness-*, so a `claude -p` scheduled session cannot call harness tools (ladder_session.py had to pass them); add the harness servers incl. mcp__harness-mem (blocking if live rung 7/8 fails on permission denials). 2. run_preamble's watch line says write files/watch.txt directly; name harness-mem watch.observe. 3. watch.observe writes state unscrubbed; watch::check scrubs before hashing, so D-141 (4)'s rationale is wrong; scrub at write and fix the text. 4. Replay session is not readers-only in fact: --allowedTools only adds, no cwd is set (inherits the repo's .claude/settings.json Bash allows), other MCP servers stay configured; use --strict-mcp-config with harness-web only, cwd = run folder, restrict built-ins. 5. schedule.add is Submit (allow): persistence vector; file a blocker with an ask default. 6. Record deferrals: reflect output-shape compare, T-6 growth/forge proposals, G-3 expectation learning and after-each-task, H-5 nightly (no reflect row is created). 7. Reflect commits whole changed tool folders (git add -A incl. untracked), sweeping in unrelated edits; commit only the sweep's paths. 8. mcp.rs:356-357 ToolCtx::store doc still tells handlers to touch_contact (double count after B-198)."
+gotchas:
+  - "During the review the worktree held the tester's uncommitted bench/fixtures/ladder_session.py change and untracked bench/pages/t16, bench/phase1/rung-6..8.md; only the report and this handoff were staged."
+  - "Dotted MCP tool names are fine: the servers ladder run shows Claude Code calling ashbyhq.list_jobs (swarm/servers-ladder-results bench/results/ladder-phase1-servers.md:78)."
+  - "Postgres-backed T-16 tests pass after a SKIPPED line when the DB is down; the tester must check for SKIPPED."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-16.md
+  - agent-memory/handoffs/T-16-reviewer-1.yaml
+verify: "python scripts/swarm/merge_gate.py core --worktree ."

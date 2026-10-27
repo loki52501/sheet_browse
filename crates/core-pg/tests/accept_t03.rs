@@ -377,6 +377,7 @@ async fn a03_seeded_rules_and_challenge_allow_rejected() {
         "Delete",
         "Submit:job_application",
         "Submit:signature",
+        "Account:schedule",
     ] {
         assert_eq!(s.gate_rule("*", class).await.unwrap(), ask, "{class}");
     }

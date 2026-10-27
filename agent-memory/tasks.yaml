@@ -179,7 +179,7 @@ tasks:
     step: 4
     title: "reviews SM-2, contacts in gate, baselines, watch diff + single notify, reflect readers-only, proposals"
     docs: [docs/01-HARNESS-CORE.md, docs/02-MEMORY.md, docs/06-TOOLFORGE.md]
-    status: todo
+    status: done
     blocked_by: [T-13, T-15]
   - id: T-17
     step: 5
@@ -370,6 +370,24 @@ tasks:
     title: "review-T-18 leftovers: run the Unix Pipe launch on Linux (only compiled and clippy-checked); a real-Chromium test for getFrameTree seeding and prerender activation (restored me tab with iframes, with T-22 acceptance 4); session_events channel after detach; CdpError::Closed keeps the method; sweep stale profiles/bench-* after a crash; B-601 tab titles (T-22)."
     status: todo
     from: T-18
+  - id: T-16b
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T16d
+    title: "T-16 deferrals (review-T-16 r1 should-fix 6, D-143): H-5/G-3 reflect 'compare output shape' (the ledger keeps only result_summary; needs a stored output shape per tool call); T-6 growth and G-3 forge proposals from reflect; G-3 expectation learning (T-5) from earlier runs; G-3 reflect 'after each task' (today only a reflect schedule fires a pass); H-5 'nightly' reflect is not auto-created (harnessd should make sure one nightly reflect row exists, D-142 (1)); and the live-ladder leftovers from accept-T-16 (rungs 6-8 all passed): `harness schedule list` shows the placeholder 'T-16' as next run for watch/reflect rows and `schedule add --kind watch|reflect` still prints 'harnessd runs it from T-16 (not in Phase 1)' (cli.rs); the launcher denies MultiEdit, which Claude Code 2.1.311 lacks (harnessd warns); `harness run` has no grounding preamble, so rung 6 session A wrote cards without fetching the paper (same gap as servers ladder failure 1); the print-session allow list is proven only by the launcher unit test because the ladder shim replaces --allowedTools."
+    docs: [docs/01-HARNESS-CORE.md, docs/06-TOOLFORGE.md, docs/03-TOOL-STORE.md]
+    status: todo
+    from: T-16
+  - id: T-16e
+    step: follow-up
+    wave: 3
+    owner: core
+    branch: swarm/core-T16e
+    title: "review-T-16 r3 R3-1 remainder (D-144): harnessd -p sessions now load no built-in tools (--tools \"\"), so the repo's Bash allow rules give them no path around the gate. Still open: they inherit harnessd's cwd and every configured MCP server (user-level connectors such as mail) and user/project settings; a user allow rule on another server's tool would be reachable from page-planted text. Give ClaudeLauncher::print the replay session's isolation: --strict-mcp-config with a generated config of the four harness servers (paths as srv_web_from_env does), cwd = run folder, --setting-sources local; deny Bash(harness schedule:*) for interactive sessions too. Also: core-pg build.rs with cargo:rerun-if-changed=../../migrations."
+    docs: [docs/01-HARNESS-CORE.md]
+    status: todo
+    from: T-16
   - id: T-05e
     step: follow-up
     wave: 2
