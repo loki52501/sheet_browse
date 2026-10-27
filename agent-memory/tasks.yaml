@@ -162,7 +162,7 @@ tasks:
     branch: swarm/servers-T13c
   - id: T-13d
     step: 2
-    title: "T-13c review should-fix (bench/results/review-T-13c.md): (1) srv-files call re-plans and recheck compares only the class, so a bare-name Delete whose base file vanished after the ask acts on runs/<id>/files/<name> instead (D-572); carry the classified target into call or refuse when it moved; (2) a 32 MB JSON answer has no memory guard (Value tree, shape and pick clones; page.api into the 32 MiB JS runner); (5) no test for the docs readers' bare-name fallback (pdf/xlsx/docx.read, md.to_pdf). Plus red ladder rows from accept-T-13c.md owned by servers."
+    title: "T-13c review should-fix (bench/results/review-T-13c.md): (1) srv-files call re-plans and recheck compares only the class, so a bare-name Delete whose base file vanished after the ask acts on runs/<id>/files/<name> instead (D-572); carry the classified target into call or refuse when it moved; (2) a 32 MB JSON answer has no memory guard (Value tree, shape and pick clones; page.api into the 32 MiB JS runner); (5) no test for the docs readers' bare-name fallback (pdf/xlsx/docx.read, md.to_pdf). From accept-T-13c.md (ladder 14/18, no red row owned by servers): (6) pick refuses index paths like versions[0].license and its error shows the path as versions(0); every rung-2 session lost 3 calls to it: support [N] steps or steer to versions[].license in the error; (7) the ashbyhq.list_jobs ledger summary names the last page fetched, not the board; (8) srv-cli classes `curl <url>` and `python3 -c` as Delete so each waits out a 60 s ask (check against T-15b)."
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
     status: todo
   - id: T-16
