@@ -171,6 +171,11 @@ fn build_with(cfg: &Config, resolver: PublicOnly, proxy: Option<&str>) -> Result
         .map_err(fail)?;
     let api_policy = |strict: bool| {
         Policy::custom(move |attempt| {
+            // D-5, D-580: a redirect to a challenge URL (another host or this one) is never
+            // followed; the error carries the target so the call stops as a challenge.
+            if let Some(why) = crate::html::challenge_url(attempt.url()) {
+                return attempt.error(ChallengeRedirect { why });
+            }
             let ok = attempt
                 .previous()
                 .first()
@@ -285,6 +290,36 @@ impl fmt::Display for PrivateAnswer {
 }
 
 impl std::error::Error for PrivateAnswer {}
+
+/// An api or page.api redirect to a challenge URL (D-5, D-580), refused by the redirect
+/// policy before it is followed. `why` is [`crate::html::challenge_url`]'s reason for the
+/// target (it names a challenge host; a challenge path is named by kind).
+#[derive(Debug)]
+pub(crate) struct ChallengeRedirect {
+    why: String,
+}
+
+impl fmt::Display for ChallengeRedirect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("redirect to a human check")
+    }
+}
+
+impl std::error::Error for ChallengeRedirect {}
+
+/// Why, when `e` is a redirect the api policy refused because it led to a challenge
+/// ([`ChallengeRedirect`]): `redirect to <reason>`. reqwest's own `Error::url()` is the URL
+/// that redirected, not the target, so the reason travels in the error.
+pub(crate) fn challenge_redirect(e: &reqwest::Error) -> Option<String> {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        if let Some(c) = err.downcast_ref::<ChallengeRedirect>() {
+            return Some(format!("redirect to {}", c.why));
+        }
+        cur = err.source();
+    }
+    None
+}
 
 /// Did `e` come from [`PublicOnly`] refusing a private answer?
 fn is_private_answer(e: &reqwest::Error) -> bool {

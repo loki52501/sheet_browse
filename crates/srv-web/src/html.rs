@@ -410,7 +410,8 @@ fn no_markup(s: &str) -> String {
 /// D-5: a URL that only serves challenges (a challenge host, reCAPTCHA's path on google.com,
 /// Cloudflare's challenge platform path).
 pub fn challenge_url(url: &Url) -> Option<String> {
-    let host = url.host_str()?.to_ascii_lowercase();
+    // A fully qualified `challenges.cloudflare.com.` is the same host.
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
     let on = |d: &str| host == d || host.ends_with(&format!(".{d}"));
     if CHALLENGE_HOSTS.iter().any(|d| on(d)) {
         return Some(format!("challenge host {host}"));
@@ -1552,6 +1553,21 @@ fn esc_html(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review T-13b round 2: a trailing dot names the same host (D-5).
+    #[test]
+    fn a_challenge_host_with_a_trailing_dot_is_a_challenge() {
+        for u in [
+            "https://challenges.cloudflare.com./turnstile",
+            "https://WWW.HCAPTCHA.COM./x",
+            "https://www.google.com./recaptcha/api2/anchor",
+        ] {
+            let url = Url::parse(u).unwrap();
+            assert!(challenge_url(&url).is_some(), "{u}");
+        }
+        let plain = Url::parse("https://example.com./x").unwrap();
+        assert!(challenge_url(&plain).is_none());
+    }
 
     fn page(html: &str) -> Doc {
         parse(html, &Url::parse("https://example.com/a/b").unwrap())

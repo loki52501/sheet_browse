@@ -125,6 +125,49 @@ pub(crate) fn body_start(src: &str) -> usize {
     off
 }
 
+/// A character that must never be written into a header line (D-578, B-33 family): a
+/// control character (Unicode Cc: CR, LF, NEL, ...) or U+2028 / U+2029. JS ends a `//`
+/// comment at CR, LF, U+2028 and U+2029, while [`header_lines`] splits on LF only, so one of
+/// these inside a header value would turn the rest of the line into code the header checks
+/// read as a comment.
+pub(crate) fn header_unsafe(c: char) -> bool {
+    c.is_control() || c == '\u{2028}' || c == '\u{2029}'
+}
+
+/// `item` can be written into an `@fingerprint` line and read back unchanged (D-578): no
+/// [`header_unsafe`] character in its role, name or id, and an id without whitespace or a
+/// quote (the id ends at either when the line is parsed).
+pub(crate) fn fp_item_writable(item: &FpItem) -> bool {
+    let id_ok = |id: &str| {
+        !id.chars()
+            .any(|c| header_unsafe(c) || c.is_whitespace() || c == '"')
+    };
+    !item.role.chars().any(header_unsafe)
+        && item
+            .name
+            .as_deref()
+            .is_none_or(|n| !n.chars().any(header_unsafe))
+        && item.id.as_deref().is_none_or(id_ok)
+}
+
+/// The 1-based number of the first line in `src`'s header block (the leading comment and
+/// blank lines) that holds a [`header_unsafe`] character other than tab, or a lone CR
+/// (D-578). `str::lines` strips a trailing `\r\n`, so any CR left in a line is one JS would
+/// end the comment at.
+pub(crate) fn unsafe_header_line(src: &str) -> Option<usize> {
+    for (i, line) in src.lines().enumerate() {
+        // The same block header_lines reads (its trim also strips U+2028 / U+2029).
+        let t = line.trim();
+        if !(t.is_empty() || t.starts_with("//")) {
+            break;
+        }
+        if line.chars().any(|c| c != '\t' && header_unsafe(c)) {
+            return Some(i + 1);
+        }
+    }
+    None
+}
+
 /// Why an `@match` pattern is not a path within the site (G-4, D-307), if it is not.
 pub(crate) fn match_violation(pattern: &str) -> Option<&'static str> {
     if pattern.contains("://") {

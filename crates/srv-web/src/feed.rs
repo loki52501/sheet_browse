@@ -93,6 +93,7 @@ impl ToolHandler for Feed {
         let host = host_of(&url);
         let clients = self.web.clients()?;
         if let Some(why) = html::challenge_url(&url) {
+            self.web.challenged(&url);
             return Ok(fetch::challenge_output(&url, &why));
         }
         let body = http::get_page(
@@ -105,8 +106,14 @@ impl ToolHandler for Feed {
         .await
         .map_err(|e| ToolError::Failed(format!("feed: {e}")))?;
         // D-5 before anything else: a challenge (any status) stops the call.
+        // D-582: and drops the challenged site's cached pages.
+        let challenged = |stop: ToolOutput| {
+            self.web.challenged(&url);
+            self.web.challenged(&body.url);
+            Ok(stop)
+        };
         if let Some(stop) = fetch::challenge_by_response(&body) {
-            return Ok(stop);
+            return challenged(stop);
         }
         let ok = (200..300).contains(&body.status);
         let parsed = if ok {
@@ -119,7 +126,7 @@ impl ToolHandler for Feed {
             // status or type still stops the call (D-5).
             let text = body.text(true);
             if let Some(stop) = fetch::challenge_in_text(&body, &text, "feed").await? {
-                return Ok(stop);
+                return challenged(stop);
             }
             if !ok {
                 return Err(ToolError::Failed(format!(

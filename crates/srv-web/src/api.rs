@@ -419,6 +419,7 @@ impl ToolHandler for Api {
         let host = host_of(&req.url);
         let clients = self.web.clients()?;
         if let Some(why) = html::challenge_url(&req.url) {
+            self.web.challenged(&req.url);
             return Ok(fetch::challenge_output(&req.url, &why));
         }
         let vault = req.headers.iter().any(|(_, t)| has_vault(t));
@@ -477,11 +478,22 @@ impl ToolHandler for Api {
             }
             None => {}
         }
-        let resp = rb
-            .headers(hm)
-            .send()
-            .await
-            .map_err(|e| ToolError::Failed(format!("api: {}", http::map_err(&e, &host))))?;
+        let resp = match rb.headers(hm).send().await {
+            Ok(r) => r,
+            // D-5, D-580: a redirect to a challenge URL stops the call; it is not followed.
+            Err(e) => match http::challenge_redirect(&e) {
+                Some(why) => {
+                    self.web.challenged(&req.url);
+                    return Ok(fetch::challenge_output(&req.url, &why));
+                }
+                None => {
+                    return Err(ToolError::Failed(format!(
+                        "api: {}",
+                        http::map_err(&e, &host)
+                    )))
+                }
+            },
+        };
         // D-565: a pick call shows only its projection, so it reads up to the JSON cap;
         // every other call, and an answer pick cannot apply to (not JSON, untyped or
         // text/plain), keeps the W-2 page cap.
@@ -498,8 +510,14 @@ impl ToolHandler for Api {
             .await
             .map_err(|e| ToolError::Failed(format!("api: {e}")))?;
         // D-5: a challenge stops the call, whatever the status and content type.
+        // D-582: a challenge also drops the site's cached pages.
+        let challenged = |stop: ToolOutput| {
+            self.web.challenged(&req.url);
+            self.web.challenged(&body.url);
+            Ok(stop)
+        };
         if let Some(stop) = fetch::challenge_by_response(&body) {
-            return Ok(stop);
+            return challenged(stop);
         }
         let text = match render(&body, &req.method, req.pick.as_ref(), cap, pick_cap) {
             Rendered::Shown(t) => t,
@@ -507,7 +525,7 @@ impl ToolHandler for Api {
                 // Only a body the model does not see is walked for a challenge: a JSON
                 // string holding widget markup is data, not a page.
                 if let Some(stop) = fetch::challenge_in_text(&body, &text, "api").await? {
-                    return Ok(stop);
+                    return challenged(stop);
                 }
                 line
             }
