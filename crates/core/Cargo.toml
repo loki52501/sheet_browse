@@ -39,3 +39,5 @@ zeroize.workspace = true
 # so `cargo test -p harness-core` (and the S-8 `cargo test --workspace`) runs them all.
 [dev-dependencies]
 harness-core = { path = ".", features = ["testing"] }
+# Reference encoder for the B-151 base64 scrub tests (already in Cargo.lock).
+base64 = "0.22"

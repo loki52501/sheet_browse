@@ -1809,6 +1809,7 @@ dependencies = [
  "age",
  "aho-corasick",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "croner",
  "dirs 7.0.0",

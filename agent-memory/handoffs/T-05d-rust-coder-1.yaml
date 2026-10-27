@@ -1,0 +1,18 @@
+from: rust-coder-1
+to: reviewer, tester
+task: T-05d
+date: "2026-10-26"
+state: "Done on swarm/core-T05d. vault::spellings now adds base64 and base64url spellings (push_base64_spellings) of each base text (raw, non-ASCII case forms) and of its serde and ASCII-only JSON forms where they differ byte for byte: 3 byte alignments (k = 0, 1, 2 placeholder bytes, the ceil(8k/6) leading characters that carry placeholder bits dropped), both alphabets, and three forms each: core (last character that carries following bytes' bits also dropped), unpadded tail (value ends the blob, last character zero-filled) and padded tail. A form under MIN_BASE64_CHARS = 8 characters, padding not counted, is skipped (D-118 floor for the encoded form; values of 5 bytes or less get none, from 7 bytes every alignment has a core). Since spellings() also feeds check_entries, the D-118 (3b) ValueInLiteral check now covers the base64 forms too. Six new unit tests in vault.rs: base64_into_matches_the_base64_crate, scrub_basic_auth_header (exact output, padded and unpadded, both alphabets), scrub_jwt_payload (plain canary and a JSON-escaped value), scrub_base64_at_every_alignment (offsets 0..6, suffix 0..2 bytes, 4 engines; only edge characters survive), base64_spellings_respect_the_floor (no pattern under 8, nothing for 5 bytes or less, a 4-char value's base64 is not over-scrubbed). Each was proven red by a temporary break (no base64, k=0 only, std alphabet only, no tail forms, no padded form, no JSON-form base64, floor 1, wrong alphabet character), then restored. fmt, clippy -D warnings and cargo test -p harness-core green."
+not_done: "Nothing for T-05d. B-152 (input masks, split or truncated values, capitalised non-ASCII) remains core's step-3 work."
+gotchas:
+  - "serde_json::json! sorts keys (no preserve_order), so a JWT payload built with it puts the value at a fixed offset (24 bytes, k = 0); scrub_base64_at_every_alignment is the test that covers k = 1 and 2."
+  - "Edge characters next to a scrubbed base64 core survive by design (each holds at most 4 bits of the value); the Basic test pins the exact output, the other tests bound how many edge characters may remain."
+  - "base64 0.22 is a dev-dependency only (already in Cargo.lock), used as the reference encoder; production code hand-rolls base64_into so every buffer is Zeroizing and sized up front."
+  - "Merged swarm/core-T05c 2527224 for the all-alphanumeric canary fix in vault_scrub_t05_fix."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/src/vault.rs
+  - crates/core/Cargo.toml
+  - Cargo.lock
+verify: "SB_VAULT_CANARY=sbcanary<random hex> CARGO_TARGET_DIR=F:/sb-swarm/wt/core/target cargo test -j 2 -p harness-core"

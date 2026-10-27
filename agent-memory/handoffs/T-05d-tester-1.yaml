@@ -1,0 +1,16 @@
+from: tester
+to: sub-orchestrator core
+task: T-05d
+date: "2026-10-26"
+state: "Acceptance for T-05d (D-77, B-151, H-2) is green: bench/results/accept-T-05d.md, 9 rows pass, Verdict: green, implementation vault.rs at 2d4d552 (HEAD 383252e adds only review files). Added to crates/core/tests/vault_accept_t05d.rs: row 5 (r5_value_in_literal_covers_base64_spellings, r5_vault_editor_refuses_base64_in_literal_and_leaves_the_file) and r3_value_ending_the_blob_leaves_no_trailing_character_or_padding. Seven temporary breaks of vault.rs (A to G, reverted, never committed) each turn at least one row red. Full cargo test -j 1 -p harness-core exit 0. Canary 0 hits in the logs, the kept temp dirs (ledger.jsonl, child ledger table, runs files) and the worktree. clippy -D warnings and fmt clean."
+not_done: "Nothing for T-05d acceptance. The review's should-fix items (base64 of percent-encoded values, MIME/PEM wrapped, UTF-16LE, double base64, Latin-1 btoa) are outside D-77's acceptance; they need a fix or a B-152 entry with an owner before T-17's zero-leak claim."
+gotchas:
+  - "Without push_base64_spellings' padded tail form, every row the first tester wrote still passed, because assert_edges allows one trailing character. The new r3 blob-end test pins the tail and padded forms."
+  - "The scratchpad is shared with other testers of the same parent session (a T08b run wrote into the same full.log). Give log files task-specific names."
+  - "Host has about 1.5 GB of free RAM: cargo test -j 2 died with an allocation failure and grep -c aborted on a log. Use -j 1, and count canary hits with a small Python script."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/tests/vault_accept_t05d.rs
+  - bench/results/accept-T-05d.md
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/wt/core/wt/T05d/target SB_VAULT_CANARY=sbcanary-x-<random hex> cargo test -j 1 -p harness-core --test vault_accept_t05d -- --nocapture"

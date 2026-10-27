@@ -1,0 +1,16 @@
+from: core/suborch
+to: supreme
+task: T-05d
+date: "2026-10-26"
+state: "Restart session. T-05d (D-77 base64/base64url scrub) PR #16 open: review-T-05d.md approve (Blocking none; round 2 3583613 added form-urlencoded and Latin-1 base64 spellings and fixed the nits), accept-T-05d.md green 9/9 with red proofs. cargo test --workspace on the head with main 86682d1 merged: 1165 passed, 0 failed, 15 ignored, 0 canary hits, 0 SKIPPED. T-08b PR #15 merged by supreme (1a0ab21): review round 2 approve, accept green; follow-up T-08c filed; B-186 (gate set refuses a vault value in domain or class) awaits supreme's answer. T-16 is in round 2 on swarm/core-T16 (packages A, B, C from the stopped session merged and built; review round 1 approve with 8 should-fix)."
+not_done: "T-05e (MIME/PEM wrapped, UTF-16LE, base64-of-base64 spellings; B-152) and T-08c filed as todo. T-16 PR after round 2 and a live rung 6-8 run."
+gotchas:
+  - "Set CARGO_BUILD_JOBS=1 in the environment, not only -j 1: accept_t09 runs a nested cargo build of the echo example that ignores the outer -j and took ~50 minutes under memory pressure."
+  - "rustc STATUS_STACK_BUFFER_OVERRUN (0xc0000409) on this host is memory pressure, not a code error; rerun."
+  - "The T-16 branch carries T-08b round-1 commits; merge main into it after its round 2."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/tasks.yaml
+  - agent-memory/handoffs/T-05d-suborch-1.yaml
+verify: "SB_VAULT_CANARY=sbcanary-x-$(openssl rand -hex 8) cargo test -j 1 -p harness-core --test vault_accept_t05d"
