@@ -407,4 +407,10 @@ interface_changes:
     change: "Proposed for T-16 (D-142), not needed to build: I-1 MemoryStore::ledger_since(ts: Ts) -> Result<Vec<(LedgerId, LedgerEvent)>, MemoryError> for cross-run reads; harness::reflect::History::read (crates/harness/src/reflect.rs) reads every runs/<id>/ledger.jsonl with harness_core::ledger::read_jsonl meanwhile. I-7 a public toolstore::ToolStore::domains() -> Vec<String> (the private lifecycle.rs swept_domains made public); harness::reflect::tool_domains and harness::reflect::tool_files list tools/ and parse headers with toolstore::parse_header meanwhile. Additive paths T-16 package B adds: harness::reflect::{ReflectLauncher, ReflectError, History, GoodCall, ToolFile, Replay, Reflected, tool_domains, tool_files, last_use, replay_prompt, READERS_ALLOWED_TOOLS, SWEEP_TOOL, WEB_SERVER, SUMMARY_FILE, PROMPT_FILE, REPLAY_MAX_CHARS}; harness::proposals::{Proposal, MergeInput, StaleWhy, Written, merge_proposals, retire_proposal, write_proposals, arg_shape, role_sequence, default_proposals_file, proposals_file_from_env, PROPOSALS_FILE_VAR, RUN_COPY, MERGE_MIN_DOMAINS}; harness::launcher::ClaudeLauncher.allowed_tools."
     why: "A jsonl scan reads every run on every reflect and trusts files a crash can truncate, and the tools/ scan duplicates toolstore's folder rules; both go away with the two methods. Default until supreme answers: the workarounds as implemented in T-16 package B."
 
+  - id: B-205
+    from: core
+    interface: "I-3 (harness_core::gate), additive const"
+    change: "pub const harness_core::gate::HINT_SCHEDULE: &str = \"schedule\" (next to HINT_JOB_APPLICATION and HINT_SIGNATURE), and migration 0003 seeding gate.rules ('*','Account:schedule','ask'); harness_core::testing::SEED_RULES grows to 7 rows. T-16, D-144."
+    why: "harness-mem schedule.add classifies with this hint so the seeded hint rule decides its ask and an unanswered ask times out to skip (supreme hold of PR #17, review-T-16 r3 R3-2). Additive; no signature changes. Default until supreme answers (D-90): keep as is, list in interfaces.yaml at T-17."
+
 proposals:

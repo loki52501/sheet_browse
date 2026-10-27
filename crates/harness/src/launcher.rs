@@ -22,7 +22,10 @@
 //! tool that needs a permission and has no allow rule, so [`ClaudeLauncher::print`] allows
 //! the four harness servers ([`HARNESS_ALLOWED_TOOLS`], the names in `mcp.example.json`).
 //! That is safe because the gate inside each server is the permission layer (H-1, rule 4).
-//! Interactive sessions get no allow list: the user is at the terminal.
+//! Every `claude -p` session also gets `--tools ""`: no built-in tool is loaded, so the
+//! project's Bash allow rules (`Bash(psql *)`, `Bash(cargo *)`, ...) give a fired session no
+//! path around the gate; files and shell go through harness-files (review T-16 r3, D-144).
+//! Interactive sessions get no allow list and keep the built-ins: the user is at the terminal.
 //!
 //! Reflect's replay session ([`ClaudeLauncher::readers_only`], G-3, T-16) is limited by
 //! what is passed, not by an allow rule alone:
@@ -31,10 +34,11 @@
 //!   server is loaded;
 //! * the working directory is the run folder and `--setting-sources local`: no project or
 //!   user settings (and none of their allow rules) are loaded; `--permission-mode default`;
-//! * `--tools ""`: Claude Code loads none of its built-in tools (no Bash, PowerShell, file
-//!   edits or reads, web fetch, subagents), checked live on Claude Code 2.1.311: the session
-//!   lists only `mcp__harness-web__*`. [`BUILTIN_TOOLS`] are also added to
-//!   `--disallowedTools` in case a Claude Code version ignores `--tools`;
+//! * `--tools ""` (as every `-p` session): Claude Code loads none of its built-in tools (no
+//!   Bash, PowerShell, file edits or reads, web fetch, subagents); checked live on Claude
+//!   Code 2.1.311, the session lists only `mcp__harness-web__*`
+//!   (bench/results/live-tools-T-16.md). An older Claude Code without `--tools` refuses to
+//!   start, which fails closed. [`BUILTIN_TOOLS`] are also denied by name as a second layer;
 //! * `--allowedTools mcp__harness-web`, so in `-p` mode harness-web's tools are all it can
 //!   call. srv-web registers only `@phase 1` readers as site tools; its own tools still pass
 //!   through its gate.
@@ -271,9 +275,11 @@ impl ClaudeLauncher {
             cmd.arg("--strict-mcp-config")
                 .arg("--mcp-config")
                 .arg(dir.join(READERS_MCP_FILE))
-                .args(["--setting-sources", "local", "--permission-mode", "default"])
-                // No built-in tools at all (an empty list), not only the denied names.
-                .args(["--tools", ""]);
+                .args(["--setting-sources", "local", "--permission-mode", "default"]);
+        }
+        if !self.interactive {
+            // No built-in tools at all (an empty list), not only the denied names (D-144).
+            cmd.args(["--tools", ""]);
         }
         // The lists are variadic: each ends where the next flag starts. --disallowedTools
         // stays last (the ladder shim reads everything after it as the deny list).
@@ -493,6 +499,7 @@ mod tests {
 
     /// B-192: every session is started with the user-only CLI commands denied; the prompt
     /// is on stdin for -p and before the variadic --disallowedTools list when interactive.
+    /// D-144: a -p session loads no built-in tools (`--tools ""`); interactive keeps them.
     #[test]
     fn every_session_denies_the_user_only_commands() {
         let tmp = tempfile::tempdir().unwrap();
@@ -510,7 +517,7 @@ mod tests {
             "Bash(harness vault:*)",
         ];
         let p = ClaudeLauncher::print("claude");
-        let mut want = vec!["-p", "--allowedTools"];
+        let mut want = vec!["-p", "--tools", "", "--allowedTools"];
         want.extend(HARNESS_ALLOWED_TOOLS);
         want.extend(deny);
         assert_eq!(argv(&p.command(&p.program, &req, tmp.path())), want);
