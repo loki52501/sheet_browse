@@ -40,8 +40,9 @@ use std::sync::Arc;
 /// `ledger.events.server` of this server's tool events, and the MCP server name.
 pub const SERVER: &str = "mem";
 
-/// The file `watch.observe` writes under `runs/<run>/files/`.
-pub const WATCH_FILE: &str = "watch.txt";
+/// The file `watch.observe` writes under `runs/<run>/files/`: the one the harness hashes
+/// after a watch firing (`harness_core::watch::WATCH_FILE`, D-140 (1)).
+pub const WATCH_FILE: &str = harness_core::watch::WATCH_FILE;
 
 /// Longest review item, review answer or schedule prompt accepted, in characters.
 pub const TEXT_MAX: usize = 4000;

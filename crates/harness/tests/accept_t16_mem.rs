@@ -659,10 +659,7 @@ async fn a_vault_value_in_a_review_never_reaches_a_reply_the_row_or_the_ledger()
             ),
             ("schedule.list", json!({})),
             ("contact.get", json!({"person": canary.clone()})),
-            (
-                "review.grade",
-                json!({"id": format!("{canary}"), "grade": 3}),
-            ),
+            ("review.grade", json!({"id": canary.clone(), "grade": 3})),
             ("watch.observe", json!({"state": format!("seen {canary}")})),
         ],
     )
