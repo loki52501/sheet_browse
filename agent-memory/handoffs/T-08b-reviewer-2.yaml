@@ -1,0 +1,15 @@
+from: reviewer
+to: core/suborch
+task: T-08b
+date: "2026-10-26"
+state: "Reviewed T-08b round 2 (D-89 final, swarm/core-T08b at 5e98d49, diff 0bb4698..HEAD); report bench/results/review-T-08b.md (committed 3f52368). Verdict: approve, Blocking none. Both round-1 Blocking items closed and proven red here: reverting cli.rs:908 (pin echo tool_id) and cli.rs:517 (watch_target scrub) failed d124_1_tools_commands_echo_the_tool_id_as_literal at accept_t08_r2.rs:683 and d124_1_writing_commands_store_and_print_no_value at :910; restored with git checkout + touch. accept_t08_r2 15 passed 0 ignored; mcp_t07 file_asker_stderr + accept_t08b_d85 3 passed; clippy -p harness -p harness-core --all-targets -D warnings clean; fmt clean; 0 canary hits. All round-1 should-fix and nits done. No new rule 2 leak, fail-open or vacuous test."
+not_done: "Should-fix (not blocking): B-186 refusal (cli.rs:356) checks the typed text, but gate_rule_set canonicalises via UTS-46 rule_domain (full-width mapped, U+00AD deleted), so a mapped spelling of a vault value passes and the ASCII value is stored in gate.rules. Fix: run gate::rule_key first and refuse on the canonical domain/class too, plus one test case. B-186 still needs supreme to accept the default. Next: tester re-run of accept-T-08b, then area PR."
+gotchas:
+  - "With accept_t08_r2 already built in the worktree target, a filtered re-run after a one-line cli.rs edit takes under a minute at -j 1; clippy on harness + harness-core about 40 s."
+  - "Use the package name harness-core (not harness_core) for cargo -p."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-08b.md
+  - agent-memory/handoffs/T-08b-reviewer-2.yaml
+verify: "tail -n 1 bench/results/review-T-08b.md (expects 'Verdict: approve')"
