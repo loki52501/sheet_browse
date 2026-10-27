@@ -121,8 +121,10 @@ tasks:
     step: 2
     title: "T-13 follow-ups: Phase 1 ladder rungs 1, 2, 4 over MCP (with srv-files); concurrent repairs can record version 3 (per-tool repair lock or skip Relocated when @fingerprint already matches); D-561 re-enables a missed tool within the run, amending T-4 (B-561); assert registry class Read after re-register; site-tool-level password/challenge test (docs/03 item 4 mapping); B-560 page.api cap for large boards; toolstore relocate should refuse \\r U+2028 U+2029 in names it writes into headers (B-33 family)"
     docs: [docs/03-TOOL-STORE.md, docs/08-USE-CASES-AND-TESTS.md]
-    status: todo
-    owner: servers
+    status: done
+    owner: servers/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/servers-T13b
   - id: T-14
     step: 3
     title: "srv-files: fs, shell classification, docs wrappers, csv.clean, diff, history.search"
@@ -162,7 +164,7 @@ tasks:
     branch: swarm/servers-T13c
   - id: T-13d
     step: 2
-    title: "T-13c review should-fix (bench/results/review-T-13c.md): (1) srv-files call re-plans and recheck compares only the class, so a bare-name Delete whose base file vanished after the ask acts on runs/<id>/files/<name> instead (D-572); carry the classified target into call or refuse when it moved; (2) a 32 MB JSON answer has no memory guard (Value tree, shape and pick clones; page.api into the 32 MiB JS runner); (5) no test for the docs readers' bare-name fallback (pdf/xlsx/docx.read, md.to_pdf). From accept-T-13c.md (ladder 14/18, no red row owned by servers): (6) pick refuses index paths like versions[0].license and its error shows the path as versions(0); every rung-2 session lost 3 calls to it: support [N] steps or steer to versions[].license in the error; (7) the ashbyhq.list_jobs ledger summary names the last page fetched, not the board; (8) srv-cli classes `curl <url>` and `python3 -c` as Delete so each waits out a 60 s ask (check against T-15b). From review round 2: (9) a credential header with a literal token beside a real ref still passes; (10) the url-email test does not assert recipients == [host]."
+    title: "T-13c review should-fix (bench/results/review-T-13c.md): (1) srv-files call re-plans and recheck compares only the class, so a bare-name Delete whose base file vanished after the ask acts on runs/<id>/files/<name> instead (D-572); carry the classified target into call or refuse when it moved; (2) a 32 MB JSON answer has no memory guard (Value tree, shape and pick clones; page.api into the 32 MiB JS runner); (5) no test for the docs readers' bare-name fallback (pdf/xlsx/docx.read, md.to_pdf). From accept-T-13c.md (ladder 14/18, no red row owned by servers): (6) pick refuses index paths like versions[0].license and its error shows the path as versions(0); every rung-2 session lost 3 calls to it: support [N] steps or steer to versions[].license in the error; (7) done in T-13b (D-579); (8) srv-cli classes `curl <url>` and `python3 -c` as Delete so each waits out a 60 s ask (check against T-15b). From review round 2: (9) a credential header with a literal token beside a real ref still passes; (10) the url-email test does not assert recipients == [host]. From review-T-13b round 2: (11) two server processes repairing the same site tool at the same moment can still reach version 3 (D-584: needs a file lock or compare-and-set on the row); (12) no test for an api call with a vault header redirected to a challenge."
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
     status: todo
   - id: T-16
