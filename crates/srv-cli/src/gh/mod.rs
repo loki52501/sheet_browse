@@ -444,13 +444,25 @@ fn is_read(group: &str, sub: Option<&str>) -> bool {
     }
 }
 
-/// The class of `gh <group> <sub> ...` from the static rules (D-540) alone.
 /// A word that names a deletion: `delete` and gh's aliases of it (`secret remove`,
 /// `variable remove`), and hyphenated forms (`release delete-asset`, `project item-delete`).
 fn is_delete_word(w: &str) -> bool {
     matches!(w, "remove" | "rm") || w.split('-').any(|p| p == "delete")
 }
 
+/// The word after a subcommand that names a deletion of a sub-resource (`repo deploy-key
+/// delete`, `repo autolink -R o/r delete`): found the way the subcommand is (D-585), so a
+/// `-R` value is not taken for it; any word may be it when a flag before it is unknown.
+fn third_is_delete(after: &[String]) -> bool {
+    let exact = |w: &str| matches!(w, "delete" | "remove" | "rm");
+    match subcommand(after) {
+        Sub::None => false,
+        Sub::Known(j) => exact(&after[j]),
+        Sub::Ambiguous(words) => words.iter().any(|w| exact(w)),
+    }
+}
+
+/// The class of `gh <group> <sub> ...` from the static rules (D-540) alone.
 fn sub_class(group: &str, sub: Option<&str>) -> Class {
     if sub.is_some_and(is_delete_word) {
         Class::Delete
@@ -613,11 +625,10 @@ fn classify_static(
         match &sub {
             Sub::None => sub_class(group, None),
             // A third word can name the deletion (`repo deploy-key delete`, `repo autolink
-            // delete`): the class is at least Delete then (D-599).
+            // delete`): the class is at least Delete then (D-585).
             Sub::Known(i) => {
-                let third = rest[*i + 1..].iter().find(|w| !w.starts_with('-'));
                 let c = sub_class(group, Some(&rest[*i]));
-                if third.is_some_and(|w| is_delete_word(w)) {
+                if third_is_delete(&rest[*i + 1..]) {
                     c.max(Class::Delete)
                 } else {
                     c
@@ -1723,9 +1734,14 @@ as1: alias set zz9 'auth token'\nas2: alias set --bogus x 'pr view'\n";
             "release delete-asset v1 a.zip",
             "project item-delete 1 --id x",
             "project field-delete --id x",
+            "repo deploy-key -R o/r delete 5",
+            "repo autolink --repo o/r delete 7 --yes",
+            "repo autolink --repo=o/r delete 7",
         ] {
             assert_eq!(c(call).unwrap(), Class::Delete, "gh {call}");
         }
+        // A read that only mentions the word stays a read.
+        assert_eq!(c("repo view my-delete-tool").unwrap(), Class::Read);
     }
 
     /// T-15b item 2 (D-591): `alias set` is at the class of what the alias would run.
