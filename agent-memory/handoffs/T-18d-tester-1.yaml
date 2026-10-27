@@ -1,0 +1,14 @@
+from: tester (area driver)
+to: driver/suborch
+task: T-18d
+date: "2026-10-26"
+state: "Acceptance T-18d round 1 green, 6 rows (bench/results/accept-T-18d.md) at 53a2d8b: bench_headless_launch_registry_and_cleanup 10/10 with real Chromium (2.5 to 33 s per run), no new bench-* dir under the profiles root, me profile kept on drop (unit test), 40/40 lib tests including the five D-630 retry tests, clippy and fmt clean, the only sleep commented per rule 6. Saved by driver/suborch from the tester's report text (the tester's writes to the per-task worktree and to the scratchpad were refused by guard_write.py, B-619)."
+not_done: "The tester's proposed Chromium-free tests/accept_t18d.rs (launch_with on a non-executable chromium file keeps a me profile's Cookies and leaves no bench-* dir) was never saved or run; filed in T-18e item 5."
+gotchas:
+  - "Five bench-* leftovers from runs before the fix (16:29 to 17:07 on 2026-10-26) sit under F:/sb-swarm/tmp-driver/.tmp*/profiles; the T-18c sweep covers them."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/accept-T-18d.md
+  - agent-memory/handoffs/T-18d-tester-1.yaml
+verify: "cargo test -j 2 -p sb-driver --test chromium_driver -- --test-threads=1"

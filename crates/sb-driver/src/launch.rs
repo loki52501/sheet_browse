@@ -2,7 +2,9 @@
 
 use crate::{DriverError, Profile};
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The D-34 pin (D-601): Chrome for Testing 156.0.8078.4, Playwright's chromium-1248.
 pub const CHROMIUM_VERSION: &str = "156.0.8078.4";
@@ -150,11 +152,13 @@ pub fn launch_args(
     Ok(args)
 }
 
-/// A profile directory for one driver: `me` persists; `bench` is removed when dropped.
+/// A profile directory for one driver: `me` persists; `bench` is removed when dropped (B-2),
+/// retrying while the browser's files are still held (D-630). Inside a [`crate::Driver`] it
+/// is the last field, so it drops only after the browser was killed.
 #[derive(Debug)]
 pub(crate) enum ProfileDir {
     Me(PathBuf),
-    Bench(tempfile::TempDir),
+    Bench(PathBuf),
 }
 
 impl ProfileDir {
@@ -169,10 +173,12 @@ impl ProfileDir {
                     .map_err(|e| DriverError::Launch(format!("create {}: {e}", dir.display())))?;
                 Ok(ProfileDir::Me(dir))
             }
+            // keep(): TempDir's own drop makes one silent removal attempt, which a file the
+            // just-killed browser still holds defeats (B-199); our Drop retries instead.
             Profile::Bench => tempfile::Builder::new()
                 .prefix("bench-")
                 .tempdir_in(&root)
-                .map(ProfileDir::Bench)
+                .map(|t| ProfileDir::Bench(t.keep()))
                 .map_err(|e| {
                     DriverError::Launch(format!("bench profile in {}: {e}", root.display()))
                 }),
@@ -181,9 +187,88 @@ impl ProfileDir {
 
     pub(crate) fn path(&self) -> &Path {
         match self {
-            ProfileDir::Me(p) => p,
-            ProfileDir::Bench(t) => t.path(),
+            ProfileDir::Me(p) | ProfileDir::Bench(p) => p,
         }
+    }
+}
+
+impl Drop for ProfileDir {
+    fn drop(&mut self) {
+        if let ProfileDir::Bench(dir) = self {
+            // This blocks the dropping thread for at most BENCH_REMOVE_CAP of waits, as
+            // Driver's drop already blocked it up to DROP_KILL_CAP in kill(); no extra thread.
+            // A failure is left behind for the stale-profile sweep (T-18c), never a panic.
+            let _ = remove_dir_retrying(
+                dir,
+                |p: &Path| std::fs::remove_dir_all(p),
+                &BENCH_REMOVE_BACKOFF,
+                BENCH_REMOVE_CAP,
+                std::thread::sleep,
+            );
+        }
+    }
+}
+
+/// D-630: total time a bench profile removal may spend waiting between attempts. Measured
+/// on a loaded Windows host: a held file (sharing violation) cleared within 5 s after the
+/// browser was confirmed gone, but up to 16 s after `kill` hit its own 20 s cap. Only paid
+/// while a file is still held; the usual removal succeeds on the first attempt.
+pub(crate) const BENCH_REMOVE_CAP: Duration = Duration::from_secs(20);
+
+/// D-630: waits before the 2nd, 3rd, ... removal attempt; the last repeats until the cap.
+pub(crate) const BENCH_REMOVE_BACKOFF: [Duration; 5] = [
+    Duration::ZERO,
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+];
+
+/// An error a just-exited process's files can cause for a moment on Windows (Defender or
+/// indexer scans, delete-pending handles): access denied (5), sharing violation (32), lock
+/// violation (33), directory not empty (145). Anything else will not clear by waiting.
+fn removal_retryable(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::DirectoryNotEmpty
+    ) || (cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32 | 33 | 145)))
+}
+
+/// Remove `dir` with `remove`, retrying a [`removal_retryable`] error after each wait in
+/// `backoff` (its last entry repeating) while the waits so far stay within `cap`. NotFound
+/// is success; any other error is returned at once.
+pub(crate) fn remove_dir_retrying(
+    dir: &Path,
+    mut remove: impl FnMut(&Path) -> io::Result<()>,
+    backoff: &[Duration],
+    cap: Duration,
+    mut sleep: impl FnMut(Duration),
+) -> io::Result<()> {
+    let mut waited = Duration::ZERO;
+    let mut attempt = 0usize;
+    loop {
+        let err = match remove(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if !removal_retryable(&e) => return Err(e),
+            Err(e) => e,
+        };
+        let wait = match backoff.get(attempt) {
+            Some(w) => *w,
+            // The last wait repeats; a zero one would spin, so it ends the retries instead.
+            None => match backoff.last() {
+                Some(w) if !w.is_zero() => *w,
+                _ => return Err(err),
+            },
+        };
+        if waited + wait > cap {
+            return Err(err);
+        }
+        // Windows gives no event when another process releases a file lock, so there is no
+        // condition to wait on (rule 6): back off on a schedule, capped in total.
+        sleep(wait);
+        waited += wait;
+        attempt += 1;
     }
 }
 
@@ -327,6 +412,134 @@ mod tests {
         assert_eq!(env(None, None).profiles(), PathBuf::from("/work/profiles"));
     }
 
+    /// The error a file the browser still holds gives: ERROR_SHARING_VIOLATION on Windows.
+    fn busy() -> io::Error {
+        if cfg!(windows) {
+            io::Error::from_raw_os_error(32)
+        } else {
+            io::Error::from(io::ErrorKind::PermissionDenied)
+        }
+    }
+
+    /// Runs remove_dir_retrying with `results` as the remover's answers (then Ok), and a
+    /// sleep that only records. Returns the result, the attempt count and the waits.
+    fn run_removal(
+        results: Vec<io::Result<()>>,
+        backoff: &[Duration],
+        cap: Duration,
+    ) -> (io::Result<()>, usize, Vec<Duration>) {
+        let mut results = results.into_iter();
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+        let r = remove_dir_retrying(
+            Path::new("/p/bench-x"),
+            |p| {
+                assert_eq!(p, Path::new("/p/bench-x"));
+                attempts += 1;
+                results.next().unwrap_or(Ok(()))
+            },
+            backoff,
+            cap,
+            |d| waits.push(d),
+        );
+        (r, attempts, waits)
+    }
+
+    fn ms(v: &[u64]) -> Vec<Duration> {
+        v.iter().map(|m| Duration::from_millis(*m)).collect()
+    }
+
+    #[test]
+    fn removal_retries_a_held_file_on_the_d630_schedule_until_released() {
+        let (r, attempts, waits) = run_removal(
+            vec![Err(busy()), Err(busy()), Err(busy())],
+            &BENCH_REMOVE_BACKOFF,
+            BENCH_REMOVE_CAP,
+        );
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(attempts, 4);
+        assert_eq!(waits, ms(&[0, 50, 100]));
+    }
+
+    #[test]
+    fn removal_gives_up_at_the_d630_cap_with_the_last_error() {
+        assert_eq!(BENCH_REMOVE_CAP, Duration::from_secs(20));
+        assert_eq!(BENCH_REMOVE_BACKOFF.to_vec(), ms(&[0, 50, 100, 250, 500]));
+        let always = (0..100).map(|_| Err(busy())).collect();
+        let (r, attempts, waits) = run_removal(always, &BENCH_REMOVE_BACKOFF, BENCH_REMOVE_CAP);
+        let e = r.expect_err("held past the cap");
+        assert_eq!(e.raw_os_error(), busy().raw_os_error());
+        assert_eq!(e.kind(), busy().kind());
+        // 0+50+100+250+500 then 500 ms steps: 19.9 s waited, the next step would pass 20 s.
+        let mut want = ms(&[0, 50, 100, 250, 500]);
+        want.extend(ms(&[500; 38]));
+        assert_eq!(waits, want);
+        assert_eq!(waits.iter().sum::<Duration>(), Duration::from_millis(19900));
+        assert_eq!(attempts, waits.len() + 1);
+    }
+
+    #[test]
+    fn removal_not_found_is_success_and_other_errors_stop_at_once() {
+        let gone = || Err(io::Error::from(io::ErrorKind::NotFound));
+        let (r, attempts, waits) =
+            run_removal(vec![gone()], &BENCH_REMOVE_BACKOFF, BENCH_REMOVE_CAP);
+        assert!(r.is_ok() && attempts == 1 && waits.is_empty(), "{r:?}");
+        let (r, attempts, _) = run_removal(
+            vec![Err(busy()), gone(), Err(busy())],
+            &BENCH_REMOVE_BACKOFF,
+            BENCH_REMOVE_CAP,
+        );
+        assert!(r.is_ok() && attempts == 2, "{r:?}");
+
+        let other = || Err(io::Error::from(io::ErrorKind::InvalidInput));
+        let (r, attempts, waits) =
+            run_removal(vec![other()], &BENCH_REMOVE_BACKOFF, BENCH_REMOVE_CAP);
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert!(attempts == 1 && waits.is_empty());
+        let (r, attempts, waits) = run_removal(
+            vec![Err(busy()), other()],
+            &BENCH_REMOVE_BACKOFF,
+            BENCH_REMOVE_CAP,
+        );
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!((attempts, waits), (2, ms(&[0])));
+    }
+
+    #[test]
+    fn removal_with_no_or_zero_schedule_does_not_spin() {
+        let always = || (0..100).map(|_| Err(busy())).collect();
+        let (r, attempts, waits) = run_removal(always(), &[], BENCH_REMOVE_CAP);
+        assert!(r.is_err() && attempts == 1 && waits.is_empty());
+        let (r, attempts, waits) = run_removal(always(), &[Duration::ZERO], BENCH_REMOVE_CAP);
+        assert!(r.is_err() && attempts == 2);
+        assert_eq!(waits, ms(&[0]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn removal_retries_each_windows_held_file_code() {
+        // 5 access denied, 32 sharing violation, 33 lock violation, 145 dir not empty.
+        for code in [5, 32, 33, 145] {
+            let held = || Err(io::Error::from_raw_os_error(code));
+            let (r, attempts, _) = run_removal(
+                vec![held(), held()],
+                &BENCH_REMOVE_BACKOFF,
+                BENCH_REMOVE_CAP,
+            );
+            assert!(
+                r.is_ok() && attempts == 3,
+                "code {code}: {r:?} after {attempts}"
+            );
+        }
+        // 3 is ERROR_PATH_NOT_FOUND (NotFound: success); 87 ERROR_INVALID_PARAMETER stops.
+        let (r, attempts, _) = run_removal(
+            vec![Err(io::Error::from_raw_os_error(87))],
+            &BENCH_REMOVE_BACKOFF,
+            BENCH_REMOVE_CAP,
+        );
+        assert!(r.is_err() && attempts == 1);
+    }
+
     #[test]
     fn bench_profile_is_a_fresh_dir_removed_on_drop_and_me_persists() {
         let root = tempfile::tempdir().unwrap();
@@ -342,6 +555,8 @@ mod tests {
         assert!(name.starts_with("bench-"), "{name}");
         assert_eq!(a.path().parent().unwrap(), root.path().join("profiles"));
         let gone = a.path().to_path_buf();
+        std::fs::create_dir_all(gone.join("Default").join("Cache")).unwrap();
+        std::fs::write(gone.join("Default").join("Cookies"), b"x").unwrap();
         drop(a);
         assert!(!gone.exists());
         let me = ProfileDir::prepare(Profile::Me, &e).unwrap();

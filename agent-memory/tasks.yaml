@@ -451,3 +451,21 @@ tasks:
     title: "T-17 baseline cannot reach >= 27/30: bench/phase1 has no rung-10.md and only one variant for rungs 6, 7, 8 (9 of 30 slots missing), and docs/08/09 never define the A/B use cases. Write the missing prompts and the A/B set, then re-run T-17."
     status: todo
     from: T-17
+  - id: T-18d
+    step: follow-up
+    wave: 3
+    owner: driver/suborch
+    branch: swarm/driver-T18d
+    title: "B-199: bench profile removal flakes on a loaded Windows host (chromium_driver::bench_headless_launch_registry_and_cleanup, 'bench profile ... not removed'), making the D-87 workspace gate flaky for every area. Remove the bench profile with a capped retry after the browser is gone instead of TempDir's single silent attempt."
+    status: done
+    claimed_at: "2026-10-26"
+    from: B-199
+    note: "review-T-18d round 1 approve, Blocking none; accept-T-18d round 1 green (10/10). Should-fix items are T-18e."
+  - id: T-18e
+    step: follow-up
+    wave: 3
+    owner: driver
+    branch: swarm/driver-T18e
+    title: "review-T-18d round 1 leftovers: (1) Driver drop can block about 60 s worst case (kill 20 s, Pipe::drop second kill 20 s, removal 19.9 s plus attempt time): Driver::shutdown drops via spawn_blocking before sb-mcp holds a Driver, and the lib.rs Driver doc states the real worst case; (2) a cfg(windows) Drop-level test holding a file with share_mode(0) in a bench dir; (3) retry PermissionDenied/DirectoryNotEmpty on Windows only; (4) surface a final removal failure (path and ErrorKind); (5) the tester's Chromium-free accept_t18d.rs: launch_with on a non-executable chromium file keeps a me profile's contents and leaves no bench-* dir; (6) checked_add in remove_dir_retrying. Also seen while looping (sb-cdp, host load): one launch Timeout(Target.setDiscoverTargets) in about 30 runs; Pipe::kill used its full 20 s cap in about half the runs."
+    status: todo
+    from: T-18d

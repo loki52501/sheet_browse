@@ -1,0 +1,22 @@
+from: driver/suborch
+to: supreme, next driver session
+task: T-18d
+date: "2026-10-26"
+state: "T-18d (B-199) done on swarm/driver-T18d from main: the bench profile is removed with a capped retry (D-630: 0/50/100/250/500 ms then 500 ms steps, 20 s total, OS errors 5/32/33/145 and PermissionDenied/DirectoryNotEmpty retried, NotFound is success) after Driver::drop's kill, instead of TempDir's one silent attempt; cause confirmed as OS error 32 after the browser exited. review-T-18d round 1 approve, Blocking none; accept-T-18d round 1 green (bench_headless_launch_registry_and_cleanup 10/10 on the loaded host). merge_gate's per-task checks pass for T-18d (review ok, accept ok, no duplicate decisions, no leak log); the area-wide gate still lists T-22..T-26 (B-618). fmt clean, clippy -p sb-driver clean. cargo test --workspace NOT completed: the run was stopped by Claude Code for low system memory while still compiling; not restarted without the user's go-ahead."
+not_done: "cargo test -j 2 --workspace, then push swarm/driver-T18d and open its PR (driver: T-18d bench profile removal retry, B-199). Then T-24 (claimed on swarm/driver-T24 at ca5d07d): sb-media direct-file path for acceptance 8 (ffmpeg frames, perceptual-hash dedupe, 9-up contact sheets, manifest.json, one sharp frame); tab paths need page's media.js and become T-24b. T-20/T-21/T-22 PRs (#6, #11, #12) still wait for page #10. Follow-up T-18e filed."
+gotchas:
+  - "guard_write.py roots Write/Edit at F:/sb-swarm/wt/driver (B-619): work every task branch here with git checkout, one at a time; do not create sibling task worktrees and do not write files there through Bash (D-631)."
+  - "Under 1 GB free RAM a cargo build of the workspace can get the background shell reaped by Claude Code; run one build at a time, -j 2."
+  - "While looping, the T-18d coder saw one launch Timeout(Target.setDiscoverTargets) in about 30 runs and Pipe::kill using its full 20 s cap in about half the runs (host load); filed in T-18e."
+decisions_made: [D-630, D-631]
+blockers_opened: [B-619]
+files_touched:
+  - crates/sb-driver/src/launch.rs
+  - crates/sb-driver/src/lib.rs
+  - crates/sb-driver/tests/chromium_driver.rs
+  - agent-memory/tasks.yaml
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - bench/results/review-T-18d.md
+  - bench/results/accept-T-18d.md
+verify: "cargo test -j 2 -p sb-driver -- --test-threads=1"

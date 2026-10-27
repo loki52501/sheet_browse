@@ -1,0 +1,18 @@
+from: rust-coder (driver area, T-18d)
+to: driver/suborch, then reviewer and tester
+task: T-18d
+date: "2026-10-26"
+state: "B-199 cause confirmed and fixed in commit 3d5ae24. Experiment (temporary eprintln in Driver::drop, not committed): TempDir::close() failed with OS error 32 (ERROR_SHARING_VIOLATION) in 3 of 8 runs of bench_headless_launch_registry_and_cleanup, both when kill returned true and when it returned false; the pid asserts passed each time. Fix (D-630): ProfileDir::Bench holds a PathBuf (TempDir::keep at creation); Drop for ProfileDir calls launch::remove_dir_retrying(std::fs::remove_dir_all, BENCH_REMOVE_BACKOFF 0/50/100/250/500 ms then 500 ms steps, BENCH_REMOVE_CAP 20 s total waited, std::thread::sleep with the rule-6 comment). Retryable: ErrorKind PermissionDenied or DirectoryNotEmpty, Windows raw 5/32/33/145; NotFound is success; anything else stops at once; a final failure is ignored (no panic, left for the T-18c sweep). Field order is unchanged: profile is still Driver's last field, so removal runs after kill, including when kill returned false. The chromium test's profile assert is unchanged except that its message now lists up to 20 leftover paths. Instrumented measurements with a 30 s cap: when kill confirmed the browser gone, the hold cleared within 4.84 s (13 attempts); after kill hit its 20 s cap, it lasted 16.4 s in one run and more than 32 s in another (1 of 8 failed even at 30 s). Every retry error was code 32. Hence 20 s, not the 5 s first proposed. Gates: cargo fmt --all --check clean; cargo clippy -p sb-driver --all-targets -D warnings clean; cargo test -j 2 -p sb-driver -- --test-threads=1: lib 40 (5 new removal tests), accept_t18 1, chromium_driver 1, contract_paths 2, all pass with real Chromium. bench_headless_launch_registry_and_cleanup looped 10 times on the final code: 10/10 pass (5 to 44 s each). Mutation: removal_retryable forced to false turned all 5 removal unit tests red; restored."
+not_done: "1. cargo test --workspace not run here (sub-orchestrator runs it once). 2. main has one newer commit (8dedda3 supreme checkpoint, agent-memory/handoffs/supreme-wave1.yaml only), not merged into this branch. 3. Residual risk: on a host stalled enough that kill hits DROP_KILL_CAP, a file can stay held past 20 s more and the profile assert can still fail (seen once at a 30 s cap). That is host or sb-cdp teardown time, not removal logic."
+gotchas:
+  - "tempfile's TempDir::close() wraps the OS error in a PathError, so raw_os_error() on it is None; std::fs::remove_dir_all returns the raw code (32) directly, which is what removal_retryable matches."
+  - "Separate flakes seen on this host while looping, not addressed here (candidates for their own blockers): (a) launch fails with Timeout(\"Target.setDiscoverTargets\") (10 s CDP call timeout) under load, 1 of about 30 runs; (b) Pipe::kill returned false after its full 20 s DROP_KILL_CAP in about half the runs, and one kill took 576 s by wall clock even though wait_handle is capped (the host stalled: under 450 MB free RAM, parallel linkers)."
+  - "Python on Windows writes CRLF in text mode; open files with newline='' when editing with scripts, or git warns and the diff covers the whole file."
+decisions_made: [D-630]
+blockers_opened: []
+files_touched:
+  - crates/sb-driver/src/launch.rs
+  - crates/sb-driver/src/lib.rs
+  - crates/sb-driver/tests/chromium_driver.rs
+  - agent-memory/decisions.yaml
+verify: "cargo test -j 2 -p sb-driver -- --test-threads=1"
