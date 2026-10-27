@@ -303,6 +303,26 @@ async fn a_pick_call_reads_json_up_to_the_json_cap() {
     assert!(!out.text.contains("Role 0"), "{}", out.text);
 }
 
+/// Review T-13c round 1: pick raises the read cap only for an answer it can apply to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pick_keeps_the_page_cap_for_an_answer_that_is_not_json() {
+    let page = b"<html><body>".repeat(500);
+    let server = Server::start(vec![route(Some(HOST), "/p", 200, "text/html", page)]).await;
+    let cfg = srv_web::Config {
+        max_bytes: 1000,
+        ..config(&server, &[HOST], no_tools())
+    };
+    let e = env(cfg).await;
+    let out = call(&e, "api", json!({"url": url("/p"), "pick": ["a"]}))
+        .await
+        .expect("api");
+    assert!(
+        out.text.contains("body cut at the 1000 byte cap"),
+        "{}",
+        out.text
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bad_pick_is_refused_in_words() {
     let (server, e) = setup(vec![json_route("/x", b"{}".to_vec())]).await;

@@ -472,10 +472,13 @@ impl ToolHandler for Api {
             .await
             .map_err(|e| ToolError::Failed(format!("api: {}", http::map_err(&e, &host))))?;
         // D-565: a pick call shows only its projection, so it reads up to the JSON cap;
-        // every other call keeps the W-2 page cap.
+        // every other call, and an answer pick cannot apply to (not JSON, untyped or
+        // text/plain), keeps the W-2 page cap.
         let cfg = &self.web.cfg;
         let pick_cap = cfg.json_max_bytes.max(cfg.max_bytes);
-        let cap = if req.pick.is_some() {
+        let (mime, _) = http::content_type(resp.headers());
+        let pickable = fetch::is_json_type(&mime) || mime.is_empty() || mime == "text/plain";
+        let cap = if req.pick.is_some() && pickable {
             pick_cap
         } else {
             cfg.max_bytes
