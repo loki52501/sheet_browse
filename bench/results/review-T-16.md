@@ -122,4 +122,102 @@ No hard-rule break. Every step-4 acceptance item has a test that asserts behavio
 
 Should-fix 1 and 2 decide whether live rungs 7 and 8 pass through harnessd.
 
+## Round 3 (supreme hold, D-144)
+
+Range: `git diff bd1f47c..HEAD`, non-merge commits 3c4f830 and be24f1e, limited to crates, migrations, bench/phase1
+and agent-memory/decisions.yaml. Not built here, because a workspace test run held the build lock and host RAM was
+short. Test claims are read from the code; the mutation claim is the coder's (handoffs/T-16-suborch-2.yaml).
+
+Blocking for the whole review is still `- none`: no hard-rule break, and every supreme ask has a test that asserts the
+behaviour.
+
+### Asks (3), (4), (5) at HEAD
+- **(3) watch.txt scrubbed: closed.** mem_server.rs:546 runs `self.vault.scrub(state)` before `write_atomic` at :548.
+  The test is accept_t16_mem.rs:713 and :734-737, which checks that watch.txt never holds the canary. It fails if the
+  scrub is removed. be24f1e (:697) gives that MCP session a yes, because its schedule.add now skips with no answer.
+- **(4) replay session readers-only: closed.**
+  - The argv is at launcher.rs:270-286: `--strict-mcp-config --mcp-config <run>/replay-mcp.json`, then
+    `--setting-sources local --permission-mode default`, then `--tools ""`, `--allowedTools mcp__harness-web`, and
+    `--disallowedTools` with DISALLOWED_TOOLS plus BUILTIN_TOOLS last.
+  - cwd is the absolute run folder (:246).
+  - The config names harness-web only (:168-177).
+  - `the_replay_session_is_readers_only` (:577-611) compares the whole argv, including the empty string after
+    `--tools`, and checks cwd and SB_TOOLS_ROOT. Removing any piece turns it red.
+- **(5) no schedule without a yes: closed.**
+  - mem_server.rs:255-262 hints schedule.add with `HINT_SCHEDULE`, and mcp.rs:1081/:1098 copy the hints into the
+    `Call`.
+  - The hit is found at the call's own class (gate.rs:459-468, `Account:schedule`), so `from_hint` stays true (:402).
+    `may_proceed` is then false (:331), so strict is true and `on_timeout` is Skip (:340, :346, :375-378).
+  - `ask_capped` can only tighten this: mcp.rs:564-573 turns a TimeoutProceed against a Skip card into a skip, and an
+    asker that hangs is skipped.
+  - Tests:
+    - gate.rs:1361 checks Skip with the seed and Proceed with no seed, so it fails if the hint branch is removed.
+    - accept_t16_mem.rs:540-561 runs on Postgres with the real migration. With no answer it expects a `skipped:` reply,
+      still 1 row, no wake marker and ledger `TimeoutSkip`. It fails if the hint or the migration is dropped.
+  - The key is spelled the same everywhere: migrations/0003_schedule_ask.sql:5-7 `'Account:schedule'`,
+    testing.rs:44-49 SEED_RULES, accept_t03.rs:380. `rule_class_key("Account:schedule")` is that string, and
+    PgStore::gate_rule canonicalises before it looks up (core-pg/src/lib.rs:791-797).
+
+### Q2: can an unanswered or planted schedule.add still add a row?
+Not through harness-mem.
+- A failed rule lookup fails closed: gate error, then `ToolError`, then nothing runs (mcp.rs:1109-1112).
+- `domain` is None, so no domain-scoped row can shadow the `*` rule.
+- A user `('*','Account','allow')` loses to the hint rule.
+- The class floor is Account (mcp.rs:1080).
+- No model-reachable tool writes gate rules. Only cli.rs:309 does.
+- The only fallback to "ask, timeout proceeds" is the user deleting or changing the row, which D-144 (1) documents.
+- MemStore and the Postgres seed agree.
+- 3c4f830 also changes harness-core, so core-pg is rebuilt and `sqlx::migrate!` picks up 0003 (see Note c).
+
+Outside harness-mem, see Should-fix R3-1.
+
+### Q3: `--tools ""` argv
+- tokio delegates to std. On Windows, std quotes an empty argument as `""`, both for an .exe and, since Rust 1.77.2,
+  through the batch-file path that the claude.cmd fallback (launcher.rs:304-311) takes. cmd's `%*` passes `""`
+  through, and node reads it as one empty argv entry.
+- Claude Code's `--tools` takes a list of values. The next token, `--allowedTools`, starts with `--`, so `--tools`
+  ends at the empty value and the lists do not run into each other.
+- The test reads argv from `as_std().get_args()`. That is the argument list, not the quoted Windows command line, so
+  the quoting itself is not tested (Note a).
+- The doc claims at launcher.rs:27-40 and reflect.rs:27-33 match the code, with two small gaps in Notes a and b.
+
+### Should fix (round 3)
+- **R3-1. Fired `claude -p` sessions still load project and user settings and keep Bash available.** This predates
+  the delta and is outside it, but it is the remaining way a planted schedule (or gate rule) gets in.
+  - Where: `ClaudeLauncher::print` sets no current_dir (launcher.rs:240-242), passes no `--setting-sources` and no
+    `--tools`, and denies only `harness ask/gate/vault` (:56-60).
+  - What happens: started from the repo root, a firing inherits .claude/settings.json's `Bash(psql *)` and
+    `Bash(cargo *)`. Page-derived text in that session could then run `psql -c "insert into schedules ..."`, or
+    `cargo run -p harness -- schedule add ...` / `-- gate set ...`. None of those match the deny patterns, and none
+    of them reach `core::mcp::serve`.
+  - Fix: give print sessions the replay session's isolation. That means `--tools ""` (or only the built-ins a
+    firing needs), `--setting-sources local`, and cwd = the run folder. Also deny `Bash(harness schedule:*)`.
+    Track it as a T-16b item or a blocker for supreme.
+- **R3-2. `HINT_SCHEDULE` is a new pub item of I-3 that interfaces.yaml:28 does not list, and no blocker records it.**
+  It is additive, like B-197. File it as an interface proposal for supreme.
+
+### Notes (round 3)
+- a. "Checked live on Claude Code 2.1.311" (launcher.rs:35, D-144 (2)) has no artifact in bench/results. Only the
+  commit and the handoff say it. Before merge, record the session's tool list in accept-T-16.md. No test builds the
+  Windows command line for the shim path.
+- b. launcher.rs:36-37 says BUILTIN_TOOLS are denied "in case a Claude Code version ignores `--tools`". A version
+  without the flag would reject it as an unknown option and the replay would fail, which fails closed. The wording
+  should say that.
+- c. core-pg has no build.rs with `cargo:rerun-if-changed=../../migrations`. A future change that only adds a
+  migration (no Rust change in core-pg or its dependencies) would leave an incrementally built harnessd without it,
+  and the sqlx docs warn about exactly this. It is not hit here, because harness-core changed in the same commit.
+- d. accept_t16_mem and accept_t03 still pass with a SKIPPED line when Postgres is down. The tester must confirm
+  there is no SKIPPED line for the new timeout-skip assertion.
+- e. Hard rules on the delta:
+  - no keys;
+  - no vault value in the new seed note, card text or test fixtures; the canary test now answers yes rather than
+    weakening its assertion;
+  - no sleeps, no em dashes, no new `unwrap` outside tests;
+  - rung-7.md's expected text matches D-144.
+
+### Round 3 verdict
+Asks (3), (4) and (5) are closed in code, and each has a test that fails if its fix is removed. R3-1 is a real
+remaining bypass path for fired sessions. It predates and lies outside this delta, so it is should-fix for the
+supreme to schedule, not a hold on PR #17.
+
 Verdict: approve
