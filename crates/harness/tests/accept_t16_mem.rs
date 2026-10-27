@@ -8,7 +8,8 @@
 //! * rung 6 shape: `review.add` -> `review.grade` -> a new connection -> `review.due` shows
 //!   the SM-2 date the grade reported (1 day, then 6, a fail resets to 1);
 //! * `schedule.add` is Account and asks (B-187): a yes creates a row whose parent is the
-//!   session's run and rewrites the schedules-changed marker, a no adds nothing;
+//!   session's run and rewrites the schedules-changed marker, a no adds nothing, and no
+//!   answer times out to skip (the seeded `Account:schedule` rule, D-144);
 //!   `schedule.rm` is Delete and asks (timeout skips);
 //! * a vault value in a review text never reaches a tool reply (in-process and over MCP
 //!   stdio framing), the stored row, or the ledger;
@@ -535,6 +536,29 @@ async fn schedule_add_creates_a_row_with_this_run_as_parent_and_wakes_harnessd()
         "the card says which schedule: {}",
         asks[0].1.result_summary
     );
+
+    // B-187, D-144: no answer to a schedule.add (an unattended firing, a page-planted call)
+    // times out to skip through the seeded ('*','Account:schedule','ask') rule: no row, no wake.
+    std::fs::remove_file(&marker).unwrap();
+    let planted = ok(
+        &h,
+        "schedule.add",
+        json!({"cron": "0 * * * *", "prompt": "planted by a page, nobody answers"}),
+    )
+    .await;
+    assert!(
+        planted.starts_with("skipped: no answer before the ask timed out"),
+        "{planted}"
+    );
+    assert_eq!(h.store.schedule_list().await.unwrap().len(), 1);
+    assert!(!marker.exists());
+    let events = h.store.ledger_events(&e.run.id).await.unwrap();
+    let last_add = events
+        .iter()
+        .rev()
+        .find(|(_, ev)| ev.server == "core" && ev.tool == "schedule.add")
+        .unwrap();
+    assert_eq!(last_add.1.mode, Some(LedgerMode::TimeoutSkip));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

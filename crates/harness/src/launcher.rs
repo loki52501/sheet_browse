@@ -31,10 +31,13 @@
 //!   server is loaded;
 //! * the working directory is the run folder and `--setting-sources local`: no project or
 //!   user settings (and none of their allow rules) are loaded; `--permission-mode default`;
-//! * `--allowedTools mcp__harness-web`, and [`BUILTIN_TOOLS`] added to `--disallowedTools`
-//!   (Bash, file edits, web fetch, file reads and the rest), so in `-p` mode harness-web's
-//!   tools are all it can call. srv-web registers only `@phase 1` readers as site tools;
-//!   its own tools still pass through its gate.
+//! * `--tools ""`: Claude Code loads none of its built-in tools (no Bash, PowerShell, file
+//!   edits or reads, web fetch, subagents), checked live on Claude Code 2.1.311: the session
+//!   lists only `mcp__harness-web__*`. [`BUILTIN_TOOLS`] are also added to
+//!   `--disallowedTools` in case a Claude Code version ignores `--tools`;
+//! * `--allowedTools mcp__harness-web`, so in `-p` mode harness-web's tools are all it can
+//!   call. srv-web registers only `@phase 1` readers as site tools; its own tools still pass
+//!   through its gate.
 
 use crate::CliError;
 use async_trait::async_trait;
@@ -65,8 +68,8 @@ pub const HARNESS_ALLOWED_TOOLS: [&str; 4] = [
     "mcp__harness-mem",
 ];
 
-/// Claude Code built-in tools the readers-only replay session is started without (the
-/// same list as the ladder shim, `bench/fixtures/ladder_session.py`).
+/// Claude Code built-in tools the readers-only replay session denies, behind `--tools ""`
+/// (the same list as the ladder shim, `bench/fixtures/ladder_session.py`).
 pub const BUILTIN_TOOLS: [&str; 24] = [
     "Bash",
     "PowerShell",
@@ -268,7 +271,9 @@ impl ClaudeLauncher {
             cmd.arg("--strict-mcp-config")
                 .arg("--mcp-config")
                 .arg(dir.join(READERS_MCP_FILE))
-                .args(["--setting-sources", "local", "--permission-mode", "default"]);
+                .args(["--setting-sources", "local", "--permission-mode", "default"])
+                // No built-in tools at all (an empty list), not only the denied names.
+                .args(["--tools", ""]);
         }
         // The lists are variadic: each ends where the next flag starts. --disallowedTools
         // stays last (the ladder shim reads everything after it as the deny list).
@@ -564,9 +569,10 @@ mod tests {
         assert_eq!(p.readers_only, None);
     }
 
-    /// Review T-16 r1 should-fix 4 (G-3): the replay session gets a strict MCP config with
-    /// harness-web only, the run folder as working directory, local settings only, only
-    /// harness-web allowed and the built-in tools denied; --disallowedTools stays last.
+    /// Review T-16 r1 should-fix 4 (G-3, D-144): the replay session gets a strict MCP config
+    /// with harness-web only, the run folder as working directory, local settings only, no
+    /// built-in tools (`--tools ""`), only harness-web allowed and the built-in tools denied
+    /// too; --disallowedTools stays last.
     #[test]
     fn the_replay_session_is_readers_only() {
         let tmp = tempfile::tempdir().unwrap();
@@ -593,6 +599,8 @@ mod tests {
             "local",
             "--permission-mode",
             "default",
+            "--tools",
+            "",
             "--allowedTools",
             "mcp__harness-web",
             "--disallowedTools",

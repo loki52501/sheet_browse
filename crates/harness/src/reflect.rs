@@ -27,7 +27,9 @@
 //!    are never named in it. In harnessd that session is
 //!    [`crate::launcher::ClaudeLauncher::readers_only`]: a strict MCP config naming
 //!    harness-web only, the run folder as working directory, `--setting-sources local`,
-//!    only `mcp__harness-web` allowed and Claude Code's built-in tools denied. srv-web
+//!    no built-in tools (`--tools ""`, and the built-ins denied by name as well), only
+//!    `mcp__harness-web` allowed. The prompt carries page-derived text from earlier ledgers,
+//!    so the session is limited by what it is given, not by an allow rule. srv-web
 //!    registers only `@phase 1` readers as site tools; its other tools stay behind its gate.
 //!    With nothing to replay no session starts.
 //!

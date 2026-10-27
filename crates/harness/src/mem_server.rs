@@ -18,8 +18,10 @@
 //! | `schedule.rm`   | Delete | `schedule_rm` (asks by default), wakes harnessd             |
 //! | `watch.observe` | Fill   | writes the watched state to `runs/<run>/files/watch.txt`    |
 //!
-//! `schedule.add` is Account, so it asks (H-1.1; a timeout proceeds, H-1.3): a schedule makes
-//! unattended runs persist, and one injected page must not plant one without a card (B-187).
+//! `schedule.add` is Account with the hint `schedule`, so it asks (H-1.1), and the seeded
+//! `('*','Account:schedule','ask')` rule (migration 0003) makes the ask time out to skip: a
+//! schedule makes unattended runs persist, and one injected page must not plant one without a
+//! card the user answered yes, including in an unattended harnessd firing (B-187, D-144).
 //!
 //! Text stored in memory (review item and answer, schedule prompt and watch target) is
 //! scrubbed against the vault first: a vault value is stored only as `@vault(name)`. A watch
@@ -32,6 +34,7 @@ use crate::CliError;
 use async_trait::async_trait;
 use chrono::Duration as ChronoDuration;
 use harness_core::class::Class;
+use harness_core::gate::HINT_SCHEDULE;
 use harness_core::memory::{contact_key, ts_now, MemoryError, ReviewId, ScheduleKind, Ts};
 use harness_core::memory::{Review, Schedule};
 use harness_core::sched::{self, next_after, parse_cron};
@@ -248,8 +251,14 @@ impl ToolHandler for Mem {
             }
             _ => None,
         };
+        // B-187, D-144: the seeded `Account:schedule` ask rule decides, so no answer skips.
+        let hints = match self.op {
+            Op::ScheduleAdd => vec![HINT_SCHEDULE.to_owned()],
+            _ => Vec::new(),
+        };
         Ok(Classified {
             what: what.map(|w| self.vault.scrub(&w)),
+            hints,
             ..Classified::default()
         })
     }

@@ -23,6 +23,10 @@ pub const ASK_TIMEOUT: Duration = Duration::from_secs(60);
 /// (H-1.2). Looked up as the rule keys `Submit:job_application` / `Submit:signature` (D-39).
 pub const HINT_JOB_APPLICATION: &str = "job_application";
 pub const HINT_SIGNATURE: &str = "signature";
+/// Hint of harness-mem `schedule.add`, looked up as `Account:schedule`. Migration 0003 seeds
+/// `('*','Account:schedule','ask')`: a hint rule decides, so the ask times out to skip and
+/// no unanswered call (an unattended firing, a page-planted call) adds a schedule (B-187, D-144).
+pub const HINT_SCHEDULE: &str = "schedule";
 
 /// One tool call as the gate sees it, after classification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1351,6 +1355,22 @@ mod tests {
         // At its own class the allow applies.
         c.class = Class::Read;
         assert_eq!(g.check(&c).await.unwrap(), Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn a_schedule_add_ask_times_out_to_skip() {
+        // B-187, D-144: harness-mem schedule.add is Account hinted `schedule`. With the seeded
+        // ('*','Account:schedule','ask') rule the hint decides, so no answer adds nothing.
+        let (_, g) = gate(MemStore::new());
+        let mut c = call(Class::Account, None);
+        c.hints = vec![HINT_SCHEDULE.into()];
+        assert_eq!(card(g.check(&c).await.unwrap()).on_timeout, OnTimeout::Skip);
+        // Without the row (deleted by the user) it is a plain Account ask again.
+        let (_, g) = gate(MemStore::empty());
+        assert_eq!(
+            card(g.check(&c).await.unwrap()).on_timeout,
+            OnTimeout::Proceed
+        );
     }
 
     #[tokio::test]
