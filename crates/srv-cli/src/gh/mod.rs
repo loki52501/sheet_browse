@@ -22,6 +22,12 @@
 //! `run list -w ci.yml`), and an `R` inside a cluster (`-cRHOST/o/r`) is a repo whose host
 //! is checked.
 //!
+//! A flag before the group (D-594): gh's parser skips it to find the command and hands it
+//! to that command, so `gh --repo=o/r run delete 5` runs `run delete`. The server moves
+//! `--name=value` and `-R`, `--repo` or `--hostname` with its value behind the group, the
+//! way gh reads them, and classifies and runs that ([`group_first`]); any other flag before
+//! the group is refused (a lone `--help` or `--version` is kept).
+//!
 //! Aliases (D-591, [`alias`]): a call that is not on the read allowlist or `api` may name a
 //! user alias, so the server reads `gh alias list` (refusing the call when it cannot) and
 //! classifies and runs the expansion instead of the alias. `alias set` is classified at the
@@ -99,13 +105,69 @@ struct Gh {
     cfg: Arc<Config>,
 }
 
-/// The gh arguments of a call, without a leading `gh` word.
+/// The gh arguments of a call, without a leading `gh` word, the group first
+/// ([`group_first`]).
 fn gh_argv(args: &Value) -> Result<Vec<String>, ToolError> {
     let mut v = argv::from_value(args, "args")?;
     if v.first().map(String::as_str) == Some("gh") {
         v.remove(0);
     }
-    Ok(v)
+    group_first(&v, false)
+}
+
+/// Flags gh's parser reads with the next word as their value when they come before the
+/// group (gh's root command knows only `--help` and `--version`, which take none).
+const LEAD_VALUE_FLAGS: [&str; 3] = ["-R", "--repo", "--hostname"];
+
+/// `argv` with the flags before the group moved behind it (D-594). gh's parser (cobra)
+/// skips flags to find the command, then hands them to that command in their order, so
+/// `--repo=o/r run delete 5` runs `run delete` with `--repo=o/r`, as `run --repo=o/r delete
+/// 5` does, and `--hostname h tok` runs the alias `tok` with `--hostname h`. Only the forms
+/// cobra reads one way are moved: `--name=value`, and [`LEAD_VALUE_FLAGS`] with the next word
+/// as the value. Any other flag first is refused, as is a call that is only flags; a lone
+/// `--help` or `--version` is returned as it is. `quiet` (inside an alias's expansion) leaves
+/// the flag out of the message.
+fn group_first(argv: &[String], quiet: bool) -> Result<Vec<String>, ToolError> {
+    let is_flag = |t: &str| t.starts_with('-');
+    match argv {
+        [] => return Ok(Vec::new()),
+        [first, ..] if !is_flag(first) => return Ok(argv.to_vec()),
+        [one] if one == "--help" || one == "--version" => return Ok(argv.to_vec()),
+        _ => {}
+    }
+    let refuse = |t: &str| {
+        let what = if quiet {
+            String::new()
+        } else {
+            format!(" ({})", text::line(t, 40))
+        };
+        ToolError::Args(format!(
+            "gh: a flag before the command{what} is not read here; put the flags after the \
+             subcommand, e.g. gh run delete 5 --repo o/r; nothing ran"
+        ))
+    };
+    let mut i = 0;
+    while let Some(t) = argv.get(i).filter(|t| is_flag(t)) {
+        let one_word = t
+            .strip_prefix("--")
+            .and_then(|l| l.split_once('='))
+            .is_some_and(|(name, _)| !name.is_empty());
+        if one_word {
+            i += 1;
+        } else if LEAD_VALUE_FLAGS.contains(&t.as_str()) && i + 1 < argv.len() {
+            i += 2;
+        } else {
+            return Err(refuse(t));
+        }
+    }
+    let Some(group) = argv.get(i) else {
+        return Err(refuse(&argv[0]));
+    };
+    let mut out = Vec::with_capacity(argv.len());
+    out.push(group.clone());
+    out.extend_from_slice(&argv[..i]);
+    out.extend_from_slice(&argv[i + 1..]);
+    Ok(out)
 }
 
 /// The gate's view of one `gh` call.
@@ -161,6 +223,8 @@ fn plan_at(
     aliases: &Aliases,
     depth: usize,
 ) -> Result<GhPlan, ToolError> {
+    // An expansion may start with a flag too (`alias set x '--repo=o/r run delete'`).
+    let argv = &group_first(argv, depth > 0)?;
     if let Some(hit) = aliases.lookup(argv) {
         let name = text::line(&hit.name, 64);
         if depth >= MAX_ALIAS_DEPTH {
@@ -1268,7 +1332,7 @@ mod tests {
     const ALIASES: &str = "tok: auth token\ncfg: config get oauth_token\nrmr: repo delete\n\
 v: pr view\nrl: run list\nsh1: '!echo hi'\nml: |-\n    pr\n    view\n\
 issue mine: issue list --mention @me\nq: api -X \"$1\" repos/o/r\nnest: tok\nloop: loop\n\
-far: api https://any.host/x\nt2: v\n";
+far: api https://any.host/x\nt2: v\nrd: --repo=o/r run delete\nlead: --repo o/r --bogus run delete\n";
 
     fn p(s: &str) -> Result<GhPlan, ToolError> {
         plan(
@@ -1334,6 +1398,71 @@ far: api https://any.host/x\nt2: v\n";
         ] {
             assert!(needs(yes), "{yes}");
         }
+    }
+
+    /// review-T-15b Blocking (D-594): gh hands a flag before the group to the command, so
+    /// it is moved behind the group and classified there, or refused.
+    #[test]
+    fn a_flag_before_the_group_is_read_where_gh_reads_it() {
+        let ok = |s: &str, class: Class, runs: &str| {
+            let got = p(s).unwrap_or_else(|e| panic!("gh {s}: {e}"));
+            assert_eq!(got.call.class, class, "gh {s}");
+            assert_eq!(got.argv, argv::split(runs).unwrap(), "gh {s}");
+        };
+        ok(
+            "--repo=o/r run delete 5",
+            Class::Delete,
+            "run --repo=o/r delete 5",
+        );
+        ok("-R o/r run delete 5", Class::Delete, "run -R o/r delete 5");
+        ok(
+            "--yes=true repo delete o/r",
+            Class::Delete,
+            "repo --yes=true delete o/r",
+        );
+        ok("--repo o/r pr view 5", Class::Read, "pr --repo o/r view 5");
+        ok(
+            "--repo=o/r pr merge 5",
+            Class::Account,
+            "pr --repo=o/r merge 5",
+        );
+        // An alias's expansion that starts with a flag is read the same way.
+        ok("rd 5", Class::Delete, "run --repo=o/r delete 5");
+        // A lone --help or --version stays as it is.
+        ok("--help", Class::Account, "--help");
+        ok("--version", Class::Account, "--version");
+        for bad in [
+            // The auth refusal, the alias lookup and the host check still apply.
+            "--hostname github.com auth token",
+            "--hostname=github.com auth token",
+            "--hostname github.com tok",
+            "-R o/r tok",
+            "--repo=other.host/o/r pr view 5",
+            "-R other.host/o/r run delete 5",
+            // Forms gh's parser could read another way, and calls that are only flags.
+            "--bogus run delete 5",
+            "-y repo delete o/r",
+            "-Ro/r run delete 5",
+            "--help run delete 5",
+            "-- run delete 5",
+            "-R o/r",
+            "--repo=o/r",
+            "lead 5",
+        ] {
+            assert!(matches!(p(bad), Err(ToolError::Args(_))), "gh {bad}");
+        }
+        // Without the alias list too, and the refusal says where the flags go.
+        let e = c("--bogus run delete 5").unwrap_err().to_string();
+        assert!(e.contains("put the flags after the subcommand"), "{e}");
+        assert!(c("--hostname github.com auth token").is_err());
+        assert_eq!(c("--repo=o/r run delete 5").unwrap(), Class::Delete);
+        // Inside an alias the flag is not named (D-591: two words of an expansion only).
+        let e = p("lead 5").unwrap_err().to_string();
+        assert!(!e.contains("--bogus"), "{e}");
+        // A flag first is looked up after the move: the alias is found.
+        assert!(needs_aliases(
+            &group_first(&argv::split("-R o/r tok").unwrap(), false).unwrap()
+        ));
     }
 
     /// T-15b item 2 (D-591): `alias set` is at the class of what the alias would run.

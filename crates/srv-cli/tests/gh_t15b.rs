@@ -170,3 +170,48 @@ async fn flag_values_are_not_subcommands_and_writes_keep_their_class() {
         .expect_err("other host");
     assert!(matches!(err, ToolError::Args(_)), "{err}");
 }
+
+/// review-T-15b Blocking (D-594): a flag before the group is handed to the command by gh,
+/// so it is classified (and run) behind the group: a delete asks Delete, the auth refusal,
+/// the alias lookup and the host check still apply, and any other flag first is refused.
+#[tokio::test]
+async fn a_flag_before_the_group_keeps_every_check() {
+    let dir = Tmp::new("lead-flags");
+    let env = env_with_aliases(&dir, ALIASES, vec![AskOutcome::AnsweredProceed; 2]).await;
+    for cmd in [
+        "--hostname github.com auth token",
+        "--hostname=github.com auth token",
+        "--hostname github.com tok",
+        "--repo=other.host/o/r pr view 5",
+        "--bogus run delete 5",
+        "-y repo delete o/r",
+    ] {
+        let err = env.call("gh", json!({ "args": cmd })).await.expect_err(cmd);
+        assert!(matches!(err, ToolError::Args(_)), "gh {cmd}: {err}");
+    }
+    assert!(env.asker.cards().is_empty(), "a refusal never asks");
+    // A delete asks as Delete, and what runs is the command with the flag behind the group.
+    // (These run the fake gh, and cmd.exe splits its arguments at `=`: two-word forms.)
+    let out = env
+        .call("gh", json!({"args": "-R o/r run delete 5"}))
+        .await
+        .expect("approved delete");
+    assert_eq!(last_card_class(&env.asker), Some(Class::Delete));
+    assert!(
+        out.text.contains("fake gh: run -R o/r delete 5"),
+        "{}",
+        out.text
+    );
+    // A read with --repo first runs at once as the read.
+    let out = env
+        .call("gh", json!({"args": "--repo o/r pr view 5"}))
+        .await
+        .expect("read");
+    assert!(
+        out.text.contains("fake gh: pr --repo o/r view 5"),
+        "{}",
+        out.text
+    );
+    assert_eq!(env.last_tool_event().class, Some(Class::Read));
+    assert_eq!(env.asker.cards().len(), 1);
+}
