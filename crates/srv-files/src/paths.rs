@@ -221,8 +221,15 @@ const PROFILE_DIRS: &[&str] = &["windowspowershell", "powershell"];
 /// * a file in a folder on the PATH that bash, the cmd fallback or this server use
 ///   ([`path_dirs`]), or any file at all when that PATH has a relative entry.
 ///
-/// Fails closed: a dotfile inside `runs/` is Delete too, rather than keep a list of the
-/// startup files each program reads.
+/// * anything below a folder where Git keeps its own system configuration
+///   ([`PathDirs::trees`]: `<msys root>/etc` with `gitconfig` and `gitattributes`,
+///   `<msys root>/mingw64/etc`, `%ProgramData%\Git`; D-544).
+///
+/// Inside `runs/` (D-545) a dotfile name alone is not enough: no program this server
+/// starts reads startup files from a run folder (HOME, XDG_CONFIG_HOME, CURL_HOME and
+/// WGETRC never point there), so only D-523 (8)'s names stay Delete there
+/// ([`RUNS_STRICT_NAMES`]), with every [`CODE_DIRS`] folder (`.git/hooks`, `.config`,
+/// `.cargo`, ...).
 pub fn runs_code_on_use(roots: &Roots, p: &Path) -> bool {
     code_path(roots, p, homes(), path_dirs())
 }
@@ -233,7 +240,16 @@ pub fn code_path(roots: &Roots, p: &Path, homes: &[Vec<String>], path: &PathDirs
     let Some((file, dirs)) = names.split_last() else {
         return false;
     };
-    if dot_name(file) || matches!(file.as_str(), "_netrc" | "_curlrc") {
+    if path.trees.iter().any(|t| dirs.starts_with(t)) {
+        return true;
+    }
+    let runs = lower_names(&roots.runs);
+    let in_runs = dirs.len() > runs.len() && dirs.starts_with(&runs);
+    if in_runs {
+        if RUNS_STRICT_NAMES.contains(&file.as_str()) {
+            return true;
+        }
+    } else if dot_name(file) || matches!(file.as_str(), "_netrc" | "_curlrc") {
         return true;
     }
     let base = lower_names(&roots.base);
@@ -251,6 +267,19 @@ pub fn code_path(roots: &Roots, p: &Path, homes: &[Vec<String>], path: &PathDirs
     }
     !dirs.is_empty() && path.contains(dirs)
 }
+
+/// File names that stay Delete inside `runs/` (D-523 (8), D-545): git reads them in the
+/// repository that holds them (a `.git` file names the git folder), and the rc spellings
+/// of the two download programs are kept as D-523 listed them.
+const RUNS_STRICT_NAMES: &[&str] = &[
+    ".git",
+    ".gitattributes",
+    ".gitmodules",
+    ".gitconfig",
+    ".curlrc",
+    "_curlrc",
+    ".wgetrc",
+];
 
 fn dot_name(n: &str) -> bool {
     n.starts_with('.') && n != "." && n != ".."
@@ -274,14 +303,7 @@ pub fn homes() -> &'static [Vec<String>] {
     static HOMES: OnceLock<Vec<Vec<String>>> = OnceLock::new();
     HOMES.get_or_init(|| {
         let mut out: Vec<Vec<String>> = Vec::new();
-        let cands = [
-            dirs::home_dir(),
-            std::env::var_os("HOME")
-                .filter(|h| !h.is_empty())
-                .map(PathBuf::from)
-                .filter(|h| h.is_absolute()),
-        ];
-        for h in cands.into_iter().flatten() {
+        for h in home_dirs() {
             let n = lower_names(&canonical_or_absolute(&h));
             if n.len() > 1 && !out.contains(&n) {
                 out.push(n);
@@ -289,6 +311,21 @@ pub fn homes() -> &'static [Vec<String>] {
         }
         out
     })
+}
+
+/// The home folders as paths: the user's profile folder and, when set, `HOME` (a Git
+/// Bash spelling `/c/Users/x` taken as `C:/Users/x`). Relative values are dropped.
+pub fn home_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(|h| PathBuf::from(msys_drive(&h.to_string_lossy())));
+    let mut out: Vec<PathBuf> = Vec::new();
+    for h in [dirs::home_dir(), home].into_iter().flatten() {
+        if h.is_absolute() && !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    out
 }
 
 /// The components of `p`, ASCII-lowercased (Windows paths are case-insensitive), the
@@ -313,11 +350,13 @@ pub(crate) fn lower_names(p: &Path) -> Vec<String> {
         .collect()
 }
 
-/// `p` canonicalised (8.3 names expanded, junctions and links followed) when it exists,
-/// else made absolute (Win32 normalisation of `..`, trailing dots and spaces).
+/// `p` made absolute (Win32 normalisation of `..`, trailing dots and spaces) with every
+/// existing component canonicalised (8.3 names expanded, junctions and links followed),
+/// the way [`resolve`] spells a path, so a folder that does not exist yet (`~/bin`)
+/// below a junction or an 8.3 name compares equal to a resolved path in it.
 fn canonical_or_absolute(p: &Path) -> PathBuf {
     std::fs::canonicalize(p)
-        .or_else(|_| std::path::absolute(p))
+        .or_else(|_| std::path::absolute(p).and_then(|a| walk(&a)))
         .unwrap_or_else(|_| p.to_path_buf())
 }
 
@@ -331,6 +370,9 @@ pub struct PathDirs {
     /// Delete. [`crate::shell`] removes such entries before bash starts, so this only
     /// happens when bash adds one itself.
     pub relative: bool,
+    /// Folders below which every file is configuration a program reads (Git's own
+    /// system config folders, D-544), as [`lower_names`].
+    pub trees: Vec<Vec<String>>,
 }
 
 impl PathDirs {
@@ -351,7 +393,22 @@ impl PathDirs {
                 dirs.push(n);
             }
         }
-        PathDirs { dirs, relative }
+        PathDirs {
+            dirs,
+            relative,
+            trees: Vec::new(),
+        }
+    }
+
+    /// Adds folders whose whole tree is configuration (see [`PathDirs::trees`]).
+    pub fn with_trees(mut self, trees: &[PathBuf]) -> PathDirs {
+        for t in trees {
+            let n = lower_names(&canonical_or_absolute(t));
+            if !n.is_empty() && !self.trees.contains(&n) {
+                self.trees.push(n);
+            }
+        }
+        self
     }
 
     pub fn contains(&self, dir: &[String]) -> bool {
@@ -361,33 +418,52 @@ impl PathDirs {
 
 /// The program search folders, computed once (D-525): this server's own PATH (the cmd
 /// fallback and the helpers it starts), with a relative or empty entry taken against its
-/// working folder; the folder of this executable (Windows searches it first); `~/bin`;
-/// and the PATH the runner's bash really has, which Git Bash builds by putting
-/// `/mingw64/bin`, `/usr/bin` and `$USERPROFILE/bin` in front ([`crate::shell::bash_path`]).
+/// working folder; the folder of this executable (Windows searches it first); `<h>/bin`
+/// for every home folder `h` ([`home_dirs`]: Git Bash puts `$HOME/bin` in front of its
+/// PATH, and HOME may differ from the profile folder; D-543); and the PATH the runner's
+/// bash really has, which Git Bash builds by putting `/mingw64/bin`, `/usr/bin` and
+/// `$HOME/bin` in front ([`crate::shell::bash_path`]). With them, Git's own config
+/// folders as trees ([`crate::shell::git_config_dirs`], D-544).
 pub fn path_dirs() -> &'static PathDirs {
     static DIRS: OnceLock<PathDirs> = OnceLock::new();
     DIRS.get_or_init(|| {
-        let mut entries: Vec<PathBuf> = Vec::new();
-        if let Some(p) = std::env::var_os("PATH") {
-            entries.extend(std::env::split_paths(&p));
-        }
-        if let Some(dir) = std::env::current_exe()
+        let exe_dir = std::env::current_exe()
             .ok()
-            .and_then(|e| e.parent().map(Path::to_path_buf))
-        {
-            entries.push(dir);
-        }
-        if let Some(h) = dirs::home_dir() {
-            entries.push(h.join("bin"));
-        }
-        let mut relative = false;
-        if let Some(b) = crate::shell::bash_path() {
-            entries.extend(b.dirs);
-            relative = b.relative;
-        }
+            .and_then(|e| e.parent().map(Path::to_path_buf));
         let cwd = std::env::current_dir().ok();
-        PathDirs::from_entries(&entries, cwd.as_deref(), relative)
+        path_dirs_from(
+            std::env::var_os("PATH"),
+            exe_dir,
+            &home_dirs(),
+            crate::shell::bash_path(),
+            cwd.as_deref(),
+        )
+        .with_trees(&crate::shell::git_config_dirs())
     })
+}
+
+/// [`path_dirs`] from its parts. `bash` is `None` without bash; a bash whose PATH probe
+/// failed or timed out reports only the Git folders next to it, so `<home>/bin` comes
+/// from `homes` whatever the probe did (D-543).
+pub fn path_dirs_from(
+    harness_path: Option<std::ffi::OsString>,
+    exe_dir: Option<PathBuf>,
+    homes: &[PathBuf],
+    bash: Option<crate::shell::BashPath>,
+    cwd: Option<&Path>,
+) -> PathDirs {
+    let mut entries: Vec<PathBuf> = Vec::new();
+    if let Some(p) = harness_path {
+        entries.extend(std::env::split_paths(&p));
+    }
+    entries.extend(exe_dir);
+    entries.extend(homes.iter().map(|h| h.join("bin")));
+    let mut relative = false;
+    if let Some(b) = bash {
+        entries.extend(b.dirs);
+        relative = b.relative;
+    }
+    PathDirs::from_entries(&entries, cwd, relative)
 }
 
 /// True when `p` is an existing file (links followed) with more than one hard link, or
@@ -405,10 +481,25 @@ fn link_count(_p: &Path, m: &std::fs::Metadata) -> Option<u64> {
     Some(m.nlink())
 }
 
-/// `nNumberOfLinks` from GetFileInformationByHandle (std's `number_of_links` is unstable).
 #[cfg(windows)]
 fn link_count(p: &Path, _m: &std::fs::Metadata) -> Option<u64> {
     use std::os::windows::fs::OpenOptionsExt;
+    // Access 0: metadata only, so a file another process holds open still answers; std
+    // shares read, write and delete by default.
+    let f = std::fs::OpenOptions::new().access_mode(0).open(p).ok()?;
+    handle_link_count(&f)
+}
+
+/// The hard link count of an open file (`None` when it cannot be read).
+#[cfg(unix)]
+pub fn handle_link_count(f: &std::fs::File) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    f.metadata().ok().map(|m| m.nlink())
+}
+
+/// `nNumberOfLinks` from GetFileInformationByHandle (std's `number_of_links` is unstable).
+#[cfg(windows)]
+pub fn handle_link_count(f: &std::fs::File) -> Option<u64> {
     use std::os::windows::io::AsRawHandle;
 
     #[repr(C)]
@@ -432,9 +523,6 @@ fn link_count(p: &Path, _m: &std::fs::Metadata) -> Option<u64> {
             info: *mut ByHandleFileInformation,
         ) -> i32;
     }
-    // Access 0: metadata only, so a file another process holds open still answers; std
-    // shares read, write and delete by default.
-    let f = std::fs::OpenOptions::new().access_mode(0).open(p).ok()?;
     let mut info = ByHandleFileInformation::default();
     // SAFETY: a live file handle owned by `f` and a correctly laid out out-struct.
     let ok = unsafe { GetFileInformationByHandle(f.as_raw_handle() as *mut _, &mut info) };
@@ -784,6 +872,76 @@ mod tests {
         // A relative harness entry is taken against the server's own folder.
         let from_cwd = PathDirs::from_entries(&[PathBuf::from("bin")], Some(t.path()), false);
         assert!(code(&r.resolve("bin/jq").unwrap(), &from_cwd));
+    }
+
+    /// D-544 (review-T-14 confirm, should-fix 2): Git's system config folders are
+    /// configuration below every level; their neighbours are not.
+    #[test]
+    fn git_system_config_folders_are_code() {
+        let (t, r) = setup();
+        let git = t.path().join("Programs").join("Git");
+        std::fs::create_dir_all(git.join("etc")).unwrap();
+        std::fs::write(git.join("etc").join("gitconfig"), "[core]\n").unwrap();
+        let dirs =
+            PathDirs::default().with_trees(&[git.join("etc"), git.join("mingw64").join("etc")]);
+        let code = |rel: &str| code_path(&r, &r.resolve(rel).unwrap(), &[], &dirs);
+        for bad in [
+            "Programs/Git/etc/gitconfig",
+            "Programs/GIT/etc/gitattributes",
+            "Programs/Git/etc/profile.d/x.sh",
+            "Programs/Git/mingw64/etc/gitconfig",
+        ] {
+            assert!(code(bad), "{bad}");
+        }
+        for ok in ["Programs/Git/usr/share/a.txt", "Programs/Git/etc"] {
+            assert!(!code(ok), "{ok}");
+        }
+        assert!(!code_path(
+            &r,
+            &r.resolve("Programs/Git/etc/gitconfig").unwrap(),
+            &[],
+            &PathDirs::default()
+        ));
+    }
+
+    /// D-545 (review-T-14 should-fix carried): a dotfile in a run folder is scratch; the
+    /// names git reads there and every code folder stay Delete; outside runs/ every
+    /// dotfile still is.
+    #[test]
+    fn dotfiles_in_runs_are_scratch_but_git_names_are_not() {
+        let (_t, r) = setup();
+        let none = PathDirs::default();
+        let code = |rel: &str| code_path(&r, &r.resolve(rel).unwrap(), &[], &none);
+        for ok in [
+            "runs/x/.env",
+            "runs/2026-10-25T00-00-00-t/files/.something",
+            "runs/x/.eslintrc.json",
+            "runs/x/.bashrc",
+            "runs/x/.netrc",
+            "runs/x/sub/.npmrc",
+        ] {
+            assert!(!code(ok), "{ok}");
+        }
+        for bad in [
+            "runs/x/.git",
+            "runs/x/r/.GIT",
+            "runs/x/r/.gitattributes",
+            "runs/x/r/.gitmodules",
+            "runs/x/.gitconfig",
+            "runs/x/.curlrc",
+            "runs/x/_curlrc",
+            "runs/x/.wgetrc",
+            "runs/x/r/.git/hooks/pre-commit",
+            "runs/x/r/.git/config",
+            "runs/x/.vscode/tasks.json",
+            "runs/x/.cargo/config.toml",
+            "runs/x/.config/git/config",
+            ".env",
+            "sub/.npmrc",
+            "runs/../.bashrc",
+        ] {
+            assert!(code(bad), "{bad}");
+        }
     }
 
     #[test]

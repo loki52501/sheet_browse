@@ -235,10 +235,9 @@ fn write_table(
     header: &[String],
     rows: &[Vec<String>],
 ) -> Result<(), String> {
-    let mut w = ::csv::WriterBuilder::new()
-        .delimiter(delim)
-        .from_path(path)
-        .map_err(|e| e.to_string())?;
+    // Opened, then checked to be the classified file, before it is replaced (D-549).
+    let f = crate::safeio::open_write(path, false).map_err(|e| e.to_string())?;
+    let mut w = ::csv::WriterBuilder::new().delimiter(delim).from_writer(f);
     w.write_record(header).map_err(|e| e.to_string())?;
     for r in rows {
         w.write_record(r).map_err(|e| e.to_string())?;
