@@ -17,8 +17,9 @@
 //! `xlsx/`, `docx/`, `pptx/`), else found on PATH and under the Claude Code skills folder
 //! (`$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`; S7). A missing program, Python
 //! package or skills folder is an error or note that names it and how to get it, never
-//! a panic. Written documents go to this run's `files/` unless `out` says
-//! otherwise; replacing a file outside `runs/` asks first.
+//! a panic. Written documents go to this run's `files/` unless `out` is an absolute
+//! path (a relative `out` is under `files/` too, D-146); replacing a file outside `runs/`
+//! asks first.
 
 use crate::csv::Table;
 use crate::paths::Roots;
@@ -232,7 +233,7 @@ pub fn tools() -> Vec<ToolSpec> {
 
 /// The document tools with explicit helper locations (tests).
 pub fn tools_with(cfg: DocsConfig) -> Vec<ToolSpec> {
-    let in_path = json!({"type":"string","description":"input file; a bare name not found next to runs/ is read from this run's files/"});
+    let in_path = json!({"type":"string","description":"input file; a relative path not found next to runs/ is read from this run's files/"});
     let read_props = |extra: Value| {
         let mut p = json!({
             "path":in_path,
@@ -244,7 +245,7 @@ pub fn tools_with(cfg: DocsConfig) -> Vec<ToolSpec> {
         }
         json!({"type":"object","properties":p,"required":["path"],"additionalProperties":false})
     };
-    let out = json!({"type":"string","description":"output file; a bare name lands in this run's files/"});
+    let out = json!({"type":"string","description":"output file; a relative path lands in this run's files/ (one that leaves it is refused)"});
     let specs: Vec<(Op, &str, Class, Value)> = vec![
         (
             Op::PdfRead,

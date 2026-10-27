@@ -1,0 +1,23 @@
+from: rust-coder-1
+to: core/suborch (then reviewer, tester)
+task: T-17c
+date: "2026-10-27"
+state: "Committed f739e05 on swarm/core-T17b. D-146 is in crates/srv-files/src/paths.rs: Roots::resolve_out sends every relative output path (x.csv, ./x.csv, out/x.csv) under runs/<id>/files/ and refuses with Args, naming the path, any that leaves files/ (../x, a/../../x, a link inside files/ pointing out). Absolute paths, ~ and rooted paths resolve as before. A relative path that already resolves inside the runs root from the base (runs/<id>/files/x, the form Roots::shown prints) is not nested. Drive-relative C:x is refused for outputs. resolve_existing and shadowed fall back to files/<path> for any relative path, never leaving files/. fs.mkdir uses resolve_out. fs.move's move_dest: for a scratch source, a folder of that name in files/ wins, then a base folder of that name (D-573), else resolve_out. For a non-scratch source it resolves against the base as before. is_bare is gone; is_relative and is_drive_relative replace it (srv-files only, not in interfaces.yaml). Tool descriptions in fs, csv, diff and docs updated. Full cargo test -p srv-files passed on this exact code (lib 79, accept_t13c 8, accept_t14 22 plus 4 ignored, t14b and the rest green)."
+not_done: "1) cargo clippy -p srv-files --all-targets -- -D warnings was not run on the final code: the machine ran out of memory (rustc allocation failures, STATUS_STACK_BUFFER_OVERRUN). 2) The mutation check (pr-ready section 6) was started but killed for low memory and not rerun. It put back the old ./x and out/x meaning and dropped the leave-files/ guard. paths.rs was restored byte-for-byte and verified. Expected red if rerun: accept_t13c relative_paths_go_to_files_and_absolute_ones_keep_their_meaning and relative_outputs_that_leave_files_are_refused. 3) cargo test --workspace not run. 4) Reviewer and tester reports (bench/results/review-T-17c.md, accept-T-17c.md)."
+gotchas:
+  - "Python pathlib write_text on Windows writes CRLF. Strip it (sed -i 's/\\r$//') or write bytes. The repo is LF."
+  - "Other sessions build in the same machine; cargo with more than one job, or concurrent builds, ran out of RAM and left corrupt rlib metadata ('only metadata stub found'). Use cargo -j 1 and one build at a time."
+  - "Behaviour change for callers that used ./name to mean the base folder: it now lands in files/. accept_t14 fs_read_write_glob_move_mkdir and r2_ladder_rung9 were switched to absolute paths. The shell tool's cp/mv targets are unchanged (shell cwd rules)."
+  - "The session cwd was moved to F:/sb-swarm/wt/core/wt/T28 mid-task by the environment. All work and commits are in F:/sb-swarm/wt/core on swarm/core-T17b."
+decisions_made: [D-146]
+blockers_opened: [B-206]
+files_touched:
+  - crates/srv-files/src/paths.rs
+  - crates/srv-files/src/fs.rs
+  - crates/srv-files/src/csv.rs
+  - crates/srv-files/src/diff.rs
+  - crates/srv-files/src/docs.rs
+  - crates/srv-files/tests/accept_t13c.rs
+  - crates/srv-files/tests/accept_t14.rs
+  - agent-memory/blockers.yaml
+verify: "cargo clippy -j 1 -p srv-files --all-targets -- -D warnings && cargo test -j 1 -p srv-files"

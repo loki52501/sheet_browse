@@ -1,0 +1,15 @@
+from: rust-coder-1
+to: core/suborch (then reviewer, tester)
+task: T-17b
+date: "2026-10-27"
+state: "Committed a549823 on swarm/core-T17b. NOT COMPILED, NOT TESTED: cargo clippy and test -p harness failed with out-of-memory (rustc 'memory allocation failed', STATUS_STACK_BUFFER_OVERRUN). The code is formatted (cargo fmt --all -- --check ok). The change is in crates/harness/src/launcher.rs. A new pub fn preamble_line(req) joins sched::run_preamble's lines (split on \\n and \\r, trimmed, empty ones dropped) with one space. In ClaudeLauncher::command, interactive mode adds the args '--append-system-prompt' and preamble_line(req) right after the prompt (which is unchanged, including the leading-space guard for '-' prompts) and before the variadic --disallowedTools list. -p sessions are unchanged. In tests, every_session_denies_the_user_only_commands now expects the two new argv elements. New test interactive_sessions_get_the_preamble_as_one_line checks: prompt unchanged, flag placed before --disallowedTools, value holds the run id, the absolute files/ path and the cite-only line, no newline or double space, the value equals run_preamble lines joined by spaces, and a -p argv has no such flag. bench/fixtures/ladder_session.py forwards --append-system-prompt <value> into its claude -p argv (py_compile ok). Module doc updated."
+not_done: "1) Build and run: cargo clippy -j 1 -p harness --all-targets -- -D warnings; cargo test -j 1 -p harness --lib launcher. 2) Mutation check: drop the cmd.arg(\"--append-system-prompt\") line; both launcher tests must go red. 3) cargo test --workspace. 4) Reviewer and tester reports. 5) Not checked live: that Claude Code accepts --append-system-prompt in interactive mode before --disallowedTools via the claude.cmd shim. D-145 assumes it does."
+gotchas:
+  - "--disallowedTools is variadic and must stay last; the new flag goes before it."
+  - "The machine is RAM-bound with other sessions' cargo builds; use -j 1, one build at a time."
+decisions_made: [D-145]
+blockers_opened: []
+files_touched:
+  - crates/harness/src/launcher.rs
+  - bench/fixtures/ladder_session.py
+verify: "cargo test -j 1 -p harness --lib launcher"
