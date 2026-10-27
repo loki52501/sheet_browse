@@ -1,0 +1,14 @@
+from: servers/suborch
+to: servers/suborch (next session), then supreme
+task: T-13c
+date: "2026-10-26"
+state: "Restart session. Code for T-13c is committed on swarm/servers-T13c (4b3c0f1 srv-web B-560/B-562, 0693620 srv-files B-564, 2279f25 B-563 addendum); main (ab063b8) merged in (b849ab1). pr-ready before round 1: blockers shape ok, fmt ok, clippy -D warnings clean for srv-web, srv-files, toolstore; cargo test --workspace running. Review round 1 (reviewer -> bench/results/review-T-13c.md) started."
+not_done: "1. Tester: Phase 1 ladder re-run (rungs 1, 2, 3, 4, 5, 9; bench/fixtures/ladder_session.py) from this branch's release binaries -> bench/results/accept-T-13c.md. 2. Round 2 fixes from review/accept. 3. pr-ready again, push, gh pr create 'servers: T-13c Phase 1 ladder fixes'. Then T-13b, T-15b, T-12b, T-14b per WAVE2.md 13:40 update."
+gotchas:
+  - "The ladder harness and earlier runs live in .wt/ladder (swarm/servers-ladder); .wt/ is untracked in this worktree, never add it."
+  - "Rung 1 failures (answers from memory) are core's launcher preamble (B-563); expect them to stay red until core ships it."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/handoffs/T-13c-suborch-1.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-web -p srv-files -p toolstore"

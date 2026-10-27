@@ -57,7 +57,9 @@ pub(crate) fn spec(web: Arc<Web>) -> ToolSpec {
             page skeleton, the first chunk as light markdown with [text](#id) links, and a \
             cursor; pass cursor (or region=\"## Heading\") with the same url to continue on the \
             cached page. mode=sheet: numbered element lines. url=\"#12\" follows link #12 of \
-            the last fetched page."
+            the last fetched page. Fetching a page also announces that site's tools (a \
+            `tools for this site:` line, e.g. a job board's list_jobs); prefer them over raw \
+            api calls."
             .into(),
         class: Class::Read,
         args: json!({

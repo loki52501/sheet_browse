@@ -1,0 +1,30 @@
+from: rust-coder-1 (servers, srv-web part of T-13c)
+to: servers sub-orchestrator, then the T-13c tester (ladder re-run)
+task: T-13c
+date: "2026-10-26"
+state: "srv-web ladder fixes for rungs 2 and 4 are in. B-562 / D-567: api always sends its own USER_AGENT; caller User-Agent and From are refused (even as @vault), Authorization / Proxy-Authorization / Cookie unless the value holds @vault(...), one-line refusal naming only the header; an email-shaped string in any other header's literal text raises the class to Send with recipients [host] (asks). B-560 / D-565: Config::json_max_bytes (32 MB) is page.api's cap and api's cap for pick calls (other api calls keep 5 MB and, when JSON is cut, say to call again with pick). D-566: api gained pick (dotted paths, [] for arrays) that projects before the 20 000-char cap; a cut answer ends with its top-level keys, array lengths and a pick example. D-569: tools/ashbyhq.com/list_jobs.js takes offset and q and returns {org,total,matched,offset,shown,next_offset?,jobs}; site output falls back to compact JSON when only that fits. D-568: site tool descriptions carry the header's first prose paragraph; fetch, api and search descriptions steer to site tools, pick, and citing this run. srv-web: fmt, clippy -D warnings and all tests green; workspace tests green (see verify)."
+not_done: "1) The ladder re-run (bench/fixtures/ladder_session.py) for rungs 2 and 4 is the tester's. 2) Live check of list_jobs on jobs.ashbyhq.com/openai (over 5 MB, now under the 32 MB JSON cap): `SB_ASHBY_ORG=openai cargo test -p srv-web --test accept_t13 -- --ignored` was not run (network). 3) B-565 (Send times out to proceed for personal data in headers) is core's, wave 4."
+gotchas:
+  - "Changing tools/ashbyhq.com/list_jobs.js changes toolstore's seed-tool expectations: crates/toolstore/src/tests.rs (skeleton line) and crates/toolstore/tests/accept_t11.rs (skeleton line and exact output). They were updated in the same commit (store area is stopped); any later edit to the seed tool's @args or output must update them too."
+  - "serde_json here has no preserve_order: object keys come out sorted, so in list_jobs output `jobs` precedes `next_offset`; that is why site output falls back to compact JSON instead of letting the 20 000-char cut drop the paging fields."
+  - "agent-memory files are shared with the srv-files coder on the same branch: commit only your own hunks (this commit was built from HEAD + this task's entries with a temporary index, so the other coder's D-570..D-574 and B-564 edits stay in the working tree for their commit)."
+  - "A Send ask with ScriptedAsker and no scripted answer times out to proceed: tests that need the call not to go out push AskOutcome::AnsweredSkip first."
+decisions_made: [D-565, D-566, D-567, D-568, D-569]
+blockers_opened: [B-565]
+files_touched:
+  - crates/srv-web/src/api.rs
+  - crates/srv-web/src/pick.rs
+  - crates/srv-web/src/config.rs
+  - crates/srv-web/src/http.rs
+  - crates/srv-web/src/site.rs
+  - crates/srv-web/src/fetch.rs
+  - crates/srv-web/src/search.rs
+  - crates/srv-web/src/lib.rs
+  - crates/srv-web/tests/accept_t13.rs
+  - crates/srv-web/tests/t13c_api.rs
+  - tools/ashbyhq.com/list_jobs.js
+  - crates/toolstore/src/tests.rs
+  - crates/toolstore/tests/accept_t11.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+verify: "cargo test -p srv-web -j 2 && cargo test -p toolstore -j 2"

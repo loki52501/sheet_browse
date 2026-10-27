@@ -246,7 +246,7 @@ blockers:
   - id: B-560
     task: T-13
     question: "Live run 2026-10-26: ashbyhq.list_jobs works on jobs.ashbyhq.com/ashby and /linear, but fails on /openai because api.ashbyhq.com/posting-api/job-board/openai answers more than page.api's 5 MB cap (D-501; the answer carries descriptionHtml and descriptionPlain for every job, which the tool drops). Large boards therefore cannot be listed in Phase 1. Raise page.api's cap for JSON (the tool's output is capped at 64 KiB / 20 000 chars anyway), stream-parse and drop known-large fields, or accept?"
-    default_taken: "Accept for now: the 5 MB cap stays (W-2, D-501) and page.api reports a cut body as 'answered more than the 5 MB cap' instead of 'did not answer with JSON', so the model falls back to fetch/find in one turn. Proposed follow-up for the sub-orchestrator: a separate page.api cap (e.g. 32 MB, still bounded by the run's remaining wall time, D-64), since the bytes never reach the model."
+    default_taken: "Accept for now: the 5 MB cap stays (W-2, D-501) and page.api reports a cut body as 'answered more than the 5 MB cap' instead of 'did not answer with JSON', so the model falls back to fetch/find in one turn. Proposed follow-up for the sub-orchestrator: a separate page.api cap (e.g. 32 MB, still bounded by the run's remaining wall time, D-64), since the bytes never reach the model. Shipped (T-13c, D-565): page.api has its own JSON cap, Config::json_max_bytes = 32 MB, still inside the run's remaining wall time (D-64); api gained pick (D-566), and a pick call reads up to the same cap, so a 2 MB board fits in one call and a cut answer names its top-level keys, array lengths and a pick example. list_jobs pages with offset and filters with q (D-569)."
     needs_user: false
   - id: B-561
     task: T-13
@@ -255,23 +255,32 @@ blockers:
   - id: B-562
     task: T-13b
     question: "Phase 1 ladder rung 2 (bench/results/ladder-phase1-servers.md, variants 1 and 3): the session put the Claude Code account's email address into a `User-Agent` header of a Read-class `api` call to crates.io, so personal data left the machine with no ask. Should srv-web's `api` refuse model-set identity headers (User-Agent, From, Cookie...) and keep its own UA, or should the gate class an outgoing header carrying contact data as Send?"
-    default_taken: "Servers fix in T-12b: `api` sends its own UA and refuses model-set User-Agent, From, Cookie and Authorization headers that are not @vault(...) templates; any other header value that looks like an email address raises the class to Send (asks, D-39 recipients = the host). A gate-level personal-data check is a core question for wave 4."
+    default_taken: "Servers fix in T-12b: `api` sends its own UA and refuses model-set User-Agent, From, Cookie and Authorization headers that are not @vault(...) templates; any other header value that looks like an email address raises the class to Send (asks, D-39 recipients = the host). A gate-level personal-data check is a core question for wave 4. Shipped (T-13c, D-567): api always sends its own USER_AGENT; User-Agent and From are refused (even as @vault), Authorization, Proxy-Authorization and Cookie unless the value holds @vault(...), each with a one-line reason naming only the header; an email-shaped string in any other header's literal text raises the class to Send with recipients = [host], so it asks. The gate-level personal-data check stays core's (see B-565)."
     needs_user: false
   - id: B-563
     task: T-13b
     question: "Phase 1 ladder rung 1 (variants 2, 3): `claude -p` sessions launched by `harness run` answered research prompts from memory with zero tool calls, and report.md said `Result: done` with `Read: 0`. The launcher passes only the bare prompt; the session is not told its run id, its files/ folder, or that answers must cite this run's tool results. Should the launcher (core, docs/01 H-5/H-6) prepend a short run preamble (run id, files path, 'cite sources you fetched in this run'), and should report.md mark a research run with no Read calls as not done?"
-    default_taken: "Core owns it (launcher and report). Proposed preamble: one paragraph with the run id, `runs/<id>/files/` for deliverables, and 'cite only what tools returned in this run'. Until then the ladder scores such runs as fail."
+    default_taken: "Core owns it (launcher and report). Proposed preamble: one paragraph with the run id, `runs/<id>/files/` for deliverables, and 'cite only what tools returned in this run'. Until then the ladder scores such runs as fail. T-13c addendum (servers): Claude Code loads MCP tools deferred, so a session sees tool names but not descriptions until it searches; the T-13c description changes (search: cite only this run's results) cannot reach a session that never calls a tool. Servers propose, for core: harness_core::mcp initialize returns an `instructions` string per server (Claude Code puts MCP server instructions into the system prompt), e.g. srv-web 'answer web questions from search/fetch in this run and cite only those results', srv-files 'a bare file name you write lands in this run's files/'. That needs a serve() parameter or a ToolSpec-adjacent hook, so it is an I-2 change for wave 4 (D-90); the launcher preamble alone also fixes rung 1."
     needs_user: false
   - id: B-564
     task: T-13b
     question: "Phase 1 ladder rungs 4 and 5 (variant 3): sessions wrote deliverables (CSV, table) to their working folder instead of runs/<id>/files/, because fs.write and csv.clean resolve a bare file name against the base folder and the session never learns its run id. Should fs.write and csv.clean put a bare file name into the run's files/ the way xlsx.write already does?"
-    default_taken: "Yes, servers T-14b: a relative path with no folder component goes to runs/<id>/files/; explicit paths keep their meaning. The tool descriptions say so."
+    default_taken: "Yes, servers T-14b: a relative path with no folder component goes to runs/<id>/files/; explicit paths keep their meaning. The tool descriptions say so. Shipped in T-13c (srv-files, D-570..D-574): output-taking tools put a bare name in runs/<id>/files/, readers fall back to files/<name> when the base has no such file (base wins when both exist), fs.move's bare destination follows D-573, descriptions updated."
+    needs_user: false
+  - id: B-565
+    task: T-13c
+    question: "D-567 makes an email address in an api header a Send that asks, with the host as the recipient. A Send ask times out to proceed (H-1.1), so with no one at the keyboard the address still leaves. Should personal data in an outgoing header (api, and later cdp/eval/forged tools) time out to skip, i.e. should the gate (core) carry a personal-data hint whose ask times out to skip, and should it detect contact data itself instead of each server?"
+    default_taken: "Keep Send as B-562 proposed (asks, times out to proceed); identity headers (User-Agent, From) are refused outright, which covers the ladder's failure. Proposed for core, wave 4: a gate hint such as Send:personal_data with a skip timeout, set by servers or by a gate-side scan of outgoing values."
     needs_user: false
   - id: B-199
     task: T-05c
     question: "For area driver: sb-driver test chromium_driver::bench_headless_launch_registry_and_cleanup (crates/sb-driver/tests/chromium_driver.rs:231) fails about 1 run in 2 on this machine under load ('bench profile ... not removed'); it passed on the next run with no code change. Seen in core's `cargo test --workspace -j 2` on swarm/core-T05c (main 14587a3 merged). It makes the D-87 workspace gate flaky for every area."
     default_taken: "Not a core fix. Core lists it in its PR bodies as a known flake and reruns that test binary once. Proposed for driver: wait for the browser process tree to exit (condition with a cap, rule 6) before asserting the profile folder is gone, or retry the removal on Windows sharing violations."
     needs_user: false
+  - id: B-186
+    from: core
+    question: "review-T-08b round 1 should-fix: `harness gate set <domain> <class>` stores domain and class as the gate.rules key. A vault value typed into either (gate::rule_key accepts a canary-shaped label) would land in the database (rule 2). Scrubbing does not fit a key: the scrubbed text is a different rule, or one rule_key refuses. Should the CLI refuse such a domain or class, scrub it, or store it?"
+    default_taken: "Refuse (T-08b round 2): before gate_rule_set, a domain or class whose scrub differs from the typed text is a Usage error that names the vault entry (`@vault(name)`), never the value, and nothing is stored. The note keeps being scrubbed (it is not a key). Test: accept_t08_r2 b186_gate_set_refuses_a_vault_value_in_the_domain_or_class."
 interface_changes:
   - id: B-194
     from: core

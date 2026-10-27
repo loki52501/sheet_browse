@@ -1,0 +1,19 @@
+from: tester (T-13c ladder re-run)
+to: servers suborch, supreme
+task: T-13c
+date: "2026-10-26"
+state: "Phase 1 ladder rungs 1, 2, 3, 4, 5, 9 re-run, 3 variants each (18 real Claude Code sessions via harness run), against release binaries built from swarm/servers-T13c at 29862a0. 14 of 18 runs pass. The live accept_t13 test with SB_ASHBY_ORG=openai passes, and the offline t13c_api + accept_t13 suites pass (20 passed, 1 ignored). The canary was found 0 times everywhere. Report: bench/results/accept-T-13c.md, Verdict: red. Fixed by T-13c: no UA/From header and no email sent (rung 2); rung 4 is now 3/3 (list_jobs paging with offset reads all 67+33 roles, api pick reads full boards); bare names land in files/ and the Files line in all 5 cases where they were used."
+not_done: "Failing: (1) rung 1 variants 1 and 2 answer from memory with zero tool calls. Owner: core launcher preamble, B-563. (2) rung 2 variant 1 and rung 5 variant 3 wrote the deliverable to an absolute path outside runs/ (the session cwd; the inputs' folder), so it is not in files/ or report.md's Files line. Owner: core B-563 preamble (tell the session that deliverables go in this run's files/), with srv-files F-1 as a possible fallback (a note or report entry for a new file created outside runs/)."
+gotchas:
+  - "The guard hook blocks Write outside the worktree (including the scratchpad) and blocks curl to non-registry hosts. Tester scripts went to the untracked .wt/t13c/; Ashby totals came from the ledgered list_jobs/api results in the transcripts."
+  - "The ladder scratch tree is F:/sb-swarm/tmp-servers/ladder (it was gone and was recreated). The rung 5 and rung 9 prompts hardcode paths under it. resume_fixture.py needs anaconda python without -I (python-docx is in the user site)."
+  - "When answering the rung 9/2 ask, strip the trailing slash that `ls` adds to the run id; harness ask rejects 'id/'."
+  - "pick rejects index paths like versions[0] and echoes them as versions(0) (escape::name). Every rung-2 session lost 3 calls to this."
+  - "The srv-cli classifier classes `curl <url>` and `python3 -c` as Delete, so each costs a 60 s ask timeout in a headless ladder."
+  - "No session used csv.clean; all dedupes were done by the model and were correct."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/accept-T-13c.md
+  - agent-memory/handoffs/T-13c-tester-1.yaml
+verify: "SB_ASHBY_ORG=openai cargo test -j 2 -p srv-web --test accept_t13 -- --ignored (the ladder itself needs real sessions; evidence is in the throwaway DB sb_t_ladder_p1c, runs/2026-10-27T00-*, and F:/sb-swarm/tmp-servers/ladder/logs)"

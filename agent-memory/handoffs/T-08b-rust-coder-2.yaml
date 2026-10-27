@@ -1,0 +1,19 @@
+from: rust-coder
+to: reviewer
+task: T-08b
+date: "2026-10-26"
+state: "Round 2 (D-89, last round) fixes both Blocking items and all should-fix items of review-T-08b round 1. crates/harness/src/cli.rs: `schedule add` scrubs --watch-target before the Schedule row and ledger args are built, and scrubs the own run's task text (cron nit). It prints parent run through clean(). `tools list` prints the folder through the new tool_id(d, n) helper (clean of `d/n`), which pin, unpin, known_tool and retire also use. `gate set` refuses a domain or class that holds a vault value (B-186 default): it returns a Usage error naming `@vault(name)`, never the value, and stores nothing. crates/harness/tests/accept_t08_r2.rs: the writing test adds a `--kind watch --watch-target https://example.com/<canary>/inbox` case and asserts schedules.watch_target is stored scrubbed. The tools echo test now seeds a tools.health row and a file named luma.com/<canary> and asserts that pin, unpin and retire print `luma.com/@vault(test): pinned|unpinned|retired`. Three tests are new: unknown-id pin/unpin returns CliError::NotFound and writes no row, with and without a value in the id; b186 gate set refusal; schedule add under SB_RUN_ID prints the parent run as the literal. The reading test adds a `<canary>.com` tool folder for `tools list` with and without the domain argument. crates/core/tests/mcp_t07.rs: file_asker_stderr_has_no_canary sets the child's TEMP/TMP/TMPDIR to a folder padded past 210 chars itself, and the child asserts its temp path is over 200 chars. Red proofs: one run with all five cli.rs fixes reverted (watch_target scrub, the three echoes, tools list `d`, parent.id, gate refusal) gave `accept_t08_r2: 10 passed; 5 failed`. Each new or changed test failed on its own line (watch_target left Some(...<CANARY>...), echoes print luma.com/<CANARY>, tools list shows <CANARY>.com/probe, parent run ...-<CANARY>, gate set Ok). The old ask.rs wording with the session TEMP (20 chars) failed mcp_t07 at the 'fail-closed line is printed' assert. Both files were restored. Gates: fmt clean; clippy -p harness-core -p harness --all-targets -D warnings clean; accept_t08_r2 15 passed, 0 ignored; full `cargo test -j 1 -p harness-core -p harness --no-fail-fast` exit 0, 37 binaries ok (harness lib 6, accept_t08 18, accept_t08_r2 15, accept_t09 1, step1_accept 7, t08 10, t08_vault 6; harness_core lib 133, accept_t08b_d85 2, mcp_t07 33 + 1 ignored child, all other core suites ok, doctests 5), 0 canary hits in the log."
+not_done: "Reviewer round 2, then tester re-run of accept-T-08b. The orchestrator can close B-186 once supreme accepts the default (blockers.yaml is append-only)."
+gotchas:
+  - "Bash heredocs in this tool turn `\\n` inside a quoted Python string into a real newline. Use the Edit tool for Rust string literals with escapes."
+  - "Writes outside the worktree (including the session scratchpad) are blocked by guard_write.py. Keep temp files under target/."
+  - "Build with a per-worktree CARGO_TARGET_DIR and -j 1. Host RAM is nearly exhausted, and the full harness-core + harness test run takes more than 10 minutes."
+decisions_made: []
+blockers_opened: [B-186]
+files_touched:
+  - crates/harness/src/cli.rs
+  - crates/harness/tests/accept_t08_r2.rs
+  - crates/core/tests/mcp_t07.rs
+  - agent-memory/blockers.yaml
+  - agent-memory/tasks.yaml
+verify: "SB_VAULT_CANARY=sbcanary-x-$(openssl rand -hex 8) CARGO_TARGET_DIR=F:/sb-swarm/wt/core/wt/T08b/target cargo test -j 1 -p harness --test accept_t08_r2 -- --test-threads=1"
