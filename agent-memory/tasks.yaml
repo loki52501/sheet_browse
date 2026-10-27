@@ -169,7 +169,7 @@ tasks:
     step: 4
     title: "reviews SM-2, contacts in gate, baselines, watch diff + single notify, reflect readers-only, proposals"
     docs: [docs/01-HARNESS-CORE.md, docs/02-MEMORY.md, docs/06-TOOLFORGE.md]
-    status: todo
+    status: done
     blocked_by: [T-13, T-15]
   - id: T-17
     step: 5
@@ -364,7 +364,7 @@ tasks:
     wave: 2
     owner: core
     branch: swarm/core-T16d
-    title: "T-16 deferrals (review-T-16 r1 should-fix 6, D-143): H-5/G-3 reflect 'compare output shape' (the ledger keeps only result_summary; needs a stored output shape per tool call); T-6 growth and G-3 forge proposals from reflect; G-3 expectation learning (T-5) from earlier runs; G-3 reflect 'after each task' (today only a reflect schedule fires a pass); H-5 'nightly' reflect is not auto-created (harnessd should make sure one nightly reflect row exists, D-142 (1)); and whatever the tester's live ladder rungs 6, 7, 8 find (permission denials, srv-web path for the replay session, schedule.add ask in rung 7)."
+    title: "T-16 deferrals (review-T-16 r1 should-fix 6, D-143): H-5/G-3 reflect 'compare output shape' (the ledger keeps only result_summary; needs a stored output shape per tool call); T-6 growth and G-3 forge proposals from reflect; G-3 expectation learning (T-5) from earlier runs; G-3 reflect 'after each task' (today only a reflect schedule fires a pass); H-5 'nightly' reflect is not auto-created (harnessd should make sure one nightly reflect row exists, D-142 (1)); and the live-ladder leftovers from accept-T-16 (rungs 6-8 all passed): `harness schedule list` shows the placeholder 'T-16' as next run for watch/reflect rows and `schedule add --kind watch|reflect` still prints 'harnessd runs it from T-16 (not in Phase 1)' (cli.rs); the launcher denies MultiEdit, which Claude Code 2.1.311 lacks (harnessd warns); `harness run` has no grounding preamble, so rung 6 session A wrote cards without fetching the paper (same gap as servers ladder failure 1); the print-session allow list is proven only by the launcher unit test because the ladder shim replaces --allowedTools."
     docs: [docs/01-HARNESS-CORE.md, docs/06-TOOLFORGE.md, docs/03-TOOL-STORE.md]
     status: todo
     from: T-16
