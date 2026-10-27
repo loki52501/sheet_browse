@@ -106,8 +106,10 @@ tasks:
     step: 2
     title: "srv-web follow-ups: un-ignore api_base64_echoed_vault_value_is_scrubbed once T-05d is on main; api text/plain tag check before JSON decode; text/plain walk loses <...> content (Vec<String>); page client honours system proxy so PublicOnly is skipped; Content-Type echoed; wiring tests for feed/search cleaned URLs and text; relative feed links without xml:base dropped; B-500 and B-501 need supreme answers"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
-    status: todo
-    owner: servers
+    status: doing
+    owner: servers/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/servers-T12b
   - id: T-13
     step: 2
     title: "Seed tools/ashbyhq.com/list_jobs.js (@phase 1) and step-2 acceptance; ladder rungs 1, 2, 4"
