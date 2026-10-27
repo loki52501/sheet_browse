@@ -1,0 +1,23 @@
+# T-27. Opens the index-th conversation of a Gmail search and returns its text. Opening a
+# thread marks it read, as it does for the user.
+name: thread
+domain: mail.google.com
+kind: recipe
+description: "Open one thread and return its messages as text. query is a Gmail search (subject:\"...\" to pick by subject; default in:inbox), index is the 1-based row among the results"
+match: ["/mail/*"]
+args:
+  query: {type: string, default: "in:inbox"}
+  index: {type: int, default: 1}
+steps:
+  - tool: navigate
+    args: {url: "https://mail.google.com/mail/u/0/#search/{query}"}
+  - tool: wait
+    args: {for: selector, value: "[role=main] [role=grid] [role=row]", timeout: 30000}  # cold loads of Google pages exceed the 10 s default
+  - tool: act
+    target: {role: row, nth: "{index}"}
+    args: {kind: click}
+  - tool: wait
+    args: {for: selector, value: "[role=main] [aria-label=\"Print all\"]"}   # only an open thread has it; [role=main] h2 also matches the results page
+  - tool: read
+    args: {format: text, selector: "[role=main]"}
+    returns: messages

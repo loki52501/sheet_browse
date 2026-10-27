@@ -316,6 +316,35 @@ blockers:
     task: T-17c
     question: "D-146 says every relative output path resolves under this run's files/. Three spellings it does not settle: (1) a relative path that already names a place inside the runs root from the base, e.g. `runs/<id>/files/x.csv`, which is exactly how srv-files replies show a path in files/ (Roots::shown) and which sessions reuse; taken literally it would nest as files/runs/<id>/files/x.csv. (2) Windows drive-relative `C:x` (the server process's per-drive cwd). (3) `~`, `~/x` and rooted `/x` or `\\x`."
     default_taken: "(1) A relative output path whose base resolution is inside the runs root keeps the base resolution (same place and class as before D-146; accept_t13c relative_paths_go_to_files_and_absolute_ones_keep_their_meaning asserts no nesting). (2) Refused for outputs with Args (the session cannot know that cwd; the old resolution landed outside both base and files/); reads keep the old resolution with no files/ fallback. (3) Treated as not relative: resolved as before (home folder, drive root), gate classes unchanged. A relative fs.move `to` for a scratch source follows resolve_out, a folder of that name in files/ first, then a base folder of that name (D-573), else refused if it leaves files/. Code: crates/srv-files/src/paths.rs Roots::resolve_out, is_relative, is_drive_relative; fs.rs move_dest."
+  - id: B-595
+    task: T-27
+    question: "For supreme: the servers decision-id range (D-500..D-599, D-42) is used up (D-599 is the last). Which range does servers use next?"
+    default_taken: "servers uses D-1500..D-1599 (nobody's range; driver's D-600+ is in use). Recorded here so the next allocation does not collide."
+    needs_user: false
+  - id: B-596
+    task: T-27
+    question: "For core (T-28 recipe kind, tools.run): the WAVE3 format leaves the run-time semantics open. The hand-written recipes in tools/mail.google.com, tools/calendar.google.com and tools/lu.ma rely on these. Are they what tools.run will do?"
+    default_taken: "(1) target is {role, name?, nth?}: role equals the snapshot role, name is a case-sensitive prefix of the accessible name (Gmail's Send button is named 'Send (Ctrl-Enter)'), nth is 1-based among matches in snapshot order (default 1); resolved from a fresh snapshot or grep right before the act. (2) act kinds used: click, fill (args.value), press (args.key, no target). (3) a string that is only one placeholder ('{count}') takes the arg's type, so grep limit stays an int. (4) placeholder values substituted into navigate.args.url are percent-encoded as a URL component (titles with spaces or & in calendar eventedit). (5) an arg with default '' is allowed and substitutes the empty string. (6) a step's `returns` names the tool result handed back to the model. (7) expects.text is checked with wait for=text after the last step. scripts/recipes/check_recipes.py enforces the static side until toolstore's parser replaces it."
+    needs_user: false
+  - id: B-597
+    task: T-27
+    question: "For the user: the live run of tools/lu.ma/register (click Register on a free public event with the saved Luma profile) was refused by Claude Code's auto-mode classifier as a real-world transaction. Run it yourself, or allow mcp__browseros*__act for it, so it can be tested live?"
+    default_taken: "Not worked around. register is checked statically and verified live up to the click: luma.com/cygp5fj9 (Ping Pong Night // Inference x Depot, free, open registration, 2026-10-27) shows the Registration block with the saved name and email and a 'Register' button; a registered event shows \"You're In\" (ASCII apostrophe), which is the recipe's expects. Live register stays open in accept-T-27.md."
+    needs_user: true
+  - id: B-598
+    task: T-27
+    question: "For supreme (hooks): browseros_ledger.py matches mcp__browseros__.* only. A session that has BrowserOS under another server name (this machine's user config registers it as browseros-neo, so tools are mcp__browseros-neo__*) records nothing in browseros.jsonl, and tools.save would find no steps. Widen the matcher to mcp__browseros[^_]*__.* or require the project .mcp.json name?"
+    default_taken: "Acceptance runs for T-27 use the worktree .mcp.json server name `browseros` so the hook records them; the exploratory calls made under browseros-neo are not in any browseros.jsonl."
+    needs_user: false
+  - id: B-599
+    task: T-27
+    question: "For core (T-28 tools.run), addendum to B-596 from review-T-27 round 1: run-time rules a static check cannot enforce. Will tools.run do these?"
+    default_taken: "(1) @vault(key) is resolved only where the recipe file itself has it as the whole act text/value; an arg value or default containing @vault( is refused (else send(body='@vault(pw)') would mail the secret). (2) target nth counts matches inside the region of the step's last wait selector when there is one ([role=main] [role=grid] for Gmail rows), not the whole snapshot, so a hidden or side-panel row cannot be picked; until then thread relies on Gmail listing result rows first (seen live). (3) a Challenge stop during a recipe does not count toward reflect's 3-failure retire rule. (4) tools.run refuses em dashes and double-dash separators in send/draft subject and body (CLAUDE.md rule 7). (5) placeholders substituted into grep patterns are regex-escaped and into CSS selectors CSS-escaped. (6) send/draft check the recipient chip equals the `to` arg before Send (a partial name makes Tab commit Gmail's top suggestion); the recipes' descriptions require one full address meanwhile. (7) register needs a stop condition for paid or approval events (a proposed optional `refuse_if: {text: ...}` step field, e.g. 'Approval Required', 'Get Ticket', '$'); until then the description says free open events only and the model checks the page before running it."
+    needs_user: false
+  - id: B-1500
+    task: T-27
+    question: "For supreme (hooks) and core (tools.save, reflect), from the T-27 live acceptance (bench/results/accept-T-27.md): scripts/hooks/browseros_ledger.py writes ok: true for BrowserOS results that are failures in substance (wait returning matched:false, grep 'No matches'), because BrowserOS does not set isError on them; and a run whose wait and grep failed had 4 ledger lines where the session made 6 calls, so failed calls appear to be missing (PostToolUse only?). tools.save would save failed steps and reflect could not count recipe failures. Fix in the hook (PostToolUseFailure too, and ok: false on matched:false / No matches) or in tools.save?"
+    default_taken: "No hook change from servers (hooks are supreme's). Servers ids continue at B-1500 / D-1500 (B-595: both 500 ranges are used up). Also noted for core: inbox returns mail snippets to the model as they are; the test inbox had a bank one-time code in a snippet, kept out of browseros.jsonl only by the 300-char summary cut. A one-time-code scrub in the ledger hook summary would be cheap."
     needs_user: false
 interface_changes:
   - id: B-194

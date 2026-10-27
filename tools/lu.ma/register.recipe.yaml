@@ -1,0 +1,21 @@
+# T-27. Free events with open registration only: the button must read "Register" (not
+# "Request to Join", "Join Waiting List" or a ticket price), and the saved Luma name and
+# email are used as they are. A ticket or payment step is a stop.
+name: register
+domain: lu.ma
+kind: recipe
+description: "Register for a FREE event with open registration (a plain Register button, no ticket price, no Approval Required) with the saved Luma name and email; check the page first. event is the slug after lu.ma/ or luma.com/ (luma.com/cygp5fj9 -> cygp5fj9)"
+match: ["/*"]
+args:
+  event: {type: string, required: true}
+steps:
+  - tool: navigate
+    args: {url: "https://luma.com/{event}"}
+  - tool: wait
+    args: {for: text, value: "Registration", timeout: 30000}  # a cold page load can exceed the 10 s default
+  - tool: act
+    target: {role: button, name: "Register"}
+    args: {kind: click}
+  - tool: wait
+    args: {for: text, value: "You're In"}
+expects: {text: "You're In"}

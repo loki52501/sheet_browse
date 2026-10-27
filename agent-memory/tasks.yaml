@@ -255,8 +255,20 @@ tasks:
     step: 6
     title: "(docs/11 shape, D-98) Hand-written BrowserOS recipes: tools/mail.google.com inbox/thread/draft/send, tools/calendar.google.com events/create, tools/lu.ma register; tested live through BrowserOS (prompts/suborch/WAVE3.md limits). Owner servers, branch swarm/servers-T27."
     docs: [docs/07-MAIL-CALENDAR-VIA-BROWSER.md]
+    status: done
+    done_at: "2026-10-27"
+    evidence: "bench/results/review-T-27.md (approve, Blocking none), bench/results/accept-T-27.md (rows 1-7 and 9 pass live through BrowserOS; row 8 register not-run, B-597 -> T-27b)"
+    owner: servers/suborch
+    claimed_at: "2026-10-27"
+    branch: swarm/servers-T27
+    blocked_by: [T-26]   # waived by prompts/suborch/WAVE3.md, which assigns T-27 to servers now
+  - id: T-27b
+    step: 6
+    title: "Live run of tools/lu.ma/register on a free open Luma event (accept-T-27 row 8), once the user allows the Register click or runs it (B-597); then switch scripts/recipes to toolstore's recipe parser after T-28 merges (D-1500)"
+    docs: [prompts/suborch/WAVE3.md]
     status: todo
-    blocked_by: [T-26]
+    owner: servers
+    blocked_by: [T-28]
   - id: T-28
     step: 6
     title: "(docs/11 shape, D-98) toolstore `recipe` kind + harness-forge MCP server: tools.list/run/save over BrowserOS, save from browseros.jsonl, report.md includes browser calls, reflect retires a recipe after 3 failures, launcher allows browseros and harness-forge. Owner core, branch swarm/core-T28."

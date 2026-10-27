@@ -1,0 +1,34 @@
+# T-27. Composes and saves a draft; never sends. The draft stays in Drafts.
+name: draft
+domain: mail.google.com
+kind: recipe
+description: "Compose a new message and save it as a draft (does not send); checks it is listed in Drafts. to is one full email address"
+match: ["/mail/*"]
+args:
+  to: {type: string, required: true}
+  subject: {type: string, required: true}
+  body: {type: string, required: true}
+steps:
+  - tool: navigate
+    args: {url: "https://mail.google.com/mail/u/0/#inbox?compose=new"}
+  - tool: wait
+    args: {for: selector, value: "[role=dialog] [aria-label=\"To recipients\"]", timeout: 30000}  # cold loads of Google pages exceed the 10 s default
+  - tool: act
+    target: {role: combobox, name: "To recipients"}
+    args: {kind: fill, value: "{to}"}
+  - tool: act
+    args: {kind: press, key: Tab}             # commits the address as a chip and closes the suggestion list
+  - tool: act
+    target: {role: textbox, name: "Subject"}
+    args: {kind: fill, value: "{subject}"}
+  - tool: act
+    target: {role: textbox, name: "Message Body"}
+    args: {kind: fill, value: "{body}"}
+  - tool: act
+    target: {role: button, name: "Save & close"}
+    args: {kind: click}
+  - tool: navigate
+    args: {url: "https://mail.google.com/mail/u/0/#drafts"}
+  - tool: wait
+    args: {for: text, value: "{subject}", timeout: 30000}  # cold loads of Google pages exceed the 10 s default
+expects: {text: "{subject}"}

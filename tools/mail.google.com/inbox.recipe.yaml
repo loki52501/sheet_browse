@@ -1,0 +1,16 @@
+# T-27 (docs/11, WAVE3 recipe format). Read only: lists rows, opens nothing, so unread stays unread.
+name: inbox
+domain: mail.google.com
+kind: recipe
+description: "List the latest N inbox threads, one line each: unread flag, sender, subject, date, snippet"
+match: ["/mail/*"]
+args:
+  count: {type: int, default: 5}
+steps:
+  - tool: navigate
+    args: {url: "https://mail.google.com/mail/u/0/#inbox"}
+  - tool: wait
+    args: {for: selector, value: "[role=main] [role=grid] [role=row]", timeout: 30000}  # cold loads of Google pages exceed the 10 s default
+  - tool: grep
+    args: {over: ax, pattern: '^\s*- row "', limit: "{count}"}
+    returns: threads

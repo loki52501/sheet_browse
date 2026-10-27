@@ -763,3 +763,15 @@ decisions:
   - id: D-146
     text: "T-17b/T-17c (amends D-570, D-571). srv-files output paths: every relative path (bare `x.csv`, `./x.csv`, `out/x.csv`) resolves under this run's files/, not the folder that holds runs/; absolute paths keep their meaning. A relative output path that would leave files/ (`../x`) is refused (Args). Reads: a relative path resolves against the base folder first as before, then falls back to files/<path> when the base has no such file (D-571 widened from bare names to all relative paths). fs.mkdir follows the output rule so 'fs.mkdir out' then 'fs.write out/x.csv' agree."
     why: "WAVE3 core 1: file-writing tools default relative paths to the run's files/ so deliverables land in the run and report.md's Files line; absolute paths stay the user's explicit choice."
+  - id: D-1500
+    text: "T-27 recipes are checked by scripts/recipes/check_recipes.py (Python, PyYAML, unittest in scripts/recipes/test_check_recipes.py) until core's toolstore recipe parser (T-28) merges; then the check moves to a Rust test over toolstore's parser. It ports toolstore's @match rules and imports the hooks' KEY_RE."
+    why: "The workspace has no YAML crate and core picks one in T-28; adding a second one from servers would collide. The hooks already depend on PyYAML."
+  - id: D-1501
+    text: "Google recipes use URL entry points over clicks where Google offers them: compose opens with #inbox?compose=new, calendar create prefills title, times and description through /r/eventedit?text=&dates=&details= and only clicks Save. After filling To recipients, a press Tab commits the address as a chip and closes the suggestion list."
+    why: "Fewer, more deterministic steps (efficiency first). Seen live 2026-10-27: without Tab, the suggestion list covers Subject and the next fill fails as covered."
+  - id: D-1502
+    text: "lu.ma register takes the event slug, not a URL, and navigates to https://luma.com/{slug}; tools/lu.ma/_site.yaml aliases luma.com, because every lu.ma page redirects there. thread takes a Gmail query (default in:inbox) and a 1-based index instead of separate subject and index modes."
+    why: "A URL argument would let a recipe navigate off-site; a slug keeps the host literal, which the checker enforces. Recipes have no conditionals, so one query+index form covers both 'by subject' (subject:\"...\") and 'by index'."
+  - id: D-1503
+    text: "A recipe step may call only navigate, wait, act, grep, read, snapshot and diff. tabs, windows, tab_groups, history, download, upload, pdf and screenshot are left out until the checker has a URL or path rule for each; run, evaluate, request/await_human_help, save_skill, mark_skill_run and name_session never. Navigate URLs with a backslash, whitespace, a control character, @ or % in the authority, or a port are refused."
+    why: "review-T-27 round 1 items 2 and 3: a tab or download opened any URL and upload read any local file with no check, and Chrome reads a backslash after evil.com as a slash (so evil.com, then .site as path) while urlsplit sees a host ending in .site."
