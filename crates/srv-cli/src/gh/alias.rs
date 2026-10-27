@@ -6,8 +6,10 @@
 //! Only the YAML gh 2.x writes is understood: one `name: value` line per alias, the value
 //! plain, single-quoted or double-quoted. A value in any other form (a block scalar, a
 //! multi-line plain value, an unknown escape) is kept as unreadable, and calling that alias
-//! is refused (fails closed). Alias values can hold anything the user typed, so nothing here
-//! puts an expansion into an error message.
+//! is refused (fails closed). Alias values can hold anything the user typed, so no error
+//! here quotes one (an [`expand`] error names at most one shell character), and the gh
+//! module names an expansion only by its leading command words (`gh::command_words`) and
+//! leaves the expansion's words out of every refusal made inside it (D-596).
 
 use std::collections::BTreeMap;
 

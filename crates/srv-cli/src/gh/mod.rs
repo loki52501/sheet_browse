@@ -32,7 +32,7 @@
 //! user alias, so the server reads `gh alias list` (refusing the call when it cannot) and
 //! classifies and runs the expansion instead of the alias. `alias set` is classified at the
 //! class of the command its expansion runs (at least Account) and refused when that command
-//! would be refused or is a shell alias.
+//! would be refused or is a shell alias; `alias import` is refused (D-597).
 //! `call` plans again with a fresh list and runs only when that plan (the words, the host,
 //! the class) equals the one classify made for it (D-595).
 //!
@@ -287,10 +287,14 @@ fn plan_at(
             _ => Vec::new(),
         };
         if let Some(w) = later.iter().find(|w| aliases.has_pair(group, w)) {
+            // Inside an expansion the second word may be far into it: not named.
+            let named = if depth > 0 {
+                "a two-word alias".to_string()
+            } else {
+                format!("gh {} {}", text::line(group, 64), text::line(w, 64))
+            };
             return Err(ToolError::Args(format!(
-                "gh {} {} is an alias: put no flags between its two words; nothing ran",
-                text::line(group, 64),
-                text::line(w, 64)
+                "{named} is an alias: put no flags between its two words; nothing ran"
             )));
         }
     }
@@ -317,14 +321,40 @@ fn message(e: ToolError) -> String {
     }
 }
 
-/// A refusal of an alias's expansion, naming the alias and the command it stands for (its
-/// first two words only: an expansion can hold anything the user typed).
+/// A refusal of an alias's expansion, naming the alias and the command it stands for by
+/// [`command_words`]. The reason is the inner refusal, which names no word of the expansion:
+/// every refusal made at depth > 0 leaves its words out (D-596).
 fn in_alias(name: &str, expanded: &[String], e: ToolError) -> ToolError {
-    let head = text::line(&argv::show(&expanded[..expanded.len().min(2)]), 64);
     ToolError::Args(format!(
-        "gh {name} is an alias for gh {head} ...: {}",
+        "gh {name} is an alias for gh {} ...: {}",
+        command_words(expanded),
         message(e)
     ))
+}
+
+/// How a card or an error names an alias's expansion: its first two words, stopping at the
+/// first that is not a plain command word (letters, digits, `-`, `_`, not starting with
+/// `-`), so a flag, an endpoint, a URL or a value is never shown (D-591, D-596). An
+/// expansion can hold anything the user typed.
+fn command_words(expanded: &[String]) -> String {
+    let plain = |w: &&String| {
+        !w.is_empty()
+            && w.len() <= 32
+            && !w.starts_with('-')
+            && w.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    let words: Vec<&str> = expanded
+        .iter()
+        .take(2)
+        .take_while(plain)
+        .map(String::as_str)
+        .collect();
+    if words.is_empty() {
+        "(a command)".to_string()
+    } else {
+        words.join(" ")
+    }
 }
 
 /// Does classifying `gh <argv>` need the user's aliases? Not for `api`, `auth`, `config`,
@@ -443,10 +473,14 @@ fn alias_set_class(
                 }
             }
             _ => {
+                let flag = if depth > 0 {
+                    String::new()
+                } else {
+                    format!(" {}", text::line(t, 40))
+                };
                 return Err(ToolError::Args(format!(
-                    "gh alias set: flag {} is not one this server reads (--clobber); nothing ran",
-                    text::line(t, 40)
-                )))
+                    "gh alias set: flag{flag} is not one this server reads (--clobber); nothing ran"
+                )));
             }
         }
     }
@@ -456,7 +490,12 @@ fn alias_set_class(
                 .into(),
         ));
     };
-    let name = text::line(name, 64);
+    // Inside an expansion (`alias set` as an alias) the name is its third word: not shown.
+    let name = if depth > 0 {
+        "NAME".to_string()
+    } else {
+        text::line(name, 64)
+    };
     if expansion == "-" {
         return Err(ToolError::Args(
             "gh alias set NAME -: an expansion read from stdin cannot be checked; give it as \
@@ -487,6 +526,30 @@ fn alias_set_class(
     Ok(inner.call.class.max(Class::Account))
 }
 
+/// `gh alias import FILE` is refused: it stores every alias in a file (or stdin) with no
+/// check of what each would run, so `tok: auth token` would be one Account ask away. Aliases
+/// are set one at a time with `alias set`, which checks the expansion (D-597). `alias set`
+/// or `import` after an unknown flag is refused too, so the check cannot be skipped.
+fn alias_refusals(known: Option<&str>, sub: &Sub<'_>) -> Result<(), ToolError> {
+    if known == Some("import") {
+        return Err(ToolError::Args(
+            "gh alias import is refused: the aliases in a file cannot be checked; set each with \
+             gh alias set NAME EXPANSION, which checks what it runs; nothing ran"
+                .into(),
+        ));
+    }
+    if let Sub::Ambiguous(words) = sub {
+        if words.iter().any(|w| matches!(*w, "set" | "import")) {
+            return Err(ToolError::Args(
+                "gh alias: a flag before the alias subcommand is not read here; put the flags \
+                 after the subcommand, e.g. gh alias set --clobber pv \"pr view\"; nothing ran"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// [`plan`] for a call that is not an alias.
 fn classify_static(
     argv: &[String],
@@ -514,10 +577,10 @@ fn classify_static(
     let rest = &argv[1..];
     let mut domain = GITHUB.to_string();
     if group == "api" {
-        if let Some(host) = api_host(rest, ghe_hosts)? {
+        if let Some(host) = api_host(rest, ghe_hosts, depth > 0)? {
             domain = host;
         }
-    } else if let Some(host) = repo_host(rest, ghe_hosts)? {
+    } else if let Some(host) = repo_host(rest, ghe_hosts, depth > 0)? {
         domain = host;
     }
     let sub = subcommand(rest);
@@ -547,6 +610,9 @@ fn classify_static(
         _ => None,
     };
     let known = known_at.map(|i| rest[i].as_str());
+    if group == "alias" {
+        alias_refusals(known, &sub)?;
+    }
     let class = match (group.as_str(), known_at) {
         ("alias", Some(i)) if rest[i] == "set" => {
             class.max(alias_set_class(&rest[i + 1..], ghe_hosts, aliases, depth)?)
@@ -700,13 +766,18 @@ fn api_class(rest: &[String]) -> Class {
 ///
 /// Tokens that are the value of a known value-taking flag (`-f body=https://...`) are not
 /// endpoints; after an unknown flag the next token is still checked (fails closed).
-fn api_host(rest: &[String], ghe_hosts: &[String]) -> Result<Option<String>, ToolError> {
+/// `quiet` (inside an alias's expansion, D-596): the refusal does not quote the token.
+fn api_host(
+    rest: &[String],
+    ghe_hosts: &[String],
+    quiet: bool,
+) -> Result<Option<String>, ToolError> {
     let ghe = |h: &str| ghe_hosts.iter().any(|g| g.eq_ignore_ascii_case(h));
     let refuse = |what: &str| {
         ToolError::Args(format!(
-            "gh api {:?}: gh api only reaches GitHub API hosts (https://{GITHUB_API}{}); \
+            "gh api{}: gh api only reaches GitHub API hosts (https://{GITHUB_API}{}); \
              use a path like repos/o/r, or the web tools for other sites",
-            text::line(what, 200),
+            quoted(what, quiet),
             if ghe_hosts.is_empty() {
                 String::new()
             } else {
@@ -793,13 +864,17 @@ fn api_host(rest: &[String], ghe_hosts: &[String]) -> Result<Option<String>, Too
 /// configured GHE host, and it becomes the gate domain; any other host is refused.
 ///
 /// Fails closed: every token is checked, so a `HOST/OWNER/REPO`-shaped search query or a
-/// URL in a free-text argument is refused too.
-fn repo_host(rest: &[String], ghe_hosts: &[String]) -> Result<Option<String>, ToolError> {
+/// URL in a free-text argument is refused too. `quiet` as for [`api_host`].
+fn repo_host(
+    rest: &[String],
+    ghe_hosts: &[String],
+    quiet: bool,
+) -> Result<Option<String>, ToolError> {
     let refuse = |what: &str| {
         ToolError::Args(format!(
-            "gh {:?}: gh only reaches github.com{}; use OWNER/REPO, or the web tools for other \
+            "gh{}: gh only reaches github.com{}; use OWNER/REPO, or the web tools for other \
              sites",
-            text::line(what, 200),
+            quoted(what, quiet),
             if ghe_hosts.is_empty() {
                 String::new()
             } else {
@@ -861,6 +936,15 @@ fn repo_host(rest: &[String], ghe_hosts: &[String]) -> Result<Option<String>, To
         }
     }
     Ok(found)
+}
+
+/// ` "token"` for a host refusal, or nothing when `quiet`.
+fn quoted(what: &str, quiet: bool) -> String {
+    if quiet {
+        " (a host in an alias's expansion)".to_string()
+    } else {
+        format!(" {:?}", text::line(what, 200))
+    }
 }
 
 /// GET and HEAD read, DELETE deletes, anything else (POST, PUT, PATCH, unknown) is Account.
@@ -993,7 +1077,7 @@ impl ToolHandler for Gh {
             Some(a) => format!(
                 "run gh {shown} (alias {} for gh {} ...)",
                 text::line(a, 64),
-                text::line(&argv::show(&p.argv[..p.argv.len().min(2)]), 64)
+                command_words(&p.argv)
             ),
             None => format!("run gh {shown}"),
         };
@@ -1401,7 +1485,9 @@ mod tests {
     const ALIASES: &str = "tok: auth token\ncfg: config get oauth_token\nrmr: repo delete\n\
 v: pr view\nrl: run list\nsh1: '!echo hi'\nml: |-\n    pr\n    view\n\
 issue mine: issue list --mention @me\nq: api -X \"$1\" repos/o/r\nnest: tok\nloop: loop\n\
-far: api https://any.host/x\nt2: v\nrd: --repo=o/r run delete\nlead: --repo o/r --bogus run delete\n";
+far: api https://any.host/x\nt2: v\nrd: --repo=o/r run delete\nlead: --repo o/r --bogus run delete\n\
+fr: pr view -R secret.host/o/r\nfa: api --hostname secret.host repos/o/r\n\
+as1: alias set zz9 'auth token'\nas2: alias set --bogus x 'pr view'\n";
 
     fn p(s: &str) -> Result<GhPlan, ToolError> {
         plan(
@@ -1444,6 +1530,36 @@ far: api https://any.host/x\nt2: v\nrd: --repo=o/r run delete\nlead: --repo o/r 
         ] {
             assert!(matches!(p(bad), Err(ToolError::Args(_))), "gh {bad}");
         }
+        // review-T-15b should-fix 2 (D-596): a refusal inside an alias names the alias and
+        // the expansion's command words, never the rest of it (the host, the URL, a flag).
+        for (bad, hidden) in [
+            ("far", "any.host"),
+            ("fr 5", "secret.host"),
+            ("fa", "secret.host"),
+            ("as1", "zz9"),
+            ("as2", "--bogus"),
+            ("lead 5", "--bogus"),
+        ] {
+            let e = p(bad).unwrap_err().to_string();
+            assert!(!e.contains(hidden), "gh {bad}: {e}");
+            assert!(e.contains(&format!(
+                "gh {} is an alias",
+                bad.split(' ').next().unwrap()
+            )));
+        }
+        let e = p("fr 5").unwrap_err().to_string();
+        assert!(e.contains("is an alias for gh pr view ..."), "{e}");
+        let e = p("far").unwrap_err().to_string();
+        assert!(e.contains("is an alias for gh api ..."), "{e}");
+        // Outside an alias the call's own text is still quoted.
+        let e = p("api https://any.host/x").unwrap_err().to_string();
+        assert!(e.contains("any.host"), "{e}");
+        let words = |s: &str| command_words(&argv::split(s).unwrap());
+        assert_eq!(words("pr view 5"), "pr view");
+        assert_eq!(words("api https://h/x"), "api");
+        assert_eq!(words("issue list --mention @me"), "issue list");
+        assert_eq!(words("--repo=o/r run delete"), "(a command)");
+        assert_eq!(words("a.b c"), "(a command)");
         // Not an alias: unchanged.
         let got = p("pr merge 5").unwrap();
         assert_eq!((got.call.class, got.alias), (Class::Account, None));
@@ -1569,6 +1685,23 @@ far: api https://any.host/x\nt2: v\nrd: --repo=o/r run delete\nlead: --repo o/r 
         }
         assert_eq!(c("alias delete pv").unwrap(), Class::Delete);
         assert_eq!(c("alias list").unwrap(), Class::Account);
+        // review-T-15b should-fix 4 (D-597): `alias import` stores unchecked aliases, and a
+        // flag before `set` or `import` would hide them from the check: refused.
+        for bad in [
+            "alias import x.yml",
+            "alias import -",
+            "alias import --clobber x.yml",
+            "alias -R o/r import x.yml",
+            "-R o/r alias import x.yml",
+            "alias --bogus import x.yml",
+            "alias --bogus set tok2 'auth token'",
+            "alias -c set pv 'pr view'",
+        ] {
+            assert!(matches!(c(bad), Err(ToolError::Args(_))), "gh {bad}");
+            assert!(matches!(p(bad), Err(ToolError::Args(_))), "gh {bad}");
+        }
+        let e = c("alias import x.yml").unwrap_err().to_string();
+        assert!(e.contains("gh alias set NAME EXPANSION"), "{e}");
     }
 
     /// T-15b item 4 (D-593): a whole HTML page from `gh api` is not shown; a PR body that

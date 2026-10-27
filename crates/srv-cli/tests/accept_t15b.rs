@@ -125,11 +125,12 @@ async fn item2_adversarial_alias_chains_placeholders_and_loops_are_refused() {
     assert_eq!(env.asker.cards().len(), n + 1);
     assert!(last_card_class(&env.asker) >= Some(Class::Account));
 
-    // `alias import` (a file of aliases, unchecked here) asks, and `alias delete` is Delete.
-    env.call("gh", json!({"args": "alias import x.yml"}))
-        .await
-        .expect("skipped");
-    assert!(last_card_class(&env.asker) >= Some(Class::Account));
+    // `alias import` (a file of aliases, unchecked) is refused since review-T-15b should-fix
+    // 4 (D-597), with no card; `alias delete` is Delete.
+    let cards = env.asker.cards().len();
+    let r = env.call("gh", json!({"args": "alias import x.yml"})).await;
+    assert!(matches!(r, Err(ToolError::Args(_))), "{r:?}");
+    assert_eq!(env.asker.cards().len(), cards);
     env.call("gh", json!({"args": "alias delete co"}))
         .await
         .expect("skipped");

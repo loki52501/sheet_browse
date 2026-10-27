@@ -271,3 +271,88 @@ async fn a_plan_that_changed_after_classify_does_not_run() {
         out.text
     );
 }
+
+/// review-T-15b should-fix 4 (D-597): `alias import` would store aliases nobody checked, so
+/// it is refused before any card; `alias set` (checked) still asks.
+#[tokio::test]
+async fn alias_import_is_refused() {
+    let dir = Tmp::new("alias-import");
+    let env = env_with_aliases(&dir, ALIASES, vec![AskOutcome::AnsweredSkip]).await;
+    for cmd in [
+        "alias import x.yml",
+        "alias import -",
+        "alias --bogus import x.yml",
+    ] {
+        let err = env.call("gh", json!({ "args": cmd })).await.expect_err(cmd);
+        assert!(
+            matches!(&err, ToolError::Args(m) if m.contains("alias set")),
+            "gh {cmd}: {err}"
+        );
+    }
+    assert!(env.asker.cards().is_empty(), "a refusal never asks");
+    env.call("gh", json!({"args": "alias set pv 'pr view'"}))
+        .await
+        .expect("skipped");
+    assert_eq!(last_card_class(&env.asker), Some(Class::Account));
+    assert!(env.events().iter().all(|e| !e.ok || e.server == "core"));
+}
+
+/// review-T-15b should-fix 3 (D-591 fails closed): when `gh alias list` fails, a call that
+/// may name an alias is refused at classify with no card and nothing run, whatever class
+/// the word would have (fixture fake-gh-page: `<page>.aliasfail` makes `alias list` exit 1;
+/// any other call prints the page, so a run would show as an ok event).
+#[tokio::test]
+async fn a_failing_alias_list_refuses_the_call() {
+    let dir = Tmp::new("alias-list-fails");
+    let page = dir.0.join("page.txt");
+    std::fs::write(&page, "it ran\n").unwrap();
+    std::fs::write(dir.0.join("page.txt.aliasfail"), "").unwrap();
+    let script = if cfg!(windows) {
+        vec![
+            fixtures().join("fake-gh-page.cmd").display().to_string(),
+            page.display().to_string(),
+        ]
+    } else {
+        vec![
+            "sh".into(),
+            fixtures().join("fake-gh-page.sh").display().to_string(),
+            page.display().to_string(),
+        ]
+    };
+    let cfg = Config {
+        gh: script,
+        ..Config::default()
+    };
+    let env = Env::new(
+        srv_cli::tools_with(cfg),
+        "gh_canary",
+        vec![AskOutcome::AnsweredProceed; 4],
+    )
+    .await;
+    for cmd in [
+        "x 5",
+        "pr merge 5",
+        "rmr o/r --yes",
+        "--repo=o/r pr merge 5",
+    ] {
+        let err = env.call("gh", json!({ "args": cmd })).await.expect_err(cmd);
+        assert!(
+            matches!(&err, ToolError::Failed(m)
+                if m.contains("cannot tell whether this names a gh alias")),
+            "gh {cmd}: {err}"
+        );
+    }
+    assert!(env.asker.cards().is_empty(), "nothing was asked");
+    assert!(
+        env.events().iter().all(|e| !e.ok || e.server == "core"),
+        "an event shows a run"
+    );
+    // The listing works again: the same call asks and runs.
+    std::fs::remove_file(dir.0.join("page.txt.aliasfail")).unwrap();
+    let out = env
+        .call("gh", json!({"args": "pr merge 5"}))
+        .await
+        .expect("runs");
+    assert!(out.text.contains("it ran"), "{}", out.text);
+    assert_eq!(env.asker.cards().len(), 1);
+}
