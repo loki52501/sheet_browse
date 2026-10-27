@@ -15,6 +15,7 @@ pub mod feed;
 pub mod fetch;
 pub mod html;
 mod http;
+mod pick;
 mod pin;
 pub mod search;
 mod site;

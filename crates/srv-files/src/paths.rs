@@ -64,17 +64,40 @@ impl Roots {
         resolve(dir, raw).map_err(|e| ToolError::Args(format!("path {raw:?}: {e}")))
     }
 
-    /// `raw` resolved, or this run's `files/<raw>` when `raw` is a bare file name (no
-    /// folder part): where documents and reports land by default.
+    /// Where a file a tool writes goes (B-564, D-570): this run's `files/<raw>` when `raw`
+    /// is a bare file name ([`is_bare`]), else `raw` resolved against the base as written
+    /// (`./x.csv`, `out/x.csv` and absolute paths keep their meaning). Every tool that
+    /// names an output file uses this, in classify and in call alike.
     pub fn resolve_out(&self, raw: &str) -> Result<PathBuf, ToolError> {
-        let p = Path::new(raw);
-        let mut comps = p.components();
-        let bare = matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none();
-        if bare {
+        if is_bare(raw) {
             self.resolve_in(&self.files, raw)
         } else {
             self.resolve(raw)
         }
+    }
+
+    /// Where a file a tool reads (or moves or deletes) is (B-564, D-571): `raw` resolved
+    /// against the base; a bare name that does not exist there but does exist in this
+    /// run's `files/` is that file, so a session reads back what it wrote with the same
+    /// name. When both exist the base wins (as before T-13c); [`Roots::shadowed`] names
+    /// the other one.
+    pub fn resolve_existing(&self, raw: &str) -> Result<PathBuf, ToolError> {
+        let p = self.resolve(raw)?;
+        if !is_bare(raw) || exists(&p) {
+            return Ok(p);
+        }
+        let f = self.resolve_in(&self.files, raw)?;
+        Ok(if exists(&f) { f } else { p })
+    }
+
+    /// For a bare `raw` that [`Roots::resolve_existing`] resolved to `p` in the base while
+    /// this run's `files/<raw>` exists too: that file (D-571).
+    pub fn shadowed(&self, raw: &str, p: &Path) -> Option<PathBuf> {
+        if !is_bare(raw) || p.starts_with(&self.files) {
+            return None;
+        }
+        let f = self.resolve_in(&self.files, raw).ok()?;
+        (f != p && exists(&f)).then_some(f)
     }
 
     /// For text the model reads: relative to the base with `/`, else the plain path.
@@ -89,6 +112,17 @@ impl Roots {
     pub fn place(&self, p: &Path) -> Place {
         place(self, p)
     }
+}
+
+/// True when `raw` is a bare file name: one plain component with no folder part, root,
+/// drive, `.`, `..`, `~` or trailing separator (`report.csv`; not `./report.csv`,
+/// `out/report.csv`, `archive/`, `C:x`).
+pub fn is_bare(raw: &str) -> bool {
+    if raw.starts_with('~') || raw.ends_with('/') || raw.ends_with('\\') {
+        return false;
+    }
+    let mut comps = Path::new(raw).components();
+    matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
 }
 
 /// Where a resolved path is, for the gate.
@@ -763,5 +797,51 @@ mod tests {
             r.resolve_out("x/report.pdf").unwrap(),
             r.base.join("x").join("report.pdf")
         );
+        assert_eq!(
+            r.resolve_out("./report.pdf").unwrap(),
+            r.base.join("report.pdf")
+        );
+    }
+
+    /// B-564 (D-570): only a plain one-component name is bare.
+    #[test]
+    fn bare_names() {
+        for b in ["report.csv", "a b.txt", "x"] {
+            assert!(is_bare(b), "{b}");
+        }
+        for n in [
+            "./report.csv",
+            "out/report.csv",
+            "archive/",
+            "/abs.txt",
+            "..",
+            ".",
+            "~",
+            "~/x.txt",
+            "",
+        ] {
+            assert!(!is_bare(n), "{n}");
+        }
+        #[cfg(windows)]
+        for n in ["C:x.txt", "C:\\x.txt", "archive\\", "out\\report.csv"] {
+            assert!(!is_bare(n), "{n}");
+        }
+    }
+
+    /// B-564 (D-571): a bare read falls back to files/ only when the base has no such
+    /// file; the base wins when both exist and `shadowed` names the other.
+    #[test]
+    fn bare_reads_fall_back_to_files() {
+        let (_t, r) = setup();
+        std::fs::write(r.files.join("a.csv"), "run").unwrap();
+        assert_eq!(r.resolve_existing("a.csv").unwrap(), r.files.join("a.csv"));
+        assert_eq!(r.shadowed("a.csv", &r.files.join("a.csv")), None);
+        assert_eq!(r.resolve_existing("./a.csv").unwrap(), r.base.join("a.csv"));
+        assert_eq!(r.resolve_existing("b.csv").unwrap(), r.base.join("b.csv"));
+        std::fs::write(r.base.join("a.csv"), "base").unwrap();
+        let p = r.resolve_existing("a.csv").unwrap();
+        assert_eq!(p, r.base.join("a.csv"));
+        assert_eq!(r.shadowed("a.csv", &p), Some(r.files.join("a.csv")));
+        assert_eq!(r.shadowed("./a.csv", &p), None);
     }
 }

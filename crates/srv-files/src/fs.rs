@@ -7,6 +7,12 @@
 //! elsewhere it is gone from where it was. `fs.delete` inside `runs/` is Read, the class
 //! `shell("rm -rf runs/x")` has (S3, B-520). Every call rechecks its class against the
 //! approved one before it acts.
+//!
+//! Bare names (B-564, T-13c): `fs.write` puts a bare file name in this run's `files/`
+//! ([`Roots::resolve_out`], D-570); `fs.read`, `fs.delete` and a move's source fall back to
+//! `files/<name>` when the base has no such file ([`Roots::resolve_existing`], D-571); a
+//! move's bare destination follows D-573. Classify and call act on one resolved `Plan`
+//! (D-572).
 
 use crate::paths::{self, Place, Roots};
 use crate::text::{self, MAX_CHARS, READ_DEFAULT_CHARS};
@@ -52,7 +58,7 @@ pub fn tools() -> Vec<ToolSpec> {
     vec![
         spec(
             "fs.read",
-            "Read a text file (relative paths start at the folder that holds runs/). Returns at most max_chars (default 8000, up to 20000) from char offset; a trailer names the next offset.",
+            "Read a text file. Relative paths start at the folder that holds runs/; a bare file name not found there is read from this run's files/ (where fs.write put it). Returns at most max_chars (default 8000, up to 20000) from char offset; a trailer names the next offset.",
             Class::Read,
             Op::Read,
             json!({"type":"object","properties":{
@@ -63,7 +69,7 @@ pub fn tools() -> Vec<ToolSpec> {
         ),
         spec(
             "fs.write",
-            "Write (or append) text to a file, creating folders. Deliverables belong in this run's files/ (runs/<run>/files/). Replacing a file outside runs/ asks first.",
+            "Write (or append) text to a file, creating folders. A bare file name (report.csv) lands in this run's files/ (runs/<run>/files/, the reply names it) and is listed in the run report: use one for deliverables. ./name, folder/name and absolute paths keep their meaning (relative to the folder that holds runs/). Replacing a file outside runs/ asks first.",
             Class::Fill,
             Op::Write,
             json!({"type":"object","properties":{
@@ -84,7 +90,7 @@ pub fn tools() -> Vec<ToolSpec> {
         ),
         spec(
             "fs.move",
-            "Move or rename a file or folder. Into an existing folder keeps the name. Replacing a file, or moving something from outside runs/ into it, asks first.",
+            "Move or rename a file or folder. Into an existing folder keeps the name. A bare `to` name for something in runs/ lands in this run's files/; a bare `from` not found next to runs/ is this run's files/<name>. Replacing a file, or moving something from outside runs/ into it, asks first.",
             Class::Fill,
             Op::Move,
             json!({"type":"object","properties":{
@@ -103,7 +109,7 @@ pub fn tools() -> Vec<ToolSpec> {
         ),
         spec(
             "fs.delete",
-            "Delete a file, or a folder with recursive=true. Inside runs/ it just runs (class Read, like shell rm there); anywhere else it is class Delete and asks first.",
+            "Delete a file, or a folder with recursive=true. A bare name not found next to runs/ is this run's files/<name>. Inside runs/ it just runs (class Read, like shell rm there); anywhere else it is class Delete and asks first.",
             Class::Read,
             Op::Delete,
             json!({"type":"object","properties":{
@@ -168,9 +174,21 @@ struct MovePlan {
     verdict: Verdict,
 }
 
+/// The destination of a move (D-573): a bare `to` for a source inside runs/ lands in this
+/// run's files/ like a bare fs.write, unless the base folder holds a folder of that name
+/// (then the move goes into it, as before). For a source outside runs/ a bare `to` stays
+/// a rename next to it in the base folder; that move is Delete either way (D-523).
+fn move_dest(roots: &Roots, from: &Path, raw: &str) -> Result<PathBuf, ToolError> {
+    let in_base = roots.resolve(raw)?;
+    if paths::is_bare(raw) && roots.place(from).scratch() && !paths::is_dir(&in_base) {
+        return roots.resolve_out(raw);
+    }
+    Ok(in_base)
+}
+
 fn plan_move(roots: &Roots, a: &MoveArgs) -> Result<MovePlan, ToolError> {
-    let from = roots.resolve(&a.from)?;
-    let mut to = roots.resolve(&a.to)?;
+    let from = roots.resolve_existing(&a.from)?;
+    let mut to = move_dest(roots, &from, &a.to)?;
     if paths::is_dir(&to) {
         if let Some(name) = from.file_name() {
             to = to.join(name);
@@ -261,62 +279,70 @@ fn regular_file(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file())
 }
 
+/// What a call acts on, resolved once: classify shows it and call acts on exactly it
+/// (D-572), so the class the gate approved is the class of the file that is written.
+enum Target {
+    None,
+    Path(PathBuf),
+    Move(MovePlan),
+}
+
+/// A call's class, the values for the ask card, and its target.
+struct Plan {
+    verdict: Verdict,
+    values: Vec<(String, String)>,
+    target: Target,
+}
+
 impl Fs {
-    fn verdict(
-        &self,
-        roots: &Roots,
-        args: &Value,
-    ) -> Result<(Verdict, Vec<(String, String)>), ToolError> {
+    fn plan(&self, roots: &Roots, args: &Value) -> Result<Plan, ToolError> {
+        let one = |verdict: Verdict, p: PathBuf| Plan {
+            verdict,
+            values: vec![("path".into(), roots.shown(&p))],
+            target: Target::Path(p),
+        };
         Ok(match self.0 {
             Op::Read => {
                 let a: ReadArgs = parse(args)?;
-                let p = roots.resolve(&a.path)?;
-                (
-                    Verdict::new(Class::Read),
-                    vec![("path".into(), roots.shown(&p))],
-                )
+                one(Verdict::new(Class::Read), roots.resolve_existing(&a.path)?)
             }
             Op::Glob => {
                 let a: GlobArgs = parse(args)?;
-                (
-                    Verdict::new(Class::Read),
-                    vec![("pattern".into(), a.pattern)],
-                )
+                Plan {
+                    verdict: Verdict::new(Class::Read),
+                    values: vec![("pattern".into(), a.pattern)],
+                    target: Target::None,
+                }
             }
             Op::Write => {
                 let a: WriteArgs = parse(args)?;
-                let p = roots.resolve(&a.path)?;
-                (
-                    util::write_verdict(roots, &p, !a.append, Class::Fill),
-                    vec![("path".into(), roots.shown(&p))],
-                )
+                let p = roots.resolve_out(&a.path)?;
+                one(util::write_verdict(roots, &p, !a.append, Class::Fill), p)
             }
             Op::Move => {
                 let a: MoveArgs = parse(args)?;
-                let m = plan_move(roots, &a)?;
-                (
-                    m.verdict,
-                    vec![
+                let mut m = plan_move(roots, &a)?;
+                let verdict = std::mem::replace(&mut m.verdict, Verdict::new(Class::Fill));
+                Plan {
+                    verdict,
+                    values: vec![
                         ("from".into(), roots.shown(&m.from)),
                         ("to".into(), roots.shown(&m.to)),
                     ],
-                )
+                    target: Target::Move(m),
+                }
             }
             Op::Mkdir => {
+                // A folder name is not an output file: a bare name stays in the base
+                // folder, so `fs.mkdir out` then `fs.write out/x.csv` agree (D-570).
                 let a: PathArgs = parse(args)?;
                 let p = roots.resolve(&a.path)?;
-                (
-                    mkdir_verdict(roots, &p),
-                    vec![("path".into(), roots.shown(&p))],
-                )
+                one(mkdir_verdict(roots, &p), p)
             }
             Op::Delete => {
                 let a: DeleteArgs = parse(args)?;
-                let p = roots.resolve(&a.path)?;
-                (
-                    delete_verdict(roots, &p),
-                    vec![("path".into(), roots.shown(&p))],
-                )
+                let p = roots.resolve_existing(&a.path)?;
+                one(delete_verdict(roots, &p), p)
             }
         })
     }
@@ -330,7 +356,9 @@ fn io_err(what: &str, roots: &Roots, p: &Path, e: std::io::Error) -> ToolError {
 impl ToolHandler for Fs {
     async fn classify(&self, ctx: &ToolCtx, args: &Value) -> Result<Classified, ToolError> {
         let roots = Roots::of(ctx)?;
-        let (v, values) = self.verdict(&roots, args)?;
+        let Plan {
+            verdict, values, ..
+        } = self.plan(&roots, args)?;
         let name = match self.0 {
             Op::Read => "fs.read",
             Op::Write => "fs.write",
@@ -339,16 +367,16 @@ impl ToolHandler for Fs {
             Op::Mkdir => "fs.mkdir",
             Op::Delete => "fs.delete",
         };
-        Ok(v.classified(name, values))
+        Ok(verdict.classified(name, values))
     }
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput, ToolError> {
         let roots = Roots::of(ctx)?;
-        let (v, _) = self.verdict(&roots, &args)?;
-        recheck(ctx, &v)?;
-        match self.0 {
-            Op::Read => read(&roots, parse(&args)?),
-            Op::Glob => {
+        let plan = self.plan(&roots, &args)?;
+        recheck(ctx, &plan.verdict)?;
+        match (self.0, plan.target) {
+            (Op::Read, Target::Path(p)) => read(&roots, parse(&args)?, &p),
+            (Op::Glob, _) => {
                 // A wide pattern walks a lot of disk: off the async threads, with a cap.
                 let a: GlobArgs = parse(&args)?;
                 let r = roots.clone();
@@ -366,36 +394,35 @@ impl ToolHandler for Fs {
                     ))),
                 }
             }
-            Op::Write => write(&roots, parse(&args)?),
-            Op::Move => mv(&roots, parse(&args)?),
-            Op::Mkdir => {
-                let a: PathArgs = parse(&args)?;
-                let p = roots.resolve(&a.path)?;
+            (Op::Write, Target::Path(p)) => write(&roots, parse(&args)?, &p),
+            (Op::Move, Target::Move(m)) => mv(&roots, parse(&args)?, m),
+            (Op::Mkdir, Target::Path(p)) => {
                 std::fs::create_dir_all(&p).map_err(|e| io_err("mkdir", &roots, &p, e))?;
                 Ok(ToolOutput {
                     text: format!("made {}", text::one_line(&roots.shown(&p), 300)),
                     ..ToolOutput::default()
                 })
             }
-            Op::Delete => delete(&roots, parse(&args)?),
+            (Op::Delete, Target::Path(p)) => delete(&roots, parse(&args)?, &p),
+            _ => Err(ToolError::Failed("no target resolved for this call".into())),
         }
     }
 }
 
-fn read(roots: &Roots, a: ReadArgs) -> Result<ToolOutput, ToolError> {
+/// `p`: [`Roots::resolve_existing`] of `a.path`.
+fn read(roots: &Roots, a: ReadArgs, p: &Path) -> Result<ToolOutput, ToolError> {
     let max = util::limit("max_chars", a.max_chars, READ_DEFAULT_CHARS, MAX_CHARS)?;
-    let p = roots.resolve(&a.path)?;
-    let shown = text::one_line(&roots.shown(&p), 300);
-    let meta = std::fs::metadata(&p).map_err(|e| io_err("read", roots, &p, e))?;
+    let shown = text::one_line(&roots.shown(p), 300);
+    let meta = std::fs::metadata(p).map_err(|e| io_err("read", roots, p, e))?;
     if meta.is_dir() {
         return Err(ToolError::Args(format!(
             "{shown} is a folder; list it with fs.glob"
         )));
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(&p)
+    std::fs::File::open(p)
         .and_then(|f| f.take(READ_MAX_BYTES).read_to_end(&mut bytes))
-        .map_err(|e| io_err("read", roots, &p, e))?;
+        .map_err(|e| io_err("read", roots, p, e))?;
     if bytes.iter().take(8192).any(|&b| b == 0) {
         return Ok(ToolOutput {
             text: format!(
@@ -419,10 +446,17 @@ fn read(roots: &Roots, a: ReadArgs) -> Result<ToolOutput, ToolError> {
             meta.len()
         ));
     }
+    if let Some(other) = roots.shadowed(&a.path, p) {
+        // D-571: the base wins; say so, so the session knows which of the two it read.
+        out.push_str(&format!(
+            "\nnote: this is {shown}; this run's {} has the same name (read that path for it)",
+            text::one_line(&roots.shown(&other), 300)
+        ));
+    }
     Ok(ToolOutput {
         text: out,
         summary: Some(format!("read {shown}")),
-        consequences: json!({"path": roots.shown(&p)}),
+        consequences: json!({"path": roots.shown(p)}),
         ..ToolOutput::default()
     })
 }
@@ -490,13 +524,13 @@ fn glob(roots: &Roots, a: GlobArgs) -> Result<ToolOutput, ToolError> {
     })
 }
 
-fn write(roots: &Roots, a: WriteArgs) -> Result<ToolOutput, ToolError> {
+/// `p`: [`Roots::resolve_out`] of `a.path`.
+fn write(roots: &Roots, a: WriteArgs, p: &Path) -> Result<ToolOutput, ToolError> {
     use std::io::Write;
-    let p = roots.resolve(&a.path)?;
-    if paths::is_dir(&p) {
+    if paths::is_dir(p) {
         return Err(ToolError::Args(format!(
             "{} is a folder",
-            text::one_line(&roots.shown(&p), 300)
+            text::one_line(&roots.shown(p), 300)
         )));
     }
     if let Some(parent) = p.parent() {
@@ -507,26 +541,25 @@ fn write(roots: &Roots, a: WriteArgs) -> Result<ToolOutput, ToolError> {
         .write(true)
         .append(a.append)
         .truncate(!a.append)
-        .open(&p)
-        .map_err(|e| io_err("write", roots, &p, e))?;
+        .open(p)
+        .map_err(|e| io_err("write", roots, p, e))?;
     f.write_all(a.content.as_bytes())
         .and_then(|_| f.flush())
-        .map_err(|e| io_err("write", roots, &p, e))?;
-    let shown = text::one_line(&roots.shown(&p), 300);
+        .map_err(|e| io_err("write", roots, p, e))?;
+    let shown = text::one_line(&roots.shown(p), 300);
     Ok(ToolOutput {
         text: format!(
             "wrote: {shown} ({} bytes{})",
             a.content.len(),
             if a.append { ", appended" } else { "" }
         ),
-        consequences: json!({"wrote": roots.shown(&p)}),
-        files: util::run_files(roots, &[&p]),
+        consequences: json!({"wrote": roots.shown(p)}),
+        files: util::run_files(roots, &[p]),
         ..ToolOutput::default()
     })
 }
 
-fn mv(roots: &Roots, a: MoveArgs) -> Result<ToolOutput, ToolError> {
-    let m = plan_move(roots, &a)?;
+fn mv(roots: &Roots, a: MoveArgs, m: MovePlan) -> Result<ToolOutput, ToolError> {
     if !paths::exists(&m.from) {
         return Err(ToolError::Args(format!(
             "{} does not exist",
@@ -574,16 +607,16 @@ fn mv(roots: &Roots, a: MoveArgs) -> Result<ToolOutput, ToolError> {
     })
 }
 
-fn delete(roots: &Roots, a: DeleteArgs) -> Result<ToolOutput, ToolError> {
-    let p = roots.resolve(&a.path)?;
-    let shown = text::one_line(&roots.shown(&p), 300);
-    let meta = std::fs::symlink_metadata(&p).map_err(|e| io_err("delete", roots, &p, e))?;
+/// `p`: [`Roots::resolve_existing`] of `a.path`.
+fn delete(roots: &Roots, a: DeleteArgs, p: &Path) -> Result<ToolOutput, ToolError> {
+    let shown = text::one_line(&roots.shown(p), 300);
+    let meta = std::fs::symlink_metadata(p).map_err(|e| io_err("delete", roots, p, e))?;
     if meta.is_dir() {
         if a.recursive {
             // remove_dir_all does not follow links or junctions inside the folder.
-            std::fs::remove_dir_all(&p)
+            std::fs::remove_dir_all(p)
         } else {
-            std::fs::remove_dir(&p)
+            std::fs::remove_dir(p)
         }
         .map_err(|e| {
             ToolError::Failed(format!(
@@ -591,11 +624,11 @@ fn delete(roots: &Roots, a: DeleteArgs) -> Result<ToolOutput, ToolError> {
             ))
         })?;
     } else {
-        std::fs::remove_file(&p).map_err(|e| io_err("delete", roots, &p, e))?;
+        std::fs::remove_file(p).map_err(|e| io_err("delete", roots, p, e))?;
     }
     Ok(ToolOutput {
         text: format!("deleted {shown}"),
-        consequences: json!({"deleted": roots.shown(&p)}),
+        consequences: json!({"deleted": roots.shown(p)}),
         ..ToolOutput::default()
     })
 }
@@ -702,9 +735,48 @@ mod tests {
             Class::Delete
         );
         // A folder out of runs/ carries files nobody checked.
-        assert_eq!(mv(&r, "runs/x/home", "newdir"), Class::Delete);
+        assert_eq!(mv(&r, "runs/x/home", "./newdir"), Class::Delete);
+        // A bare name keeps it in runs/ (this run's files/, D-573).
+        assert_eq!(mv(&r, "runs/x/home", "newdir"), Class::Fill);
         assert_eq!(mv(&r, "runs/x/home", "runs/x/home2"), Class::Fill);
         assert_eq!(mv(&r, "runs/x/a.txt", "new.txt"), Class::Fill);
+    }
+
+    /// D-573: a bare `to` for a source in runs/ is files/<to>; a base folder of that name
+    /// is moved into; a source outside runs/ is renamed in the base folder; the D-523
+    /// classes hold.
+    #[test]
+    fn bare_move_destinations_d573() {
+        let (_t, r) = setup();
+        let plan = |from: &str, to: &str| {
+            plan_move(
+                &r,
+                &MoveArgs {
+                    from: from.into(),
+                    to: to.into(),
+                    overwrite: false,
+                },
+            )
+            .unwrap()
+        };
+        let m = plan("runs/x/a.txt", "b.txt");
+        assert_eq!(m.to, r.files.join("b.txt"));
+        assert_eq!(m.verdict.class, Class::Fill);
+        let m = plan("file.txt", "other.txt");
+        assert_eq!(m.to, r.base.join("other.txt"));
+        assert_eq!(m.verdict.class, Class::Delete);
+        std::fs::create_dir_all(r.base.join("archive")).unwrap();
+        let m = plan("runs/x/a.txt", "archive");
+        assert_eq!(m.to, r.base.join("archive").join("a.txt"));
+        assert_eq!(m.verdict.class, Class::Fill);
+        let m = plan("runs/x/a.txt", "./b.txt");
+        assert_eq!(m.to, r.base.join("b.txt"));
+        // A bare source the base lacks is this run's files/<name>.
+        std::fs::write(r.files.join("c.txt"), "c").unwrap();
+        let m = plan("c.txt", "d.txt");
+        assert_eq!(m.from, r.files.join("c.txt"));
+        assert_eq!(m.to, r.files.join("d.txt"));
+        assert_eq!(m.verdict.class, Class::Fill);
     }
 
     #[test]

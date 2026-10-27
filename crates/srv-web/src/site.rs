@@ -20,8 +20,9 @@
 //! on `match`, `Ok` (needs_repair -> repaired, version + 1, D-304), then the tool is enabled
 //! again. srv-web never commits the patched file (D-560). The reader runs in
 //! `spawn_blocking` over a `SheetPage`; `page.api(url)` is a GET limited to the page's
-//! registrable domain (D-501) bridged with `Handle::block_on` and bounded by the run's
-//! remaining time (D-64); a body cut at the cap is reported as such (B-560). JSON strings in
+//! registrable domain (D-501) bridged with `Handle::block_on`, read up to the JSON cap
+//! (`Config::json_max_bytes`, 32 MB, D-565) and bounded by the run's remaining time (D-64);
+//! a body cut at the cap is reported as such (B-560). JSON strings in
 //! the output cannot spell a `[text](#id)` link form.
 
 use crate::cache::Page;
@@ -160,10 +161,18 @@ fn spec(web: Arc<Web>, tool: Tool) -> ToolSpec {
     };
     ToolSpec {
         name: tool.namespaced.clone(),
-        description: format!(
-            "Site tool (reader) from tools/{}/{}.js; reads {site} and returns JSON.",
-            tool.domain, tool.header.name
-        ),
+        description: {
+            let mut d = format!(
+                "Site tool (reader) from tools/{}/{}.js; reads {site} and returns JSON.",
+                tool.domain, tool.header.name
+            );
+            let about = about(&tool.source);
+            if !about.is_empty() {
+                d.push(' ');
+                d.push_str(&about);
+            }
+            d
+        },
         class: tool.header.gate.max(Class::Read),
         args: json!({ "type": "object", "properties": props, "required": required }),
         handler: Arc::new(SiteTool {
@@ -172,6 +181,35 @@ fn spec(web: Arc<Web>, tool: Tool) -> ToolSpec {
             pins: Pins::default(),
         }),
     }
+}
+
+/// Characters of a tool file's header prose that go into its description (D-568).
+const ABOUT_MAX_CHARS: usize = 400;
+
+/// The first paragraph of plain comment lines in a tool file's header block (the prose
+/// after the `// @key` lines, up to an empty `//` line), joined, escaped and capped
+/// (D-568): what the arguments mean, so the model can use them in its first call.
+fn about(source: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for line in source.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Some(c) = t.strip_prefix("//") else {
+            break;
+        };
+        let c = c.trim();
+        if c.is_empty() && !parts.is_empty() {
+            // An empty comment line ends the first paragraph; later notes are for people.
+            break;
+        }
+        if c.is_empty() || c.starts_with('@') {
+            continue;
+        }
+        parts.push(c);
+    }
+    escape::name(&parts.join(" "), ABOUT_MAX_CHARS)
 }
 
 struct SiteTool {
@@ -339,7 +377,8 @@ impl ToolHandler for SiteTool {
             handle: Handle::current(),
             client: clients.api.clone(),
             domain: toolstore::registrable(&host_of(&page_url)),
-            cap: self.web.cfg.max_bytes,
+            // B-560, D-565: the JSON cap, not the page cap; the bytes never reach the model.
+            cap: self.web.cfg.json_max_bytes,
         };
         let tool = self.tool.clone();
         let run_page = page.clone();
@@ -386,7 +425,15 @@ impl ToolHandler for SiteTool {
                     Err(n) => notes.push(n),
                 }
                 escape::json_strings(&mut v);
-                let body = serde_json::to_string_pretty(&v).unwrap_or_else(|_| "null".into());
+                let mut body = serde_json::to_string_pretty(&v).unwrap_or_else(|_| "null".into());
+                if body.chars().count() > SITE_OUTPUT_MAX_CHARS {
+                    // D-569: compact JSON when only that fits (60 long job rows), so the
+                    // paging fields after `jobs` are not cut off.
+                    let compact = serde_json::to_string(&v).unwrap_or_default();
+                    if compact.chars().count() <= SITE_OUTPUT_MAX_CHARS {
+                        body = compact;
+                    }
+                }
                 let mut text = escape::cap_chars(&body, SITE_OUTPUT_MAX_CHARS);
                 if body.chars().count() > SITE_OUTPUT_MAX_CHARS {
                     text.push_str(&format!(
@@ -457,14 +504,9 @@ impl ApiFetch for PageApi {
             }
             if body.truncated {
                 // Cut JSON never parses; say why instead of "not JSON" (B-560).
-                const MB: usize = 1024 * 1024;
-                let shown = if cap >= MB && cap.is_multiple_of(MB) {
-                    format!("{} MB", cap / MB)
-                } else {
-                    format!("{cap} byte")
-                };
                 return Err(format!(
-                    "page.api: {host} answered more than the {shown} cap"
+                    "page.api: {host} answered more than the {} cap",
+                    http::cap_text(cap)
                 ));
             }
             serde_json::from_slice::<Value>(&body.bytes)

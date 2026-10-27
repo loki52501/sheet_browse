@@ -564,17 +564,18 @@ async fn fs_read_write_glob_move_mkdir() {
     assert!(out.text.starts_with("moved"), "{}", out.text);
     assert!(e.p("runs/m/n/draft.md").is_file());
 
-    // Overwriting an existing file outside runs/ is Delete (times out to skip).
+    // Overwriting an existing file outside runs/ is Delete (times out to skip). `./` keeps
+    // the base folder; a bare name would land in this run's files/ (D-570).
     std::fs::write(e.p("keep.txt"), "old").unwrap();
     let out = e
-        .ok("fs.write", json!({"path": "keep.txt", "content": "new"}))
+        .ok("fs.write", json!({"path": "./keep.txt", "content": "new"}))
         .await;
     assert!(out.text.starts_with("skipped"), "{}", out.text);
     assert_eq!(std::fs::read_to_string(e.p("keep.txt")).unwrap(), "old");
     // Appending is Fill: allowed.
     e.ok(
         "fs.write",
-        json!({"path": "keep.txt", "content": "+", "append": true}),
+        json!({"path": "./keep.txt", "content": "+", "append": true}),
     )
     .await;
     assert_eq!(std::fs::read_to_string(e.p("keep.txt")).unwrap(), "old+");
@@ -1116,7 +1117,9 @@ async fn r2_ladder_rung9_write_then_delete_outside_runs() {
         let out = e
             .ok(
                 "fs.write",
-                json!({"path": "rung9.txt", "content": "written by rung 9\n"}),
+                // `./`: outside runs/, as the rung's absolute path is; a bare name would
+                // land in this run's files/ (D-570).
+                json!({"path": "./rung9.txt", "content": "written by rung 9\n"}),
             )
             .await;
         assert!(out.text.starts_with("wrote:"), "{label}: {}", out.text);
@@ -1140,7 +1143,7 @@ async fn r2_ladder_rung9_write_then_delete_outside_runs() {
         );
         assert!(tools[0].ok);
 
-        let out = e.ok("fs.delete", json!({"path": "rung9.txt"})).await;
+        let out = e.ok("fs.delete", json!({"path": "./rung9.txt"})).await;
         let cards = e.asker.cards();
         assert_eq!(cards.len(), 1, "{label}: one ask for the delete");
         assert_eq!(cards[0].class, Class::Delete, "{label}");
