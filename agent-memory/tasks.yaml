@@ -199,7 +199,7 @@ tasks:
     step: 5
     title: "Phase 1 baseline: 10 rungs x 3 variants, A/B use cases, bench/results/phase1-<date>.md"
     docs: [docs/08-USE-CASES-AND-TESTS.md]
-    status: todo
+    status: done   # D-94: baseline 13/30 strict (16 lenient), 0 vault leaks, bench/results/phase1-2026-10-27.md; follow-ups T-17b..T-17f
     blocked_by: [T-16]
   - id: T-18
     step: 6
