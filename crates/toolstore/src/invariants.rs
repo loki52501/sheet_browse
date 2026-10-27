@@ -171,7 +171,8 @@ fn non_fingerprint_header(src: &str) -> Vec<(String, String)> {
 pub fn check_repair(old: &str, new: &str, kind: RepairKind) -> Result<(), StoreError> {
     if let Some(n) = unsafe_header_line(new) {
         return Err(invariant(format!(
-            "repair writes a control character or line terminator into header line {n}              (B-33, D-578)"
+            "repair writes a control character or line terminator into header line {n} \
+             (B-33, D-578)"
         )));
     }
     for (_, key, value) in header_lines(new) {

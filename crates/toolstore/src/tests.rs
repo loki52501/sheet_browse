@@ -1135,7 +1135,9 @@ async fn record_relocated_refuses_line_terminators_in_names_and_ids() {
                 )
                 .await;
             assert!(
-                matches!(&r, Err(StoreError::Invariant(m)) if m.contains("D-578")),
+                // Review T-13b item 7: one sentence, no runs of spaces from a continuation.
+                matches!(&r, Err(StoreError::Invariant(m))
+                    if m.contains("D-578") && !m.contains("  ")),
                 "{}: {r:?}",
                 bad.escape_debug()
             );
@@ -1167,7 +1169,11 @@ async fn record_relocated_refuses_an_id_that_does_not_read_back() {
                 res("register", RunOutcome::Relocated { fingerprint: fp }, t0()),
             )
             .await;
-        assert!(matches!(&r, Err(StoreError::Invariant(_))), "{id}: {r:?}");
+        assert!(
+            matches!(&r, Err(StoreError::Invariant(m))
+                if m.contains("D-578") && !m.contains("  ")),
+            "{id}: {r:?}"
+        );
         assert_eq!(
             fs::read_to_string(dir.path().join("luma.com/register.js")).unwrap(),
             REGISTER
@@ -1188,7 +1194,8 @@ fn check_repair_refuses_hidden_line_terminators_in_the_header() {
         for kind in [RepairKind::Relocate, RepairKind::Reforge] {
             let r = check_repair(REGISTER, &new, kind);
             assert!(
-                matches!(&r, Err(StoreError::Invariant(m)) if m.contains("header line 7")),
+                matches!(&r, Err(StoreError::Invariant(m))
+                    if m.contains("header line 7") && !m.contains("  ")),
                 "{} {kind:?}: {r:?}",
                 bad.escape_debug()
             );

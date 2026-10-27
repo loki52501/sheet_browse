@@ -407,7 +407,8 @@ impl ToolStore {
                 // text).
                 if let Some(bad) = fingerprint.iter().find(|i| !fp_item_writable(i)) {
                     let e = StoreError::Invariant(format!(
-                        "relocate of {domain}/{name} would write a control character, line                          terminator or unreadable id into @fingerprint ({} item) (B-33, D-578)",
+                        "relocate of {domain}/{name} would write a control character, line \
+                         terminator or unreadable id into @fingerprint ({} item) (B-33, D-578)",
                         bad.role.escape_debug()
                     ));
                     self.log_invariant(store, &domain, &name, &e).await?;
@@ -420,7 +421,8 @@ impl ToolStore {
                     match parse_header(&new) {
                         Ok(hd) if hd.fingerprint == fingerprint => Ok(()),
                         _ => Err(StoreError::Invariant(format!(
-                            "relocate of {domain}/{name}: the patched @fingerprint does not read                              back as written (D-578)"
+                            "relocate of {domain}/{name}: the patched @fingerprint does not read \
+                             back as written (D-578)"
                         ))),
                     }
                 });
@@ -540,7 +542,8 @@ impl ToolStore {
                     StoreError::Io(std::io::Error::new(
                         restore.kind(),
                         format!(
-                            "reforge {domain}/{name} failed ({cause}) and restoring {} failed                              too ({restore}); the old version is kept at {kept}",
+                            "reforge {domain}/{name} failed ({cause}) and restoring {} failed \
+                             too ({restore}); the old version is kept at {kept}",
                             self.rel(&path)
                         ),
                     ))
