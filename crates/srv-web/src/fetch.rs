@@ -165,6 +165,7 @@ impl Fetch {
         let url = &target.url;
         let clients = self.web.clients()?;
         if let Some(why) = html::challenge_url(url) {
+            self.web.challenged(url);
             return Ok(Loaded::Challenge(challenge_output(url, &why)));
         }
         let body = http::get_page(
@@ -178,7 +179,14 @@ impl Fetch {
         .map_err(|e| ToolError::Failed(format!("fetch: {e}")))?;
         let final_url = body.url.clone();
         let final_host = host_of(&final_url);
+        // D-582: a challenge drops the cached pages of the site asked for and of the one
+        // that answered.
+        let challenged = || {
+            self.web.challenged(url);
+            self.web.challenged(&final_url);
+        };
         if cf_mitigated(&body) {
+            challenged();
             return Ok(Loaded::Challenge(challenge_output(
                 &final_url,
                 "Cloudflare challenge (cf-mitigated)",
@@ -222,6 +230,7 @@ impl Fetch {
         }
         let doc = walk(text, final_url.clone(), !html_type, "fetch").await?;
         if let Some(why) = doc.challenge.clone() {
+            challenged();
             return Ok(Loaded::Challenge(challenge_output(&final_url, &why)));
         }
         let (folder, site_tools) = site::register(&self.web, ctx, &final_url, &doc.index).await;

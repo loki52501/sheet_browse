@@ -4,9 +4,11 @@
 //! `sb_sheet::data::{aria_roles, alias_for}` (D-59), the one table find, sheets and
 //! fingerprints share. Names compare case-, space- and punctuation-insensitively (`Email *` = `email`).
 //! Relocate re-finds a missing item among unused rows of the same role by name synonyms or
-//! token overlap. Everything here is pure and linear in the index size.
+//! token overlap. Everything here is pure and linear in the index size. A row whose name
+//! holds a control character or U+2028/U+2029, or a form id a header line cannot hold, is
+//! never copied into a fingerprint (D-578).
 
-use crate::header::FpItem;
+use crate::header::{fp_item_writable, header_unsafe, FpItem};
 use crate::Tool;
 use sb_sheet::data::{alias_for, aria_roles};
 use sb_sheet::IndexRow;
@@ -201,6 +203,10 @@ fn relocate_items(items: &[FpItem], index: &[IndexRow]) -> Option<Vec<FpItem>> {
                 if used.contains(&i) || !role_matches(&item.role, &r.role) {
                     continue;
                 }
+                // D-578: a name a header line cannot hold is never copied into @fingerprint.
+                if item.name.is_some() && r.name.chars().any(header_unsafe) {
+                    continue;
+                }
                 let mut score = match &item.name {
                     Some(n) => similarity(n, &r.name),
                     None => 1.0,
@@ -229,11 +235,16 @@ fn relocate_items(items: &[FpItem], index: &[IndexRow]) -> Option<Vec<FpItem>> {
         if out[k].is_none() {
             missing_any = true;
             let form = dominant_form(&used, index)?;
-            out[k] = Some(FpItem {
+            let patched = FpItem {
                 role: item.role.clone(),
                 name: item.name.clone(),
                 id: Some(form),
-            });
+            };
+            // D-578: a form id a header line cannot hold (or read back) is no relocation.
+            if !fp_item_writable(&patched) {
+                return None;
+            }
+            out[k] = Some(patched);
         }
     }
     if !missing_any {

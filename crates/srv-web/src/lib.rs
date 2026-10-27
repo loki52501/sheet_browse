@@ -23,7 +23,7 @@ mod site;
 pub use config::Config;
 
 use harness_core::{ToolError, ToolSpec};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// State shared by every tool of one server: config, HTTP clients, the page cache.
@@ -35,6 +35,9 @@ pub(crate) struct Web {
     /// again only on a fetched page their fingerprint matches or relocates on, and enabled
     /// again by a clean repair run there (D-561).
     pub disabled: Mutex<HashSet<String>>,
+    /// One repair at a time per site tool (D-577): held from the decision to relocate until
+    /// the run's outcome is recorded, so two calls cannot both patch and bump the version.
+    repair_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Web {
@@ -45,6 +48,7 @@ impl Web {
             clients,
             cache: cache::Cache::default(),
             disabled: Mutex::new(HashSet::new()),
+            repair_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -68,6 +72,24 @@ impl Web {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(name);
+    }
+
+    /// The repair lock of site tool `name` (D-577); one per name for the server's life (a
+    /// handful of site tools, so the map is not pruned).
+    pub fn repair_lock(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.repair_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(name.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// A challenge on `url`'s site (D-5, D-582): that site's cached pages are dropped, so a
+    /// site tool cannot run on an older page of a site that now asks for a human check.
+    pub fn challenged(&self, url: &reqwest::Url) {
+        self.cache
+            .drop_site(&toolstore::registrable(&http::host_of(url)));
     }
 
     pub fn clients(&self) -> Result<&http::Clients, ToolError> {

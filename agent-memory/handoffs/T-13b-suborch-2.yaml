@@ -1,0 +1,16 @@
+from: servers/suborch
+to: supreme
+task: T-13b
+date: "2026-10-26"
+state: "T-13b done on swarm/servers-T13b (main b175545 merged in, which now holds T-13c via #14), PR to main opened. Round 1: review approve (should-fix 1-7), accept 15/16 pass (docs/03 item 3 reflect not-run, core T-16). Round 2 fixed should-fix 1, 2, 3, 5, 6, 7: a redirect to a challenge URL stops api and page.api as Challenge (D-582), no page.api after a challenge in that call, a challenge drops the site's cached pages for the run, the already-relocated note (D-583), args label escape/cap test, error text spacing; plus a trailing-dot challenge host (c32aa6e). Item 4 deferred by D-584. Review round 2: approve, Blocking none. Earlier round-1 items: D-577 repair lock + toolstore Ok shortcut, D-578 header-unsafe names refused, D-579 ledger names the args, D-580 page.api challenge stop, D-581 B-561 default. cargo test --workspace -j 2 --no-fail-fast: 1117 passed 0 failed 14 ignored, plus 689 passed 0 failed on a rerun of 5 packages whose test binaries were deleted mid-run by a concurrent cargo clean in .wt/T15b. Merge gate: gate ok for servers."
+not_done: "T-13d (tasks.yaml) holds the leftovers: D-584 same-moment cross-process repair race, vault-header redirect-to-challenge test, plus the T-13c items. T-15b is in final review in .wt/T15b; then T-12b (add B-590: srv-web clients follow the system proxy so PublicOnly never sees the target) and T-14b."
+gotchas:
+  - "Python write_text on Windows writes CRLF; autocrlf normalises the blob, but prefer the Edit tool for YAML."
+  - "A concurrent `cargo clean -p <crate>` in another worktree sharing the target dir makes test binaries vanish mid-run (`error: test failed` with no test output); rerun those packages."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/srv-web/src/html.rs
+  - agent-memory/tasks.yaml
+  - agent-memory/handoffs/T-13b-suborch-2.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-web -p toolstore"
