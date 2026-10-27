@@ -6,7 +6,9 @@
 //! (2 -> 1, D-313), or put a scheme, host, `//` or `..` in `@match`. A planner's output class is `max(@gate floor, sb-act class)` and must
 //! pass sb-act's `?s` rule (D-50), checked through [`PlannerCheck`] (D-301).
 
-use crate::header::{body_start, header_lines, match_violation, parse_header, ToolKind};
+use crate::header::{
+    body_start, header_lines, match_violation, parse_header, unsafe_header_line, ToolKind,
+};
 use crate::{StoreError, Tool};
 use harness_core::Class;
 use sb_act::ActClass;
@@ -162,7 +164,16 @@ fn non_fingerprint_header(src: &str) -> Vec<(String, String)> {
 }
 
 /// T-9 / G-4 static check of a repair, `old` and `new` being whole tool files.
+///
+/// D-578: the new file's header block may not hold a lone CR, U+2028, U+2029 or another
+/// control character but tab; JS would end a `//` comment there and run the rest of the
+/// line, which every other check here reads as a comment.
 pub fn check_repair(old: &str, new: &str, kind: RepairKind) -> Result<(), StoreError> {
+    if let Some(n) = unsafe_header_line(new) {
+        return Err(invariant(format!(
+            "repair writes a control character or line terminator into header line {n}              (B-33, D-578)"
+        )));
+    }
     for (_, key, value) in header_lines(new) {
         if key == "match" {
             for p in value.split_whitespace() {

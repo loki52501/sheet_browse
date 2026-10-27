@@ -976,3 +976,229 @@ fn seed_read_table_runs() {
     let out = run_reader(&tool, &SeedPage, &serde_json::json!({"id": "7"}), None).unwrap();
     assert_eq!(out["error"], "no table 7");
 }
+
+// ---------------------------------------------------------------- T-13b (D-577, D-578)
+
+fn luma_register(ts: &ToolStore) -> Tool {
+    ts.load("lu.ma", "/e/abc")
+        .unwrap()
+        .into_iter()
+        .find(|t| t.namespaced == "luma.register")
+        .unwrap()
+}
+
+/// luma.register's relocated fingerprint on `page("Sign up")`.
+fn relocated_register(ts: &ToolStore) -> Vec<FpItem> {
+    relocate(&luma_register(ts), &page("Sign up")).expect("relocatable")
+}
+
+/// D-577: two runs that both saw the miss both record Relocated with the same new
+/// fingerprint; the second finds the file already patched, writes nothing and counts as a
+/// clean run. The row stays at version 2 with one tools.relocate event.
+#[tokio::test]
+async fn a_second_relocate_to_the_same_fingerprint_stays_at_version_2() {
+    let (dir, ts) = luma_root();
+    let store = Fake::default();
+    store
+        .tool_health_set(health(ToolStatus::NeedsRepair, 1, 0, 1))
+        .await
+        .unwrap();
+    let fp = relocated_register(&ts);
+    let file = dir.path().join("luma.com/register.js");
+    let relocated = || {
+        res(
+            "register",
+            RunOutcome::Relocated {
+                fingerprint: fp.clone(),
+            },
+            t0(),
+        )
+    };
+    let first = ts.record(&store, relocated()).await.unwrap();
+    assert_eq!((first.status, first.version), (ToolStatus::Repaired, 2));
+    let patched = fs::read_to_string(&file).unwrap();
+    assert_ne!(patched, REGISTER);
+    let second = ts.record(&store, relocated()).await.unwrap();
+    assert_eq!(
+        (second.status, second.version, second.runs),
+        (ToolStatus::Repaired, 2, 1),
+        "{second:?}"
+    );
+    assert_eq!(second.why, first.why, "no second 'X -> X' relocate");
+    assert_eq!(fs::read_to_string(&file).unwrap(), patched);
+    let relocates = store
+        .events()
+        .iter()
+        .filter(|e| e.tool == "tools.relocate")
+        .count();
+    assert_eq!(relocates, 1);
+}
+
+/// D-577 on a row left needs_repair after the file was patched (a crash between the write
+/// and the row): the Relocated is an Ok, which repairs the row (D-304) without a write.
+#[tokio::test]
+async fn relocate_to_the_fingerprint_the_file_has_is_an_ok() {
+    let (dir, ts) = luma_root();
+    let store = Fake::default();
+    store
+        .tool_health_set(health(ToolStatus::NeedsRepair, 1, 0, 1))
+        .await
+        .unwrap();
+    let file = dir.path().join("luma.com/register.js");
+    let current = parse_header(REGISTER).unwrap().fingerprint;
+    let h = ts
+        .record(
+            &store,
+            res(
+                "register",
+                RunOutcome::Relocated {
+                    fingerprint: current,
+                },
+                t0(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!((h.status, h.version, h.runs), (ToolStatus::Repaired, 2, 1));
+    assert_eq!(h.why.as_deref(), Some("fingerprint matches again"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), REGISTER);
+    assert!(store.events().iter().all(|e| e.tool != "tools.relocate"));
+}
+
+/// The characters D-578 keeps out of headers: JS line terminators Rust's line split does not
+/// see, LF itself, and other control characters.
+const BAD_IN_HEADER: [&str; 6] = ["\r", "\n", "\u{2028}", "\u{2029}", "\u{85}", "\u{1b}"];
+
+/// D-578 (B-33 family): a page name holding a JS line terminator or control character is
+/// never relocated into @fingerprint; the page is a miss, not a partial.
+#[test]
+fn relocate_skips_names_with_line_terminators_and_controls() {
+    let (_d, ts) = luma_root();
+    let tool = luma_register(&ts);
+    for bad in BAD_IN_HEADER {
+        // Without D-578 each of these would relocate: names compare after normalising.
+        let name = format!("Sign up{bad}");
+        let index = page(&name);
+        assert_eq!(relocate(&tool, &index), None, "{}", bad.escape_debug());
+        assert_eq!(
+            fingerprint(&tool, &index),
+            FingerprintResult::Miss,
+            "{}",
+            bad.escape_debug()
+        );
+    }
+    // The same name without the bad character relocates.
+    assert!(relocate(&tool, &page("Sign up")).is_some());
+}
+
+/// D-578: a form id that cannot be read back from a header line is no relocation.
+#[test]
+fn relocate_skips_form_ids_a_header_cannot_hold() {
+    use crate::fingerprint::tests::row;
+    let (_d, ts) = luma_root();
+    let tool = luma_register(&ts);
+    let board = |id: &str| {
+        vec![
+            row(1, "button", "Register", Some(id)),
+            row(2, "textbox", "Email", Some(id)),
+        ]
+    };
+    for id in ["f 3", "f\"3", "f\u{2028}3", "f\r3"] {
+        assert_eq!(relocate(&tool, &board(id)), None, "{}", id.escape_debug());
+    }
+    let fp = relocate(&tool, &board("f3")).expect("a plain id relocates");
+    assert_eq!(fp[0].id.as_deref(), Some("f3"));
+}
+
+/// D-578: record(Relocated) refuses an item a header line cannot hold, whoever built it; the
+/// file is untouched, the version stays, and the reason (without the page text) is logged.
+#[tokio::test]
+async fn record_relocated_refuses_line_terminators_in_names_and_ids() {
+    for bad in BAD_IN_HEADER {
+        let (dir, ts) = luma_root();
+        let store = Fake::default();
+        store
+            .tool_health_set(health(ToolStatus::NeedsRepair, 1, 0, 1))
+            .await
+            .unwrap();
+        let file = dir.path().join("luma.com/register.js");
+        let mut by_name = relocated_register(&ts);
+        let b = by_name.iter_mut().find(|i| i.role == "button").unwrap();
+        b.name = Some(format!("Sign up{bad}globalThis.x = 1; //"));
+        let mut by_id = relocated_register(&ts);
+        by_id[0].id = Some(format!("f2{bad}x"));
+        for fp in [by_name, by_id] {
+            let r = ts
+                .record(
+                    &store,
+                    res("register", RunOutcome::Relocated { fingerprint: fp }, t0()),
+                )
+                .await;
+            assert!(
+                matches!(&r, Err(StoreError::Invariant(m)) if m.contains("D-578")),
+                "{}: {r:?}",
+                bad.escape_debug()
+            );
+            assert_eq!(fs::read_to_string(&file).unwrap(), REGISTER);
+            let row = store.row("luma.com", "register").unwrap();
+            assert_eq!((row.status, row.version), (ToolStatus::NeedsRepair, 1));
+            let why = row.why.unwrap_or_default();
+            assert!(
+                why.starts_with("rejected:") && !why.contains("globalThis"),
+                "{why}"
+            );
+        }
+        assert!(store.events().iter().all(|e| e.tool != "tools.relocate"));
+    }
+}
+
+/// D-578: an id with a space or a quote would not read back from the patched line, so it is
+/// refused the same way.
+#[tokio::test]
+async fn record_relocated_refuses_an_id_that_does_not_read_back() {
+    let (dir, ts) = luma_root();
+    let store = Fake::default();
+    for id in ["f 2", "f\"2"] {
+        let mut fp = relocated_register(&ts);
+        fp[0].id = Some(id.into());
+        let r = ts
+            .record(
+                &store,
+                res("register", RunOutcome::Relocated { fingerprint: fp }, t0()),
+            )
+            .await;
+        assert!(matches!(&r, Err(StoreError::Invariant(_))), "{id}: {r:?}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("luma.com/register.js")).unwrap(),
+            REGISTER
+        );
+    }
+}
+
+/// D-578: check_repair refuses a new file whose header block hides a JS line terminator or
+/// control character, for relocate and re-forge alike; CRLF line ends and tabs stay fine,
+/// and the body may hold U+2028 in a string.
+#[test]
+fn check_repair_refuses_hidden_line_terminators_in_the_header() {
+    for bad in ["\r", "\u{2028}", "\u{2029}", "\u{1b}"] {
+        let new = REGISTER.replace(
+            "// @expects navigated",
+            &format!("// @expects{bad}globalThis.x = 1; // navigated"),
+        );
+        for kind in [RepairKind::Relocate, RepairKind::Reforge] {
+            let r = check_repair(REGISTER, &new, kind);
+            assert!(
+                matches!(&r, Err(StoreError::Invariant(m)) if m.contains("header line 7")),
+                "{} {kind:?}: {r:?}",
+                bad.escape_debug()
+            );
+        }
+    }
+    let crlf = REGISTER.replace('\n', "\r\n");
+    assert!(check_repair(&crlf, &crlf, RepairKind::Relocate).is_ok());
+    let tab = REGISTER.replace("// @phase 2", "//\t@phase 2");
+    assert!(check_repair(REGISTER, &tab, RepairKind::Reforge).is_ok());
+    let body = REGISTER.replace("  return `t#", "  const s = '\u{2028}';\n  return `t#");
+    assert_ne!(body, REGISTER);
+    assert!(check_repair(REGISTER, &body, RepairKind::Reforge).is_ok());
+}
