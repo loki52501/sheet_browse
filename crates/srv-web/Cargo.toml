@@ -35,6 +35,9 @@ hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system
 http = "1"
 # W-2: the HTML walk that builds IndexRow and TextBlock.
 scraper = "0.29"
+# D-519: the parser scraper drives (already in Cargo.lock through scraper), fed in pieces
+# so a parse can stop at a deadline, a nesting cap or a node cap (dom.rs).
+html5ever = "0.40"
 
 [dev-dependencies]
 harness-core = { workspace = true, features = ["testing"] }

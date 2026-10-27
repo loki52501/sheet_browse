@@ -10,6 +10,7 @@
 pub mod api;
 mod cache;
 pub mod config;
+mod dom;
 pub mod escape;
 pub mod feed;
 pub mod fetch;

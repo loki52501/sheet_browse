@@ -4645,6 +4645,7 @@ dependencies = [
  "encoding_rs",
  "feed-rs",
  "harness-core",
+ "html5ever",
  "http",
  "hyper-util",
  "reqwest",

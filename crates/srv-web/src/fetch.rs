@@ -474,6 +474,11 @@ fn skeleton(page: &Page) -> String {
     if page.truncated {
         s.push_str("\npage cut at the 5 MB cap; the end of the page is missing");
     }
+    // D-519: what of the page the bounded parse or walk did not read.
+    if let Some(cut) = &page.doc.cut {
+        s.push('\n');
+        s.push_str(cut);
+    }
     s
 }
 

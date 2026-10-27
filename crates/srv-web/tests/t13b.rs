@@ -256,6 +256,58 @@ async fn two_servers_repairing_the_same_tool_leave_version_2() {
     assert!(!b.text.contains("patched to version"), "{}", b.text);
 }
 
+/// D-527 (review-T-12b round 2 should-fix 3): the tool is retired after the first server's
+/// repair, but its archive step failed (D-316), so the patched file is still in place. The
+/// second server's repair finds the file already patched; it must not record that run as
+/// clean or offer the retired tool again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retired_tool_is_not_revived_by_a_second_repair() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = repo_tools_copy(tmp.path());
+    let file = plant(&tools, "Read");
+    let server = Server::start(routes(BOARD_BROKEN)).await;
+    let e = env(config(&server, &HOSTS, tools.clone())).await;
+    let other = Other::new(&server, &tools);
+    fetch_board(&e).await;
+    other
+        .call(&e, "fetch", json!({ "url": BOARD_URL }))
+        .await
+        .expect("fetch b");
+    call(&e, TOOL, json!({})).await.expect_err("miss a");
+    other.call(&e, TOOL, json!({})).await.expect_err("miss b");
+
+    server.set_routes(routes(BOARD_FIXED));
+    fetch_board(&e).await;
+    other
+        .call(&e, "fetch", json!({ "url": BOARD_URL }))
+        .await
+        .expect("fetch b");
+    call(&e, TOOL, json!({})).await.expect("repair a");
+    let after_a = std::fs::read_to_string(&file).unwrap();
+    // Retired, file still in place (the archive step failed).
+    let mut h = row(&e).await.unwrap();
+    h.status = ToolStatus::Retired;
+    h.why = Some("retired by the test".into());
+    e.store.tool_health_set(h.clone()).await.unwrap();
+
+    let b = other.call(&e, TOOL, json!({})).await.expect("run b");
+    let after = row(&e).await.unwrap();
+    assert_eq!(after.status, ToolStatus::Retired, "{after:?}");
+    assert_eq!(
+        (after.version, after.runs),
+        (h.version, h.runs),
+        "{after:?}"
+    );
+    assert_eq!(after.last_ok, h.last_ok, "{after:?}");
+    assert!(
+        other.registry.get(TOOL).is_none(),
+        "the retired tool is offered again"
+    );
+    assert!(b.text.contains("retired"), "{}", b.text);
+    assert!(!b.text.contains("patched to version"), "{}", b.text);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), after_a);
+}
+
 // ---------------------------------------------------------------------------------------
 // D-581 (B-561): the same-run re-enable
 

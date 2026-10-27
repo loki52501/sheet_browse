@@ -458,10 +458,16 @@ impl ToolHandler for Api {
         }
         // A vault header only follows redirects within the same scheme, host and port; a
         // loopback or private target never goes through a proxy (B-590, D-509).
+        let started = std::time::Instant::now();
         let client = clients
             .api_for(&req.url, vault, &self.web.cfg.resolve)
             .await;
-        let mut rb = client.request(req.method.clone(), req.url.clone());
+        // D-526: api_for's name lookup (at most http::LOOKUP_MAX) counts against the
+        // request's own timeout, so the whole call stays within W-2's budget.
+        let left = self.web.cfg.timeout.saturating_sub(started.elapsed());
+        let mut rb = client
+            .request(req.method.clone(), req.url.clone())
+            .timeout(left.max(std::time::Duration::from_millis(1)));
         match req.body {
             Some(Body::Json(v)) => {
                 if !hm.contains_key(CONTENT_TYPE) {

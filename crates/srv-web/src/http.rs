@@ -70,7 +70,8 @@ pub(crate) struct Clients {
     /// private address or one that stays on this machine ([`Clients::api_for`]).
     api_local: reqwest::Client,
     api_vault_local: reqwest::Client,
-    /// Cap on [`Clients::api_for`]'s name lookup (the request timeout, W-2).
+    /// Cap on [`Clients::api_for`]'s name lookup: [`LOOKUP_MAX`], or the request timeout
+    /// when that is shorter (D-526).
     lookup_max: std::time::Duration,
 }
 
@@ -243,9 +244,14 @@ fn build_with(cfg: &Config, resolver: PublicOnly, proxy: Option<&str>) -> Result
         api_vault: api_client(true, true)?,
         api_local: api_client(false, false)?,
         api_vault_local: api_client(false, true)?,
-        lookup_max: cfg.timeout,
+        lookup_max: LOOKUP_MAX.min(cfg.timeout),
     })
 }
+
+/// D-526 (review-T-12b should-fix 2): the longest [`Clients::api_for`] waits for its name
+/// lookup. A lookup that does not finish by then is no answer (the proxy settings apply),
+/// and api's request gets what is left of its timeout.
+pub(crate) const LOOKUP_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// May an api request that started at `first` follow a redirect to `next`? Always the same
 /// host and never https to http; with a vault header (`strict`) also the same scheme and
@@ -1118,6 +1124,20 @@ mod tests {
         );
         // The origin got the two page requests and the loopback api request only.
         assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    /// D-526 (review-T-12b round 2 should-fix 2): api's name lookup has its own short cap
+    /// within the request budget, not the whole request timeout.
+    #[test]
+    fn the_api_lookup_cap_is_short() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.timeout, std::time::Duration::from_secs(15));
+        let clients = build_with(&cfg, PublicOnly::default(), None).unwrap();
+        assert_eq!(clients.lookup_max, LOOKUP_MAX);
+        assert_eq!(LOOKUP_MAX, std::time::Duration::from_secs(5));
+        cfg.timeout = std::time::Duration::from_secs(2);
+        let clients = build_with(&cfg, PublicOnly::default(), None).unwrap();
+        assert_eq!(clients.lookup_max, std::time::Duration::from_secs(2));
     }
 
     /// D-515 (B-590, review-T-12b should-fix 2 and 4): which api client a URL gets with a

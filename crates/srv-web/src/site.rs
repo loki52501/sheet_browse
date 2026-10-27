@@ -284,12 +284,17 @@ impl SiteTool {
     /// The tool's row says `needs_repair` (a miss broke it). An unreadable row counts as not
     /// broken, so nothing is patched on a guess.
     async fn needs_repair(&self, ctx: &ToolCtx) -> bool {
+        self.status(ctx).await == Some(ToolStatus::NeedsRepair)
+    }
+
+    /// The tool's `tools.health` status; `None` when there is no row or it cannot be read.
+    async fn status(&self, ctx: &ToolCtx) -> Option<ToolStatus> {
         ToolStore::new(&self.web.cfg.tools_root)
             .health(&**ctx.store(), &self.tool.domain, &self.tool.header.name)
             .await
             .ok()
             .flatten()
-            .is_some_and(|h| h.status == ToolStatus::NeedsRepair)
+            .map(|h| h.status)
     }
 
     /// The tool file on disk already carries `fp` as its `@fingerprint`: another run
@@ -481,14 +486,24 @@ impl ToolHandler for SiteTool {
                 // D-518: when this read already saw the fingerprint in the file, the run is
                 // recorded as the clean run toolstore would make of it (D-577), so the result
                 // does not hang on toolstore reading the file a second time (a read that fails
-                // there counts as "not carried" and patches again).
+                // there counts as "not carried" and patches again). D-527: not for a tool
+                // retired meanwhile (its file can still be in place when the archive step
+                // failed, D-316): it keeps Relocated, which toolstore refuses for a retired
+                // tool (T-7), so the run neither counts as clean nor brings the tool back.
+                let retired = already && self.status(ctx).await == Some(ToolStatus::Retired);
                 let outcome = match &relocated {
-                    Some((_, fp)) if !already => RunOutcome::Relocated {
+                    Some((_, fp)) if !already || retired => RunOutcome::Relocated {
                         fingerprint: fp.clone(),
                     },
                     _ => RunOutcome::Ok,
                 };
                 match self.record_row(ctx, outcome).await {
+                    Ok(row) if row.status == ToolStatus::Retired => {
+                        // D-527: retired between the read and the record: never enabled or
+                        // registered again (as register() drops a retired tool).
+                        ctx.registry().remove(&name);
+                        notes.push(format!("note: {name} is retired; it is not offered again"));
+                    }
                     Ok(row) => {
                         // D-561: a clean repair run (relocated, or a match recorded Ok)
                         // enables a tool a miss disabled.
@@ -521,7 +536,13 @@ impl ToolHandler for SiteTool {
                             self.reregister(ctx).await;
                         }
                     }
-                    Err(n) => notes.push(n),
+                    Err(n) => {
+                        if retired {
+                            // D-527: toolstore refused to revive it; neither does this server.
+                            ctx.registry().remove(&name);
+                        }
+                        notes.push(n);
+                    }
                 }
                 escape::json_strings(&mut v);
                 let mut body = serde_json::to_string_pretty(&v).unwrap_or_else(|_| "null".into());

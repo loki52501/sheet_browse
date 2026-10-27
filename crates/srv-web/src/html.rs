@@ -16,6 +16,7 @@
 //! row or a block goes through [`crate::escape`]; a challenge (captcha widget, challenge
 //! frame, human-check prompt, Cloudflare interstitial) is reported in [`Doc::challenge`].
 
+use crate::dom::{self, Budget};
 use crate::escape;
 use ego_tree::NodeRef;
 use reqwest::Url;
@@ -174,6 +175,9 @@ pub struct Doc {
     pub hrefs: HashMap<u32, String>,
     /// Why this page is a challenge (D-5), if it is one.
     pub challenge: Option<String>,
+    /// D-519: one line saying what of the page was not read (nested too deep, or markup
+    /// that makes the parser repeat elements), shown under the skeleton.
+    pub cut: Option<String>,
 }
 
 /// Walks `html` fetched from `url` (the final URL, used to resolve links).
@@ -189,16 +193,30 @@ pub(crate) fn parse_within(html: &str, url: &Url, deadline: Instant) -> Option<D
 }
 
 fn parse_inner(html: &str, url: &Url, deadline: Option<Instant>) -> Option<Doc> {
-    let doc = Html::parse_document(html);
+    let budget = deadline.map_or_else(Budget::unlimited, Budget::until);
+    // D-519: the parse stops past dom::NEST_MAX levels or on runaway element repetition,
+    // and gives up at the deadline.
+    let parsed = dom::document(html, &budget)?;
+    let doc = parsed.html;
     let base = base_url(&doc, url);
-    let mut w = Walker::new(&doc, base);
-    w.deadline = deadline;
+    let mut w = Walker::new(&doc, base, &budget);
     w.walk(doc.tree.root(), &Cx::default());
     if w.out_of_time {
         return None;
     }
     w.flush();
-    let title = page_title(&doc);
+    let title = page_title(&doc, &budget);
+    if budget.spent() {
+        return None;
+    }
+    let cut = match (parsed.cut, w.flattened) {
+        (Some(c), _) => Some(c.note()),
+        (None, true) => Some(format!(
+            "page nests elements more than {WALK_DEPTH_MAX} levels deep; what is deeper is \
+             shown as plain text without its links and fields"
+        )),
+        (None, false) => None,
+    };
     let mut challenge = challenge_url(url).or(w.challenge);
     if challenge.is_none() {
         let t = title.trim().to_ascii_lowercase();
@@ -212,6 +230,7 @@ fn parse_inner(html: &str, url: &Url, deadline: Option<Instant>) -> Option<Doc> 
         blocks: w.blocks,
         hrefs: w.hrefs,
         challenge,
+        cut,
     })
 }
 
@@ -456,39 +475,46 @@ fn plain_bracket(s: &str, opened: &mut Vec<String>) -> Option<usize> {
 /// that holds markup), whitespace collapsed. Only text nodes outside [`SKIP_TAGS`],
 /// `textarea` and `iframe` come out, so the result holds no markup (rule 5); block edges and
 /// line breaks separate words.
-pub(crate) fn fragment_text(s: &str) -> String {
+///
+/// D-519: within `budget`. The parse is bounded ([`dom::fragment`]: the text of a fragment
+/// nested past [`dom::NEST_MAX`] levels ends there), and when the budget runs out the text
+/// is empty and [`Budget::spent`] says so. The walk over the tree keeps its own stack, so
+/// no depth can exhaust the thread's.
+pub(crate) fn fragment_text_in(s: &str, budget: &Budget) -> String {
     if !s.contains('<') && !s.contains('&') {
         return s.split_whitespace().collect::<Vec<_>>().join(" ");
     }
-    let frag = Html::parse_fragment(s);
+    let Some(frag) = dom::fragment(s, budget) else {
+        return String::new();
+    };
     let mut out = String::new();
-    for node in frag.tree.root().descendants() {
+    let mut stack = vec![frag.html.tree.root()];
+    while let Some(node) = stack.pop() {
         match node.value() {
-            Node::Text(t) => {
-                let hidden = node.ancestors().any(|a| {
-                    a.value().as_element().is_some_and(|e| {
-                        SKIP_TAGS.contains(&e.name()) || matches!(e.name(), "textarea" | "iframe")
-                    })
-                });
-                if !hidden {
-                    out.push_str(t);
+            Node::Text(t) => out.push_str(t),
+            Node::Element(e) => {
+                let name = e.name();
+                // Raw text, field values and frame content are never text (rule 5).
+                if SKIP_TAGS.contains(&name) || matches!(name, "textarea" | "iframe") {
+                    continue;
                 }
+                // Block edges and line breaks separate words; inline tags do not.
+                if name == "br" || BLOCK_TAGS.contains(&name) {
+                    out.push(' ');
+                }
+                stack.extend(node.children().rev());
             }
-            // Block edges and line breaks separate words; inline tags do not.
-            Node::Element(e) if e.name() == "br" || BLOCK_TAGS.contains(&e.name()) => {
-                out.push(' ');
-            }
-            _ => {}
+            _ => stack.extend(node.children().rev()),
         }
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// [`fragment_text`] when `s` holds markup (raw-text and RCDATA content such as a `<title>`
-/// or `<textarea>`), else `s` unchanged.
-fn no_markup(s: &str) -> String {
+/// [`fragment_text_in`] when `s` holds markup (raw-text and RCDATA content such as a
+/// `<title>` or `<textarea>`), else `s` unchanged.
+fn no_markup(s: &str, budget: &Budget) -> String {
     if crate::http::has_tag(s) {
-        fragment_text(s)
+        fragment_text_in(s, budget)
     } else {
         s.to_string()
     }
@@ -518,7 +544,11 @@ pub fn challenge_url(url: &Url) -> Option<String> {
 /// [`RAW_MAX_CHARS`]. Not a model-facing tool output (CLAUDE.md rule 5, B-500): it is kept
 /// for in-process site-tool hosts that need structure.
 pub fn raw_main_html(html: &str) -> String {
-    let doc = Html::parse_document(html);
+    // D-519: a bounded parse (no deadline: in-process hosts call this on a fetched page).
+    let Some(doc) = dom::document(html, &Budget::unlimited()) else {
+        return String::new();
+    };
+    let doc = doc.html;
     let pick = ["main", "[role=main]"]
         .iter()
         .filter_map(|s| Selector::parse(s).ok())
@@ -595,16 +625,27 @@ struct Walker<'a> {
     order: u32,
     challenge: Option<String>,
     /// D-517: when the walk must stop ([`parse_within`]); `out_of_time` once it has.
-    deadline: Option<Instant>,
+    budget: &'a Budget,
     steps: u32,
     out_of_time: bool,
+    /// D-519: how many walk calls are open (the walk's own recursion depth), and whether a
+    /// subtree past [`WALK_DEPTH_MAX`] was read as plain text.
+    depth: usize,
+    flattened: bool,
 }
+
+/// D-519: the deepest the walk recurses. A subtree below this depth is read as plain text
+/// ([`collect_text`], which keeps its own stack) instead of walked: its controls get no
+/// rows. Each level costs two stack frames (the walk and the element), so 256 levels stay
+/// well inside the 2 MiB stack of a test or tokio blocking thread even in a debug build
+/// (`html::tests::the_walk_fits_a_small_stack` walks the cap on a 1 MiB thread).
+pub(crate) const WALK_DEPTH_MAX: usize = 256;
 
 /// The walk looks at the clock once per this many nodes.
 const CLOCK_EVERY: u32 = 256;
 
 impl<'a> Walker<'a> {
-    fn new(doc: &'a Html, base: Url) -> Walker<'a> {
+    fn new(doc: &'a Html, base: Url, budget: &'a Budget) -> Walker<'a> {
         let mut by_id = HashMap::new();
         let mut label_for = HashMap::new();
         for e in doc.root_element().descendent_elements() {
@@ -632,9 +673,11 @@ impl<'a> Walker<'a> {
             tables: 0,
             order: 0,
             challenge: None,
-            deadline: None,
+            budget,
             steps: 0,
             out_of_time: false,
+            depth: 0,
+            flattened: false,
         }
     }
 
@@ -643,7 +686,7 @@ impl<'a> Walker<'a> {
             return;
         }
         self.steps = self.steps.wrapping_add(1);
-        if self.steps % CLOCK_EVERY == 1 && self.deadline.is_some_and(|d| Instant::now() >= d) {
+        if self.steps % CLOCK_EVERY == 1 && self.budget.spent() {
             self.out_of_time = true;
             return;
         }
@@ -655,7 +698,13 @@ impl<'a> Walker<'a> {
             }
             Node::Element(_) => {
                 if let Some(e) = ElementRef::wrap(node) {
-                    self.element(e, cx);
+                    if self.depth >= WALK_DEPTH_MAX {
+                        self.flat(e, cx);
+                    } else {
+                        self.depth += 1;
+                        self.element(e, cx);
+                        self.depth -= 1;
+                    }
                 }
             }
             Node::Document | Node::Fragment => {
@@ -980,6 +1029,45 @@ impl<'a> Walker<'a> {
 
     fn control(&mut self, e: ElementRef<'a>, role: String, cx: &Cx) {
         let tag = e.value().name();
+        let elem = self.row(e, &role, cx);
+        // Controls nested inside this one (rare: a button in a link) get rows too, so ids
+        // stay complete; their text is part of this control's name already.
+        let mut inner = cx.clone();
+        inner.hidden = true;
+        self.nested_controls(*e, &inner);
+        if cx.hidden {
+            return;
+        }
+        if tag == "iframe" || tag == "frame" {
+            // I-11: an iframe is a placeholder block linking its row.
+            self.boundary(cx);
+            let mut ocx = cx.clone();
+            ocx.kind = BlockKind::Other;
+            self.push_elem(String::new(), elem, &ocx);
+            self.boundary(cx);
+            return;
+        }
+        let text = match tag {
+            "input" | "select" | "textarea" => String::new(),
+            _ => self.inner_text(e, false),
+        };
+        // A permalink anchor (`§`, `¶`, `#` linking a fragment of this page) keeps its row
+        // but adds nothing to the text: it would sit in every heading and outline entry.
+        let permalink = role == "link"
+            && e.attr("href")
+                .is_some_and(|h| h.trim_start().starts_with('#'))
+            && !text.chars().any(char::is_alphanumeric);
+        if permalink {
+            return;
+        }
+        self.push_elem(escape::cap_chars(&text, NAME_MAX), elem, cx);
+    }
+
+    /// The index row of control `e` (its id, name, state and flags); `cx.hidden` makes it
+    /// invisible. Adds nothing to the text and does not look at nested controls.
+    fn row(&mut self, e: ElementRef<'a>, role: &str, cx: &Cx) -> ElemRef {
+        let role = role.to_string();
+        let tag = e.value().name();
         let id = self.next_id;
         self.next_id += 1;
         let elem = ElemRef::main(id);
@@ -1039,7 +1127,7 @@ impl<'a> Walker<'a> {
             }
             "textarea" => {
                 // RCDATA: markup inside a textarea is text to the parser, not to rule 5.
-                let t = no_markup(&e.text().collect::<String>());
+                let t = no_markup(&e.text().collect::<String>(), self.budget);
                 state.value = Some(if t.trim().is_empty() {
                     FieldValue::Empty
                 } else if secret {
@@ -1124,42 +1212,15 @@ impl<'a> Walker<'a> {
             child_frame: None,
             bbox: None,
         });
-        // Controls nested inside this one (rare: a button in a link) get rows too, so ids
-        // stay complete; their text is part of this control's name already.
-        let mut inner = cx.clone();
-        inner.hidden = true;
-        self.nested_controls(*e, &inner);
-        if cx.hidden {
-            return;
-        }
-        if tag == "iframe" || tag == "frame" {
-            // I-11: an iframe is a placeholder block linking its row.
-            self.boundary(cx);
-            let mut ocx = cx.clone();
-            ocx.kind = BlockKind::Other;
-            self.push_elem(String::new(), elem, &ocx);
-            self.boundary(cx);
-            return;
-        }
-        let text = match tag {
-            "input" | "select" | "textarea" => String::new(),
-            _ => self.inner_text(e, false),
-        };
-        // A permalink anchor (`§`, `¶`, `#` linking a fragment of this page) keeps its row
-        // but adds nothing to the text: it would sit in every heading and outline entry.
-        let permalink = role == "link"
-            && e.attr("href")
-                .is_some_and(|h| h.trim_start().starts_with('#'))
-            && !text.chars().any(char::is_alphanumeric);
-        if permalink {
-            return;
-        }
-        self.push_elem(escape::cap_chars(&text, NAME_MAX), elem, cx);
+        elem
     }
 
-    /// Rows for the controls under `node` (outermost ones; each handles its own subtree).
+    /// Rows for the controls under `node`, in document order, all with `cx` (hidden: their
+    /// text is part of the outer control's name already). D-519: one loop with its own
+    /// stack, also for controls inside controls, so no nesting costs thread stack.
     fn nested_controls(&mut self, node: NodeRef<'a, Node>, cx: &Cx) {
-        for c in node.children() {
+        let mut stack: Vec<NodeRef<'a, Node>> = node.children().rev().collect();
+        while let Some(c) = stack.pop() {
             let Some(ce) = ElementRef::wrap(c) else {
                 continue;
             };
@@ -1167,11 +1228,22 @@ impl<'a> Walker<'a> {
             if SKIP_TAGS.contains(&tag) || tag == "option" {
                 continue;
             }
-            match control_role(ce) {
-                Some(role) => self.control(ce, role, cx),
-                None => self.nested_controls(c, cx),
+            if let Some(role) = control_role(ce) {
+                self.row(ce, &role, cx);
             }
+            stack.extend(c.children().rev());
         }
+    }
+
+    /// D-519: a subtree past [`WALK_DEPTH_MAX`] as plain text in the current block.
+    fn flat(&mut self, e: ElementRef<'a>, cx: &Cx) {
+        self.flattened = true;
+        if cx.hidden {
+            return;
+        }
+        let mut s = String::new();
+        collect_text(*e, false, &mut s, false);
+        self.push_text(&s, cx);
     }
 
     /// The B-5 name ladder, approximated: aria-labelledby, aria-label, label, content,
@@ -1361,43 +1433,47 @@ fn cap_span(s: &mut Span, max: usize) {
     }
 }
 
+/// Visible text under `node` into `out` (image alt text included). `top`: `node` is the
+/// element asked about, whose own hidden state the caller has decided. D-519: an explicit
+/// stack, so a subtree of any depth costs no thread stack.
 fn collect_text(node: NodeRef<'_, Node>, skip_controls: bool, out: &mut String, top: bool) {
-    match node.value() {
-        Node::Text(t) => {
-            out.push(' ');
-            out.push_str(t);
+    let mut stack = vec![(node, top)];
+    while let Some((node, top)) = stack.pop() {
+        let el = match node.value() {
+            Node::Text(t) => {
+                out.push(' ');
+                out.push_str(t);
+                continue;
+            }
+            Node::Element(el) => el,
+            _ => continue,
+        };
+        let tag = el.name();
+        // A frame's text is a separate document, never read (module doc, rule 5).
+        if SKIP_TAGS.contains(&tag) || matches!(tag, "iframe" | "frame" | "frameset") {
+            continue;
         }
-        Node::Element(el) => {
-            let tag = el.name();
-            // A frame's text is a separate document, never read (module doc, rule 5).
-            if SKIP_TAGS.contains(&tag) || matches!(tag, "iframe" | "frame" | "frameset") {
-                return;
-            }
-            // A textarea adds nothing to a name: its text is the field's value (maybe a
-            // secret, rule 5) and is reported once, as the value, through no_markup.
-            if tag == "textarea" {
-                return;
-            }
-            if let Some(e) = ElementRef::wrap(node) {
-                if !top && is_hidden(e) {
-                    return;
-                }
-            }
-            if skip_controls && matches!(tag, "input" | "select" | "textarea") {
-                return;
-            }
-            if tag == "img" {
-                if let Some(a) = el.attr("alt") {
-                    out.push(' ');
-                    out.push_str(a);
-                }
-                return;
-            }
-            for c in node.children() {
-                collect_text(c, skip_controls, out, false);
+        // A textarea adds nothing to a name: its text is the field's value (maybe a
+        // secret, rule 5) and is reported once, as the value, through no_markup.
+        if tag == "textarea" {
+            continue;
+        }
+        if let Some(e) = ElementRef::wrap(node) {
+            if !top && is_hidden(e) {
+                continue;
             }
         }
-        _ => {}
+        if skip_controls && matches!(tag, "input" | "select" | "textarea") {
+            continue;
+        }
+        if tag == "img" {
+            if let Some(a) = el.attr("alt") {
+                out.push(' ');
+                out.push_str(a);
+            }
+            continue;
+        }
+        stack.extend(node.children().rev().map(|c| (c, false)));
     }
 }
 
@@ -1647,14 +1723,14 @@ fn challenge_text(plain: &str) -> bool {
 // ---------------------------------------------------------------------------------------
 // Page-level helpers
 
-fn page_title(doc: &Html) -> String {
+fn page_title(doc: &Html, budget: &Budget) -> String {
     let Ok(sel) = Selector::parse("title") else {
         return String::new();
     };
     doc.select(&sel)
         .next()
         // RCDATA: markup inside a title is text to the parser, not to rule 5.
-        .map(|t| escape::name(&no_markup(&t.text().collect::<String>()), NAME_MAX))
+        .map(|t| escape::name(&no_markup(&t.text().collect::<String>(), budget), NAME_MAX))
         .unwrap_or_default()
 }
 
@@ -1710,17 +1786,40 @@ const VOID: &[&str] = &[
     "wbr",
 ];
 
+/// D-519: an explicit stack of nodes to open and end tags to write, so a tree of any depth
+/// costs no thread stack.
 fn serialize(node: NodeRef<'_, Node>, out: &mut String) {
-    match node.value() {
-        Node::Text(t) => out.push_str(&esc_html(t)),
-        Node::Element(el) => {
+    enum Step<'a> {
+        Open(NodeRef<'a, Node>),
+        Close(&'a str),
+    }
+    let mut stack = vec![Step::Open(node)];
+    while let Some(step) = stack.pop() {
+        let node = match step {
+            Step::Open(n) => n,
+            Step::Close(tag) => {
+                out.push_str("</");
+                out.push_str(tag);
+                out.push('>');
+                continue;
+            }
+        };
+        let el = match node.value() {
+            Node::Text(t) => {
+                out.push_str(&esc_html(t));
+                continue;
+            }
+            Node::Element(el) => el,
+            _ => continue,
+        };
+        {
             let tag = el.name();
             if SKIP_TAGS.contains(&tag) || tag == "iframe" {
-                return;
+                continue;
             }
             if let Some(e) = ElementRef::wrap(node) {
                 if is_hidden(e) {
-                    return;
+                    continue;
                 }
             }
             out.push('<');
@@ -1749,16 +1848,11 @@ fn serialize(node: NodeRef<'_, Node>, out: &mut String) {
             }
             out.push('>');
             if VOID.contains(&tag) {
-                return;
+                continue;
             }
-            for c in node.children() {
-                serialize(c, out);
-            }
-            out.push_str("</");
-            out.push_str(tag);
-            out.push('>');
+            stack.push(Step::Close(tag));
+            stack.extend(node.children().rev().map(Step::Open));
         }
-        _ => {}
     }
 }
 
@@ -2203,5 +2297,125 @@ mod tests {
         assert!(parse_text_within("plain words", &url, Instant::now()).is_none());
         let later = Instant::now() + std::time::Duration::from_secs(60);
         assert!(parse_within(&html, &url, later).is_some_and(|d| !d.blocks.is_empty()));
+    }
+
+    /// Runs `f` on a thread with a 1 MiB stack, half of what a test or tokio blocking thread
+    /// gets. A stack overflow aborts the whole test binary, so passing proves the margin.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    fn shown(d: &Doc) -> String {
+        let mut all = String::new();
+        for b in &d.blocks {
+            for s in &b.spans {
+                all.push_str(&s.text);
+                all.push(' ');
+            }
+        }
+        for r in &d.index {
+            all.push_str(&r.name);
+            all.push(' ');
+        }
+        all
+    }
+
+    /// D-519, review-T-12b round 2 Blocking 1: a page nested deeper than the walk recurses
+    /// (but not past the parse cap) is walked on half the usual stack, whatever the nesting
+    /// is made of, and its deepest text is shown as plain text with a note.
+    #[test]
+    fn the_walk_fits_a_small_stack() {
+        // (open, close, levels per repetition)
+        let shapes = [
+            ("<div>", "</div>", 1),
+            ("<span>", "</span>", 1),
+            ("<div role=button>", "</div>", 1),
+            ("<a href=/x><div role=button>", "</div></a>", 2),
+            ("<table><tr><td>", "</td></tr></table>", 4),
+            ("<ul><li>", "</li></ul>", 2),
+            ("<details open><summary>s</summary>", "</details>", 1),
+            ("<label>L ", "</label>", 1),
+            ("<form><fieldset>", "</fieldset></form>", 1),
+        ];
+        for (open, close, per) in shapes {
+            let n = (dom::NEST_MAX - 40) / per;
+            assert!(n * per > WALK_DEPTH_MAX + 100, "{open}");
+            let page = format!(
+                "<p>top words</p>{}deepest words <a href=/deep>deep link</a>{}<p>after words</p>",
+                open.repeat(n),
+                close.repeat(n)
+            );
+            let d = on_small_stack(move || page_at(&page));
+            let all = shown(&d);
+            for want in ["top words", "deepest words", "after words"] {
+                assert!(all.contains(want), "{open}: {want} missing");
+            }
+            // A control takes its subtree as its name (nested controls get rows in one
+            // loop); anything else is walked to the cap and read as plain text below it.
+            let cut = d.cut.clone().unwrap_or_default();
+            if open.contains("role=button") {
+                assert_eq!(cut, "", "{open}");
+                assert!(d.index.len() > n, "{open}: {} rows", d.index.len());
+            } else {
+                assert!(cut.contains("plain text"), "{open}: {cut:?}");
+            }
+        }
+        // A page within the walk's depth has no note.
+        let page = format!("{}x", "<div>".repeat(WALK_DEPTH_MAX - 10));
+        assert_eq!(on_small_stack(move || page_at(&page)).cut, None);
+    }
+
+    fn page_at(html: &str) -> Doc {
+        parse(html, &Url::parse("https://example.com/a/b").unwrap())
+    }
+
+    /// D-519, review-T-12b round 2 Blockings 1 and 2: 100 000 nested elements (as HTML and,
+    /// with known names, as text/plain) parse only to the nesting cap, walk on half the
+    /// usual stack, and say the rest is missing; the text before them is shown.
+    #[test]
+    fn a_hundred_thousand_nested_elements_return_quickly() {
+        let url = Url::parse("https://example.com/p").unwrap();
+        for open in ["<div>", "<span>", "<b>", "<div role=button>", "<td>"] {
+            for plain in [false, true] {
+                let page = format!("before words\n\n{}deep words", open.repeat(100_000));
+                let u = url.clone();
+                let t = Instant::now();
+                let d = on_small_stack(move || {
+                    if plain {
+                        parse_text(&page, &u)
+                    } else {
+                        parse(&page, &u)
+                    }
+                });
+                let took = t.elapsed();
+                assert!(took.as_secs() < 10, "{open} plain={plain}: {took:?}");
+                let all = shown(&d);
+                assert!(all.contains("before words"), "{open} plain={plain}");
+                if open != "<td>" {
+                    // `<td>` outside a table is dropped by the parser: nothing nests.
+                    let cut = d.cut.clone().unwrap_or_default();
+                    assert!(
+                        cut.contains("nested too deep"),
+                        "{open} plain={plain}: {cut:?}"
+                    );
+                    assert!(!all.contains("deep words"), "{open} plain={plain}");
+                }
+            }
+        }
+        // The other walks over a parsed tree: fragment text and the raw main HTML.
+        let deep = format!("<main>a {}b", "<div><i>".repeat(50_000));
+        let (text, raw) = on_small_stack(move || {
+            (
+                fragment_text_in(&deep, &Budget::unlimited()),
+                raw_main_html(&deep),
+            )
+        });
+        assert!(text.starts_with("a"), "{text:.40}");
+        assert!(raw.starts_with("<main>a <div><i>"), "{raw:.40}");
     }
 }
