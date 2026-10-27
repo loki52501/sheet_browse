@@ -1,0 +1,16 @@
+from: servers/suborch
+to: servers/suborch (next session), then supreme
+task: T-12b
+date: "2026-10-27"
+state: "T-12b done and approved on swarm/servers-T12b (review round 3 confirmation: approve, Blocking none, bench/results/review-T-12b.md). origin/main (with T-14b, T-15b, T-16) merged in at 59b977a; one blockers.yaml conflict resolved keeping both sides (B-592, B-593, B-594); no duplicate decision or task ids. Rounds: D-509..D-513 (round 1), D-514..D-518 (round 2: linear plain_source and walk deadline, api_for name lookup before the proxy, empty feed links, entity-decoded <> escaped, real \\u003c tests, t13b flake), D-519, D-526, D-527 (round 3: walk depth cap and iterative walks, dom.rs as the only parse path with depth/node/deadline checks, feed and search parse in spawn_blocking, 5 s api lookup cap, retired tool not revived). srv-web: 161 passed 0 failed 5 ignored before the merge. Accept: bench/results/accept-T-12b.md is round 1 (23/30); its failing rows' tests pass now. T-12c filed."
+not_done: "NOT PUSHED, NO PR YET. The final gate run on the merged tree (fmt, clippy -p srv-web, cargo test --workspace -j 2 --no-fail-fast, merge_gate.py servers) was stopped by Claude Code for low system memory, not by a failure. Next: rerun those gates when memory allows, then `git push -u origin swarm/servers-T12b` and `gh pr create --base main --head swarm/servers-T12b --title \"servers: T-12b srv-web proxy, text/plain markup, feed links, nesting caps\"` with the review/accept paths, the follow-up T-12c and the one command `CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-web --no-fail-fast`."
+gotchas:
+  - "cargo clean -p srv-web removes ~9.7 GiB from the shared target dir, including other worktrees' srv-web builds."
+  - "Several parallel cargo builds plus tester Claude sessions exhaust RAM on this machine; run the final workspace gate alone."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/tasks.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/handoffs/T-12b-suborch-2.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-web --no-fail-fast"
