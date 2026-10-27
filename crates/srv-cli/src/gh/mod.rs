@@ -155,12 +155,13 @@ const LEAD_VALUE_FLAGS: [&str; 3] = ["-R", "--repo", "--hostname"];
 /// `--help` or `--version` is returned as it is. `quiet` (inside an alias's expansion) leaves
 /// the flag out of the message.
 fn group_first(argv: &[String], quiet: bool) -> Result<Vec<String>, ToolError> {
-    // D-598: gh's parser drops empty words, so `'' auth token` or `repo '' delete` runs a
-    // command this classifier would not see; an empty word is refused anywhere.
-    if argv.iter().any(|t| t.is_empty()) {
+    // D-598: gh's parser drops empty words and a lone `-`, so `'' auth token` or
+    // `label - delete` runs a command this classifier would not see; both are refused
+    // anywhere (gh runs with stdin closed, so `-` as "read stdin" has no use here).
+    if argv.iter().any(|t| t.is_empty() || t == "-") {
         return Err(ToolError::Args(
-            "gh: an empty word is not passed to gh (gh drops it, which changes the command); \
-             write an empty flag value as --flag=; nothing ran"
+            "gh: an empty word or a lone - is not passed to gh (gh drops it, which changes \
+             the command); write an empty flag value as --flag=; nothing ran"
                 .into(),
         ));
     }
@@ -444,9 +445,14 @@ fn is_read(group: &str, sub: Option<&str>) -> bool {
 }
 
 /// The class of `gh <group> <sub> ...` from the static rules (D-540) alone.
+/// A word that names a deletion: `delete` and gh's aliases of it (`secret remove`,
+/// `variable remove`), and hyphenated forms (`release delete-asset`, `project item-delete`).
+fn is_delete_word(w: &str) -> bool {
+    matches!(w, "remove" | "rm") || w.split('-').any(|p| p == "delete")
+}
+
 fn sub_class(group: &str, sub: Option<&str>) -> Class {
-    // `remove` and `rm` are gh's own aliases of delete (`secret remove`, `variable remove`).
-    if matches!(sub, Some("delete" | "remove" | "rm")) {
+    if sub.is_some_and(is_delete_word) {
         Class::Delete
     } else if is_read(group, sub) {
         Class::Read
@@ -606,7 +612,17 @@ fn classify_static(
     } else {
         match &sub {
             Sub::None => sub_class(group, None),
-            Sub::Known(i) => sub_class(group, Some(&rest[*i])),
+            // A third word can name the deletion (`repo deploy-key delete`, `repo autolink
+            // delete`): the class is at least Delete then (D-599).
+            Sub::Known(i) => {
+                let third = rest[*i + 1..].iter().find(|w| !w.starts_with('-'));
+                let c = sub_class(group, Some(&rest[*i]));
+                if third.is_some_and(|w| is_delete_word(w)) {
+                    c.max(Class::Delete)
+                } else {
+                    c
+                }
+            }
             // Any word may be the subcommand: the highest class any of them gives, and
             // never below Account (a read is a read only when its subcommand is certain).
             Sub::Ambiguous(words) => words
@@ -1673,11 +1689,15 @@ as1: alias set zz9 'auth token'\nas2: alias set --bogus x 'pr view'\n";
             "--repo=o/r '' run delete 5",
             "'' api --hostname other.host /x",
             "pr view 5 ''",
+            "label - delete --yes",
+            "repo - delete --yes",
+            "alias - set x 'auth token'",
+            "alias - import f.yml",
         ] {
             let argv = argv::split(bad).unwrap();
             assert!(
-                argv.iter().any(String::is_empty),
-                "fixture has an empty word: {bad}"
+                argv.iter().any(|w| w.is_empty() || w == "-"),
+                "fixture has an empty word or a lone -: {bad}"
             );
             let e = p(bad).unwrap_err().to_string();
             assert!(e.contains("empty word"), "gh {bad}: {e}");
@@ -1698,6 +1718,11 @@ as1: alias set zz9 'auth token'\nas2: alias set --bogus x 'pr view'\n";
             "secret remove TOKEN",
             "variable remove X",
             "secret rm TOKEN",
+            "repo deploy-key delete 5",
+            "repo autolink delete 7 --yes",
+            "release delete-asset v1 a.zip",
+            "project item-delete 1 --id x",
+            "project field-delete --id x",
         ] {
             assert_eq!(c(call).unwrap(), Class::Delete, "gh {call}");
         }

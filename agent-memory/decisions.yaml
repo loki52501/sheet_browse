@@ -607,3 +607,6 @@ decisions:
   - id: D-599
     text: "T-15b review round 2 (C-1, D-540). gh subcommands `remove` and `rm` are classed Delete like `delete` (`secret remove`, `variable remove`)."
     why: "They are gh's own aliases of delete; Account understated a deletion. Raising a class never lowers one."
+  - id: D-660
+    text: "T-15b review round 3 (C-1, rule 4, extends D-598 and D-599). gh also refuses a lone `-` word anywhere in a call or an alias expansion (gh drops it like an empty word; gh runs with stdin closed, so `-` as stdin has no use). A deletion named by a hyphenated word (`release delete-asset`, `project item-delete`, `project field-delete`) or by the word after the subcommand (`repo deploy-key delete`, `repo autolink delete`) is classed at least Delete."
+    why: "`label - delete --yes` deleted while classed Account, and an unanswered Account ask proceeds where a Delete ask is skipped; the hyphenated and three-word deletes were Account since T-15 (D-540). Each change only raises a class or refuses."

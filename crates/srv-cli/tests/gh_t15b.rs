@@ -284,8 +284,9 @@ async fn alias_import_is_refused() {
         "alias --bogus import x.yml",
     ] {
         let err = env.call("gh", json!({ "args": cmd })).await.expect_err(cmd);
+        // `alias import -` is refused earlier, for its lone `-` (D-598).
         assert!(
-            matches!(&err, ToolError::Args(m) if m.contains("alias set")),
+            matches!(&err, ToolError::Args(m) if m.contains("alias set") || m.contains("lone -")),
             "gh {cmd}: {err}"
         );
     }
