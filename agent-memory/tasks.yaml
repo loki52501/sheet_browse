@@ -411,3 +411,43 @@ tasks:
     title: "review-T-08b round 2 should-fix: the B-186 refusal in `harness gate set` checks the typed domain and class, but gate_rule_set stores the UTS-46-normalised key (gate::rule_domain: full-width to ASCII, soft hyphens dropped). Run the vault-value refusal on gate::rule_key's output too, with a full-width and a soft-hyphen test case."
     status: todo
     from: T-08b
+  - id: T-17b
+    step: follow-up
+    wave: 4
+    owner: core
+    branch: swarm/core-T17b
+    title: "T-17 baseline (phase1-2026-10-27, 13/30): interactive `harness run` sessions get no grounding preamble (run_preamble only reaches -p/harnessd), so rung 1/2 answered from memory with zero tool calls; give every run the preamble."
+    status: todo
+    from: T-17
+  - id: T-17c
+    step: follow-up
+    wave: 4
+    owner: core
+    branch: swarm/core-T17c
+    title: "T-17 baseline: sessions are not told their run id or files path, so fs.write/xlsx.write deliverables land in the session cwd, outside runs/<id>/files/ and missing from report.md (rungs 2/1, 4/2, 5/3); pass the run files path and make writes default there (B-564 bare names already work)."
+    status: todo
+    from: T-17
+  - id: T-17d
+    step: follow-up
+    wave: 4
+    owner: core
+    branch: swarm/core-T17d
+    title: "T-17 baseline rung 8: watch.observe hashes the model free-text state, so an unchanged page described in different words reads as changed and sends a second notification; normalise or structure the watched state before hashing."
+    status: todo
+    from: T-17
+  - id: T-17e
+    step: follow-up
+    wave: 4
+    owner: servers
+    branch: swarm/servers-T17e
+    title: "T-17 baseline: every rung-2 session burned 3 failed `api` calls guessing `pick` index syntax (versions[0]); document or accept the index form in the api tool description and errors."
+    status: todo
+    from: T-17
+  - id: T-17f
+    step: follow-up
+    wave: 4
+    owner: supreme
+    branch: swarm/bench-T17f
+    title: "T-17 baseline cannot reach >= 27/30: bench/phase1 has no rung-10.md and only one variant for rungs 6, 7, 8 (9 of 30 slots missing), and docs/08/09 never define the A/B use cases. Write the missing prompts and the A/B set, then re-run T-17."
+    status: todo
+    from: T-17
