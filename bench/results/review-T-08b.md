@@ -16,6 +16,7 @@ Run here: `CARGO_TARGET_DIR=<wt>/target SB_VAULT_CANARY=sbcanary-x-<hex> cargo t
   - `tools list` prints the folder name raw: `format!("{d}/{}", cell(&n, 0))` at cli.rs:813. The name is cleaned but `d` is not. `d` is typed (`tools list <domain>`) or read from disk. Use `cell(&d, 0)`. This is a D-124 (1) reading command, so add a folder named with the canary to `d124_1_reading_commands_print_the_literal`.
   - `schedule add` prints `parent run {}` with `parent.id` raw (cli.rs:570). Under `SB_RUN_ID` that is the session's run id, which can carry a value exactly like the ledger header (fixed here at :691). The error path at :486 already uses `clean`. Use `clean(&parent.id.0)`.
 - Test gaps:
+  - D-85 has no committed test on the branch. The tester (or coder) should commit crates/core/tests/accept_t08b_d85.rs.
   - The unknown-id refusal is asserted only as "no value in tools.health". Assert that `tools pin x/unknown` and `tools unpin x/unknown` return `CliError::NotFound` and leave `tools.health` empty, with an id that holds no value. As written, a refusal that silently returned Ok would pass.
   - The B-526 guard depends on the environment. `mcp_t07::file_asker_stderr_has_no_canary` (crates/core/tests/mcp_t07.rs:1578) fails on the old wording only when TEMP is long. Put the child's run folder under a path padded past the line cap, so reverting ask.rs:151/:174 goes red on every machine.
 
@@ -26,7 +27,7 @@ Run here: `CARGO_TARGET_DIR=<wt>/target SB_VAULT_CANARY=sbcanary-x-<hex> cargo t
 
 ## Notes
 
-- D-85: `SchedError` carries `#[non_exhaustive]` (sched.rs:45-47). crates/core/tests/accept_t08b_d85.rs (from main) has a `#![deny(unreachable_patterns)]` match with a `_` arm plus a source check. It goes red without the attribute. No external exhaustive match broke.
+- D-85: `SchedError` carries `#[non_exhaustive]` (sched.rs:45-47). No committed test guards it: crates/core/tests/accept_t08b_d85.rs exists in the worktree only as an untracked file (written 16:20 next to an untracked T-08b-tester-1.yaml, so probably the tester's), on neither the branch nor main. Its design is right (a `#![deny(unreachable_patterns)]` match with a `_` arm plus a source check, which goes red without the attribute), but it has to be committed. See Should-fix. No external exhaustive match broke.
 - D-124 (1) ledger header: run id and parent go through `clean` (cli.rs:686-697), and so does the "no run" error. The test seeds both the parent and the own id with the canary and goes red on revert (the header is the only place either is printed).
 - `gate set --note`: `scrub(&note)` before `gate_rule_set` (cli.rs:297). The test dumps `gate.rules` and requires the literal, so it goes red on revert.
 - `known_tool`: errors from `try_tool_path` and `health` propagate (`?`), and an unknown id is refused. It does not fail open. With `known_tool` reverted, `set_pinned` would create a row named with the value, and the new `tools.health` dump assertion catches that.
