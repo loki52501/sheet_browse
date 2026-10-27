@@ -105,3 +105,87 @@ it is broken. Should-fix items 1-3 are fail-open gaps in the checker and in B-59
 before core builds T-28 on B-596.
 
 Verdict: approve
+
+# Round 2 (confirmation, D-89)
+
+Range: `git diff f2c2fb0..HEAD -- scripts/recipes tools agent-memory/{blockers,decisions,tasks}.yaml`
+(850dcb8, 70f8eb3, 4a2888f, 0d40e06). Ran `python scripts/recipes/check_recipes.py` (7 recipes,
+0 problems, exit 0) and `python -m unittest discover -s scripts/recipes -v` (26 tests OK). I also
+ran a probe of `check_doc` and a mutation run: in a scratch copy of the suite I reverted each fix
+one at a time. I did not use the browser and did not run cargo.
+
+Round-1 items confirmed fixed, each with a test that fails when the fix is reverted:
+- 1 (@vault outside act text): the scan now covers the whole file (check_recipes.py:311-322).
+  test_vault_in_an_arg_default_is_refused fails when it is reverted to the `body` scan. The
+  arg-value half is now B-599(1).
+- 2 (URL tricks): check_recipes.py:131, :138-147. The backslash, tab, `%2f`, bad-port and `x@`
+  cases each fail the suite when their check is removed.
+- 3 (other tools): D-1503 cuts TOOLS down to 7 (check_recipes.py:47). The old set fails
+  test_tools_are_browseros_recipe_tools.
+- 7 (odd types): `one_of` and `text` (:153-160), nth/name/value/expects/read/grep checks
+  (:177-221). Plain `in` in place of `one_of` raises inside the suite. Removing any one of the
+  other checks fails the suite.
+- 8 (aliases): check_recipes.py:81-100, and problems are surfaced at :354-355. Dropping the dot
+  rule fails test_site_aliases_are_hosts_with_a_dot.
+- Wait timeout cap: 1..30000, bool and str refused (:212-214). Removing the check fails the suite.
+
+Two mutants survived, and both are harmless. (a) `"@" in netloc` replaced by `parts.username`:
+the only input that behaves differently is `https://@host/`, an empty userinfo that Chrome drops.
+(b) The scalar-alias line :92 has no effect of its own, because :94 already wraps a non-list.
+
+## Blocking
+
+- none
+
+## Should fix
+
+1. **Whole-file @vault scan crashes on a mapping `steps`** (check_recipes.py:313-318).
+   `steps: {x: {tool: act, args: {text: "@vault(k)"}}}` raises `ValueError` from `int('x')`, and
+   `steps: {"0": ...}` raises `IndexError`. Line :292 resets `steps` to `[]`, but `strings(doc)`
+   still walks the original mapping. The check fails closed (exit 1) but prints a traceback,
+   which is the item-7 class this round set out to remove. Guard the index with
+   `kpath[1].isdigit() and int(kpath[1]) < len(steps)`.
+2. **Step args have no per-tool key allowlist. This is the one fail-open left**
+   (check_recipes.py:174-225). All of these pass: navigate `{url, tabId: 3}`, navigate
+   `{url, newTab: true}`, `read {url: https://evil.com/}`, `snapshot {url: ...}`,
+   `read {path: C:/Users/x/.ssh/id_rsa}`, and an args key `"@vault(pw)"`. I could not check here
+   which of these BrowserOS 0.0.69 honours. Either way, D-1503's narrowing holds only as far as
+   the arg surface of the 7 tools it keeps. Allow only the keys the recipes use (navigate: url;
+   wait: for, value, timeout; act: kind, value, text, key; grep: over, pattern, limit; read:
+   format, selector; snapshot/diff: none) and add a test.
+3. **Item 9 is handled by description text only.** create.recipe.yaml:5 states the format, but
+   B-599 has no run-time rule that enforces it. Add B-599(8): tools.run checks `start`/`end`
+   against `^\d{8}T\d{6}$` (or add an optional arg `pattern:` field). Without it, a model that
+   misreads the description still saves an event at Google's default slot.
+
+## Notes
+
+- D-1503 matches the code. The commit messages name T-27, T-27b, D-1503, B-599 and B-1500, and
+  each matches the diff. tasks.yaml marks T-27 done, and T-27b is blocked_by T-28. The diff has
+  no em dashes, ` -- `, key-shaped strings or vault values.
+- A fullwidth backslash (U+FF3C) passes check_url: `https://evil.com\uff3c.mail.google.com/`.
+  Chrome's host parser maps it to `\` and rejects the URL, so the browser fails closed. Python's
+  NFKC netloc check already catches the fullwidth `/ ? # @`. Round 1 asked for an
+  `[a-z0-9.-]` host allowlist, and adding it would close this case in the checker as well.
+- Items 4 and 5 are handled by the send, draft and register descriptions plus B-599(6) and (7).
+  That is acceptable for now. The prefix-match half of round-1 item 6 (`Send`, `Save` and
+  `Register` as name prefixes) is not in B-599: only the nth scope, B-599(2), was carried over.
+  B-599(7)'s `refuse_if` partly covers register.
+- Waits: `timeout: 30000` is set on the first wait after each navigate in all 7 recipes and on
+  draft's wait after its second navigate. All are condition waits within the checker's cap
+  (rule 6). The waits after a click (Event saved, Message sent, You're In, thread's Print all)
+  keep the 10 s default, which is fine for in-page transitions. The thread wait on
+  `[role=main] [aria-label="Print all"]` is sound for opening a thread. Its live check is the
+  caller's (I did not run it). Like the events grep and every name target, it depends on an
+  English UI.
+- B-1500's note that inbox snippets can carry one-time codes to the model is for core and
+  supreme, and it is worth acting on.
+
+## Verdict
+
+Round-1 items 1, 2, 3, 7 and 8 are fixed, and each fix is held by a test that fails when the fix
+is reverted. Items 4, 5 and 9 are mitigated by description text, and B-599 covers 4 and 5. No
+hard rule is broken and no new defect blocks. Should-fix 2 is the one fail-open left in the
+checker. Close it before T-28 replaces the checker with toolstore's parser, or carry it into T-28.
+
+Verdict: approve
