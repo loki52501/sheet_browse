@@ -267,7 +267,8 @@ fn on_attached(
 
 /// The driver: one browser, its registry and tabs. Dropping it kills every browser process
 /// (waiting up to [`sb_cdp::DROP_KILL_CAP`], blocking the dropping thread) and then removes a
-/// `bench` profile. Dropping skips `Browser.close`, so a `me` driver should end with
+/// `bench` profile (retrying for up to 20 s more while the browser's files are held, D-630).
+/// Dropping skips `Browser.close`, so a `me` driver should end with
 /// [`Driver::shutdown`] to let Chromium flush cookies and session state.
 pub struct Driver {
     cdp: Cdp,
@@ -280,6 +281,8 @@ pub struct Driver {
 
 impl Drop for Driver {
     fn drop(&mut self) {
+        // Even when kill reports the browser not confirmed gone, the profile field still
+        // drops after this and makes its capped removal attempts (D-630): nothing to lose.
         self.pipe.kill(sb_cdp::DROP_KILL_CAP);
     }
 }

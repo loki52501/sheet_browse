@@ -81,6 +81,28 @@ async fn serve() -> u16 {
     port
 }
 
+/// Up to 20 paths still under `dir`, for a failure message (B-199 diagnosis).
+fn leftover(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            if out.len() == 20 {
+                return out;
+            }
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p.clone());
+            }
+            out.push(p);
+        }
+    }
+    out
+}
+
 #[tokio::test]
 async fn bench_headless_launch_registry_and_cleanup() {
     let Some(chrome) = common::chromium() else {
@@ -228,5 +250,9 @@ async fn bench_headless_launch_registry_and_cleanup() {
     for pid in &pids {
         assert!(!process_running(*pid), "pid {pid} still running after drop");
     }
-    assert!(!profile.exists(), "bench profile {profile:?} not removed");
+    assert!(
+        !profile.exists(),
+        "bench profile {profile:?} not removed; left: {:?}",
+        leftover(&profile)
+    );
 }
