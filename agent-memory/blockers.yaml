@@ -281,6 +281,11 @@ blockers:
     from: core
     question: "review-T-08b round 1 should-fix: `harness gate set <domain> <class>` stores domain and class as the gate.rules key. A vault value typed into either (gate::rule_key accepts a canary-shaped label) would land in the database (rule 2). Scrubbing does not fit a key: the scrubbed text is a different rule, or one rule_key refuses. Should the CLI refuse such a domain or class, scrub it, or store it?"
     default_taken: "Refuse (T-08b round 2): before gate_rule_set, a domain or class whose scrub differs from the typed text is a Usage error that names the vault entry (`@vault(name)`), never the value, and nothing is stored. The note keeps being scrubbed (it is not a key). Test: accept_t08_r2 b186_gate_set_refuses_a_vault_value_in_the_domain_or_class."
+  - id: B-594
+    task: T-14b
+    question: "For supreme/core (gate, with B-565): an Account-class shell line such as `git config --global <key> <value>` (keys that run programs are already Delete, D-547) runs when its ask times out, and the shell runner keeps HOME, so an unanswered ask changes the user's real ~/.gitconfig. A T-14b reviewer probe did exactly that (safe.bareRepository; reverted by the reviewer, verified clean by the servers suborch). Should Account asks that touch user-global state outside the repo (git config --global/--system, gh auth/config) time out to skip instead of proceed?"
+    default_taken: "No change in T-14b: command-scope safe.bareRepository=explicit (D-555, D-556) beats the global value, so the key cannot undo the fix. Proposed for core, wave 4: an on_timeout skip hint for Account calls whose target is user-global config, set by the classifier (Classified carries it) or by a gate rule."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core
