@@ -601,3 +601,9 @@ decisions:
   - id: D-597
     text: "srv-cli gh alias import is refused (T-15b round 2, C-1, rule 4; review-T-15b should-fix 4): `gh alias import FILE` (or -) stores aliases with no check of what each runs, so it is refused before the gate with a one-line pointer to `gh alias set NAME EXPANSION`, which checks the expansion (D-591). `alias set` or `alias import` after a flag this module does not skip (`alias --bogus set ...`, `alias -c set ...`) is refused too, so the alias set check cannot be bypassed; `alias -R o/r import` is still import and refused."
     why: "With import Account-only, `tok: auth token` could be stored behind one ask; every later run of it is refused today, but the stored alias would still work in the user's own terminal and in any future path that misses the expansion."
+  - id: D-598
+    text: "T-15b review round 2 (C-1, rule 4, amends D-594). gh refuses any empty word in a call or an alias expansion (`'' auth token`, `repo '' delete`, `alias set e \"'' auth token\"`), checked in group_first before the flag move; an empty flag value is written in one word (`--jq=`)."
+    why: "gh's parser (cobra) drops empty words, so the command that runs is not the one srv-cli classified: `'' auth token` asked as Account instead of being refused, and `repo '' delete` was Account instead of Delete."
+  - id: D-599
+    text: "T-15b review round 2 (C-1, D-540). gh subcommands `remove` and `rm` are classed Delete like `delete` (`secret remove`, `variable remove`)."
+    why: "They are gh's own aliases of delete; Account understated a deletion. Raising a class never lowers one."

@@ -155,6 +155,15 @@ const LEAD_VALUE_FLAGS: [&str; 3] = ["-R", "--repo", "--hostname"];
 /// `--help` or `--version` is returned as it is. `quiet` (inside an alias's expansion) leaves
 /// the flag out of the message.
 fn group_first(argv: &[String], quiet: bool) -> Result<Vec<String>, ToolError> {
+    // D-598: gh's parser drops empty words, so `'' auth token` or `repo '' delete` runs a
+    // command this classifier would not see; an empty word is refused anywhere.
+    if argv.iter().any(|t| t.is_empty()) {
+        return Err(ToolError::Args(
+            "gh: an empty word is not passed to gh (gh drops it, which changes the command); \
+             write an empty flag value as --flag=; nothing ran"
+                .into(),
+        ));
+    }
     let is_flag = |t: &str| t.starts_with('-');
     match argv {
         [] => return Ok(Vec::new()),
@@ -436,7 +445,8 @@ fn is_read(group: &str, sub: Option<&str>) -> bool {
 
 /// The class of `gh <group> <sub> ...` from the static rules (D-540) alone.
 fn sub_class(group: &str, sub: Option<&str>) -> Class {
-    if sub == Some("delete") {
+    // `remove` and `rm` are gh's own aliases of delete (`secret remove`, `variable remove`).
+    if matches!(sub, Some("delete" | "remove" | "rm")) {
         Class::Delete
     } else if is_read(group, sub) {
         Class::Read
@@ -1648,6 +1658,49 @@ as1: alias set zz9 'auth token'\nas2: alias set --bogus x 'pr view'\n";
         assert!(needs_aliases(
             &group_first(&argv::split("-R o/r tok").unwrap(), false).unwrap()
         ));
+    }
+
+    /// Review T-15b round 2 (D-598): gh drops empty words, so none reaches it.
+    #[test]
+    fn empty_words_are_refused_anywhere() {
+        for bad in [
+            "'' auth token",
+            "auth '' token",
+            "'' config get oauth_token",
+            "'' tok",
+            "'' repo delete --yes",
+            "repo '' delete --yes",
+            "--repo=o/r '' run delete 5",
+            "'' api --hostname other.host /x",
+            "pr view 5 ''",
+        ] {
+            let argv = argv::split(bad).unwrap();
+            assert!(
+                argv.iter().any(String::is_empty),
+                "fixture has an empty word: {bad}"
+            );
+            let e = p(bad).unwrap_err().to_string();
+            assert!(e.contains("empty word"), "gh {bad}: {e}");
+            assert!(c(bad).is_err(), "gh {bad} without the alias list");
+        }
+        // The empty word inside an alias's expansion: `alias set` and running it.
+        let e = p("alias set e \"'' auth token\"").unwrap_err().to_string();
+        assert!(e.contains("empty word"), "{e}");
+        assert!(c("alias set e \"'' auth token\"").is_err());
+        // An empty flag value written in one word still works.
+        assert_eq!(c("pr view 5 --jq=").unwrap(), Class::Read);
+    }
+
+    /// Review T-15b round 2: gh's aliases of delete are a Delete too.
+    #[test]
+    fn remove_and_rm_are_deletes() {
+        for call in [
+            "secret remove TOKEN",
+            "variable remove X",
+            "secret rm TOKEN",
+        ] {
+            assert_eq!(c(call).unwrap(), Class::Delete, "gh {call}");
+        }
     }
 
     /// T-15b item 2 (D-591): `alias set` is at the class of what the alias would run.
