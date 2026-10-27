@@ -119,6 +119,8 @@ struct Req {
     headers: Vec<(HeaderName, String)>,
     /// Headers whose literal text holds an email address (B-562): the call is a Send.
     personal: Vec<HeaderName>,
+    /// The url's path or query holds an email address: the call is a Send too.
+    personal_url: bool,
     /// The `pick` projection (D-566).
     pick: Option<Pick>,
 }
@@ -325,6 +327,7 @@ fn parse(args: &Value, overrides: &[(String, SocketAddr)]) -> Result<Req, ToolEr
         .filter(|(_, t)| has_email(&literal_part(t)))
         .map(|(n, _)| n.clone())
         .collect();
+    let personal_url = has_email(url.path()) || url.query().is_some_and(has_email);
     let pick = Pick::parse(args.get("pick")).map_err(ToolError::Args)?;
     // Rule 2: a resolved value never crosses a network in clear text.
     if headers.iter().any(|(_, t)| has_vault(t))
@@ -343,6 +346,7 @@ fn parse(args: &Value, overrides: &[(String, SocketAddr)]) -> Result<Req, ToolEr
         body,
         headers,
         personal,
+        personal_url,
         pick,
     })
 }
@@ -366,6 +370,9 @@ impl ToolHandler for Api {
                 ));
             }
         }
+        if req.personal_url {
+            values.push(("url".into(), escape::cap_chars(req.url.as_str(), 300)));
+        }
         if let Some(b) = &req.body {
             let s = match b {
                 Body::Json(v) => v.to_string(),
@@ -375,14 +382,21 @@ impl ToolHandler for Api {
         }
         // B-562: an email address in a header leaves the machine only after an ask; the
         // recipient is the host it goes to (D-39).
-        let (class, recipients, note) = if req.personal.is_empty() {
+        let mut places: Vec<String> = req
+            .personal
+            .iter()
+            .map(|n| format!("header {}", n.as_str()))
+            .collect();
+        if req.personal_url {
+            places.push("the url".into());
+        }
+        let (class, recipients, note) = if places.is_empty() {
             (req.class, Vec::new(), String::new())
         } else {
-            let names: Vec<&str> = req.personal.iter().map(|n| n.as_str()).collect();
             (
                 req.class.max(Class::Send),
                 vec![host.clone()],
-                format!(" (sends an email address in header {})", names.join(", ")),
+                format!(" (sends an email address in {})", places.join(", ")),
             )
         };
         Ok(Classified {

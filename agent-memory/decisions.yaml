@@ -574,3 +574,6 @@ decisions:
   - id: D-575
     text: "T-13c review round 1 (B-562). api decides whether a header value holds a vault reference with core's exact spelling (@vault( in lower case, harness_core::vault::vault_refs). A header template that holds @vault( in any other case, an unclosed reference, or a bad name is refused in one line naming only the header, before classify; the url and body still refuse every spelling."
     why: "Core resolves only lower-case @vault(name) at the sink; a @VAULT(...) counted as a reference here was stripped before the email scan and satisfied the credential-header rule, so the address or a raw token went out as typed with class Read."
+  - id: D-576
+    text: "T-13c review round 1 (B-562, B-560). (1) An email-shaped string in api's url path or query (also %40-encoded) raises the class to Send with recipients [host], like one in a header; the ask card shows the url. (2) pick raises api's read cap to json_max_bytes only when the answer's content type is JSON, text/plain or missing; any other answer keeps the 5 MB page cap."
+    why: "The rung-2 leak can move from a header to ?contact=<address>; and a pick on an HTML page must not read 32 MB it can never project."

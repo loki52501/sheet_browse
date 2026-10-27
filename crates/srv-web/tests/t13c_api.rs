@@ -147,6 +147,43 @@ async fn a_vault_cookie_is_sent_and_never_shown() {
         .is_some_and(|c| c == format!("sid={canary}")));
 }
 
+/// Review T-13c round 1: an address in the url's query or path leaves the machine like one
+/// in a header, so it asks the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_email_in_the_url_is_a_send_that_asks() {
+    let (server, e) = setup(vec![json_route("/x", b"{}".to_vec())]).await;
+    for u in [
+        url("/x?contact=someone@example.com"),
+        url("/x?contact=someone%40example.com"),
+        url("/users/someone@example.com"),
+    ] {
+        e.asker.push(AskOutcome::AnsweredSkip);
+        let out = call(&e, "api", json!({ "url": u }))
+            .await
+            .expect("skipped, not an error");
+        assert!(out.text.starts_with("skipped:"), "{u}: {}", out.text);
+    }
+    assert!(server.requests().is_empty(), "skipped: nothing sent");
+    let cards = e.asker.cards();
+    assert_eq!(cards.len(), 3, "each one asks");
+    for c in &cards {
+        assert_eq!(c.class, Class::Send);
+        assert!(c.what.contains("in the url"), "{}", c.what);
+        assert!(
+            c.values
+                .iter()
+                .any(|(k, v)| k == "url" && v.contains("someone")),
+            "{:?}",
+            c.values
+        );
+    }
+    // A plain url stays a Read and does not ask.
+    call(&e, "api", json!({"url": url("/x?q=rust")}))
+        .await
+        .expect("read");
+    assert_eq!(e.asker.cards().len(), 3);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_email_in_a_header_is_a_send_that_asks_with_the_host_as_recipient() {
     let (server, e) = setup(vec![json_route("/x", b"{\"ok\":1}".to_vec())]).await;
