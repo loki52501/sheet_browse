@@ -13,14 +13,29 @@
 //! a full URL (or starts with `//`) and `--hostname` must name a GitHub API host
 //! (`https://api.github.com`, or a configured GHE host), which becomes the gate domain;
 //! anything else is refused. Everything else (`pr merge`, `release ...`, `workflow run`,
-//! extensions, aliases, unknown commands) is Account.
+//! extensions, unknown commands) is Account.
+//!
+//! The subcommand is the first word after the group and `-R/--repo VALUE` (`gh run -R o/r
+//! delete 5` is Delete); after any other flag the class is the highest any later word
+//! gives, and at least Account (D-592). On a read-allowlist command, a short-flag cluster
+//! is read with that command's own flags, so a value is not read as `-w` (`-Rw/x`,
+//! `run list -w ci.yml`), and an `R` inside a cluster (`-cRHOST/o/r`) is a repo whose host
+//! is checked.
+//!
+//! Aliases (D-591, [`alias`]): a call that is not on the read allowlist or `api` may name a
+//! user alias, so the server reads `gh alias list` (refusing the call when it cannot) and
+//! classifies and runs the expansion instead of the alias. `alias set` is classified at the
+//! class of the command its expansion runs (at least Account) and refused when that command
+//! would be refused or is a shell alias.
 //!
 //! `run view <id> --log` (or `--log-failed`) saves the whole log, scrubbed, to
 //! `runs/<run>/files/gh-run-<id>.log` and returns only the first failing step.
 
+pub mod alias;
 pub mod log;
 
 use crate::{argv, proc, text, Config};
+pub use alias::Aliases;
 use async_trait::async_trait;
 use harness_core::class::Class;
 use harness_core::mcp::{Classified, ToolCtx, ToolError, ToolHandler, ToolOutput, ToolSpec};
@@ -33,6 +48,12 @@ const LOG_MAX_BYTES: usize = 32 * 1024 * 1024;
 const OUT_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Stderr shown on failure, in chars.
 const ERR_CHARS: usize = 2_000;
+/// Stdout kept for `gh alias list`.
+const ALIAS_MAX_BYTES: usize = 1024 * 1024;
+/// Cap on one `gh alias list` (it reads a local file).
+const ALIAS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// Aliases may expand to aliases; deeper than this is refused.
+const MAX_ALIAS_DEPTH: usize = 4;
 
 /// No prompts, no pager, no colour, no update check: gh runs without a terminal.
 const GH_ENV: [(&str, &str); 5] = [
@@ -101,16 +122,287 @@ const GITHUB: &str = "github.com";
 /// The only github.com host a full-URL `api` endpoint may name.
 const GITHUB_API: &str = "api.github.com";
 
-/// The class of `gh <argv>` with no GHE hosts configured (see [`classify_with`]).
+/// The class of `gh <argv>` with no GHE hosts and no aliases (see [`plan`]).
 pub fn classify_args(argv: &[String]) -> Result<Class, ToolError> {
     classify_with(argv, &[]).map(|c| c.class)
 }
 
-/// The class and gate domain of `gh <argv>` (see the module doc). `ghe_hosts` are the
-/// GitHub Enterprise hosts an `api` call may reach besides github.com ([`Config::gh_hosts`]).
-/// `Err` for `gh auth`, `gh config`, an empty command, and an `api` call that would reach a
-/// host that is not a GitHub API host.
+/// The class and gate domain of `gh <argv>` with no aliases known (see [`plan`]).
+/// `ghe_hosts` are the GitHub Enterprise hosts an `api` call may reach besides github.com
+/// ([`Config::gh_hosts`]). `Err` for `gh auth`, `gh config`, an empty command, and an `api`
+/// call that would reach a host that is not a GitHub API host.
 pub fn classify_with(argv: &[String], ghe_hosts: &[String]) -> Result<GhCall, ToolError> {
+    plan(argv, ghe_hosts, &Aliases::default()).map(|p| p.call)
+}
+
+/// What one `gh` call does and what runs for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhPlan {
+    pub call: GhCall,
+    /// The gh arguments that run: `argv` itself, or an alias's expansion (D-591).
+    pub argv: Vec<String>,
+    /// The alias `argv` named, if any.
+    pub alias: Option<String>,
+}
+
+/// The gate's view of `gh <argv>` given the user's `aliases` (module doc, D-540, D-591).
+/// An alias is replaced by its expansion, which is classified, and later run, instead: an
+/// alias of a refused command is refused, one of a delete is Delete, one of a read is Read.
+/// A shell alias (`!...`), an alias whose value could not be read and one given too few
+/// arguments are refused. `alias set` is at least Account and at the class of the command
+/// its expansion would run, and refused when that command would be refused.
+pub fn plan(argv: &[String], ghe_hosts: &[String], aliases: &Aliases) -> Result<GhPlan, ToolError> {
+    plan_at(argv, ghe_hosts, aliases, 0)
+}
+
+fn plan_at(
+    argv: &[String],
+    ghe_hosts: &[String],
+    aliases: &Aliases,
+    depth: usize,
+) -> Result<GhPlan, ToolError> {
+    if let Some(hit) = aliases.lookup(argv) {
+        let name = text::line(&hit.name, 64);
+        if depth >= MAX_ALIAS_DEPTH {
+            return Err(ToolError::Args(format!(
+                "gh {name}: aliases nest more than {MAX_ALIAS_DEPTH} deep; nothing ran"
+            )));
+        }
+        let Some(expansion) = hit.expansion else {
+            return Err(ToolError::Args(format!(
+                "gh {name} is an alias whose expansion this server cannot read from `gh alias \
+                 list`; run it in your own terminal, or call the command it stands for"
+            )));
+        };
+        if expansion.starts_with('!') {
+            return Err(shell_alias(&name));
+        }
+        let expanded = alias::expand(expansion, hit.args)
+            .map_err(|e| ToolError::Args(format!("gh {name} (an alias): {e}; nothing ran")))?;
+        let inner = plan_at(&expanded, ghe_hosts, aliases, depth + 1)
+            .map_err(|e| in_alias(&name, &expanded, e))?;
+        return Ok(GhPlan {
+            alias: Some(hit.name.clone()),
+            ..inner
+        });
+    }
+    if let Some(group) = argv.first() {
+        // `gh issue -R o/r mine`: a two-word alias with flags between its words. gh's own
+        // lookup may still find it; refuse rather than guess what it runs.
+        let rest = &argv[1..];
+        let later: Vec<&str> = match subcommand(rest) {
+            Sub::Known(i) if i > 0 => vec![rest[i].as_str()],
+            Sub::Ambiguous(words) => words,
+            _ => Vec::new(),
+        };
+        if let Some(w) = later.iter().find(|w| aliases.has_pair(group, w)) {
+            return Err(ToolError::Args(format!(
+                "gh {} {} is an alias: put no flags between its two words; nothing ran",
+                text::line(group, 64),
+                text::line(w, 64)
+            )));
+        }
+    }
+    let call = classify_static(argv, ghe_hosts, aliases, depth)?;
+    Ok(GhPlan {
+        call,
+        argv: argv.to_vec(),
+        alias: None,
+    })
+}
+
+fn shell_alias(name: &str) -> ToolError {
+    ToolError::Args(format!(
+        "gh {name} is a shell alias (`!...` or --shell): it runs through sh, and this server \
+         never runs a shell; nothing ran"
+    ))
+}
+
+/// The message of an error, without its kind.
+fn message(e: ToolError) -> String {
+    match e {
+        ToolError::Args(m) | ToolError::Failed(m) => m,
+        other => other.to_string(),
+    }
+}
+
+/// A refusal of an alias's expansion, naming the alias and the command it stands for (its
+/// first two words only: an expansion can hold anything the user typed).
+fn in_alias(name: &str, expanded: &[String], e: ToolError) -> ToolError {
+    let head = text::line(&argv::show(&expanded[..expanded.len().min(2)]), 64);
+    ToolError::Args(format!(
+        "gh {name} is an alias for gh {head} ...: {}",
+        message(e)
+    ))
+}
+
+/// Does classifying `gh <argv>` need the user's aliases? Not for `api`, `auth`, `config`,
+/// `status` (built in: an alias cannot shadow a built-in command), a flag, or a command on
+/// the read allowlist; any other call may name an alias.
+pub fn needs_aliases(argv: &[String]) -> bool {
+    let Some(group) = argv.first() else {
+        return false;
+    };
+    if group.starts_with('-') || matches!(group.as_str(), "api" | "auth" | "config" | "status") {
+        return false;
+    }
+    match subcommand(&argv[1..]) {
+        Sub::Known(i) => !is_read(group, Some(&argv[1 + i])),
+        _ => true,
+    }
+}
+
+/// The subcommand of `gh <group> ...` (`rest` is everything after the group).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Sub<'a> {
+    /// No word after the flags.
+    None,
+    /// `rest[i]` is the subcommand.
+    Known(usize),
+    /// A flag this module does not know comes first, so a flag value cannot be told from
+    /// the subcommand: any listed word (every later word that is not a flag) may be it.
+    Ambiguous(Vec<&'a str>),
+}
+
+/// The first word of `rest` that is not a flag. `-R/--repo VALUE` (`gh run -R o/r delete 5`
+/// runs the delete) and `--help`/`-h` are skipped; any other flag first makes the result
+/// [`Sub::Ambiguous`] (D-592).
+fn subcommand(rest: &[String]) -> Sub<'_> {
+    let is_flag = |t: &str| t.len() > 1 && t.starts_with('-');
+    let mut i = 0;
+    let mut unsure = false;
+    while i < rest.len() {
+        let t = rest[i].as_str();
+        if t == "-R" || t == "--repo" {
+            i += 2;
+            continue;
+        }
+        if is_flag(t) {
+            let known = t.starts_with("--repo=")
+                || t == "--help"
+                || t == "-h"
+                || (t.starts_with("-R") && !t.starts_with("--"));
+            unsure |= !known;
+            i += 1;
+            continue;
+        }
+        if !unsure {
+            return Sub::Known(i);
+        }
+        let words = rest[i..]
+            .iter()
+            .map(String::as_str)
+            .filter(|w| !is_flag(w))
+            .collect();
+        return Sub::Ambiguous(words);
+    }
+    Sub::None
+}
+
+/// The read allowlist (D-540).
+fn is_read(group: &str, sub: Option<&str>) -> bool {
+    match (group, sub) {
+        ("run", Some("list" | "view"))
+        | ("pr", Some("view" | "list" | "diff" | "checks" | "status"))
+        | ("issue", Some("view" | "list" | "status"))
+        | ("repo", Some("view"))
+        | ("workflow", Some("list" | "view"))
+        | ("status", _) => true,
+        ("search", Some(s)) => !s.starts_with('-'),
+        _ => false,
+    }
+}
+
+/// The class of `gh <group> <sub> ...` from the static rules (D-540) alone.
+fn sub_class(group: &str, sub: Option<&str>) -> Class {
+    if sub == Some("delete") {
+        Class::Delete
+    } else if is_read(group, sub) {
+        Class::Read
+    } else {
+        Class::Account
+    }
+}
+
+/// `gh alias set [--clobber] NAME EXPANSION` (D-591): Account at least, and the class of the
+/// command the expansion runs (its `$N` placeholders read as plain words; the real arguments
+/// are classified again when the alias runs). Refused: a shell alias (`--shell`, `-s`, an
+/// expansion starting with `!`), an expansion read from stdin (`-`), a flag this server does
+/// not read, and an expansion whose command would be refused (`auth token`, another host).
+fn alias_set_class(
+    args: &[String],
+    ghe_hosts: &[String],
+    aliases: &Aliases,
+    depth: usize,
+) -> Result<Class, ToolError> {
+    let mut words = Vec::new();
+    let mut positional_only = false;
+    for t in args {
+        if positional_only || t == "-" || !t.starts_with('-') {
+            words.push(t.as_str());
+            continue;
+        }
+        match t.as_str() {
+            "--" => positional_only = true,
+            "--clobber" | "--help" | "-h" => {}
+            s if s.starts_with("--shell") => return Err(shell_alias("alias set")),
+            s if short_cluster(s).is_some_and(|c| c.chars().all(|l| l == 's' || l == 'h')) => {
+                if s.contains('s') {
+                    return Err(shell_alias("alias set"));
+                }
+            }
+            _ => {
+                return Err(ToolError::Args(format!(
+                    "gh alias set: flag {} is not one this server reads (--clobber); nothing ran",
+                    text::line(t, 40)
+                )))
+            }
+        }
+    }
+    let [name, expansion] = words[..] else {
+        return Err(ToolError::Args(
+            "gh alias set needs exactly a name and an expansion, e.g. alias set pv \"pr view\""
+                .into(),
+        ));
+    };
+    let name = text::line(name, 64);
+    if expansion == "-" {
+        return Err(ToolError::Args(
+            "gh alias set NAME -: an expansion read from stdin cannot be checked; give it as \
+             an argument"
+                .into(),
+        ));
+    }
+    if expansion.trim_start().starts_with('!') {
+        return Err(shell_alias(&name));
+    }
+    let target = argv::split(&alias::without_placeholders(expansion))?;
+    if target.is_empty() {
+        return Err(ToolError::Args(
+            "gh alias set: the expansion is empty".into(),
+        ));
+    }
+    if depth >= MAX_ALIAS_DEPTH {
+        return Err(ToolError::Args(format!(
+            "gh alias set: aliases nest more than {MAX_ALIAS_DEPTH} deep; nothing ran"
+        )));
+    }
+    let inner = plan_at(&target, ghe_hosts, aliases, depth + 1).map_err(|e| {
+        ToolError::Args(format!(
+            "gh alias set {name}: the alias would run a refused command: {}",
+            message(e)
+        ))
+    })?;
+    Ok(inner.call.class.max(Class::Account))
+}
+
+/// [`plan`] for a call that is not an alias.
+fn classify_static(
+    argv: &[String],
+    ghe_hosts: &[String],
+    aliases: &Aliases,
+    depth: usize,
+) -> Result<GhCall, ToolError> {
     let group = argv
         .first()
         .ok_or_else(|| ToolError::Args("gh needs a command, e.g. \"run list\"".into()))?;
@@ -129,7 +421,6 @@ pub fn classify_with(argv: &[String], ghe_hosts: &[String]) -> Result<GhCall, To
         ));
     }
     let rest = &argv[1..];
-    let sub = rest.first().map(String::as_str);
     let mut domain = GITHUB.to_string();
     if group == "api" {
         if let Some(host) = api_host(rest, ghe_hosts)? {
@@ -138,19 +429,40 @@ pub fn classify_with(argv: &[String], ghe_hosts: &[String]) -> Result<GhCall, To
     } else if let Some(host) = repo_host(rest, ghe_hosts)? {
         domain = host;
     }
-    let class = match (group.as_str(), sub) {
-        (_, Some("delete")) => Class::Delete,
-        ("api", _) => api_class(rest),
-        ("run", Some("list" | "view"))
-        | ("pr", Some("view" | "list" | "diff" | "checks" | "status"))
-        | ("issue", Some("view" | "list" | "status"))
-        | ("repo", Some("view"))
-        | ("workflow", Some("list" | "view"))
-        | ("status", _) => Class::Read,
-        ("search", Some(s)) if !s.starts_with('-') => Class::Read,
-        _ => Class::Account,
+    let sub = subcommand(rest);
+    let class = if group == "api" {
+        // `api` has no subcommands: its first word is the endpoint (D-540 kept as it was).
+        if rest.first().map(String::as_str) == Some("delete") {
+            Class::Delete
+        } else {
+            api_class(rest)
+        }
+    } else if group == "status" {
+        Class::Read
+    } else {
+        match &sub {
+            Sub::None => sub_class(group, None),
+            Sub::Known(i) => sub_class(group, Some(&rest[*i])),
+            // Any word may be the subcommand: the highest class any of them gives, and
+            // never below Account (a read is a read only when its subcommand is certain).
+            Sub::Ambiguous(words) => words
+                .iter()
+                .map(|w| sub_class(group, Some(w)))
+                .fold(Class::Account, Class::max),
+        }
     };
-    let class = if opens_web(rest) {
+    let known_at = match &sub {
+        Sub::Known(i) => Some(*i),
+        _ => None,
+    };
+    let known = known_at.map(|i| rest[i].as_str());
+    let class = match (group.as_str(), known_at) {
+        ("alias", Some(i)) if rest[i] == "set" => {
+            class.max(alias_set_class(&rest[i + 1..], ghe_hosts, aliases, depth)?)
+        }
+        _ => class,
+    };
+    let class = if opens_web(group, known, rest) {
         class.max(Class::Navigate)
     } else {
         class
@@ -158,15 +470,54 @@ pub fn classify_with(argv: &[String], ghe_hosts: &[String]) -> Result<GhCall, To
     Ok(GhCall { class, domain })
 }
 
-/// `--web`, `--web=..`, or a `w` anywhere in a single-dash cluster (`-w`, `-cw`): the call
-/// opens a browser. On the read allowlist `-w` is the only short flag that changes the
-/// class, so a `w` that is really part of another flag's value (`-Rw`) only makes the call
-/// stricter.
-fn opens_web(rest: &[String]) -> bool {
+/// `--web`, `--web=..`, or `-w` in a single-dash cluster: the call opens a browser. For a
+/// command on the read allowlist a cluster is read the way gh's flag parser reads it, with
+/// that command's flags ([`read_short_flags`]): letters left to right, and a letter that
+/// takes a value ends the cluster (`-Rw/x` names a repo, `run list -w ci.yml` a workflow).
+/// For any other command a `w` anywhere counts (stricter). Every token is checked on its
+/// own, so a `-w` that is really another flag's value (`-R -w`) also counts.
+fn opens_web(group: &str, sub: Option<&str>, rest: &[String]) -> bool {
+    let table = read_short_flags(group, sub);
     rest.iter().any(|a| {
         a == "--web"
             || a.starts_with("--web=")
-            || (short_cluster(a).is_some_and(|c| c.contains('w')))
+            || short_cluster(a).is_some_and(|c| cluster_opens_web(c, table))
+    })
+}
+
+fn cluster_opens_web(cluster: &str, table: Option<(&str, bool)>) -> bool {
+    let Some((values, w_is_web)) = table else {
+        return cluster.contains('w');
+    };
+    for l in cluster.chars() {
+        if l == 'w' && w_is_web {
+            return true;
+        }
+        if values.contains(l) {
+            return false;
+        }
+    }
+    false
+}
+
+/// For each read-allowlist command: its short flags that take a value (gh 2.93 `--help`,
+/// with `-R` where it is accepted), and whether `-w` is `--web` there (on `run list` it is
+/// `--workflow`). `None` for every other command.
+fn read_short_flags(group: &str, sub: Option<&str>) -> Option<(&'static str, bool)> {
+    Some(match (group, sub?) {
+        ("run", "list") => ("bceqLstuwR", false),
+        ("run", "view") => ("ajqtR", true),
+        ("pr", "view" | "status") | ("issue", "view" | "status") => ("qtR", true),
+        ("pr", "list") => ("aABHqlLSstR", true),
+        ("pr", "diff") => ("eR", true),
+        ("pr", "checks") => ("iqtR", true),
+        ("issue", "list") => ("aAqlLmSstR", true),
+        ("repo", "view") => ("bqt", true),
+        ("workflow", "list") => ("qLtR", true),
+        ("workflow", "view") => ("rR", true),
+        ("search", "repos" | "issues" | "code" | "commits") => ("qLtR", true),
+        ("search", "prs") => ("BHqLtR", true),
+        _ => return None,
     })
 }
 
@@ -381,6 +732,11 @@ fn repo_host(rest: &[String], ghe_hosts: &[String]) -> Result<Option<String>, To
             v
         } else if let Some(v) = t.strip_prefix("-R").filter(|v| !v.is_empty()) {
             v.trim_start_matches('=')
+        } else if let Some((_, v)) = short_cluster(t).and_then(|c| c.split_once('R')) {
+            // `-cRHOST/o/r`: gh reads the letters before R as flags and the rest as the
+            // repo (`gh pr view -cR127.0.0.1:9/o/r 5` goes to that host). A letter before
+            // R may take a value itself, so this can only be stricter than gh.
+            v.trim_start_matches('=')
         } else {
             t.as_str()
         };
@@ -465,28 +821,80 @@ fn log_file_name(argv: &[String]) -> String {
     name
 }
 
+impl Gh {
+    /// The user's gh aliases when `argv` may name one ([`needs_aliases`]), from
+    /// `gh alias list`. Fails closed: when they cannot be read the call is refused, because
+    /// an unknown word may be an alias for anything (D-591).
+    async fn aliases(&self, argv: &[String]) -> Result<Aliases, ToolError> {
+        if !needs_aliases(argv) {
+            return Ok(Aliases::default());
+        }
+        let mut full = self.cfg.gh.clone();
+        full.extend(["alias".to_string(), "list".to_string()]);
+        let timeout = self.cfg.proc_timeout.min(ALIAS_TIMEOUT);
+        let out = proc::run(&full, &GH_ENV, timeout, ALIAS_MAX_BYTES, "gh").await?;
+        let unreadable = |why: String| {
+            ToolError::Failed(format!(
+                "gh {}: cannot tell whether this names a gh alias ({why}); nothing ran",
+                text::line(&argv::show(&argv[..argv.len().min(2)]), 64)
+            ))
+        };
+        if !out.success() {
+            if out.stderr_text().contains("no aliases configured") {
+                return Ok(Aliases::default());
+            }
+            return Err(unreadable(format!("gh alias list: {}", out.status_line())));
+        }
+        if out.stdout_cut() {
+            return Err(unreadable("gh alias list printed too much".into()));
+        }
+        Aliases::parse(&out.stdout_text())
+            .map_err(|e| unreadable(format!("gh alias list output: {e}")))
+    }
+
+    /// [`plan`] with this server's GHE hosts and the user's aliases.
+    async fn plan(&self, argv: &[String]) -> Result<GhPlan, ToolError> {
+        let aliases = self.aliases(argv).await?;
+        plan(argv, &self.cfg.gh_hosts, &aliases)
+    }
+}
+
 #[async_trait]
 impl ToolHandler for Gh {
     async fn classify(&self, _ctx: &ToolCtx, args: &Value) -> Result<Classified, ToolError> {
         let argv = gh_argv(args)?;
-        let call = classify_with(&argv, &self.cfg.gh_hosts)?;
+        let p = self.plan(&argv).await?;
         let shown = text::line(&argv::show(&argv), 300);
+        // An alias names the command it runs by its first two words only: an expansion
+        // can hold anything the user typed.
+        let what = match &p.alias {
+            Some(a) => format!(
+                "run gh {shown} (alias {} for gh {} ...)",
+                text::line(a, 64),
+                text::line(&argv::show(&p.argv[..p.argv.len().min(2)]), 64)
+            ),
+            None => format!("run gh {shown}"),
+        };
         Ok(Classified {
-            class: Some(call.class),
-            domain: Some(call.domain),
-            what: Some(format!("run gh {shown}")),
+            class: Some(p.call.class),
+            domain: Some(p.call.domain),
+            what: Some(what),
             values: vec![("args".into(), shown)],
             ..Classified::default()
         })
     }
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput, ToolError> {
-        let argv = gh_argv(&args)?;
-        if classify_with(&argv, &self.cfg.gh_hosts)?.class > ctx.class {
+        let named = gh_argv(&args)?;
+        // Planned again: the aliases may have changed since classify. What runs is the
+        // planned argument vector (an alias's expansion), never the alias itself.
+        let p = self.plan(&named).await?;
+        if p.call.class > ctx.class {
             return Err(ToolError::Failed(
                 "gh: the call's class is above what the gate approved; not run".into(),
             ));
         }
+        let argv = p.argv;
         let mut full = self.cfg.gh.clone();
         full.extend(argv.iter().cloned());
         let log = is_run_log(&argv);
@@ -501,7 +909,7 @@ impl ToolHandler for Gh {
             };
             return Err(ToolError::Failed(format!(
                 "gh {} ({}): {}",
-                text::line(&argv::show(&argv), 200),
+                text::line(&argv::show(&named), 200),
                 out.status_line(),
                 text::capped(err.trim(), ERR_CHARS, "")
             )));
@@ -533,7 +941,7 @@ impl ToolHandler for Gh {
         }
         Ok(ToolOutput {
             text: t,
-            summary: Some(format!("gh {}", text::line(&argv::show(&argv), 200))),
+            summary: Some(format!("gh {}", text::line(&argv::show(&named), 200))),
             ..ToolOutput::default()
         })
     }
@@ -781,6 +1189,163 @@ mod tests {
             Class::Delete,
             "ghe.corp",
         );
+    }
+
+    /// T-15b item 3 (D-592): a flag's value is not read as `-w` or as the subcommand, and
+    /// every real write keeps (or gains) its class.
+    #[test]
+    fn flag_values_are_not_subcommands_or_web() {
+        let table: &[(&str, Class)] = &[
+            // False positives fixed: the value of -R, and run list's -w (--workflow).
+            ("pr view 5 -Rw/x", Class::Read),
+            ("issue list -Lw", Class::Read),
+            ("run list -w ci.yml", Class::Read),
+            ("run list -bw x", Class::Read),
+            ("pr -R o/r view 5", Class::Read),
+            ("pr --repo=o/r view 5", Class::Read),
+            ("run -Ro/r list", Class::Read),
+            // True positives next to them.
+            ("pr view 5 -w", Class::Navigate),
+            ("pr view 5 -cw", Class::Navigate),
+            ("pr list -dw", Class::Navigate),
+            ("pr view 5 -R o/r -w", Class::Navigate),
+            ("pr view 5 -R -w", Class::Navigate),
+            ("run list --web", Class::Navigate),
+            ("pr merge 5 -Rw/x", Class::Account),
+            ("pr view 5 -zw", Class::Navigate),
+            // Flags before the subcommand: the subcommand still counts (was Account).
+            ("run -R o/r delete 5", Class::Delete),
+            ("release --repo o/r delete v1 --yes", Class::Delete),
+            ("run --repo=o/r delete 5", Class::Delete),
+            // An unknown flag first: any later word may be the subcommand, at least Account.
+            ("run --bogus delete 5", Class::Delete),
+            ("run --bogus x delete", Class::Delete),
+            ("pr --bogus view 5", Class::Account),
+            ("pr -c view 5", Class::Account),
+            ("pr -R o/r", Class::Account),
+        ];
+        for (cmd, want) in table {
+            assert_eq!(c(cmd).unwrap(), *want, "gh {cmd}");
+        }
+        // An R inside a cluster names a repo, and its host is checked.
+        for bad in [
+            "pr view -cR127.0.0.1:9/o/r 5",
+            "pr view -cR=any.host/o/r 5",
+            "issue list -qRany.host/o/r",
+        ] {
+            assert!(matches!(c(bad), Err(ToolError::Args(_))), "gh {bad}");
+        }
+        let hosts = vec!["ghe.corp".to_string()];
+        let call = classify_with(&argv::split("pr view -cRghe.corp/o/r 5").unwrap(), &hosts);
+        assert_eq!(call.unwrap().domain, "ghe.corp");
+    }
+
+    const ALIASES: &str = "tok: auth token\ncfg: config get oauth_token\nrmr: repo delete\n\
+v: pr view\nrl: run list\nsh1: '!echo hi'\nml: |-\n    pr\n    view\n\
+issue mine: issue list --mention @me\nq: api -X \"$1\" repos/o/r\nnest: tok\nloop: loop\n\
+far: api https://any.host/x\nt2: v\n";
+
+    fn p(s: &str) -> Result<GhPlan, ToolError> {
+        plan(
+            &argv::split(s).unwrap(),
+            &[],
+            &Aliases::parse(ALIASES).unwrap(),
+        )
+    }
+
+    /// T-15b item 2 (D-591): an alias runs as its expansion, at the expansion's class.
+    #[test]
+    fn aliases_run_as_their_expansion() {
+        let ok = |s: &str, class: Class, runs: &str| {
+            let got = p(s).unwrap_or_else(|e| panic!("gh {s}: {e}"));
+            assert_eq!(got.call.class, class, "gh {s}");
+            assert_eq!(got.argv, argv::split(runs).unwrap(), "gh {s}");
+            assert!(got.alias.is_some(), "gh {s}");
+        };
+        ok("rmr o/r --yes", Class::Delete, "repo delete o/r --yes");
+        ok("v 5", Class::Read, "pr view 5");
+        ok("v 5 -w", Class::Navigate, "pr view 5 -w");
+        ok("t2 5", Class::Read, "pr view 5");
+        ok(
+            "issue mine -L 5",
+            Class::Read,
+            "issue list --mention @me -L 5",
+        );
+        ok("q DELETE", Class::Delete, "api -X DELETE repos/o/r");
+        ok("q GET", Class::Read, "api -X GET repos/o/r");
+        for bad in [
+            "tok",
+            "cfg",
+            "nest",
+            "sh1",
+            "ml",
+            "q",
+            "loop",
+            "far",
+            "issue -R o/r mine",
+        ] {
+            assert!(matches!(p(bad), Err(ToolError::Args(_))), "gh {bad}");
+        }
+        // Not an alias: unchanged.
+        let got = p("pr merge 5").unwrap();
+        assert_eq!((got.call.class, got.alias), (Class::Account, None));
+        // Which calls look aliases up.
+        let needs = |s: &str| needs_aliases(&argv::split(s).unwrap());
+        for no in [
+            "run list",
+            "pr view 5",
+            "api repos/o/r",
+            "auth token",
+            "status",
+        ] {
+            assert!(!needs(no), "{no}");
+        }
+        for yes in [
+            "tok",
+            "pr merge 5",
+            "issue mine",
+            "pr --bogus view 5",
+            "alias set a b",
+        ] {
+            assert!(needs(yes), "{yes}");
+        }
+    }
+
+    /// T-15b item 2 (D-591): `alias set` is at the class of what the alias would run.
+    #[test]
+    fn alias_set_is_classified_by_its_expansion() {
+        let refused = [
+            "alias set tok2 'auth token'",
+            "alias set c2 'config list'",
+            "alias set n2 tok",
+            "alias set far2 'api https://any.host/x'",
+            "alias set --shell s 'echo hi'",
+            "alias set -s s 'echo hi'",
+            "alias set s '!echo hi'",
+            "alias set x -",
+            "alias set pv",
+            "alias set --bogus pv 'pr view'",
+            "alias set -- a 'auth token'",
+        ];
+        for bad in refused {
+            assert!(matches!(p(bad), Err(ToolError::Args(_))), "gh {bad}");
+        }
+        // Without the alias list too.
+        assert!(c("alias set tok2 'auth token'").is_err());
+        let table: &[(&str, Class)] = &[
+            ("alias set rm2 'repo delete'", Class::Delete),
+            ("alias set rm3 rmr", Class::Delete),
+            ("alias set qq 'api -X DELETE \"repos/$1\"'", Class::Delete),
+            ("alias set qq 'api -X $1 repos/o/r'", Class::Account),
+            ("alias set pv 'pr view'", Class::Account),
+            ("alias set --clobber pv 'pr view'", Class::Account),
+            ("alias set m 'pr merge'", Class::Account),
+        ];
+        for (cmd, want) in table {
+            assert_eq!(p(cmd).unwrap().call.class, *want, "gh {cmd}");
+        }
+        assert_eq!(c("alias delete pv").unwrap(), Class::Delete);
+        assert_eq!(c("alias list").unwrap(), Class::Account);
     }
 
     #[test]
