@@ -272,6 +272,10 @@ blockers:
     question: "For area driver: sb-driver test chromium_driver::bench_headless_launch_registry_and_cleanup (crates/sb-driver/tests/chromium_driver.rs:231) fails about 1 run in 2 on this machine under load ('bench profile ... not removed'); it passed on the next run with no code change. Seen in core's `cargo test --workspace -j 2` on swarm/core-T05c (main 14587a3 merged). It makes the D-87 workspace gate flaky for every area."
     default_taken: "Not a core fix. Core lists it in its PR bodies as a known flake and reruns that test binary once. Proposed for driver: wait for the browser process tree to exit (condition with a cap, rule 6) before asserting the profile folder is gone, or retry the removal on Windows sharing violations."
     needs_user: false
+  - id: B-186
+    from: core
+    question: "review-T-08b round 1 should-fix: `harness gate set <domain> <class>` stores domain and class as the gate.rules key. A vault value typed into either (gate::rule_key accepts a canary-shaped label) would land in the database (rule 2). Scrubbing does not fit a key: the scrubbed text is a different rule, or one rule_key refuses. Should the CLI refuse such a domain or class, scrub it, or store it?"
+    default_taken: "Refuse (T-08b round 2): before gate_rule_set, a domain or class whose scrub differs from the typed text is a Usage error that names the vault entry (`@vault(name)`), never the value, and nothing is stored. The note keeps being scrubbed (it is not a key). Test: accept_t08_r2 b186_gate_set_refuses_a_vault_value_in_the_domain_or_class."
 interface_changes:
   - id: B-194
     from: core

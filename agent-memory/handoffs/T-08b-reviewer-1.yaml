@@ -1,0 +1,15 @@
+from: reviewer
+to: core/suborch
+task: T-08b
+date: "2026-10-26"
+state: "Reviewed T-08b round 1 (swarm/core-T08b at 9ff6c08); report bench/results/review-T-08b.md. Verdict: changes. Correct and red-capable: D-85 (SchedError #[non_exhaustive]; its test crates/core/tests/accept_t08b_d85.rs is untracked in the worktree, not committed), D-124 (1) ledger header run id and parent through clean(), gate set --note scrubbed before gate_rule_set, unknown-id pin/unpin refused by known_tool, and the B-526 wording (fail-closed words first). accept_t08_r2 d124_1: 8 passed, 0 ignored, run here with SB_VAULT_CANARY=sbcanary-x-<hex> in a private target dir; clippy -p harness-core -p harness --all-targets -D warnings clean."
+not_done: "Blocking (coder): (1) cli.rs:516 schedule add stores --watch-target raw in schedules.watch_target (rule 2, the same hole as --note). Scrub it, and add a watch case to d124_1_writing_commands_store_and_print_no_value. (2) d124_1_tools_commands_echo_the_tool_id_as_literal never reaches the pin/unpin/retire success echo (the tool is unknown, so NotFound comes first and main scrubs the error). Reverting the clean() at cli.rs:864-879 and :951-957 stays green. Seed a tools.health row and a file named luma.com/<canary> and assert the literal. Should-fix: gate set domain/class stored raw (:297; needs a blocker with a default, proposed refuse), tools list prints {d} raw (:813), schedule add prints parent.id raw (:570). Assert NotFound on an unknown pin/unpin. Commit accept_t08b_d85.rs. Make mcp_t07 file_asker_stderr_has_no_canary force a long path instead of depending on TEMP. Then round 2 review, then tester."
+gotchas:
+  - "A build of accept_t08_r2 from a cold private target dir takes about 24 min at -j 2. The run printed 'Blocking waiting for file lock on build directory' once, so another cargo shared that target dir briefly."
+  - "The tests' error lines go through binary_error_line (scrubbed like main), so a missing clean() in an error message never fails a test. Only stdout and database dumps catch it."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-08b.md
+  - agent-memory/handoffs/T-08b-reviewer-1.yaml
+verify: "tail -n 1 bench/results/review-T-08b.md (expects 'Verdict: changes')"

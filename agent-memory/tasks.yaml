@@ -289,10 +289,11 @@ tasks:
   - id: T-08b
     step: follow-up
     wave: 2
-    owner: core
+    owner: core/suborch
     branch: swarm/core-T08b
     title: "D-85 not done at merge: SchedError #[non_exhaustive]. Plus T-08 red acceptance rows: D-124 (1) ledger header and tools pin/unpin/retire echo ids as literals, and `harness gate set --note` stores no vault value (scrub the note before the database; vault rule)."
-    status: todo
+    status: done
+    claimed_at: "2026-10-25"
     from: T-08
   - id: T-10b
     step: follow-up
@@ -351,3 +352,11 @@ tasks:
     title: "review-T-18 leftovers: run the Unix Pipe launch on Linux (only compiled and clippy-checked); a real-Chromium test for getFrameTree seeding and prerender activation (restored me tab with iframes, with T-22 acceptance 4); session_events channel after detach; CdpError::Closed keeps the method; sweep stale profiles/bench-* after a crash; B-601 tab titles (T-22)."
     status: todo
     from: T-18
+  - id: T-08c
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T08c
+    title: "review-T-08b round 2 should-fix: the B-186 refusal in `harness gate set` checks the typed domain and class, but gate_rule_set stores the UTS-46-normalised key (gate::rule_domain: full-width to ASCII, soft hyphens dropped). Run the vault-value refusal on gate::rule_key's output too, with a full-width and a soft-hyphen test case."
+    status: todo
+    from: T-08b
