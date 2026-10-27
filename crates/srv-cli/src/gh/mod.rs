@@ -451,7 +451,7 @@ fn is_delete_word(w: &str) -> bool {
 }
 
 /// The word after a subcommand that names a deletion of a sub-resource (`repo deploy-key
-/// delete`, `repo autolink -R o/r delete`): found the way the subcommand is (D-585), so a
+/// delete`, `repo autolink -R o/r delete`): found the way the subcommand is (D-586), so a
 /// `-R` value is not taken for it; any word may be it when a flag before it is unknown.
 fn third_is_delete(after: &[String]) -> bool {
     let exact = |w: &str| matches!(w, "delete" | "remove" | "rm");
