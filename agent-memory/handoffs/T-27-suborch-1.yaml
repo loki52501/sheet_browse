@@ -1,0 +1,30 @@
+from: servers/suborch
+to: servers/suborch (next session), then supreme
+task: T-27
+date: "2026-10-27"
+state: "T-27 (WAVE3 shape) done on swarm/servers-T27, branched from main 2a078a3. Seven hand-written BrowserOS recipes in tools/mail.google.com (inbox, thread, draft, send), tools/calendar.google.com (events, create), tools/lu.ma (register, plus _site.yaml alias luma.com), written against the live UIs. scripts/recipes/check_recipes.py checks the WAVE3 rules (29 unittest cases, each round-1/round-2 fix mutation-tested red). Review: bench/results/review-T-27.md round 1 approve (9 should-fix), round 2 approve, Blocking none both; round-1 items 1-3, 7, 8 and round-2 items 1, 2 fixed in code, the run-time ones filed for core as B-596 and B-599. Accept: bench/results/accept-T-27.md rows 1-7 and 9 pass live through BrowserOS (real claude -p sessions, server name browseros, ledgers in runs/t27-accept-*/browseros.jsonl); row 8 lu.ma register not-run: Claude Code's auto-mode classifier refused the Register click as a real-world transaction (B-597, needs_user), not worked around -> follow-up T-27b. The thread wait was changed to [aria-label=\"Print all\"] after the accept run (selector checked live, recipe not re-run end to end)."
+not_done: "NOT PUSHED AS A PR, status not pr_open. 1) cargo test --workspace has not completed on this branch: every attempt died from RAM exhaustion while two other sessions were compiling (the last one was stopped by Claude Code for low memory). No Rust changed, but toolstore and srv-web tests read the real tools/ folder (accept_t11, tests.rs, t13b, accept_t13), so it must run once: CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test --workspace -j 2 --no-fail-fast, alone on the machine. 2) If green: run pr-ready step 7, set swarm.yaml areas.servers.status pr_open (add T-27 to areas.servers.tasks if supreme wants the gate to read it), gh pr create --base main --head swarm/servers-T27 --title \"servers: T-27 BrowserOS recipes for mail, calendar, Luma\", body with review/accept paths, the Luma event URL https://luma.com/cygp5fj9 (free, open; not registered) and T-27b. 3) For the user: B-597 (allow or run the live register)."
+gotchas:
+  - "On this 15 GB machine, rustc errors that look like a corrupt target dir or toolchain (found staticlib std instead of rlib, found possibly newer version of crate X, only metadata stub found, memory allocation failed) were RAM exhaustion: a fresh target dir failed the same way on std. Check free memory and other cargo processes before cleaning anything; cleaning does not help. F:/sb-swarm/target-servers-t27 is a partial throwaway dir from that attempt and can be deleted."
+  - "The Bash tool collapses doubled backslashes in heredocs to single ones (a regex backslash-s or an escaped newline arrives changed): write files that contain backslashes through Write/Edit, not bash heredocs."
+  - "In this session BrowserOS is registered user-wide as browseros-neo, which the ledger hook (matcher mcp__browseros__.*) does not record (B-598); the worktree .mcp.json (gitignored) registers it as browseros for test sessions."
+  - "Child claude -p sessions launched with only --allowedTools can still edit files and the Stop hook makes them write handoffs: one committed 0a9f149/21f8c44 (stale T-27-acceptance-inbox-1.yaml and a tasks.yaml next: line, removed in 0d40e06). Launch children with --tools \"\" plus the MCP allow list."
+  - "Gmail cold loads in a fresh tab exceed BrowserOS's 10 s wait default; recipes pass timeout: 30000. Gmail refs taken right after a hash navigation can point at the hidden previous view; resolve targets from a fresh snapshot."
+  - "Many BrowserOS tabs from the acceptance children are still open (Gmail and Calendar pages 13-30); they were left as found per BrowserOS rules and cost RAM. Tab 12 (the Luma event) is kept for B-597."
+decisions_made: [D-1500, D-1501, D-1502, D-1503]
+blockers_opened: [B-595, B-596, B-597, B-598, B-599, B-1500]
+files_touched:
+  - tools/mail.google.com/inbox.recipe.yaml
+  - tools/mail.google.com/thread.recipe.yaml
+  - tools/mail.google.com/draft.recipe.yaml
+  - tools/mail.google.com/send.recipe.yaml
+  - tools/calendar.google.com/events.recipe.yaml
+  - tools/calendar.google.com/create.recipe.yaml
+  - tools/lu.ma/register.recipe.yaml
+  - tools/lu.ma/_site.yaml
+  - scripts/recipes/check_recipes.py
+  - scripts/recipes/test_check_recipes.py
+  - agent-memory/tasks.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/decisions.yaml
+verify: "python scripts/recipes/check_recipes.py && python -m unittest discover -s scripts/recipes"
