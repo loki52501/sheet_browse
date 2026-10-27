@@ -260,6 +260,7 @@ tasks:
     claimed_at: "2026-10-27"
     branch: swarm/servers-T27
     blocked_by: [T-26]   # waived by prompts/suborch/WAVE3.md, which assigns T-27 to servers now
+    next: "inbox recipe live run failed at step 2 (row selector wait timed out, grep found no rows); diagnose selector vs Gmail load time, see handoffs/T-27-acceptance-inbox-1.yaml"
   - id: T-28
     step: 6
     title: "(docs/11 shape, D-98) toolstore `recipe` kind + harness-forge MCP server: tools.list/run/save over BrowserOS, save from browseros.jsonl, report.md includes browser calls, reflect retires a recipe after 3 failures, launcher allows browseros and harness-forge. Owner core, branch swarm/core-T28."

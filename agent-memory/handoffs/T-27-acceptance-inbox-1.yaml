@@ -1,0 +1,15 @@
+from: servers/acceptance-runner (inbox recipe live run)
+to: servers/suborch
+task: T-27
+date: "2026-10-27"
+state: "Recipes and static check committed in 6540707. Live acceptance of tools/mail.google.com/inbox.recipe.yaml through BrowserOS (count=5, own tab page 14) FAILED: step 1 navigate ok, step 2 wait for=selector '[role=main] [role=grid] [role=row]' timed out after 10000ms, step 3 grep over=ax '^\s*- row \"' limit 5 returned 'No matches'. Every snapshot on page 14 also timed out after 5000ms, so the page state (inbox still loading vs login wall vs wrong selector) was not observed."
+not_done: "1) Re-run inbox live and diagnose step 2: check whether Gmail in a fresh tab renders [role=main] [role=grid] [role=row] at all (Gmail may use table rows without role=grid under role=main) and whether snapshot timeouts mean the page was still loading. 2) Fix the selector or add a longer wait timeout in the recipe, then re-run. 3) Live-run the other recipes (thread, draft, send to lkslokesh9301@gmail.com only, calendar events/create, lu.ma register without clicking Register)."
+gotchas:
+  - "BrowserOS snapshots of a fresh Gmail tab time out at 5000ms (tabs new and navigate both reported snapshot unavailable); the wait default of 10000ms may be too short for Gmail cold load."
+  - "wait for=selector returns matched:false on timeout instead of throwing, so a recipe runner must check it explicitly."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/handoffs/T-27-acceptance-inbox-1.yaml
+  - agent-memory/tasks.yaml
+verify: "Run inbox.recipe.yaml through BrowserOS with count=5 and expect step 3 grep to return up to 5 '- row \"' lines"
