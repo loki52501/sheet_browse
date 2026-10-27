@@ -185,14 +185,13 @@ pub(crate) fn has_email(s: &str) -> bool {
 }
 
 /// The literal text of a header template: `@vault(name)` references removed, so a vault
-/// reference never counts as an address.
+/// reference never counts as an address. Only for templates [`check_vault_refs`] accepted.
 fn literal_part(tmpl: &str) -> String {
-    let lower = tmpl.to_ascii_lowercase();
     let mut out = String::new();
     let mut i = 0;
-    while let Some(at) = lower[i..].find("@vault(") {
+    while let Some(at) = tmpl[i..].find(VAULT_OPEN) {
         out.push_str(&tmpl[i..i + at]);
-        match lower[i + at..].find(')') {
+        match tmpl[i + at..].find(')') {
             Some(close) => i += at + close + 1,
             None => return out,
         }
@@ -201,12 +200,41 @@ fn literal_part(tmpl: &str) -> String {
     out
 }
 
+/// The spelling core resolves (`harness_core::vault`, exact case).
+const VAULT_OPEN: &str = "@vault(";
+
+/// True when the template holds a reference core will resolve at the sink.
 fn has_vault(s: &str) -> bool {
-    s.to_ascii_lowercase().contains("@vault(")
+    s.contains(VAULT_OPEN)
+}
+
+/// Any spelling of `@vault(`, for the places where none is allowed.
+fn mentions_vault(s: &str) -> bool {
+    s.to_ascii_lowercase().contains(VAULT_OPEN)
+}
+
+/// A header template's vault references must parse the way core parses them at the sink:
+/// a `@VAULT(` or an unclosed `@vault(name` would be sent as typed while this module
+/// treated it as a reference (B-562 bypass), so it is refused.
+fn check_vault_refs(name: &HeaderName, tmpl: &str) -> Result<(), ToolError> {
+    if !mentions_vault(tmpl) {
+        return Ok(());
+    }
+    let exact = tmpl.matches(VAULT_OPEN).count();
+    let any_case = tmpl.to_ascii_lowercase().matches(VAULT_OPEN).count();
+    let parsed = harness_core::vault::vault_refs(tmpl).map(|r| r.len());
+    if exact != any_case || parsed.ok() != Some(exact) {
+        return Err(ToolError::Args(format!(
+            "header {}: write a vault reference exactly as @vault(name), lower case, the \
+             name made of letters, digits, _ - .",
+            name.as_str()
+        )));
+    }
+    Ok(())
 }
 
 fn no_vault(s: &str, place: &str) -> Result<(), ToolError> {
-    if has_vault(s) {
+    if mentions_vault(s) {
         return Err(ToolError::Args(format!(
             "@vault(...) is allowed only in header values, not in the {place}"
         )));
@@ -269,6 +297,7 @@ fn parse(args: &Value, overrides: &[(String, SocketAddr)]) -> Result<Req, ToolEr
                         name.as_str()
                     )));
                 }
+                check_vault_refs(&name, tmpl)?;
                 check_identity(&name, tmpl)?;
                 if tmpl.chars().any(|c| c.is_control()) {
                     return Err(ToolError::Args(format!(
@@ -744,10 +773,30 @@ mod tests {
 
     #[test]
     fn literal_part_drops_vault_references() {
-        assert_eq!(literal_part("token @vault(a.b@c.de)"), "token ");
-        assert_eq!(literal_part("x@VAULT(k) y"), "x y");
-        assert_eq!(literal_part("a @vault(k"), "a ");
+        assert_eq!(literal_part("token @vault(a.b-c_1)"), "token ");
+        assert_eq!(literal_part("x@vault(k) y"), "x y");
         assert_eq!(literal_part("plain"), "plain");
+    }
+
+    #[test]
+    fn vault_refs_must_parse_the_way_core_resolves_them() {
+        let n = HeaderName::from_static("x-contact");
+        for ok in ["plain", "Bearer @vault(tok)", "@vault(a) @vault(b.c)"] {
+            assert!(check_vault_refs(&n, ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "@VAULT(someone@example.com)",
+            "@Vault(tok)",
+            "@vault(tok) @VAULT(x)",
+            "@vault(a.b@c.de)",
+            "@vault(tok",
+        ] {
+            let e = check_vault_refs(&n, bad).unwrap_err().to_string();
+            assert!(
+                e.contains("x-contact") && !e.contains("example"),
+                "{bad}: {e}"
+            );
+        }
     }
 
     #[test]

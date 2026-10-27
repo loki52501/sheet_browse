@@ -100,6 +100,34 @@ async fn identity_and_raw_credential_headers_are_refused_before_any_request() {
     assert!(!dump.contains(&canary), "vault value in the ledger");
 }
 
+/// Review T-13c round 1: core resolves only `@vault(` in lower case, so another spelling
+/// must not count as a vault reference (it would be sent as typed past both B-562 rules).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_vault_reference_in_another_case_is_refused_before_any_request() {
+    let (server, e) = setup(vec![json_route("/x", b"{}".to_vec())]).await;
+    for (name, value) in [
+        ("X-Contact", "@VAULT(someone@example.com)"),
+        ("Authorization", "Bearer raw-token-value @VAULT(x)"),
+        ("Cookie", "sid=@Vault(gh_token)"),
+        ("X-Contact", "someone@example.com @vault(gh_token"),
+    ] {
+        let err = call(
+            &e,
+            "api",
+            json!({"url": url("/x"), "headers": {name: value}}),
+        )
+        .await
+        .expect_err(value);
+        assert!(matches!(err, ToolError::Args(_)), "{value}: {err}");
+        let m = err.to_string();
+        assert!(m.contains("@vault(name)") && !m.contains('\n'), "{m}");
+        for literal in ["someone@example.com", "raw-token-value"] {
+            assert!(!m.contains(literal), "value echoed: {m}");
+        }
+    }
+    assert!(server.requests().is_empty(), "a refused call sent nothing");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_vault_cookie_is_sent_and_never_shown() {
     let (server, e) = setup(vec![json_route("/x", b"{\"ok\":1}".to_vec())]).await;
