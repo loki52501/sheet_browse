@@ -280,11 +280,25 @@ async fn accept_2_planted_miss_flips_needs_repair_and_the_fixed_page_relocates_t
         "relocate ledger event"
     );
 
+    // Rule 4 (T-13b): the re-registered tool keeps class max(@gate, Read) = Read.
+    assert_eq!(
+        e.registry
+            .get("ashbyhq.list_jobs")
+            .expect("re-registered")
+            .class,
+        Class::Read
+    );
+
     // The patched tool is the one registered now: a plain match, no note, a clean run.
     let again = call(&e, "ashbyhq.list_jobs", json!({}))
         .await
         .expect("run after repair");
     assert!(!again.text.contains("note:"), "{}", again.text);
+    let last = events(&e)
+        .into_iter()
+        .rfind(|x| x.server == "web" && x.tool == "ashbyhq.list_jobs")
+        .expect("ledger event of the run after repair");
+    assert_eq!((last.class, last.ok), (Some(Class::Read), true));
     let h = row(&e).await;
     assert_eq!((h.status, h.version, h.runs), (ToolStatus::Repaired, 2, 1));
     // And a later fetch offers it as a healthy tool.
