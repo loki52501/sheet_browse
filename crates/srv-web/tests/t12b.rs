@@ -221,27 +221,47 @@ async fn fetch_plain_text_keeps_generics_and_includes() {
 /// JSON document that is one string of markup, are not shown by api.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_never_shows_markup_hidden_in_json_escapes() {
+    // T-12b round 2 (tester-1): every `<` becomes a real JSON escape, a backslash built from
+    // its byte (so no tool on the way into this file turns the escape back into `<`) and
+    // `u003c`. The bodies hold no tag until decoded, so only D-510's decoded check sees one.
+    let esc = |s: &str| s.replace('<', &format!("{}u003c", char::from(92u8)));
+    let bodies = [
+        esc(r#""<!DOCTYPE html><script>stealCookies()</script>""#),
+        esc(r#"{"html": "<p>hi</p>"}"#),
+        esc(r#"["<b>x</b>", 1]"#),
+        esc(r#""<!DOCTYPE html><html><body><script>stealCookies()</script>""#),
+    ];
+    for b in &bodies {
+        assert!(!b.contains('<') && b.contains("u003c"), "{b}");
+    }
     let server = Server::start(vec![
         route(
             Some("a.test"),
             "/plain-escaped",
             200,
             "text/plain",
-            r#""<!DOCTYPE html><script>stealCookies()</script>""#,
+            bodies[0].clone(),
         ),
         route(
             Some("a.test"),
             "/plain-object",
             200,
             "text/plain",
-            r#"{"html": "<p>hi</p>"}"#,
+            bodies[1].clone(),
+        ),
+        route(
+            Some("a.test"),
+            "/plain-array",
+            200,
+            "text/plain",
+            bodies[2].clone(),
         ),
         route(
             Some("a.test"),
             "/json-doc",
             200,
             "application/json",
-            r#""<!DOCTYPE html><html><body><script>stealCookies()</script>""#,
+            bodies[3].clone(),
         ),
         route(
             Some("a.test"),
@@ -253,7 +273,12 @@ async fn api_never_shows_markup_hidden_in_json_escapes() {
     ])
     .await;
     let e = env(config(&server, &["a.test"], no_tools())).await;
-    for p in ["/plain-escaped", "/plain-object", "/json-doc"] {
+    for p in [
+        "/plain-escaped",
+        "/plain-object",
+        "/plain-array",
+        "/json-doc",
+    ] {
         let t = call(&e, "api", json!({ "url": format!("http://a.test{p}") }))
             .await
             .unwrap_or_else(|err| panic!("api {p}: {err}"))

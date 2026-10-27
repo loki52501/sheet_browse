@@ -22,6 +22,7 @@ use reqwest::Url;
 use sb_sheet::{BlockKind, ElemRef, FieldValue, Flags, IndexRow, Span, State, TextBlock};
 use scraper::{ElementRef, Html, Node, Selector};
 use std::collections::HashMap;
+use std::time::Instant;
 
 /// `raw_main_html` cap (W-2 `mode="raw"`: 60 k chars).
 pub const RAW_MAX_CHARS: usize = 60_000;
@@ -177,10 +178,25 @@ pub struct Doc {
 
 /// Walks `html` fetched from `url` (the final URL, used to resolve links).
 pub fn parse(html: &str, url: &Url) -> Doc {
+    parse_inner(html, url, None).unwrap_or_default()
+}
+
+/// [`parse`] that gives up at `deadline` (D-517, W-2): `None` when the walk did not finish
+/// by then. The walk checks the clock as it goes, so a page that would take longer stops
+/// its thread soon after the deadline instead of holding it.
+pub(crate) fn parse_within(html: &str, url: &Url, deadline: Instant) -> Option<Doc> {
+    parse_inner(html, url, Some(deadline))
+}
+
+fn parse_inner(html: &str, url: &Url, deadline: Option<Instant>) -> Option<Doc> {
     let doc = Html::parse_document(html);
     let base = base_url(&doc, url);
     let mut w = Walker::new(&doc, base);
+    w.deadline = deadline;
     w.walk(doc.tree.root(), &Cx::default());
+    if w.out_of_time {
+        return None;
+    }
     w.flush();
     let title = page_title(&doc);
     let mut challenge = challenge_url(url).or(w.challenge);
@@ -190,13 +206,13 @@ pub fn parse(html: &str, url: &Url) -> Doc {
             challenge = Some(format!("challenge interstitial \"{}\"", title.trim()));
         }
     }
-    Doc {
+    Some(Doc {
         title,
         index: w.rows,
         blocks: w.blocks,
         hrefs: w.hrefs,
         challenge,
-    }
+    })
 }
 
 /// A body not declared as HTML (`text/plain`, no content type, anything else fetch reads)
@@ -212,6 +228,15 @@ pub fn parse(html: &str, url: &Url) -> Doc {
 /// instead of being read as an unknown element and lost. Markup (an HTML element name, a
 /// custom element, a tag with attributes, a comment, a doctype) is still parsed and dropped.
 pub fn parse_text(text: &str, url: &Url) -> Doc {
+    parse_text_inner(text, url, None).unwrap_or_default()
+}
+
+/// [`parse_text`] that gives up at `deadline`, like [`parse_within`].
+pub(crate) fn parse_text_within(text: &str, url: &Url, deadline: Instant) -> Option<Doc> {
+    parse_text_inner(text, url, Some(deadline))
+}
+
+fn parse_text_inner(text: &str, url: &Url, deadline: Option<Instant>) -> Option<Doc> {
     let text = plain_source(text);
     let mut marked = String::with_capacity(text.len() + 64);
     let mut blank = false;
@@ -229,7 +254,7 @@ pub fn parse_text(text: &str, url: &Url) -> Doc {
         blank = false;
         marked.push_str(line);
     }
-    let mut doc = parse(&marked, url);
+    let mut doc = parse_inner(&marked, url, deadline)?;
     if doc.title.is_empty() {
         if let Some(b) = doc.blocks.first() {
             let first = b
@@ -241,7 +266,7 @@ pub fn parse_text(text: &str, url: &Url) -> Doc {
             doc.title = escape::name(&first, TEXT_TITLE_MAX);
         }
     }
-    doc
+    Some(doc)
 }
 
 /// Title of a page without a `<title>`: the start of its first block.
@@ -274,52 +299,96 @@ const KNOWN_ELEMENTS: &[&str] = &[
     "msqrt", "mroot", "mtable", "mtr", "mtd", "semantics", "annotation", "annotation-xml",
 ];
 
+/// Is tag name `raw` (any case) in [`KNOWN_ELEMENTS`]? Lowercased on the stack and looked up
+/// by binary search in a sorted copy, so the check per `<` stays cheap on a body of millions
+/// of them. No known name is longer than [`KNOWN_NAME_MAX`] bytes.
+fn known_element(raw: &[u8]) -> bool {
+    static SORTED: std::sync::OnceLock<Vec<&'static [u8]>> = std::sync::OnceLock::new();
+    if raw.len() > KNOWN_NAME_MAX {
+        return false;
+    }
+    let mut buf = [0u8; KNOWN_NAME_MAX];
+    let low = &mut buf[..raw.len()];
+    low.copy_from_slice(raw);
+    low.make_ascii_lowercase();
+    let sorted = SORTED.get_or_init(|| {
+        let mut v: Vec<&'static [u8]> = KNOWN_ELEMENTS.iter().map(|k| k.as_bytes()).collect();
+        v.sort_unstable();
+        v
+    });
+    sorted.binary_search(&&*low).is_ok()
+}
+
+/// The longest name in [`KNOWN_ELEMENTS`] (`selectedcontent`), checked by a test.
+const KNOWN_NAME_MAX: usize = 15;
+
 /// Longest `<...>` run [`plain_source`] keeps as text.
 const PLAIN_BRACKET_MAX: usize = 200;
 
+/// The marks [`plain_source`] writes for a `<` and `>` of text (shown as `&lt;`/`&gt;`).
+const LT: &str = escape::LT_MARK_STR;
+const GT: &str = escape::GT_MARK_STR;
+
 /// D-512: a body walked as text (text/plain, or no HTML type) as HTML source in which
-/// angle-bracket text that is not markup survives. Such a `<` becomes `&amp;lt;`, and the
-/// `>` that closes it on the same line `&amp;gt;`, so the walk shows `&lt;String&gt;`: the
-/// text is kept, escaped, and no tag-shaped text from it reaches the model (rule 5).
-/// Entities elsewhere decode as before (a body with no type may be HTML). Markup is left for
-/// the parser to drop: a `<` before `!`, `?` or a non-letter, a known element name
-/// ([`KNOWN_ELEMENTS`]), a custom element name (with a `-`), and a tag with `=` or quotes
-/// (attributes). A comment is copied as written, so its end is not touched.
+/// angle-bracket text that is not markup survives. Such a `<` becomes [`LT`], and the `>`
+/// that closes it on the same line [`GT`] (two Unicode noncharacters, which the parser keeps
+/// as text), and the shown text writes both as `&lt;`/`&gt;` ([`escape::angles`]), so the
+/// walk shows `Vec&lt;String&gt;`: the text is kept, escaped, and no tag-shaped text from it
+/// reaches the model (rule 5). D-517: marks instead of entities, because the parser takes
+/// tens of microseconds per character reference in a debug build, and a body can hold
+/// millions of brackets. Entities elsewhere decode as before (a body with no type may be
+/// HTML); the walk's output then shows every `<` and `>`, decoded or literal, as
+/// `&lt;`/`&gt;` (D-514). One pass, at most [`PLAIN_BRACKET_MAX`] bytes looked at past each
+/// `<` (linear in the body). Markup is left for the parser to drop: a `<` before `!`, `?` or
+/// a non-letter, a known element name ([`KNOWN_ELEMENTS`]), a custom element name (with a
+/// `-`), and a tag with `=` or quotes (attributes). A comment is copied as written, so its
+/// end is not touched.
 pub(crate) fn plain_source(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + text.len() / 8);
-    let mut i = 0;
+    // A byte loop: `<`, `>`, `-` and the other delimiters are ASCII, so every cut below is a
+    // char boundary, and the loop costs a few steps per byte even in a debug build.
+    let b = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len() + b.len() / 8);
     let mut opened = Vec::new();
-    while let Some(off) = text[i..].find('<') {
-        let at = i + off;
-        out.push_str(&text[i..at]);
-        let rest = &text[at..];
-        if let Some(body) = rest.strip_prefix("<!--") {
-            let end = body.find("-->").map_or(rest.len(), |e| 4 + e + 3);
-            out.push_str(&rest[..end]);
-            i = at + end;
+    // `b[done..at]` is copied when the next `<` at `at` is reached.
+    let mut done = 0;
+    let mut at = 0;
+    while at < b.len() {
+        if b[at] != b'<' {
+            at += 1;
             continue;
         }
-        match plain_bracket(rest, &mut opened) {
-            Some(close) => {
-                // `rest[..close]` is `<...` without markup; `close` is its `>` (or the end
-                // of what is kept on this line when there is none).
-                out.push_str("&amp;lt;");
-                out.push_str(&rest[1..close]);
-                if rest[close..].starts_with('>') {
-                    out.push_str("&amp;gt;");
-                    i = at + close + 1;
-                } else {
-                    i = at + close;
+        out.extend_from_slice(&b[done..at]);
+        let rest = &text[at..];
+        let next = if let Some(body) = rest.strip_prefix("<!--") {
+            let end = body.find("-->").map_or(rest.len(), |e| 4 + e + 3);
+            out.extend_from_slice(&rest.as_bytes()[..end]);
+            at + end
+        } else {
+            match plain_bracket(rest, &mut opened) {
+                Some(close) => {
+                    // `rest[..close]` is `<...` without markup; `close` is its `>` (or the
+                    // end of what is kept on this line when there is none).
+                    out.extend_from_slice(LT.as_bytes());
+                    out.extend_from_slice(&rest.as_bytes()[1..close]);
+                    if rest.as_bytes().get(close) == Some(&b'>') {
+                        out.extend_from_slice(GT.as_bytes());
+                        at + close + 1
+                    } else {
+                        at + close
+                    }
+                }
+                None => {
+                    out.push(b'<');
+                    at + 1
                 }
             }
-            None => {
-                out.push('<');
-                i = at + 1;
-            }
-        }
+        };
+        done = next;
+        at = next;
     }
-    out.push_str(&text[i..]);
-    out
+    out.extend_from_slice(&b[done..]);
+    // Cut only at ASCII bytes of valid UTF-8, so this is valid UTF-8.
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// For `s` starting with `<`: `Some(end)` when it starts angle-bracket text that is not
@@ -328,37 +397,55 @@ pub(crate) fn plain_source(text: &str) -> String {
 /// holds the unknown names already opened as markup (a start tag with attributes): their end
 /// tags are markup too.
 fn plain_bracket(s: &str, opened: &mut Vec<String>) -> Option<usize> {
-    let after = s.strip_prefix('<')?;
-    let name_from = usize::from(after.starts_with('/')) + 1;
-    let first = s[name_from..].chars().next()?;
-    if !first.is_ascii_alphabetic() {
+    // Bytes, no allocation on the common path: this runs once per `<` of a body that may
+    // hold millions of them (W-2).
+    let b = s.as_bytes();
+    if b.first() != Some(&b'<') {
         return None;
     }
-    let name_len = s[name_from..]
-        .find(|c: char| c.is_whitespace() || c == '/' || c == '>' || c == '<')
-        .unwrap_or(s.len() - name_from);
-    let name = s[name_from..name_from + name_len].to_ascii_lowercase();
-    let end_tag = name_from == 2;
-    if name.contains('-')
-        || KNOWN_ELEMENTS.contains(&name.as_str())
-        || (end_tag && opened.contains(&name))
-    {
+    let end_tag = b.get(1) == Some(&b'/');
+    let name_from = usize::from(end_tag) + 1;
+    if !b.get(name_from).is_some_and(u8::is_ascii_alphabetic) {
         return None;
     }
-    let line_end = s.find(['\n', '\r']).unwrap_or(s.len());
-    let close = s[1..line_end]
-        .find(['>', '<'])
+    // The tag name ends where the HTML tokenizer ends it: ASCII whitespace, `/` or `>`; and
+    // at a `<`, which starts the next bracket here.
+    let name_len = b[name_from..]
+        .iter()
+        .position(|c| c.is_ascii_whitespace() || matches!(c, b'/' | b'>' | b'<'))
+        .unwrap_or(b.len() - name_from);
+    let raw = &b[name_from..name_from + name_len];
+    if raw.contains(&b'-') || known_element(raw) {
+        return None;
+    }
+    let is_opened = |opened: &[String]| {
+        opened
+            .iter()
+            .any(|o| o.as_bytes().eq_ignore_ascii_case(raw))
+    };
+    if end_tag && is_opened(opened) {
+        return None;
+    }
+    // The closing `>`: the first `>`, `<` or line end within PLAIN_BRACKET_MAX bytes of the
+    // `<` decides. The window is bounded, so the pass over a body stays linear whatever it
+    // holds (review-T-12b Blocking: a line of `<x` repeated was quadratic). All four bytes
+    // are ASCII, so a position found is a char boundary.
+    let window = &b[1..b.len().min(PLAIN_BRACKET_MAX + 1)];
+    let close = window
+        .iter()
+        .position(|c| matches!(c, b'>' | b'<' | b'\n' | b'\r'))
         .map(|c| c + 1)
-        .filter(|&c| s[c..].starts_with('>') && c <= PLAIN_BRACKET_MAX);
+        .filter(|&c| b[c] == b'>');
     let end = match close {
         Some(c) => c,
         // No `>` on the line: only the tag name is escaped; the parser would otherwise read
         // the rest of the line (and beyond) as attributes.
         None => name_from + name_len,
     };
-    if s[1..end].contains(['=', '"', '\'']) {
-        if !end_tag && opened.len() < 64 && !opened.contains(&name) {
-            opened.push(name);
+    if b[1..end].iter().any(|c| matches!(c, b'=' | b'"' | b'\'')) {
+        if !end_tag && opened.len() < 64 && !is_opened(opened) {
+            // Every delimiter is ASCII, so the name is on char boundaries.
+            opened.push(s[name_from..name_from + name_len].to_ascii_lowercase());
         }
         return None;
     }
@@ -507,7 +594,14 @@ struct Walker<'a> {
     tables: u32,
     order: u32,
     challenge: Option<String>,
+    /// D-517: when the walk must stop ([`parse_within`]); `out_of_time` once it has.
+    deadline: Option<Instant>,
+    steps: u32,
+    out_of_time: bool,
 }
+
+/// The walk looks at the clock once per this many nodes.
+const CLOCK_EVERY: u32 = 256;
 
 impl<'a> Walker<'a> {
     fn new(doc: &'a Html, base: Url) -> Walker<'a> {
@@ -538,10 +632,21 @@ impl<'a> Walker<'a> {
             tables: 0,
             order: 0,
             challenge: None,
+            deadline: None,
+            steps: 0,
+            out_of_time: false,
         }
     }
 
     fn walk(&mut self, node: NodeRef<'a, Node>, cx: &Cx) {
+        if self.out_of_time {
+            return;
+        }
+        self.steps = self.steps.wrapping_add(1);
+        if self.steps % CLOCK_EVERY == 1 && self.deadline.is_some_and(|d| Instant::now() >= d) {
+            self.out_of_time = true;
+            return;
+        }
         match node.value() {
             Node::Text(t) => {
                 if !cx.hidden {
@@ -749,12 +854,6 @@ impl<'a> Walker<'a> {
                 elem: s.elem,
             })
             .collect();
-        // A prose block cannot open with `# ` or `- ` and pass for a heading or outline line.
-        if !matches!(kind, BlockKind::Code | BlockKind::Heading) {
-            if let Some(first) = spans.first_mut().filter(|s| s.elem.is_none()) {
-                first.text = escape::block_start(&first.text);
-            }
-        }
         let plain = spans
             .iter()
             .map(|s| s.text.as_str())
@@ -772,22 +871,40 @@ impl<'a> Walker<'a> {
             BlockKind::ListItem => b.level,
             _ => None,
         };
-        self.blocks.push(TextBlock {
-            order: self.order,
-            frame: 0,
-            kind,
-            level,
-            landmark: b.landmark.map(str::to_string),
-            heading: self.heading.clone(),
-            table: if kind == BlockKind::TableRow {
-                b.table
-            } else {
-                None
-            },
-            header: b.header,
-            spans,
-        });
-        self.order += 1;
+        let pieces = if kind == BlockKind::TableRow {
+            // A row stays one row: a cell is capped instead of split.
+            for s in &mut spans {
+                cap_span(s, BLOCK_MAX_CHARS);
+            }
+            vec![spans]
+        } else {
+            split_long(spans, BLOCK_MAX_CHARS)
+        };
+        for mut spans in pieces {
+            // A prose block cannot open with `# ` or `- ` and pass for a heading or outline
+            // line (each piece of a split block too).
+            if !matches!(kind, BlockKind::Code | BlockKind::Heading) {
+                if let Some(first) = spans.first_mut().filter(|s| s.elem.is_none()) {
+                    first.text = escape::block_start(&first.text);
+                }
+            }
+            self.blocks.push(TextBlock {
+                order: self.order,
+                frame: 0,
+                kind,
+                level,
+                landmark: b.landmark.map(str::to_string),
+                heading: self.heading.clone(),
+                table: if kind == BlockKind::TableRow {
+                    b.table
+                } else {
+                    None
+                },
+                header: b.header,
+                spans,
+            });
+            self.order += 1;
+        }
         if kind == BlockKind::Heading && !plain.is_empty() {
             self.heading = Some(escape::cap_chars(&plain, NAME_MAX));
         }
@@ -1140,6 +1257,107 @@ impl<'a> Walker<'a> {
     fn absolute(&self, href: &str) -> Option<String> {
         let u = self.base.join(href.trim()).ok()?;
         matches!(u.scheme(), "http" | "https").then(|| u.to_string())
+    }
+}
+
+/// D-517: the most characters one text block holds. A longer block (a text/plain body with
+/// no blank line, a page that is one paragraph) is split into blocks of at most this many,
+/// at a space where one is near: the reader re-reads a whole block for every chunk it plans,
+/// so one block of megabytes costs time that grows with its square.
+const BLOCK_MAX_CHARS: usize = 8_000;
+
+/// How far back from a cut [`split_long`] looks for a space to cut at instead.
+const SPLIT_LOOKBACK: usize = 200;
+
+/// `spans` in groups of at most `max` characters each. A linked span is never split (one
+/// longer than `max` is capped, [`cap_span`]); a plain span is cut at the last whitespace
+/// within [`SPLIT_LOOKBACK`] characters of the limit, else at the limit, never inside an
+/// `&lt;`/`&gt;` escape.
+fn split_long(spans: Vec<Span>, max: usize) -> Vec<Vec<Span>> {
+    let total: usize = spans.iter().map(|s| s.text.len()).sum();
+    if total <= max {
+        // Bytes bound chars from above: nothing to split.
+        return vec![spans];
+    }
+    let mut out: Vec<Vec<Span>> = Vec::new();
+    let mut cur: Vec<Span> = Vec::new();
+    let mut used = 0usize;
+    for mut s in spans {
+        let len = s.text.chars().count();
+        if used + len <= max {
+            used += len;
+            cur.push(s);
+            continue;
+        }
+        if s.elem.is_some() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            cap_span(&mut s, max);
+            used = s.text.chars().count();
+            cur.push(s);
+            continue;
+        }
+        let mut rest = s.text.as_str();
+        while !rest.is_empty() {
+            if used >= max {
+                out.push(std::mem::take(&mut cur));
+                used = 0;
+            }
+            let at = cut_point(rest, max - used);
+            let (piece, tail) = rest.split_at(at);
+            used += piece.chars().count();
+            cur.push(Span {
+                text: piece.to_string(),
+                elem: None,
+            });
+            rest = tail;
+            if !rest.is_empty() {
+                out.push(std::mem::take(&mut cur));
+                used = 0;
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Byte offset at which to cut `s` so the head holds at most `room` characters (at least
+/// one): after the last whitespace within [`SPLIT_LOOKBACK`] characters before the limit,
+/// else at the limit moved back before an `&` that starts an escape it would cut.
+fn cut_point(s: &str, room: usize) -> usize {
+    let limit = match s.char_indices().nth(room.max(1)) {
+        Some((at, _)) => at,
+        None => return s.len(),
+    };
+    let head = &s[..limit];
+    let floor = head
+        .char_indices()
+        .rev()
+        .nth(SPLIT_LOOKBACK)
+        .map_or(0, |(at, _)| at);
+    if let Some(ws) = head[floor..].rfind(char::is_whitespace) {
+        let at = floor + ws;
+        if at > 0 {
+            // Cut after the whitespace char.
+            return at + head[at..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    // `&lt;` and `&gt;` are four bytes: an `&` in the last three bytes would be cut. `&` is
+    // ASCII, so its position is a char boundary.
+    let from = limit.saturating_sub(3);
+    match head.as_bytes()[from..].iter().rposition(|&b| b == b'&') {
+        Some(amp) if from + amp > 0 => from + amp,
+        _ => limit,
+    }
+}
+
+/// Caps a span's text at `max` characters, marking the cut with ` ...`.
+fn cap_span(s: &mut Span, max: usize) {
+    if s.text.len() > max && s.text.chars().count() > max {
+        s.text = format!("{} ...", escape::cap_chars(&s.text, max.saturating_sub(4)));
     }
 }
 
@@ -1833,8 +2051,157 @@ mod tests {
             plain_source("a < b, 3<4, <!x>, <?y>"),
             "a < b, 3<4, <!x>, <?y>"
         );
-        assert_eq!(plain_source("<String>"), "&amp;lt;String&amp;gt;");
+        assert_eq!(plain_source("<String>"), format!("{LT}String{GT}"));
         assert_eq!(plain_source("<P>x</P>"), "<P>x</P>");
         assert_eq!(plain_source("<é>"), "<é>");
+        // The bracket window ends at PLAIN_BRACKET_MAX bytes: a longer run is not one bracket.
+        let long = format!("<x {}>", "y".repeat(PLAIN_BRACKET_MAX));
+        assert_eq!(
+            plain_source(&long),
+            format!("{LT}x {}>", "y".repeat(PLAIN_BRACKET_MAX))
+        );
+        let fits = format!("<x {}>", "y".repeat(PLAIN_BRACKET_MAX - 4));
+        assert!(plain_source(&fits).ends_with(GT), "{fits}");
+    }
+
+    /// review-T-12b Blocking (W-2): hostile angle-bracket runs of several MB on one line
+    /// are escaped in linear time (the window past each `<` is bounded), and the walk of
+    /// such a body finishes well within W-2's budget even in a debug build.
+    #[test]
+    fn hostile_angle_runs_are_linear() {
+        let mb = 1024 * 1024;
+        for unit in ["<x", "<x ", "<ab/", "<x=", "</q", "<abc-"] {
+            let body = unit.repeat(4 * mb / unit.len());
+            let started = Instant::now();
+            let out = plain_source(&body);
+            let took = started.elapsed();
+            assert!(out.len() >= body.len(), "{unit}");
+            assert!(
+                took < std::time::Duration::from_secs(3),
+                "plain_source of 4 MB of {unit:?} took {took:?}"
+            );
+        }
+        let body = "<x".repeat(2 * mb);
+        let started = Instant::now();
+        let doc = parse_text_within(
+            &body,
+            &Url::parse("https://example.com/f.txt").unwrap(),
+            started + std::time::Duration::from_secs(60),
+        )
+        .expect("the walk finished");
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(12),
+            "the walk of 4 MB of `<x` took {took:?}"
+        );
+        assert!(!doc.blocks.is_empty());
+    }
+
+    /// D-517: a long block is split into blocks of at most BLOCK_MAX_CHARS characters, at a
+    /// space when one is near, never inside an escape; nothing is lost.
+    #[test]
+    fn long_blocks_are_split_without_losing_text() {
+        let plain = |t: &str| Span {
+            text: t.to_string(),
+            elem: None,
+        };
+        let words = "word ".repeat(5_000);
+        let groups = split_long(vec![plain(&words)], 1_000);
+        assert!(groups.len() >= 25, "{}", groups.len());
+        let mut joined = String::new();
+        for g in &groups {
+            let n: usize = g.iter().map(|s| s.text.chars().count()).sum();
+            assert!(n <= 1_000, "{n}");
+            joined.extend(g.iter().map(|s| s.text.as_str()));
+        }
+        assert_eq!(joined, words);
+        assert!(groups[0][0].text.ends_with("word "), "cut at a space");
+        // One long word of escapes and multi-byte chars: cut by characters, never in `&lt;`.
+        let word = "&lt;éx".repeat(3_000);
+        let groups = split_long(vec![plain(&word)], 997);
+        let mut joined = String::new();
+        for g in &groups {
+            let t: String = g.iter().map(|s| s.text.as_str()).collect();
+            assert!(t.chars().count() <= 997);
+            assert!(
+                !t.ends_with('&') && !t.ends_with("&l") && !t.ends_with("&lt"),
+                "{t}"
+            );
+            joined.push_str(&t);
+        }
+        assert_eq!(joined, word);
+        // A short block is one group, untouched.
+        assert_eq!(split_long(vec![plain("a b")], 1_000).len(), 1);
+        // The walk splits a long paragraph into several blocks.
+        let doc = parse(
+            &format!("<p>{}</p>", "word ".repeat(10_000)),
+            &Url::parse("https://example.com/").unwrap(),
+        );
+        assert!(doc.blocks.len() >= 6, "{}", doc.blocks.len());
+        assert!(doc.blocks.iter().all(|b| {
+            b.spans
+                .iter()
+                .map(|s| s.text.chars().count())
+                .sum::<usize>()
+                <= BLOCK_MAX_CHARS
+        }));
+    }
+
+    /// D-514 (rule 5): markup a text/html page spells with entities, or a literal `<` the
+    /// parser keeps as text, reaches no block, code block, link name or title as a tag.
+    #[test]
+    fn entity_spelled_markup_in_html_is_shown_escaped() {
+        let doc = page(
+            "<title>T &lt;b&gt;x&lt;/b&gt;</title><p>a &lt;script&gt;steal()&lt;/script&gt; \
+             and &#60;img src=x&#62; and a < b</p><pre>&lt;i&gt;code&lt;/i&gt;</pre>\
+             <a href=\"/x\">&lt;svg onload=1&gt;</a>",
+        );
+        let text: String = doc
+            .blocks
+            .iter()
+            .flat_map(|b| b.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let names: String = doc.index.iter().map(|r| r.name.clone()).collect();
+        for t in [&text, &names, &doc.title] {
+            assert!(!crate::http::has_tag(t), "{t}");
+            assert!(!t.contains('<') && !t.contains('>'), "{t}");
+        }
+        assert!(
+            text.contains("a &lt;script&gt;steal()&lt;/script&gt; and &lt;img src=x&gt;"),
+            "{text}"
+        );
+        assert!(text.contains("a &lt; b"), "{text}");
+        assert!(text.contains("&lt;i&gt;code&lt;/i&gt;"), "{text}");
+        assert!(names.contains("&lt;svg onload=1&gt;"), "{names}");
+        // A title that holds markup once decoded loses it (no_markup, as before).
+        assert_eq!(doc.title, "T x");
+    }
+
+    #[test]
+    fn known_names_are_found_in_any_case() {
+        assert_eq!(
+            KNOWN_ELEMENTS.iter().map(|k| k.len()).max(),
+            Some(KNOWN_NAME_MAX)
+        );
+        for k in KNOWN_ELEMENTS {
+            assert!(known_element(k.as_bytes()), "{k}");
+            assert!(known_element(k.to_ascii_uppercase().as_bytes()), "{k}");
+        }
+        for no in ["string", "t", "stdio.h", "selectedcontentx", "x"] {
+            assert!(!known_element(no.as_bytes()), "{no}");
+        }
+    }
+
+    /// D-517: a walk whose deadline has passed stops and returns nothing; one with time
+    /// finishes.
+    #[test]
+    fn a_walk_past_its_deadline_returns_nothing() {
+        let url = Url::parse("https://example.com/p").unwrap();
+        let html = "<div><p>words</p></div>".repeat(5_000);
+        assert!(parse_within(&html, &url, Instant::now()).is_none());
+        assert!(parse_text_within("plain words", &url, Instant::now()).is_none());
+        let later = Instant::now() + std::time::Duration::from_secs(60);
+        assert!(parse_within(&html, &url, later).is_some_and(|d| !d.blocks.is_empty()));
     }
 }

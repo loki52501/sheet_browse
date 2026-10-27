@@ -478,11 +478,15 @@ impl ToolHandler for SiteTool {
                     Some((_, fp)) => self.file_carries(fp).await,
                     None => false,
                 };
+                // D-518: when this read already saw the fingerprint in the file, the run is
+                // recorded as the clean run toolstore would make of it (D-577), so the result
+                // does not hang on toolstore reading the file a second time (a read that fails
+                // there counts as "not carried" and patches again).
                 let outcome = match &relocated {
-                    Some((_, fp)) => RunOutcome::Relocated {
+                    Some((_, fp)) if !already => RunOutcome::Relocated {
                         fingerprint: fp.clone(),
                     },
-                    None => RunOutcome::Ok,
+                    _ => RunOutcome::Ok,
                 };
                 match self.record_row(ctx, outcome).await {
                     Ok(row) => {
@@ -618,10 +622,12 @@ impl ApiFetch for PageApi {
                 self.domain
             ));
         }
-        let client = self.clients.api_for(&u, false, &self.overrides).clone();
+        let clients = self.clients.clone();
+        let overrides = self.overrides.clone();
         let cap = self.cap;
         let slot = self.challenge.clone();
         let fut = async move {
+            let client = clients.api_for(&u, false, &overrides).await;
             // D-5, D-580: a human check stops the whole call; the reader only learns the host.
             let stopped = |out: ToolOutput| {
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(out);

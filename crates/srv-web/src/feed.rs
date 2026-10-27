@@ -252,12 +252,33 @@ pub(crate) fn parse_with(
 
 /// A feed link as the model may see it: resolved against `base` when relative (D-513), then
 /// [`http::clean_url`].
+///
+/// D-516: an empty, whitespace-only or fragment-only (`#`, `#top`) href is no link, and
+/// neither is a link that is the feed's own URL (`base`, fragment ignored): feed-rs joins
+/// such an href against the feed URL before it gets here. Otherwise every item without a
+/// link would repeat the feed URL (a secret calendar address once per event) and point the
+/// model at the feed instead of an item.
 fn link_url(href: &str, base: Option<&Url>) -> Option<String> {
     let href = href.trim();
-    match base.and_then(|b| b.join(href).ok()) {
-        Some(abs) => http::clean_url(abs.as_str()),
-        None => http::clean_url(href),
+    if href.is_empty() || href.starts_with('#') {
+        return None;
     }
+    let abs = match base.and_then(|b| b.join(href).ok()) {
+        Some(abs) => abs,
+        None => Url::parse(href).ok()?,
+    };
+    if base.is_some_and(|b| same_document(&abs, b)) {
+        return None;
+    }
+    http::clean_url(abs.as_str())
+}
+
+/// `a` and `b` name the same document (equal once the fragment is dropped).
+fn same_document(a: &Url, b: &Url) -> bool {
+    let (mut a, mut b) = (a.clone(), b.clone());
+    a.set_fragment(None);
+    b.set_fragment(None);
+    a == b
 }
 
 /// Text of an HTML fragment (feed summaries and calendar fields are often HTML), collapsed

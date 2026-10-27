@@ -7,9 +7,9 @@
 //! address is not proxied) is the unit test `http::tests::a_proxy_never_fetches_a_private_target`,
 //! which needs fixed DNS answers.
 //!
-//! The control half proves the variables are in effect: a public name (a config DNS
-//! override, public by D-507) goes to the proxy, and an https api call goes as a CONNECT
-//! tunnel that carries no header of ours.
+//! The control half proves the variables are in effect: a public IP literal goes to the
+//! proxy, and an https api call goes as a CONNECT tunnel that carries no header of ours. A
+//! config DNS override host goes direct (D-515).
 
 mod common;
 
@@ -167,18 +167,29 @@ async fn loopback_targets_bypass_the_system_proxy_and_public_ones_use_it() {
         "vault value in the ledger"
     );
 
-    // Control: a public name goes through the proxy (a forward request, 502 back).
-    let r = call(&e, "fetch", json!({"url": "http://public.test/page"})).await;
+    // D-515: a config DNS override pins its address, so it goes direct, never to the proxy
+    // (the proxy would resolve the name itself).
+    let t = call(&e, "fetch", json!({"url": "http://public.test/page"}))
+        .await
+        .unwrap_or_else(|err| panic!("fetch via the override: {err}"))
+        .text;
+    assert!(t.contains("Local page words"), "{t}");
+    assert_eq!(origin.requests().len(), 7, "the override went direct");
+    assert!(proxy.all().is_empty(), "an override host went to the proxy");
+
+    // Control: a public address goes through the proxy (a forward request, 502 back).
+    // 192.0.2.0/24 is TEST-NET-1: public by our ranges, never routed.
+    let r = call(&e, "fetch", json!({"url": "http://192.0.2.10/page"})).await;
     let seen = proxy.all();
     assert_eq!(seen.len(), 1, "the public fetch went to the proxy: {r:?}");
     assert!(
-        seen[0].starts_with("GET http://public.test/page HTTP/1.1"),
+        seen[0].starts_with("GET http://192.0.2.10/page HTTP/1.1"),
         "a forward request: {}",
         seen[0].lines().next().unwrap_or("")
     );
     assert_eq!(
         origin.requests().len(),
-        6,
+        7,
         "the origin was not asked directly"
     );
 

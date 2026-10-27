@@ -273,10 +273,20 @@ async fn private_and_loopback_targets_never_use_the_proxy_public_ones_do() {
         }
     }
 
-    // (4) Control: a public name goes through the proxy (forward request; 502 back), and an
-    // https api call with a vault header is a CONNECT tunnel carrying no header of ours.
+    // (4) Control: a public address goes through the proxy (forward request; 502 back), and
+    // an https api call with a vault header is a CONNECT tunnel carrying no header of ours.
+    // T-12b round 2 (D-515, review-T-12b should-fix 2): a config DNS override such as
+    // public.test pins its address and now goes direct, so the public control is a public
+    // IP literal (192.0.2.0/24, TEST-NET-1: public by srv-web's ranges, never routed).
     let before = proxied.all().len();
     let r = call(&e, "fetch", json!({"url": "http://public.test/page"})).await;
+    assert_eq!(
+        proxied.all().len(),
+        before,
+        "an override host went through the proxy: {}",
+        text(&r)
+    );
+    let r = call(&e, "fetch", json!({"url": "http://192.0.2.10/page"})).await;
     let seen = proxied.all();
     assert_eq!(
         seen.len(),
@@ -287,7 +297,7 @@ async fn private_and_loopback_targets_never_use_the_proxy_public_ones_do() {
     assert!(
         seen.last()
             .unwrap()
-            .starts_with("GET http://public.test/page HTTP/1.1"),
+            .starts_with("GET http://192.0.2.10/page HTTP/1.1"),
         "{}",
         seen.last().unwrap().lines().next().unwrap_or("")
     );

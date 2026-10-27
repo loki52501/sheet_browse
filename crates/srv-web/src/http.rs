@@ -70,24 +70,49 @@ pub(crate) struct Clients {
     /// private address or one that stays on this machine ([`Clients::api_for`]).
     api_local: reqwest::Client,
     api_vault_local: reqwest::Client,
+    /// Cap on [`Clients::api_for`]'s name lookup (the request timeout, W-2).
+    lookup_max: std::time::Duration,
 }
 
 impl Clients {
     /// The api client for `url`, with or without a vault header (`vault`): never a proxy for
-    /// a private or loopback target (`overrides` are the config's DNS overrides, for
-    /// [`is_loopback`]).
-    pub(crate) fn api_for(
+    /// a private or loopback target. `overrides` are the config's DNS overrides: a host in
+    /// them goes direct (the proxy would resolve the name itself and lose the pinned
+    /// address, D-515). When the system proxy applies to a name, the name is resolved here
+    /// first, like [`Clients::page_for`]: a name whose every answer is loopback, private or
+    /// link-local goes direct (D-515), so a proxy never reaches the user's machine or
+    /// network for it. A name with a public answer, no answer or a lookup error follows the
+    /// proxy settings (api may need the proxy to resolve; the proxy's own network is the
+    /// proxy owner's choice). An IP literal needs no lookup.
+    pub(crate) async fn api_for(
         &self,
         url: &Url,
         vault: bool,
         overrides: &[(String, SocketAddr)],
     ) -> &reqwest::Client {
-        let local = written_private_or_local(url) || is_loopback(url, overrides);
+        let local = written_private_or_local(url)
+            || is_loopback(url, overrides)
+            || overridden(url, overrides)
+            || (self.proxied(url) && self.resolves_private(url).await);
         match (vault, local) {
             (true, true) => &self.api_vault_local,
             (true, false) => &self.api_vault,
             (false, true) => &self.api_local,
             (false, false) => &self.api,
+        }
+    }
+
+    /// Does `url`'s host name resolve only to loopback, private or link-local addresses
+    /// ([`PublicOnly`]'s private answer)? An IP literal is not looked up (false: a private
+    /// literal is [`written_private`]).
+    async fn resolves_private(&self, url: &Url) -> bool {
+        match host_kind(url) {
+            Some(HostKind::Name(host)) => {
+                // A lookup that does not finish in time is no answer.
+                let answer = tokio::time::timeout(self.lookup_max, self.resolver.public(&host));
+                matches!(answer.await, Ok(Err(e)) if e.downcast_ref::<PrivateAnswer>().is_some())
+            }
+            _ => false,
         }
     }
 
@@ -99,32 +124,45 @@ impl Clients {
     }
 
     /// The client for one hop of a page request ([`get_page`]). A hop written as a private
-    /// address or a localhost name is never proxied. With `allow_private` any other hop
-    /// follows the proxy settings. Without it a hop goes through the proxy only when the
-    /// proxy applies and [`PublicOnly`] passes its name here (a DNS override counts as
-    /// public, D-507); otherwise it goes direct, where [`PublicOnly`] decides at the connect
-    /// (a private answer is refused, a name with no answer fails to connect). So a proxy
-    /// never fetches a name that resolves to the user's machine or network here.
+    /// address or a localhost name, or whose host is a config DNS override (the proxy would
+    /// resolve the name itself and lose the pinned address, D-515), is never proxied. With
+    /// `allow_private` any other hop follows the proxy settings. Without it a hop goes
+    /// through the proxy only when the proxy applies and either its host is a public IP
+    /// literal (no lookup needed, D-515) or [`PublicOnly`] passes its name here; otherwise
+    /// it goes direct, where [`PublicOnly`] decides at the connect (a private answer is
+    /// refused, a name with no answer fails to connect). So a proxy never fetches a name
+    /// that resolves to the user's machine or network here.
     async fn page_for(&self, cfg: &Config, url: &Url, allow_private: bool) -> &reqwest::Client {
-        if written_private_or_local(url) || !self.proxied(url) {
-            return if allow_private {
-                &self.page_local
-            } else {
-                &self.page
-            };
+        let direct = if allow_private {
+            &self.page_local
+        } else {
+            &self.page
+        };
+        if written_private_or_local(url) || overridden(url, &cfg.resolve) || !self.proxied(url) {
+            return direct;
         }
         if allow_private {
             return &self.page_proxy;
         }
-        let host = host_of(url);
-        let host = host.trim_end_matches('.');
-        if cfg.resolve.iter().any(|(h, _)| h == host) {
-            return &self.page_proxy;
+        match host_kind(url) {
+            // Not private: `written_private_or_local` said so above.
+            Some(HostKind::Ip(_)) => &self.page_proxy,
+            Some(HostKind::Name(host)) => match self.resolver.public(&host).await {
+                Ok(addrs) if !addrs.is_empty() => &self.page_proxy,
+                _ => direct,
+            },
+            None => direct,
         }
-        match self.resolver.public(host).await {
-            Ok(addrs) if !addrs.is_empty() => &self.page_proxy,
-            _ => &self.page,
-        }
+    }
+}
+
+/// Is `url`'s host one of the config's DNS overrides (tests; empty in production)? Such a
+/// request goes direct: reqwest answers the override before any resolver, and a proxy would
+/// resolve the name itself instead (D-515).
+fn overridden(url: &Url, overrides: &[(String, SocketAddr)]) -> bool {
+    match host_kind(url) {
+        Some(HostKind::Name(host)) => overrides.iter().any(|(h, _)| *h == host),
+        _ => false,
     }
 }
 
@@ -205,6 +243,7 @@ fn build_with(cfg: &Config, resolver: PublicOnly, proxy: Option<&str>) -> Result
         api_vault: api_client(true, true)?,
         api_local: api_client(false, false)?,
         api_vault_local: api_client(false, true)?,
+        lookup_max: cfg.timeout,
     })
 }
 
@@ -1051,6 +1090,7 @@ mod tests {
                 true,
                 &[],
             )
+            .await
             .get(format!("http://127.0.0.1:{port}/"))
             .send()
             .await
@@ -1058,12 +1098,182 @@ mod tests {
         assert_eq!(resp.text().await.unwrap(), "ok");
         let resp = clients
             .api_for(&Url::parse("http://pub.test/q").unwrap(), true, &[])
+            .await
             .get("http://pub.test/q")
             .send()
             .await
             .unwrap();
         assert_eq!(resp.text().await.unwrap(), "px");
         assert_eq!(proxied.lock().unwrap().len(), 2);
+        // D-515, review-T-12b should-fix 4: a public IPv6 literal needs no lookup and goes
+        // through the proxy like a public name.
+        let url = Url::parse("http://[2606:4700::1]/v6").unwrap();
+        let body = get_page(&cfg, &clients, &url, "*/*", false)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(body.bytes, b"px");
+        assert_eq!(
+            proxied.lock().unwrap().last().map(String::as_str),
+            Some("GET http://[2606:4700::1]/v6 HTTP/1.1")
+        );
+        // The origin got the two page requests and the loopback api request only.
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    /// D-515 (B-590, review-T-12b should-fix 2 and 4): which api client a URL gets with a
+    /// proxy configured. A name answering only private addresses, a private literal in any
+    /// spelling and a config DNS override go direct, with or without a vault header; a
+    /// public name, a public IP literal and a name with no answer follow the proxy.
+    #[tokio::test]
+    async fn api_never_hands_a_private_name_to_the_proxy() {
+        let resolver = PublicOnly {
+            fixed: vec![
+                ("rebind.test".into(), vec!["127.0.0.1".parse().unwrap()]),
+                ("lan.test".into(), vec!["192.168.1.10".parse().unwrap()]),
+                (
+                    "mixed.test".into(),
+                    vec!["10.0.0.1".parse().unwrap(), "fe80::1".parse().unwrap()],
+                ),
+                ("nx.test".into(), vec![]),
+                ("pub.test".into(), vec!["93.184.216.34".parse().unwrap()]),
+            ],
+        };
+        let cfg = cfg_short();
+        let clients = build_with(&cfg, resolver, Some("http://127.0.0.1:9")).unwrap();
+        let ov: Vec<(String, SocketAddr)> =
+            vec![("over.test".into(), "93.184.216.34:80".parse().unwrap())];
+        for (u, local) in [
+            ("http://rebind.test/a", true),
+            ("https://rebind.test./a", true),
+            ("http://LAN.test:8080/a", true),
+            ("http://mixed.test/a", true),
+            ("http://[::ffff:127.0.0.1]/a", true),
+            ("http://[fd00::1]/a", true),
+            ("http://10.1.2.3/a", true),
+            ("http://over.test/a", true),
+            ("http://pub.test/a", false),
+            ("https://pub.test/a", false),
+            ("http://nx.test/a", false),
+            ("http://[2606:4700::1]/a", false),
+            ("http://93.184.216.34/a", false),
+        ] {
+            let url = Url::parse(u).unwrap();
+            for vault in [false, true] {
+                let got = clients.api_for(&url, vault, &ov).await;
+                let want = match (vault, local) {
+                    (true, true) => &clients.api_vault_local,
+                    (true, false) => &clients.api_vault,
+                    (false, true) => &clients.api_local,
+                    (false, false) => &clients.api,
+                };
+                assert!(
+                    std::ptr::eq(got, want),
+                    "{u} vault={vault}: want local={local}"
+                );
+            }
+        }
+    }
+
+    /// A forward proxy on 127.0.0.1 that answers every request with a 302 to the target
+    /// its path names (`/to-rebind`, `/to-mapped`), and records each request line.
+    async fn redirecting_proxy(port: u16) -> (SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let s = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut tmp = [0u8; 4096];
+                let n = sock.read(&mut tmp).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&tmp[..n]).into_owned();
+                let line = head.lines().next().unwrap_or("").to_string();
+                let to = if line.contains("/to-mapped") {
+                    format!("http://[::ffff:127.0.0.1]:{port}/")
+                } else {
+                    format!("http://rebind.test:{port}/")
+                };
+                s.lock().unwrap().push(line);
+                let resp =
+                    format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\n\r\n");
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        (addr, seen)
+    }
+
+    /// review-T-12b should-fix 3 (D-509): a public URL that the proxy answers with a
+    /// redirect to a private target (a name resolving to loopback, an IPv4-mapped loopback
+    /// literal) is refused at that hop: one proxied request, nothing reaches this machine.
+    #[tokio::test]
+    async fn a_proxied_redirect_to_a_private_target_is_refused() {
+        let (origin, hits) = counting_server().await;
+        let (proxy_addr, proxied) = redirecting_proxy(origin.port()).await;
+        let resolver = PublicOnly {
+            fixed: vec![
+                ("rebind.test".into(), vec!["127.0.0.1".parse().unwrap()]),
+                ("pub.test".into(), vec!["93.184.216.34".parse().unwrap()]),
+            ],
+        };
+        let cfg = cfg_short();
+        let clients = build_with(&cfg, resolver, Some(&format!("http://{proxy_addr}"))).unwrap();
+        for (path, to) in [
+            ("/to-rebind", "rebind.test"),
+            ("/to-mapped", "[::ffff:7f00:1]"),
+        ] {
+            let before = proxied.lock().unwrap().len();
+            let url = Url::parse(&format!("http://pub.test{path}")).unwrap();
+            let err = get_page(&cfg, &clients, &url, "*/*", false).await.err();
+            assert_eq!(
+                err,
+                Some(HttpError::Private {
+                    from: Some("pub.test".into()),
+                    to: to.into()
+                }),
+                "{path}"
+            );
+            let seen = proxied.lock().unwrap().clone();
+            assert_eq!(seen.len(), before + 1, "{path}: one proxied request");
+            assert_eq!(seen[before], format!("GET http://pub.test{path} HTTP/1.1"));
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "a private target was reached"
+        );
+    }
+
+    /// D-515 (review-T-12b should-fix 2): a host in the config's DNS overrides goes direct
+    /// to its pinned address even with a proxy configured (the proxy would resolve the
+    /// name itself).
+    #[tokio::test]
+    async fn dns_override_hosts_never_go_through_the_proxy() {
+        let (origin, hits) = counting_server().await;
+        let (proxy_addr, proxied) = recording_proxy().await;
+        let cfg = cfg_short().with_resolve("over.test", origin);
+        // The pre-check would pass the name (a public answer), so only the override rule
+        // keeps it off the proxy.
+        let resolver = PublicOnly {
+            fixed: vec![("over.test".into(), vec!["93.184.216.34".parse().unwrap()])],
+        };
+        let clients = build_with(&cfg, resolver, Some(&format!("http://{proxy_addr}"))).unwrap();
+        let url = Url::parse("http://over.test/x").unwrap();
+        let body = get_page(&cfg, &clients, &url, "*/*", false)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(body.bytes, b"ok");
+        let resp = clients
+            .api_for(&url, false, &cfg.resolve)
+            .await
+            .get(url.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.text().await.unwrap(), "ok");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(
+            proxied.lock().unwrap().is_empty(),
+            "an override host was proxied"
+        );
     }
 
     #[test]

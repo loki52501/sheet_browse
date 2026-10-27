@@ -10,7 +10,12 @@
 //! * a line that starts with one of the harness's own trailer words (`remaining:`,
 //!   `truncated:`, `cursor:`, `tools for this site:`, `stopped:`, `skipped:`, `chunk N of M`)
 //!   gets the word quoted (`"remaining:"`), so the page cannot forge an outline, a cursor or
-//!   a site-tool announcement.
+//!   a site-tool announcement;
+//! * `<` and `>` become `&lt;` and `&gt;` (D-514, rule 5), so no tag-shaped string reaches
+//!   the model from page text, whether the page wrote it as text, as an entity (`&lt;b&gt;`
+//!   decodes to `<b>`) or as a literal `<` the parser kept. `&` is not escaped: `&lt;` in the
+//!   output can stand for either `<` or the text `&lt;`, the convention D-512 set for
+//!   text/plain.
 
 /// Line starts the harness writes itself.
 const RESERVED: &[&str] = &[
@@ -24,6 +29,18 @@ const RESERVED: &[&str] = &[
 
 /// Escapes one run of page text (span text, a cell, a code block). Line breaks are kept.
 pub fn text(s: &str) -> String {
+    harness_text(&angles(s))
+}
+
+/// [`text`] without the D-514 angle-bracket step, for text already checked to hold no tag
+/// (api's text/plain answer, D-510: it is shown only when [`crate::http::has_tag`] finds
+/// none, so `a < b` stays as written).
+pub fn text_checked(s: &str) -> String {
+    harness_text(s)
+}
+
+/// The link-form, fence and reserved-line-start steps of [`text`].
+fn harness_text(s: &str) -> String {
     let s = s.replace('[', "(").replace(']', ")").replace("```", "'''");
     if !s.contains(':') && !s.to_ascii_lowercase().contains("chunk") {
         return s;
@@ -40,9 +57,34 @@ pub fn text(s: &str) -> String {
 
 /// Escapes the text of a code block. The reader fences code blocks, so only a fence can
 /// break out: three backticks become three single quotes. Brackets and line starts inside
-/// a fence are code, and are kept as written.
+/// a fence are code, and are kept as written; `<` and `>` are escaped as in [`text`]
+/// (D-514: a fence does not make page markup safe to show).
 pub fn code(s: &str) -> String {
-    s.replace("```", "'''")
+    angles(&s.replace("```", "'''"))
+}
+
+/// The marks the text/plain walk writes for a `<` and a `>` of text (D-512, D-517):
+/// U+FDD0 and U+FDD1, Unicode noncharacters (reserved for a program's internal use, never
+/// text of their own), shown as `&lt;` and `&gt;` like the characters they stand for.
+pub const LT_MARK: char = '\u{FDD0}';
+pub const GT_MARK: char = '\u{FDD1}';
+pub const LT_MARK_STR: &str = "\u{FDD0}";
+pub const GT_MARK_STR: &str = "\u{FDD1}";
+
+/// `<` (and [`LT_MARK`]) as `&lt;`, `>` (and [`GT_MARK`]) as `&gt;` (D-514).
+pub fn angles(s: &str) -> String {
+    if !s.contains(['<', '>', LT_MARK, GT_MARK]) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + s.len() / 4);
+    for c in s.chars() {
+        match c {
+            '<' | LT_MARK => out.push_str("&lt;"),
+            '>' | GT_MARK => out.push_str("&gt;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Escapes a name or title: [`text`] plus whitespace collapsed to single spaces and capped
@@ -160,6 +202,26 @@ mod tests {
             v,
             serde_json::json!({"a": "[x] (#3)", "b": ["[y] (#4)", 1], "[k] (#5)": null})
         );
+    }
+
+    #[test]
+    fn angle_brackets_are_escaped_everywhere() {
+        assert_eq!(
+            text("x <script>a</script> y"),
+            "x &lt;script&gt;a&lt;/script&gt; y"
+        );
+        assert_eq!(
+            code("let v: Vec<u8> = a >> 1;"),
+            "let v: Vec&lt;u8&gt; = a &gt;&gt; 1;"
+        );
+        assert_eq!(name("  <b>\n t ", 40), "&lt;b&gt; t");
+        // The text/plain walk's marks show as the brackets they stand for.
+        assert_eq!(
+            text(&format!("Vec{LT_MARK}String{GT_MARK}")),
+            "Vec&lt;String&gt;"
+        );
+        // Already escaped text stays as it is (escaping twice changes nothing).
+        assert_eq!(text(&text("<i>&lt;")), "&lt;i&gt;&lt;");
     }
 
     #[test]

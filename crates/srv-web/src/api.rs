@@ -458,7 +458,9 @@ impl ToolHandler for Api {
         }
         // A vault header only follows redirects within the same scheme, host and port; a
         // loopback or private target never goes through a proxy (B-590, D-509).
-        let client = clients.api_for(&req.url, vault, &self.web.cfg.resolve);
+        let client = clients
+            .api_for(&req.url, vault, &self.web.cfg.resolve)
+            .await;
         let mut rb = client.request(req.method.clone(), req.url.clone());
         match req.body {
             Some(Body::Json(v)) => {
@@ -619,7 +621,7 @@ fn render(
             Some(j) if j.document || http::has_tag(&j.text) => None,
             Some(j) => Some(j),
             None => {
-                let mut s = Json::plain(escape::text(&text));
+                let mut s = Json::plain(escape::text_checked(&text));
                 if pick.is_some() {
                     s.note = Some("pick ignored: the answer is not JSON".into());
                 }
@@ -986,17 +988,28 @@ mod tests {
         let r = |mime: &str, b: &[u8]| {
             render(&body(mime, b, false), &Method::GET, None, 1 << 20, 1 << 20)
         };
+        // T-12b round 2 (tester-1): a real JSON escape, a backslash built from its byte (so
+        // no tool on the way into this file turns it back into `<`) and `u003c`. The bodies
+        // hold no tag until decoded, so only D-510's decoded check can refuse them.
+        let esc = |s: &str| s.replace('<', &format!("{}u003c", char::from(92u8)));
         for b in [
-            &br#""<script>stealCookies()</script>""#[..],
-            br#"{"h": "<!DOCTYPE html><html>"}"#,
-            br#"["<p>x"]"#,
+            esc(r#""<script>stealCookies()</script>""#),
+            esc(r#"{"h": "<!DOCTYPE html><html>"}"#),
+            esc(r#"["<p>x"]"#),
+            esc(r#"{"a": [{"b": "</div><img src=x>"}]}"#),
         ] {
-            let line = not_shown(r("text/plain", b));
+            assert!(!crate::http::has_tag(&b) && b.contains("u003c"), "{b}");
+            let line = not_shown(r("text/plain", b.as_bytes()));
             assert!(line.contains("not shown") && !line.contains('<'), "{line}");
         }
         for mime in ["application/json", ""] {
-            let line = not_shown(r(mime, br#""<html><body>Hi""#));
-            assert!(!line.contains('<'), "{line}");
+            for b in [
+                esc(r#""<html><body>Hi""#),
+                r#""<html><body>Hi""#.to_string(),
+            ] {
+                let line = not_shown(r(mime, b.as_bytes()));
+                assert!(!line.contains('<'), "{line}");
+            }
             let line = not_shown(r(mime, br#"")]}'<p>x</p>""#));
             assert!(!line.contains("<p"), "{line}");
         }
