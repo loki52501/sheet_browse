@@ -85,6 +85,13 @@ impl Web {
             .clone()
     }
 
+    /// A challenge on `url`'s site (D-5, D-582): that site's cached pages are dropped, so a
+    /// site tool cannot run on an older page of a site that now asks for a human check.
+    pub fn challenged(&self, url: &reqwest::Url) {
+        self.cache
+            .drop_site(&toolstore::registrable(&http::host_of(url)));
+    }
+
     pub fn clients(&self) -> Result<&http::Clients, ToolError> {
         self.clients
             .as_ref()

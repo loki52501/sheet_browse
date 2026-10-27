@@ -229,14 +229,31 @@ async fn two_servers_repairing_the_same_tool_leave_version_2() {
         .call(&e, "fetch", json!({ "url": BOARD_URL }))
         .await
         .expect("fetch b");
-    call(&e, TOOL, json!({})).await.expect("repair a");
+    let a = call(&e, TOOL, json!({})).await.expect("repair a");
     let after_a = std::fs::read_to_string(&file).unwrap();
     assert_eq!(row(&e).await.unwrap().version, 2);
-    other.call(&e, TOOL, json!({})).await.expect("repair b");
+    let b = other.call(&e, TOOL, json!({})).await.expect("repair b");
     let h = row(&e).await.unwrap();
     assert_eq!((h.status, h.version), (ToolStatus::Repaired, 2), "{h:?}");
     assert_eq!(relocates(&e), 1);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), after_a);
+    // D-583: only the run that wrote the patch says so; the second says it found it done.
+    assert!(
+        a.text
+            .contains("list_jobs.js patched to version 2, status repaired"),
+        "{}",
+        a.text
+    );
+    assert!(
+        b.text.contains(
+            "note: fingerprint already relocated by another run (was missing button\"Apply\"); \
+             tools/ashbyhq.com/list_jobs.js is already at version 2, status repaired; this \
+             call patched nothing"
+        ),
+        "{}",
+        b.text
+    );
+    assert!(!b.text.contains("patched to version"), "{}", b.text);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -422,34 +439,115 @@ fn challenge_api(status: u16, headers: Vec<(String, String)>, body: &str) -> Vec
 }
 
 const CHALLENGE_MARKER: &str = "CHALLENGE_BODY_MARKER";
+/// A same-host challenge path page.api and api must not follow a redirect to.
+const CHALLENGE_PATH: &str = "/cdn-cgi/challenge-platform/h/g/orchestrate";
 
-/// D-580: a challenge reached through page.api (Cloudflare's cf-mitigated header on a 403,
-/// or a Turnstile widget in an HTML answer) stops the site tool call with class Challenge,
-/// shows nothing of the body, and is not recorded as the tool's failure.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_challenge_behind_page_api_stops_the_site_tool_call() {
-    let html = |extra: &str| {
-        format!("<html><head><title>Just a moment...</title></head><body><p>{CHALLENGE_MARKER}</p>{extra}</body></html>")
-    };
-    let cases = [
-        challenge_api(
-            403,
-            vec![
-                ("Content-Type".into(), "text/html".into()),
-                ("cf-mitigated".into(), "challenge".into()),
-            ],
-            &html(""),
-        ),
-        challenge_api(
+fn interstitial() -> String {
+    format!("<html><head><title>Just a moment...</title></head><body><p>{CHALLENGE_MARKER}</p></body></html>")
+}
+
+/// The page.api answers that are a challenge (D-580, D-582), by case name: Cloudflare's
+/// cf-mitigated header on a 403, a Turnstile widget in a 200 HTML answer, a 503 interstitial
+/// without cf-mitigated, and redirects to a challenge URL on another host and on this one.
+/// Each route list also serves the same-host challenge path, which must never be asked for.
+fn challenge_cases() -> Vec<(&'static str, Vec<Route>)> {
+    let html_type = || ("Content-Type".to_string(), "text/html".to_string());
+    let with_path = |mut r: Vec<Route>| {
+        r.push(route(
+            Some("api.ashbyhq.com"),
+            CHALLENGE_PATH,
             200,
-            vec![("Content-Type".into(), "text/html".into())],
-            &format!(
-                "<html><head><title>Check</title></head><body><p>{CHALLENGE_MARKER}</p>\
-                 <div class=\"cf-turnstile\" data-sitekey=\"k\"></div></body></html>"
+            "text/html",
+            interstitial(),
+        ));
+        r
+    };
+    let redirect_to = |loc: &str| {
+        let mut r = routes(BOARD_OK);
+        r[1] = redirect(Some("api.ashbyhq.com"), API_PATH, loc);
+        with_path(r)
+    };
+    vec![
+        (
+            "403 cf-mitigated",
+            with_path(challenge_api(
+                403,
+                vec![html_type(), ("cf-mitigated".into(), "challenge".into())],
+                &interstitial(),
+            )),
+        ),
+        (
+            "200 turnstile",
+            with_path(challenge_api(
+                200,
+                vec![html_type()],
+                &format!(
+                    "<html><head><title>Check</title></head><body><p>{CHALLENGE_MARKER}</p>\
+                     <div class=\"cf-turnstile\" data-sitekey=\"k\"></div></body></html>"
+                ),
+            )),
+        ),
+        (
+            "503 interstitial, no cf-mitigated",
+            with_path(challenge_api(503, vec![html_type()], &interstitial())),
+        ),
+        (
+            "redirect to challenges.cloudflare.com",
+            redirect_to(
+                "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile",
             ),
         ),
-    ];
-    for (i, r) in cases.into_iter().enumerate() {
+        (
+            "redirect to hcaptcha.com",
+            redirect_to("http://www.hcaptcha.com/checkbox"),
+        ),
+        (
+            "redirect to the same host's challenge path",
+            redirect_to(CHALLENGE_PATH),
+        ),
+    ]
+}
+
+/// The call stopped on a challenge (D-5): class Challenge, the hand-back text, nothing of
+/// the body anywhere, no tool health failure, one core Stop event, and the same-host
+/// challenge path never requested.
+async fn assert_challenge_stop(e: &Env, server: &Server, out: &ToolOutput, case: &str) {
+    let stop = out
+        .stopped
+        .as_ref()
+        .unwrap_or_else(|| panic!("{case}: did not stop: {}", out.text));
+    assert_eq!(stop.class, Class::Challenge, "{case}");
+    assert!(
+        out.text.contains("I do not solve these"),
+        "{case}: {}",
+        out.text
+    );
+    assert!(!out.text.contains(CHALLENGE_MARKER), "{case}: body shown");
+    assert!(!ledger_dump(e).contains(CHALLENGE_MARKER), "{case}");
+    // Not the tool's failure: no health outcome was recorded.
+    let rows = e.store.tool_health("ashbyhq.com").await.unwrap();
+    assert!(rows.iter().all(|h| h.fails == 0), "{case}: {rows:?}");
+    let stops = events(e)
+        .iter()
+        .filter(|x| x.server == "core" && x.mode == Some(LedgerMode::Stop))
+        .count();
+    assert_eq!(stops, 1, "{case}");
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|x| !x.target.starts_with("/cdn-cgi/")),
+        "{case}: a redirect to a challenge was followed"
+    );
+}
+
+/// D-580: a challenge reached through page.api stops the site tool call with class
+/// Challenge, shows nothing of the body, and is not recorded as the tool's failure; a
+/// redirect to a challenge URL (another host, or this host's challenge path) is not followed
+/// and stops the same way, not as an ordinary refused redirect (review T-13b items 1, 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_challenge_behind_page_api_stops_the_site_tool_call() {
+    for (case, r) in challenge_cases() {
         let tmp = tempfile::tempdir().unwrap();
         let tools = repo_tools_copy(tmp.path());
         let server = Server::start(r).await;
@@ -457,27 +555,148 @@ async fn a_challenge_behind_page_api_stops_the_site_tool_call() {
         fetch_board(&e).await;
         let out = call(&e, TOOL, json!({}))
             .await
-            .unwrap_or_else(|err| panic!("case {i}: an error, not a stop: {err}"));
-        let stop = out
-            .stopped
-            .as_ref()
-            .unwrap_or_else(|| panic!("case {i} did not stop: {}", out.text));
-        assert_eq!(stop.class, Class::Challenge, "case {i}");
-        assert!(out.text.contains("I do not solve these"), "{}", out.text);
-        assert!(!out.text.contains(CHALLENGE_MARKER), "case {i}: body shown");
-        assert!(!ledger_dump(&e).contains(CHALLENGE_MARKER), "case {i}");
-        // Not the tool's failure: no health outcome was recorded.
-        assert!(
-            row(&e).await.is_none_or(|h| h.fails == 0),
-            "case {i}: {:?}",
-            row(&e).await
-        );
-        let stops = events(&e)
-            .iter()
-            .filter(|x| x.server == "core" && x.mode == Some(LedgerMode::Stop))
-            .count();
-        assert_eq!(stops, 1, "case {i}");
+            .unwrap_or_else(|err| panic!("{case}: an error, not a stop: {err}"));
+        assert_challenge_stop(&e, &server, &out, case).await;
     }
+}
+
+/// A reader that catches every page.api error, calls page.api again, and returns normally.
+const PROBE_JS: &str = r#"// @name probe
+// @kind reader
+// @match /*
+// @gate Read
+// @phase 1
+export default function (page, args) {
+  const errs = [];
+  for (let i = 0; i < 3; i++) {
+    try {
+      page.api('http://api.ashbyhq.com/posting-api/job-board/acme');
+    } catch (e) {
+      errs.push(String(e));
+    }
+  }
+  return { swallowed: errs };
+}
+"#;
+
+/// D-580, D-582 (review T-13b items 2, 3): a reader that catches the challenge error and
+/// returns normally still ends as a challenge stop (the JS cannot swallow it), and its later
+/// page.api calls in that call refuse without a request: the API host saw one request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reader_that_catches_the_challenge_still_stops_and_sends_nothing_more() {
+    for (case, r) in challenge_cases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tools = repo_tools_copy(tmp.path());
+        std::fs::write(tools.join("ashbyhq.com").join("probe.js"), PROBE_JS).unwrap();
+        let server = Server::start(r).await;
+        let e = env(config(&server, &HOSTS, tools)).await;
+        assert!(tools_line(&fetch_board(&e).await).contains("ashbyhq.probe"));
+        let out = call(&e, "ashbyhq.probe", json!({}))
+            .await
+            .unwrap_or_else(|err| panic!("{case}: an error, not a stop: {err}"));
+        assert_challenge_stop(&e, &server, &out, case).await;
+        assert!(!out.text.contains("swallowed"), "{case}: {}", out.text);
+        let api = server
+            .requests()
+            .iter()
+            .filter(|x| x.host == "api.ashbyhq.com")
+            .count();
+        assert_eq!(api, 1, "{case}: page.api kept sending after the challenge");
+    }
+}
+
+/// The `api` tool stops on a redirect to a challenge URL, on another host or this host's
+/// challenge path, and does not follow it (review T-13b item 1, D-580).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_api_tool_stops_on_a_redirect_to_a_challenge() {
+    for (case, r) in challenge_cases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tools = repo_tools_copy(tmp.path());
+        let server = Server::start(r).await;
+        let e = env(config(&server, &HOSTS, tools)).await;
+        let out = call(
+            &e,
+            "api",
+            json!({ "url": format!("http://api.ashbyhq.com{API_PATH}") }),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{case}: an error, not a stop: {err}"));
+        assert_challenge_stop(&e, &server, &out, case).await;
+    }
+}
+
+/// D-582 (review T-13b note a): a challenge on a site, met by a site tool's page.api or by
+/// fetch of another page of it, drops that site's cached pages, so no site tool runs on the
+/// older cached board page; fetching the board again (after the user's check) brings it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_challenge_drops_the_sites_cached_pages() {
+    // page.api meets the challenge.
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = repo_tools_copy(tmp.path());
+    let (_, r) = challenge_cases().swap_remove(0);
+    let server = Server::start(r).await;
+    let e = env(config(&server, &HOSTS, tools)).await;
+    fetch_board(&e).await;
+    let out = call(&e, TOOL, json!({})).await.expect("stop");
+    assert!(out.stopped.is_some(), "{}", out.text);
+    let err = call(&e, TOOL, json!({})).await.expect_err("no cached page");
+    assert!(
+        err.to_string().contains("no page from ashbyhq.com"),
+        "{err}"
+    );
+    let err = call(&e, "find", json!({ "q": "Apply", "url": BOARD_URL }))
+        .await
+        .expect_err("board page dropped");
+    assert!(err.to_string().contains("not fetched in this run"), "{err}");
+    let api = |s: &Server| {
+        s.requests()
+            .iter()
+            .filter(|x| x.host == "api.ashbyhq.com")
+            .count()
+    };
+    assert_eq!(api(&server), 1);
+
+    // fetch meets the challenge on another page of the site.
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = repo_tools_copy(tmp.path());
+    let mut r = routes(BOARD_OK);
+    r.push(Route {
+        host: Some("jobs.ashbyhq.com".into()),
+        path: "/other".into(),
+        reply: Reply::Fixed {
+            status: 403,
+            headers: vec![
+                ("Content-Type".into(), "text/html".into()),
+                ("cf-mitigated".into(), "challenge".into()),
+            ],
+            body: interstitial().into_bytes(),
+        },
+    });
+    let server = Server::start(r).await;
+    let e = env(config(&server, &HOSTS, tools)).await;
+    fetch_board(&e).await;
+    let out = call(
+        &e,
+        "fetch",
+        json!({ "url": "http://jobs.ashbyhq.com/other" }),
+    )
+    .await
+    .expect("stop");
+    assert_eq!(out.stopped.map(|s| s.class), Some(Class::Challenge));
+    let err = call(&e, TOOL, json!({})).await.expect_err("no cached page");
+    assert!(
+        err.to_string().contains("no page from ashbyhq.com"),
+        "{err}"
+    );
+    assert_eq!(api(&server), 0);
+    // After the user's check the model fetches the board again, and the tool runs.
+    fetch_board(&e).await;
+    let run = call(&e, TOOL, json!({})).await.expect("runs again");
+    assert!(
+        run.stopped.is_none() && run.text.contains("\"total\""),
+        "{}",
+        run.text
+    );
 }
 
 /// D-5: a board page that is a challenge stops fetch, is never cached, and offers no site
@@ -551,4 +770,42 @@ async fn the_ledger_names_the_board_list_jobs_read() {
             "ashbyhq.list_jobs ran on http://jobs.ashbyhq.com/acme",
         ]
     );
+}
+
+/// D-579 (review T-13b item 6): the args label is model text in the ask card and the
+/// ledger, so it is escaped and capped: no link form, no bracket, no line break or JS line
+/// terminator, whitespace collapsed, and the argument list cut at 160 characters.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_args_label_is_escaped_and_capped_at_160_characters() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = repo_tools_copy(tmp.path());
+    let server = Server::start(routes(BOARD_OK)).await;
+    let e = env(config(&server, &HOSTS, tools)).await;
+    fetch_board(&e).await;
+    let q = format!(
+        "see [this](#12)\nremaining: 3\u{2028}x\u{2029}y   z\t{}",
+        "w".repeat(400)
+    );
+    let out = call(&e, TOOL, json!({ "q": q })).await.expect("runs");
+    let summary = out.summary.clone().expect("summary");
+    let tail = " ran on http://jobs.ashbyhq.com/acme";
+    let label = summary
+        .strip_prefix("ashbyhq.list_jobs(")
+        .and_then(|s| s.strip_suffix(tail))
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("{summary}"));
+    assert_eq!(label.chars().count(), 160, "{label}");
+    assert!(
+        label.starts_with(r#"q="see (this)(#12)\nremaining: 3 x y z\twww"#),
+        "{label}"
+    );
+    for bad in ["](#", "[", "]", "\n", "\u{2028}", "\u{2029}", "  "] {
+        assert!(!summary.contains(bad), "{bad:?} in {summary}");
+    }
+    let ledger: Vec<String> = events(&e)
+        .into_iter()
+        .filter(|x| x.server == "web" && x.tool == TOOL)
+        .map(|x| x.result_summary)
+        .collect();
+    assert_eq!(ledger, [summary]);
 }

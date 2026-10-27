@@ -29,9 +29,12 @@
 //! `spawn_blocking` over a `SheetPage`; `page.api(url)` is a GET limited to the page's
 //! registrable domain (D-501) bridged with `Handle::block_on`, read up to the JSON cap
 //! (`Config::json_max_bytes`, 32 MB, D-565) and bounded by the run's remaining time (D-64);
-//! a body cut at the cap is reported as such (B-560). A challenge page.api meets stops the
-//! call like fetch does (D-5, D-580); a site tool never runs on a challenge page, which is
-//! never cached. JSON strings in the output cannot spell a `[text](#id)` link form. The
+//! a body cut at the cap is reported as such (B-560). A challenge page.api meets (a
+//! challenge answer, or a redirect to a challenge URL on any host, which is not followed)
+//! stops the call like fetch does, whatever the reader does with the error; later page.api
+//! calls in that call refuse without a request (D-5, D-580, D-582). A site tool never runs
+//! on a challenge page, which is never cached, and a challenge on a site drops that site's
+//! cached pages for the run (D-582), so it does not run on an older page of it either. JSON strings in the output cannot spell a `[text](#id)` link form. The
 //! gate's `what` and the ledger summary name the call's arguments (D-579), so a list_jobs
 //! call for another org names that board.
 
@@ -289,6 +292,23 @@ impl SiteTool {
             .is_some_and(|h| h.status == ToolStatus::NeedsRepair)
     }
 
+    /// The tool file on disk already carries `fp` as its `@fingerprint`: another run
+    /// relocated it first, and toolstore records this run's `Relocated` as a clean run
+    /// without writing (D-577), so the note must not claim a patch (D-583). The same test
+    /// toolstore makes; an unreadable file counts as not carrying it.
+    async fn file_carries(&self, fp: &[FpItem]) -> bool {
+        let path = self.tool.path.clone();
+        let fp = fp.to_vec();
+        tokio::task::spawn_blocking(move || {
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|src| toolstore::parse_header(&src).ok())
+                .is_some_and(|h| h.fingerprint == fp)
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// After a relocate patched the file: registers the patched tool in place of this one, so
     /// the next call checks the new `@fingerprint` (D-561). Left as is when the file cannot be
     /// read back as the same tool; the next fetch scans it again.
@@ -445,10 +465,18 @@ impl ToolHandler for SiteTool {
         // it is not the tool's failure, so nothing is recorded.
         let stop = challenge.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(stop) = stop {
+            // D-582: no site tool runs on an older cached page of a site that asked for a
+            // human check.
+            self.web.challenged(&page_url);
             return Ok(stop);
         }
         match res {
             Ok(mut v) => {
+                // D-583: read before record, which may write the file itself.
+                let already = match &relocated {
+                    Some((_, fp)) => self.file_carries(fp).await,
+                    None => false,
+                };
                 let outcome = match &relocated {
                     Some((_, fp)) => RunOutcome::Relocated {
                         fingerprint: fp.clone(),
@@ -462,16 +490,29 @@ impl ToolHandler for SiteTool {
                         self.web.enable(&name);
                         if let Some((missing, _)) = &relocated {
                             // D-560: srv-web never commits the patched file.
-                            notes.push(format!(
-                                "note: fingerprint relocated (was missing {}); \
-                                 tools/{}/{}.js patched to version {}, status {}; not \
-                                 committed (D-560)",
-                                list(missing),
-                                self.tool.domain,
-                                self.tool.header.name,
-                                row.version,
-                                status_name(row.status)
-                            ));
+                            notes.push(if already {
+                                format!(
+                                    "note: fingerprint already relocated by another run (was \
+                                     missing {}); tools/{}/{}.js is already at version {}, \
+                                     status {}; this call patched nothing",
+                                    list(missing),
+                                    self.tool.domain,
+                                    self.tool.header.name,
+                                    row.version,
+                                    status_name(row.status)
+                                )
+                            } else {
+                                format!(
+                                    "note: fingerprint relocated (was missing {}); \
+                                     tools/{}/{}.js patched to version {}, status {}; not \
+                                     committed (D-560)",
+                                    list(missing),
+                                    self.tool.domain,
+                                    self.tool.header.name,
+                                    row.version,
+                                    status_name(row.status)
+                                )
+                            });
                             self.reregister(ctx).await;
                         }
                     }
@@ -527,8 +568,9 @@ impl ToolHandler for SiteTool {
 /// `page.api(url)` for `@phase 1` readers (D-53, D-501): GET only, JSON only, hosts under
 /// the page's registrable domain only, same-host redirects only, answered within the run's
 /// remaining wall time (D-64). No caller headers, so no vault value can ride along. A
-/// challenge answer (D-5) is kept in `challenge` for the call to stop with (D-580), and the
-/// reader gets an error that names only the host.
+/// challenge answer or a redirect to a challenge URL (D-5) is kept in `challenge` for the
+/// call to stop with (D-580), and the reader gets an error that names only the host; once
+/// it is set, every later page.api call in the run refuses without a request (D-582).
 struct PageApi {
     handle: Handle,
     client: reqwest::Client,
@@ -550,6 +592,20 @@ async fn challenge_in_body(body: &http::Body) -> Option<ToolOutput> {
 
 impl ApiFetch for PageApi {
     fn api(&self, url: &str, remaining: Duration) -> Result<Value, String> {
+        // D-582: after a human check nothing more goes to the network in this call, whatever
+        // the reader does with the error.
+        if self
+            .challenge
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return Err(format!(
+                "page.api: this call already met a human check on {}; no further requests \
+                 (D-5)",
+                self.domain
+            ));
+        }
         let u = http::parse_url(url).map_err(|e| format!("page.api: {e}"))?;
         let host = host_of(&u);
         if toolstore::registrable(&host) != self.domain {
@@ -562,20 +618,29 @@ impl ApiFetch for PageApi {
         let cap = self.cap;
         let slot = self.challenge.clone();
         let fut = async move {
-            let resp = client
-                .get(u)
-                .header(ACCEPT, "application/json")
-                .send()
-                .await
-                .map_err(|e| format!("page.api: {}", http::map_err(&e, &host)))?;
-            let body = http::read_capped(resp, cap)
-                .await
-                .map_err(|e| format!("page.api: {e}"))?;
             // D-5, D-580: a human check stops the whole call; the reader only learns the host.
             let stopped = |out: ToolOutput| {
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(out);
                 format!("page.api: {host} answered with a human check; the call stops (D-5)")
             };
+            let resp = match client
+                .get(u.clone())
+                .header(ACCEPT, "application/json")
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                // A redirect to a challenge URL, on this host or another, is not followed.
+                Err(e) => {
+                    return Err(match http::challenge_redirect(&e) {
+                        Some(why) => stopped(fetch::challenge_output(&u, &why)),
+                        None => format!("page.api: {}", http::map_err(&e, &host)),
+                    })
+                }
+            };
+            let body = http::read_capped(resp, cap)
+                .await
+                .map_err(|e| format!("page.api: {e}"))?;
             if let Some(out) = fetch::challenge_by_response(&body) {
                 return Err(stopped(out));
             }
