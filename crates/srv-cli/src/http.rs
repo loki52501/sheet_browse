@@ -10,6 +10,7 @@ use harness_core::mcp::{ToolCtx, ToolError};
 use reqwest::header::{HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
 use reqwest::Method;
 use serde_json::Value;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use url::Url;
@@ -20,20 +21,50 @@ const MAX_BODY: usize = 1024 * 1024;
 /// Error body shown, in chars.
 const ERR_CHARS: usize = 1_500;
 
-/// A lazily built client shared by a handler's calls.
+/// Lazily built clients shared by a handler's calls: one for loopback hosts that never uses
+/// a proxy, one for every other host that follows the system proxy settings (D-590).
 #[derive(Default)]
-pub struct Client(OnceCell<reqwest::Client>);
+pub struct Client {
+    /// Loopback bases: no proxy (env or OS settings), `localhost` pinned to 127.0.0.1.
+    direct: OnceCell<reqwest::Client>,
+    /// https bases: the system proxy, if any, sees only a CONNECT tunnel.
+    system: OnceCell<reqwest::Client>,
+}
 
 impl Client {
-    async fn get(&self) -> Result<&reqwest::Client, ToolError> {
-        self.0
-            .get_or_try_init(|| async {
-                reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()
-                    .map_err(|e| ToolError::Failed(format!("http client: {e}")))
-            })
-            .await
+    /// The client for `url`. A loopback base may be plain http ([`secure_base`]) because the
+    /// request never leaves the machine; a system proxy (`HTTP_PROXY`, `ALL_PROXY`, the
+    /// Windows proxy settings) would carry that cleartext request, vault header included, to
+    /// another host, so loopback requests are never proxied.
+    async fn for_url(&self, url: &Url) -> Result<&reqwest::Client, ToolError> {
+        let fail = |e: reqwest::Error| ToolError::Failed(format!("http client: {e}"));
+        let builder = || reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        if is_loopback(url) {
+            self.direct
+                .get_or_try_init(|| async {
+                    builder()
+                        .no_proxy()
+                        // The port in the address is ignored; the URL's port is used.
+                        .resolve("localhost", SocketAddr::from(([127, 0, 0, 1], 0)))
+                        .build()
+                        .map_err(fail)
+                })
+                .await
+        } else {
+            self.system
+                .get_or_try_init(|| async { builder().build().map_err(fail) })
+                .await
+        }
+    }
+}
+
+/// 127.0.0.0/8, ::1 or `localhost` (any case).
+fn is_loopback(u: &Url) -> bool {
+    match u.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
     }
 }
 
@@ -95,12 +126,12 @@ pub fn join(base: &str, path: &str) -> Result<Url, ToolError> {
 /// crosses a network in cleartext or through a plain-http proxy.
 pub fn secure_base(base: &str) -> Result<Url, String> {
     let u = Url::parse(base).map_err(|e| format!("API base {base:?} is not a URL: {e}"))?;
-    let loopback = match u.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-        None => return Err(format!("API base {base:?} has no host")),
-    };
+    if u.host().is_none() {
+        return Err(format!("API base {base:?} has no host"));
+    }
+    // Loopback requests never go through a proxy ([`Client::for_url`]), so plain http to
+    // them stays on this machine.
+    let loopback = is_loopback(&u);
     match u.scheme() {
         "https" => Ok(u),
         "http" if loopback => Ok(u),
@@ -148,7 +179,7 @@ pub async fn send(
         ))
     })?;
     let host = url.host_str().unwrap_or("").to_string();
-    let client = client.get().await?;
+    let client = client.for_url(&url).await?;
     let mut rb = client
         .request(method, url)
         .header(name, value)
@@ -220,10 +251,46 @@ fn readable(content_type: Option<&str>) -> bool {
         || (essence.starts_with("application/") && essence.ends_with("+json"))
 }
 
+/// A body that is markup whatever its label says: not valid JSON, and HTML-shaped
+/// ([`text::looks_like_html`]). JSON that only carries HTML inside its strings is JSON.
+pub fn is_html(body: &str) -> bool {
+    !body.trim().is_empty() && !is_json(body) && text::looks_like_html(body)
+}
+
+/// One or more JSON values (gh api --paginate prints one per page).
+pub fn is_json(body: &str) -> bool {
+    let mut n = 0;
+    for v in serde_json::Deserializer::from_str(body).into_iter::<serde::de::IgnoredAny>() {
+        if v.is_err() {
+            return false;
+        }
+        n += 1;
+    }
+    n > 0
+}
+
 /// `HTTP <status>` and the body, neutral and capped; a non-2xx status is an error. A body
-/// that is not JSON or plain text is replaced by its content type (rule 5: no raw HTML).
+/// that is not JSON or plain text, or is HTML under any label, is replaced by its content
+/// type, size and page title (rule 5: no raw HTML).
 pub fn reply_text(label: &str, r: Reply) -> Result<String, ToolError> {
     let ok = (200..300).contains(&r.status);
+    if is_html(&r.body) {
+        // Labelled JSON or text/plain, but markup (a proxy, login or challenge page): only
+        // its size and title are shown (rule 5, D-593).
+        let title = text::html_title(&r.body, 120)
+            .map(|t| format!("; page title \"{t}\""))
+            .unwrap_or_default();
+        let t = format!(
+            "{label}: HTTP {}, content type {}: the body is HTML ({} bytes{}), not shown \
+             (often a proxy, login or challenge page; to read a public page as text use the \
+             web tools' fetch)",
+            r.status,
+            r.content_type.as_deref().unwrap_or("(none)"),
+            r.body.len(),
+            title
+        );
+        return if ok { Ok(t) } else { Err(ToolError::Failed(t)) };
+    }
     if !r.body.trim().is_empty() && !readable(r.content_type.as_deref()) {
         let t = format!(
             "{label}: HTTP {}, content type {}: body not shown (not JSON or plain text)",
@@ -357,6 +424,42 @@ mod tests {
             reply_text("cf", reply(204, None, "")).unwrap(),
             "cf: HTTP 204"
         );
+    }
+
+    /// T-15b item 4 (D-593): HTML labelled text/plain (or JSON) is not shown; JSON with HTML
+    /// inside its strings and plain text next to it still are.
+    #[test]
+    fn html_under_a_readable_label_is_not_shown() {
+        let page = "<!DOCTYPE html>\n<html><head><title>Just a moment...</title></head>\
+                    <body><div id=\"cf\">Checking your browser</div></body></html>";
+        for ct in [
+            "text/plain",
+            "text/plain; charset=utf-8",
+            "application/json",
+        ] {
+            let t = reply_text("cf", reply(200, Some(ct), page)).unwrap();
+            assert!(!t.contains('<') && !t.contains("Checking"), "{ct}: {t}");
+            assert!(t.contains("the body is HTML"), "{ct}: {t}");
+            assert!(t.contains("page title \"Just a moment...\""), "{ct}: {t}");
+            assert!(t.contains(ct) && t.contains("fetch"), "{ct}: {t}");
+        }
+        let Err(ToolError::Failed(e)) = reply_text("cf", reply(503, Some("text/plain"), page))
+        else {
+            panic!("503 is an error")
+        };
+        assert!(!e.contains('<') && e.contains("HTTP 503"), "{e}");
+        // A fragment with no document tag is HTML too once it has a few tags.
+        let frag = "<div><p>blocked</p><a href=/x>retry</a></div>";
+        let t = reply_text("cf", reply(200, Some("text/plain"), frag)).unwrap();
+        assert!(!t.contains("blocked"), "{t}");
+        // True negatives next to it: plain text, and JSON whose strings hold HTML.
+        let plain = "flag on: use <name> to target";
+        let t = reply_text("cf", reply(200, Some("text/plain"), plain)).unwrap();
+        assert!(t.ends_with(plain), "{t}");
+        let json = r#"{"description":"<p>a</p><p>b</p><html>"}"#;
+        let t = reply_text("cf", reply(200, Some("text/plain"), json)).unwrap();
+        assert!(t.contains(json), "{t}");
+        assert!(is_json("[1][2]") && !is_json("") && !is_json("<p>"));
     }
 
     #[test]

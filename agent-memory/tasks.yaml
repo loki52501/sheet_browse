@@ -153,6 +153,14 @@ tasks:
     step: 3
     title: "srv-cli follow-ups: Phase 1 ladder rungs 3, 5, 9 over MCP with srv-files; loopback http honours system proxy; gh alias set can map to auth (both ask); strict letter matching false positives (git log -Sconfig); HTML labelled text/plain still shown"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md, docs/08-USE-CASES-AND-TESTS.md]
+    status: done
+    owner: servers/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/servers-T15b
+  - id: T-15c
+    step: 3
+    title: "T-15b review should-fix (bench/results/review-T-15b.md, rounds 1-5): --hostname on gh commands other than api (attestation verify) not host-checked, and D-594 moves a leading --hostname there; `-R o/r run view 5 --log` returns capped stdout instead of saving the log; B-591 (the D-595 plan is keyed by the ToolCtx address, an unwritten contract with core: needs a per-call token on I-2); should-fix 6 rest (`pr view rm`, `issue list --label delete` over-classed Delete, fails closed); no test for a third delete word reached through an alias expansion; gh stderr in a failed run can echo alias expansion words (D-596 gap); every non-read gh call spawns gh alias list twice (classify and call)."
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
     status: todo
   - id: T-13c
     step: 2

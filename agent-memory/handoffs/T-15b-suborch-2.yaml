@@ -1,0 +1,18 @@
+from: servers/suborch
+to: supreme
+task: T-15b
+date: "2026-10-26"
+state: "T-15b done on swarm/servers-T15b (origin/main merged in), PR to main opened. Items: D-590 loopback http bypasses the system proxy; D-591 gh aliases expanded and classified as their expansion, alias set at max(Account, expansion); D-592 value flags end a letter cluster (git log -Sconfig Read), gh -R before the subcommand no longer hides a Delete; D-593 HTML under any label not shown. Review: round 1 Blocking (flags before the gh group) fixed by D-594/D-595/D-596/D-597; round 2 Blocking (empty words, gh drops them) fixed by D-598/D-599; round 4 Blocking (lone -, third-word deletes past -R) fixed by D-585 (first committed as D-660, renumbered: D-600+ is driver's) and D-586; round 5 approve, Blocking none. Accept: bench/results/accept-T-15b.md is round 1 (30/36, 5 failing rows from the round-1 Blocking item and the alias swap); those rows' tests (accept_t15b_open.rs, committed failing on purpose) pass now. cargo test --workspace -j 2 --no-fail-fast: 1219 passed 0 failed 15 ignored. Merge gate: gate ok."
+not_done: "T-15c (tasks.yaml): --hostname host check outside api, run view --log after -R, B-591 per-call token (interface_changes, wave 4), over-classing of reads mentioning delete words, alias-expansion third-word test, gh stderr echo, alias list spawned twice per call."
+gotchas:
+  - "Rust string continuations written through a Python heredoc lose the backslash and join lines; use the Edit tool for them."
+  - "Decision ids: servers range D-500..D-599 (D-42); driver owns D-600+."
+decisions_made: [D-585, D-586, D-598, D-599]
+blockers_opened: []
+files_touched:
+  - crates/srv-cli/src/gh/mod.rs
+  - crates/srv-cli/tests/gh_t15b.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/tasks.yaml
+  - agent-memory/handoffs/T-15b-suborch-2.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-cli"

@@ -12,7 +12,10 @@
 //! delete = []                          # first arguments that delete: Delete
 //! default = "refuse"                   # any other first argument: read|write|delete|refuse
 //! deny_flags = ["-c", "--output"]      # refused anywhere (also as --flag=value, -cvalue,
-//!                                      # and a short letter anywhere in a cluster: -pc)
+//!                                      # and a short letter in a cluster: -pc)
+//! value_flags = ["-S", "-G"]           # short flags whose value may follow in the same
+//!                                      # token: a cluster is read letter by letter and
+//!                                      # ends at one of these (-Sconfig is -S "config")
 //! timeout_secs = 60                    # optional cap, default the server's
 //! ```
 //!
@@ -49,6 +52,10 @@ pub struct Program {
     pub default: Option<String>,
     #[serde(default)]
     pub deny_flags: Vec<String>,
+    /// Short flags (`-S`) that take a value, which may follow in the same token; a denied
+    /// letter after one of them in a cluster is part of its value (D-592).
+    #[serde(default)]
+    pub value_flags: Vec<String>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 }
@@ -104,6 +111,14 @@ fn parse_allow(src: &str) -> Result<BTreeMap<String, Program>, String> {
                 "program {key}: every deny_flags entry starts with -"
             ));
         }
+        if p.value_flags
+            .iter()
+            .any(|f| f.len() != 2 || !f.starts_with('-') || f == "--")
+        {
+            return Err(format!(
+                "program {key}: every value_flags entry is one short flag, like -S"
+            ));
+        }
         if out.insert(key.clone(), p).is_some() {
             return Err(format!(
                 "program {key} is listed twice (names fold to lowercase)"
@@ -148,9 +163,11 @@ pub fn check(cmd: &[String], allow: &BTreeMap<String, Program>) -> Result<Checke
     };
     let args = &cmd[1..];
     for a in args {
-        // The letters of a single-dash token: short flags may be clustered (`dig -4f x`),
-        // and which letters take a value differs per program, so a denied letter anywhere
-        // in the cluster (even inside what may be a value) is a hit. Fails closed.
+        // The letters of a single-dash token: short flags may be clustered (`dig -4f x`).
+        // They are read left to right; a letter in the entry's value_flags ends the
+        // cluster, because the rest of the token is its value (`git log -Sconfig`). Any
+        // other letter, known or not, is read as a flag, so a denied letter after it is a
+        // hit (fails closed: an unlisted value-taking letter only makes it stricter).
         let cluster = a
             .strip_prefix('-')
             .filter(|c| !c.is_empty() && !c.starts_with('-'));
@@ -158,7 +175,7 @@ pub fn check(cmd: &[String], allow: &BTreeMap<String, Program>) -> Result<Checke
             let short = f.len() == 2 && !f.starts_with("--");
             let hit = a == f
                 || a.starts_with(&format!("{f}="))
-                || (short && cluster.is_some_and(|c| c.contains(&f[1..])));
+                || (short && cluster.is_some_and(|c| cluster_has(c, &f[1..], &p.value_flags)));
             if hit {
                 return Err(ToolError::Args(format!(
                     "{key}: flag {f} is denied by config/cli-allow.toml; nothing ran"
@@ -205,6 +222,21 @@ pub fn check(cmd: &[String], allow: &BTreeMap<String, Program>) -> Result<Checke
         class,
         timeout: p.timeout_secs.map(Duration::from_secs),
     })
+}
+
+/// Is the short flag `letter` in `cluster` (the letters of one `-abc` token), reading the
+/// letters left to right and stopping at the first one in `value_flags`?
+fn cluster_has(cluster: &str, letter: &str, value_flags: &[String]) -> bool {
+    for (i, ch) in cluster.char_indices() {
+        let l = &cluster[i..i + ch.len_utf8()];
+        if l == letter {
+            return true;
+        }
+        if value_flags.iter().any(|v| &v[1..] == l) {
+            return false;
+        }
+    }
+    false
 }
 
 /// `cli` with [`Config::from_env`].
@@ -319,10 +351,12 @@ read = ["status", "log"]
 write = ["fetch"]
 delete = ["clean"]
 deny_flags = ["-c", "--output"]
+value_flags = ["-S", "-G"]
 
 [programs.dig]
 default = "read"
 deny_flags = ["-f"]
+value_flags = ["-q"]
 "#,
         )
         .unwrap()
@@ -366,6 +400,44 @@ deny_flags = ["-f"]
         }
     }
 
+    /// T-15b item 3 (D-592): a value-taking letter ends the cluster, so its value is not
+    /// read as a denied flag; a denied letter before it, or in a token of its own, still is.
+    #[test]
+    fn values_in_a_cluster_are_not_flags() {
+        for ok in [
+            "git log -Sconfig",
+            "git log -pSconfig",
+            "git log -Gcall",
+            "git log -S config",
+            "dig -qkey.example.com",
+            "dig -4qfile.example",
+        ] {
+            assert_eq!(chk(ok).map(|c| c.class).ok(), Some(Class::Read), "{ok}");
+        }
+        for bad in [
+            "git log -cS x",
+            "git log -pcSx",
+            "git log -S x -c",
+            "git log -S -c",
+            "git -c x=y log -Sconfig",
+            "dig -fq x",
+            "dig -q x -f names.txt",
+        ] {
+            assert!(
+                matches!(chk(bad), Err(ToolError::Args(_))),
+                "{bad} accepted"
+            );
+        }
+        for bad in [r#"value_flags = ["S"]"#, r#"value_flags = ["--long"]"#] {
+            let src = format!(
+                "[programs.x]
+{bad}
+"
+            );
+            assert!(parse_allow(&src).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn shipped_allowlist_parses() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/cli-allow.toml");
@@ -379,5 +451,14 @@ deny_flags = ["-f"]
         assert!(dig("dig -4f names.txt").is_err());
         assert!(dig("dig -4k key.conf").is_err());
         assert!(dig("dig -6y hmac:n:s").is_err());
+        // D-592: values are not flags; denied letters are still found.
+        assert_eq!(git("git log -Sconfig").unwrap().class, Class::Read);
+        assert_eq!(git("git log -Gcore.pager -p").unwrap().class, Class::Read);
+        assert_eq!(git("git blame -L1,5 -Cfile").ok(), None);
+        assert!(git("git log -pc").is_err());
+        assert!(git("git log -cS x").is_err());
+        assert!(dig("dig -qkey.example.com").is_ok());
+        assert!(dig("dig -4qfile.example").is_ok());
+        assert!(dig("dig -4fq x").is_err());
     }
 }

@@ -1,6 +1,12 @@
 @echo off
 rem Fake gh for srv-cli tests (Windows). %1 is the log file the test chose; the rest are
-rem the gh arguments. "run view <id> --log" prints the log; anything else echoes its args.
+rem the gh arguments. "run view <id> --log" prints the log; "alias list" prints the file
+rem "<log>.aliases" if it exists (else nothing); anything else echoes its args.
+if not "%2"=="alias" goto notalias
+if not "%3"=="list" goto notalias
+if exist "%~1.aliases" type "%~1.aliases"
+exit /b 0
+:notalias
 if not "%2"=="run" goto other
 if not "%3"=="view" goto other
 if not "%5"=="--log" goto other
