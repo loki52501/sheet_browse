@@ -218,8 +218,6 @@ fn read_only_controls_stay_below_delete() {
             "set -euo pipefail; ls",
             "for f in a b; do echo $f; done",
             "f=runs/x/a.txt; cat \"$f\"",
-            "cargo --version",
-            "python --version",
             "gh pr list --state open",
             "gh run view 123 --log",
             "gh api repos/a/b",
@@ -374,9 +372,31 @@ fn build_tools_run_project_code_s2() {
         ],
         Class::Delete,
     );
-    assert_eq!(class(&f, "cargo --version"), Class::Read);
-    assert_eq!(class(&f, "go version"), Class::Read);
-    assert_eq!(class(&f, "make --version"), Class::Read);
+    // D-550: a version probe reads project config (rust-toolchain.toml, go.mod
+    // toolchain, .yarnrc, global.json, shims), so it is Delete too, in runs/ and outside.
+    for line in [
+        "cargo --version",
+        "go version",
+        "make --version",
+        "python --version",
+        "yarn --version",
+        "dotnet --version",
+        "mvn --version",
+        "pytest --version",
+        "docker version",
+        "cd runs/x && cargo --version",
+        "cd runs/x && yarn --version",
+    ] {
+        let v = classify(&f.roots, &f.roots.base, line, false);
+        assert_eq!(v.class, Class::Delete, "{line}");
+    }
+    let v = classify(
+        &f.roots,
+        &f.roots.base,
+        "cd runs/x && cargo --version",
+        false,
+    );
+    assert!(v.why().contains("project config"), "{}", v.why());
 }
 
 #[test]
@@ -1053,6 +1073,39 @@ fn read_git_is_sealed_or_raised() {
     assert_eq!(class(&f, "git status"), Class::Delete);
 }
 
+/// D-554 (review-T-14b should-fix 2): a repository config this parser cannot read as git
+/// does fails closed: not UTF-8 (git reads the bytes), or a byte order mark before the
+/// first header (git skips it). A plain file with the same harmless keys stays Read.
+#[test]
+fn unreadable_repo_config_makes_read_git_delete() {
+    let f = fx();
+    let git = f.roots.base.join(".git");
+    base_repo(&f, "[core]\n\tbare = false\n");
+    assert_eq!(class(&f, "git status"), Class::Read);
+    let cases: &[(&[u8], &str)] = &[
+        (
+            b"\xef\xbb\xbf[filter \"x\"]\n\tclean = evil\n",
+            "byte order mark",
+        ),
+        (b"\xef\xbb\xbf[core]\n\tbare = false\n", "byte order mark"),
+        (b"# caf\xe9\n[filter \"x\"]\n\tclean = evil\n", "not UTF-8"),
+        (b"[user]\n\tname = \xff\xfe\n", "not UTF-8"),
+    ];
+    for (bytes, why) in cases {
+        std::fs::write(git.join("config"), bytes).unwrap();
+        let v = classify(&f.roots, &f.roots.base, "git status", false);
+        assert_eq!(v.class, Class::Delete, "{bytes:?}");
+        assert!(v.why().contains(why), "{bytes:?}: {}", v.why());
+        assert!(!v.seal_git());
+    }
+    // In a submodule's git folder too.
+    base_repo(&f, "[core]\n\tbare = false\n");
+    let m = git.join("modules").join("sub");
+    std::fs::create_dir_all(&m).unwrap();
+    std::fs::write(m.join("config"), b"\xef\xbb\xbf[core]\n").unwrap();
+    assert_eq!(class(&f, "git status"), Class::Delete);
+}
+
 #[test]
 fn config_keys_read_like_git() {
     let keys = config_keys(
@@ -1087,10 +1140,10 @@ fn writes_to_git_system_config_are_delete() {
     }
 }
 
-/// T-14b item 7 (D-545): a dotfile in a run folder is scratch; git's names and code
-/// folders there are not.
+/// D-550 (reverts D-545, review-T-14b Blocking): a dotfile in a run folder is Delete,
+/// whatever writes it, like git's names and code folders there.
 #[test]
-fn dotfiles_in_runs_do_not_ask() {
+fn dotfiles_in_runs_are_delete_again() {
     let f = fx();
     assert_all(
         &f,
@@ -1100,12 +1153,9 @@ fn dotfiles_in_runs_do_not_ask() {
             "touch runs/x/.eslintrc",
             "cp runs/x/a.txt runs/x/.bashrc",
             "mv runs/x/a.txt runs/x/.hidden",
-        ],
-        Class::Read,
-    );
-    assert_all(
-        &f,
-        &[
+            "echo 'yarn-path \"e.js\"' > runs/x/.yarnrc",
+            "cp runs/x/a.txt runs/x/.yarnrc.yml",
+            "echo x > runs/x/.pytest.ini",
             "echo x > runs/x/r/.git/hooks/pre-commit",
             "echo x > runs/x/.git",
             "echo '* filter=x' > runs/x/.gitattributes",

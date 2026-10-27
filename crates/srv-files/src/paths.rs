@@ -225,11 +225,9 @@ const PROFILE_DIRS: &[&str] = &["windowspowershell", "powershell"];
 ///   ([`PathDirs::trees`]: `<msys root>/etc` with `gitconfig` and `gitattributes`,
 ///   `<msys root>/mingw64/etc`, `%ProgramData%\Git`; D-544).
 ///
-/// Inside `runs/` (D-545) a dotfile name alone is not enough: no program this server
-/// starts reads startup files from a run folder (HOME, XDG_CONFIG_HOME, CURL_HOME and
-/// WGETRC never point there), so only D-523 (8)'s names stay Delete there
-/// ([`RUNS_STRICT_NAMES`]), with every [`CODE_DIRS`] folder (`.git/hooks`, `.config`,
-/// `.cargo`, ...).
+/// Fails closed: a dotfile inside `runs/` is Delete too (D-550 reverts D-545), rather
+/// than keep a list of the startup files each program reads from its working folder
+/// (yarn's `.yarnrc`, asdf's `.tool-versions`, pytest's `.pytest.ini`, ...).
 pub fn runs_code_on_use(roots: &Roots, p: &Path) -> bool {
     code_path(roots, p, homes(), path_dirs())
 }
@@ -243,13 +241,7 @@ pub fn code_path(roots: &Roots, p: &Path, homes: &[Vec<String>], path: &PathDirs
     if path.trees.iter().any(|t| dirs.starts_with(t)) {
         return true;
     }
-    let runs = lower_names(&roots.runs);
-    let in_runs = dirs.len() > runs.len() && dirs.starts_with(&runs);
-    if in_runs {
-        if RUNS_STRICT_NAMES.contains(&file.as_str()) {
-            return true;
-        }
-    } else if dot_name(file) || matches!(file.as_str(), "_netrc" | "_curlrc") {
+    if dot_name(file) || matches!(file.as_str(), "_netrc" | "_curlrc") {
         return true;
     }
     let base = lower_names(&roots.base);
@@ -267,19 +259,6 @@ pub fn code_path(roots: &Roots, p: &Path, homes: &[Vec<String>], path: &PathDirs
     }
     !dirs.is_empty() && path.contains(dirs)
 }
-
-/// File names that stay Delete inside `runs/` (D-523 (8), D-545): git reads them in the
-/// repository that holds them (a `.git` file names the git folder), and the rc spellings
-/// of the two download programs are kept as D-523 listed them.
-const RUNS_STRICT_NAMES: &[&str] = &[
-    ".git",
-    ".gitattributes",
-    ".gitmodules",
-    ".gitconfig",
-    ".curlrc",
-    "_curlrc",
-    ".wgetrc",
-];
 
 fn dot_name(n: &str) -> bool {
     n.starts_with('.') && n != "." && n != ".."
@@ -904,25 +883,32 @@ mod tests {
         ));
     }
 
-    /// D-545 (review-T-14 should-fix carried): a dotfile in a run folder is scratch; the
-    /// names git reads there and every code folder stay Delete; outside runs/ every
-    /// dotfile still is.
+    /// D-550 (reverts D-545, review-T-14b Blocking): a dotfile is Delete in a run folder
+    /// as everywhere else (yarn reads .yarnrc from the cwd before --version), and so are
+    /// the names git reads and every code folder; a plain name there stays scratch.
     #[test]
-    fn dotfiles_in_runs_are_scratch_but_git_names_are_not() {
+    fn dotfiles_in_runs_are_code_class_again() {
         let (_t, r) = setup();
         let none = PathDirs::default();
         let code = |rel: &str| code_path(&r, &r.resolve(rel).unwrap(), &[], &none);
         for ok in [
+            "runs/x/a.txt",
+            "runs/2026-10-25T00-00-00-t/files/something",
+            "runs/x/rust-toolchain.toml",
+        ] {
+            assert!(!code(ok), "{ok}");
+        }
+        for bad in [
             "runs/x/.env",
             "runs/2026-10-25T00-00-00-t/files/.something",
             "runs/x/.eslintrc.json",
             "runs/x/.bashrc",
             "runs/x/.netrc",
             "runs/x/sub/.npmrc",
-        ] {
-            assert!(!code(ok), "{ok}");
-        }
-        for bad in [
+            "runs/x/.yarnrc",
+            "runs/x/.YarnRc.yml",
+            "runs/x/.pytest.ini",
+            "runs/x/.tool-versions",
             "runs/x/.git",
             "runs/x/r/.GIT",
             "runs/x/r/.gitattributes",

@@ -561,35 +561,42 @@ async fn item5_adversarial_programs_named_on_the_line_are_delete() {
     assert!(bad.is_empty(), "want Delete:\n{}", bad.join("\n"));
 }
 
-// ---- item 7 (D-545): dotfiles in runs/ ----
+// ---- item 7 (D-545, reverted by D-550): dotfiles in runs/ ----
 
-/// runs/<id>/files/.something writes without an ask through fs.write and the shell; git's
-/// names and code folders in runs/ stay Delete, with odd spellings (case, trailing dot,
-/// the ::$DATA stream) too.
+/// D-550 reverts D-545 (review-T-14b Blocking): a dotfile in runs/ is code-class again.
+/// Through fs.write it asks and, skipped, is not written; the shell writes are Delete
+/// for every writer; git's names and code folders in runs/ stay Delete, with odd
+/// spellings (case, trailing dot, the ::$DATA stream) too; a plain name stays scratch.
 #[tokio::test]
-async fn item7_dotfiles_in_runs_scratch_but_git_names_stay_delete() {
+async fn item7_dotfiles_in_runs_ask_and_git_names_stay_delete() {
     let f = fx().await;
     let id = f.run.id.to_string();
-    // Without an ask, end to end.
+    // A plain name in runs/ still writes without an ask, end to end.
     let out = dispatch(
         "files",
         &f.registry,
         &f.harness,
         "fs.write",
-        json!({"path": format!("runs/{id}/files/.something"), "content": "x"}),
+        json!({"path": format!("runs/{id}/files/something"), "content": "x"}),
     )
     .await
     .unwrap();
     assert!(out.text.starts_with("wrote"), "{}", out.text);
-    assert!(f.run.dir.join("files").join(".something").exists());
-    for (p, c) in [
+    assert!(f.asker.cards().is_empty(), "{:?}", f.asker.cards());
+    // A dotfile asks (the asker times out to skip) and is not written.
+    let dotted = [
+        (format!("runs/{id}/files/.something"), "x"),
         (format!("runs/{id}/files/.env"), "A=1"),
         ("runs/x/.npmrc".to_string(), "registry=x"),
         ("runs/x/.netrc".to_string(), "machine x"),
         ("runs/x/.envrc".to_string(), "echo x"),
-        ("runs/x/pip.conf".to_string(), "[global]"),
         ("runs/x/.bashrc".to_string(), "echo x"),
-    ] {
+        ("runs/x/.yarnrc".to_string(), "yarn-path \"e.js\""),
+        ("runs/x/.yarnrc.yml".to_string(), "yarnPath: e.js"),
+        ("runs/x/.pytest.ini".to_string(), "[pytest]"),
+    ];
+    for (p, c) in &dotted {
+        let before = f.asker.cards().len();
         let out = dispatch(
             "files",
             &f.registry,
@@ -599,28 +606,43 @@ async fn item7_dotfiles_in_runs_scratch_but_git_names_stay_delete() {
         )
         .await
         .unwrap();
-        assert!(out.text.starts_with("wrote"), "{p}: {}", out.text);
+        assert!(!out.text.starts_with("wrote"), "{p}: {}", out.text);
+        assert_eq!(f.asker.cards().len(), before + 1, "{p}: no ask");
+        assert!(!f.base().join(p).exists(), "{p} was written");
     }
-    if matches!(
-        srv_files::shell::Runner::discover(),
-        srv_files::shell::Runner::Bash(_)
-    ) {
-        let out = dispatch(
-            "files",
-            &f.registry,
-            &f.harness,
-            "shell",
-            json!({"cmd": format!("echo x > runs/{id}/files/.dotted && cat runs/{id}/files/.dotted")}),
-        )
-        .await
-        .unwrap();
-        assert!(out.text.starts_with("exit: 0"), "{}", out.text);
-    }
-    assert!(f.asker.cards().is_empty(), "{:?}", f.asker.cards());
+    // The gate saw each dotfile write as Delete, and no tool call above Fill ran.
+    let deletes = f
+        .store
+        .ledger()
+        .iter()
+        .filter(|(_, e)| e.tool == "fs.write" && e.class == Some(Class::Delete))
+        .count();
+    assert!(
+        deletes >= dotted.len(),
+        "{deletes} Delete ledger rows for {} dotfile writes",
+        dotted.len()
+    );
     assert!(f
         .tool_events()
         .iter()
         .all(|e| e.class.is_some_and(|k| k <= Class::Fill)));
+    if matches!(
+        srv_files::shell::Runner::discover(),
+        srv_files::shell::Runner::Bash(_)
+    ) {
+        let before = f.asker.cards().len();
+        let _ = dispatch(
+            "files",
+            &f.registry,
+            &f.harness,
+            "shell",
+            json!({"cmd": format!("echo x > runs/{id}/files/.dotted")}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(f.asker.cards().len(), before + 1, "shell dotfile: no ask");
+        assert!(!f.run.dir.join("files").join(".dotted").exists());
+    }
 
     // Still Delete in runs/: fs.write classify and the shell.
     let strict = [
@@ -657,17 +679,25 @@ async fn item7_dotfiles_in_runs_scratch_but_git_names_stay_delete() {
     }
     let lines: Vec<String> = strict.iter().map(|p| format!("echo x > '{p}'")).collect();
     bad.extend(wrong(&f, &lines, |k| k == Class::Delete));
-    // The shell writes a dotfile in runs/ without an ask (Read), any writer.
-    let scratch = s(&[
+    // The shell writes of a dotfile in runs/ are Delete too, any writer (D-550).
+    let dot_lines = s(&[
         "echo x > runs/x/.npmrc",
         "echo x > runs/x/.netrc",
         "echo x > runs/x/.envrc",
-        "echo x > runs/x/pip.conf",
+        "echo 'yarn-path \"e.js\"' > runs/x/.yarnrc",
         "cp runs/x/a.txt runs/x/.yarnrc.yml",
         "touch runs/x/.lfsconfig",
         "echo x > runs/x/.mailmap",
+        "echo x > runs/x/.tool-versions",
+        "mv runs/x/a.txt runs/x/.pytest.ini",
     ]);
-    bad.extend(wrong(&f, &scratch, |k| k == Class::Read));
+    bad.extend(wrong(&f, &dot_lines, |k| k == Class::Delete));
+    // A plain name there is still scratch.
+    bad.extend(wrong(
+        &f,
+        &s(&["echo x > runs/x/pip.conf", "cp runs/x/a.txt runs/x/b.txt"]),
+        |k| k == Class::Read,
+    ));
     assert!(bad.is_empty(), "\n{}", bad.join("\n"));
 }
 

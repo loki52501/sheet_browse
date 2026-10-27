@@ -402,8 +402,8 @@ impl ToolHandler for Fs {
             ),
             (Op::Move, Target::Move(m)) => mv(&roots, parse(&args)?, m),
             (Op::Mkdir, Target::Path(p)) => {
-                crate::safeio::check_parent(&p).map_err(|e| io_err("mkdir", &roots, &p, e))?;
-                std::fs::create_dir_all(&p).map_err(|e| io_err("mkdir", &roots, &p, e))?;
+                // One level at a time below a checked handle (D-552).
+                crate::safeio::create_dirs(&p).map_err(|e| io_err("mkdir", &roots, &p, e))?;
                 Ok(ToolOutput {
                     text: format!("made {}", text::one_line(&roots.shown(&p), 300)),
                     ..ToolOutput::default()
@@ -540,11 +540,11 @@ fn write(roots: &Roots, a: WriteArgs, p: &Path, links_ok: bool) -> Result<ToolOu
         )));
     }
     if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| io_err("mkdir", roots, parent, e))?;
+        crate::safeio::create_dirs(parent).map_err(|e| io_err("mkdir", roots, parent, e))?;
     }
     // Opened, then checked to be the classified file, before anything is replaced (D-549).
     let mut f = crate::safeio::open_write(p, a.append).map_err(|e| io_err("write", roots, p, e))?;
-    if !hard_links_ok(&f, links_ok) {
+    if !crate::safeio::links_ok(&f, links_ok) {
         return Err(ToolError::Failed(format!(
             "not written: {} gained another hard link after the check; call it again",
             text::one_line(&roots.shown(p), 300)
@@ -591,7 +591,7 @@ fn mv(roots: &Roots, a: MoveArgs, m: MovePlan) -> Result<ToolOutput, ToolError> 
         return Err(ToolError::Args("cannot move a folder into itself".into()));
     }
     if let Some(parent) = m.to.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| io_err("mkdir", roots, parent, e))?;
+        crate::safeio::create_dirs(parent).map_err(|e| io_err("mkdir", roots, parent, e))?;
     }
     // Both ends checked on a handle just before the rename (D-549).
     crate::safeio::check_entry(&m.from).map_err(|e| io_err("move", roots, &m.from, e))?;
@@ -615,12 +615,6 @@ fn mv(roots: &Roots, a: MoveArgs, m: MovePlan) -> Result<ToolOutput, ToolError> 
         files: util::run_files(roots, &[&m.to]),
         ..ToolOutput::default()
     })
-}
-
-/// False when the open file has more than one hard link and the approved class did not
-/// account for it (a link made after the check; B7, D-549).
-fn hard_links_ok(f: &std::fs::File, links_ok: bool) -> bool {
-    links_ok || paths::handle_link_count(f).is_none_or(|n| n <= 1)
 }
 
 /// `p`: [`Roots::resolve_existing`] of `a.path`.

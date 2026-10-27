@@ -141,7 +141,8 @@ const FORBIDDEN: &[&str] = &[
 ];
 
 /// Programs that run a project's own code or any program they are given (build scripts,
-/// package scripts, hooks, interpreters): only their version is Read (S2, D-523).
+/// package scripts, hooks, interpreters): every use is Delete, a version probe too (D-550;
+/// S2 and D-523 kept `--version` Read).
 const RUNS_CODE: &[&str] = &[
     "cargo",
     "rustc",
@@ -1687,17 +1688,27 @@ fn forbidden_reason(name: &str) -> String {
     format!("{name}: {why}")
 }
 
+/// Every use is Delete, `--version` included (D-550). A version probe still reads the
+/// project's config from the cwd and its parents, which a write without an ask (scratch in
+/// runs/, Fill elsewhere) can plant: rustup's proxies run a `rust-toolchain.toml`
+/// `path` toolchain, yarn runs `yarnPath`, go switches to a go.mod `toolchain`, dotnet
+/// follows global.json, mvn reads `.mvn/jvm.config`, pytest loads `addopts` plugins, and
+/// version-manager shims (asdf, mise, volta, pyenv) pick a binary from project files.
 fn runs_code(name: &str, args: &[Word], v: &mut Verdict) {
     let version = args.len() == 1
         && args[0].is_static()
-        && (args[0].text == "--version"
-            || (args[0].text == "version" && matches!(name, "go" | "cargo" | "docker" | "podman")));
-    if !version {
+        && (args[0].text == "--version" || args[0].text == "version");
+    if version {
         v.raise(
             Class::Delete,
-            format!("{name} runs the project's own code or other programs (build scripts, package scripts, hooks, interpreters)"),
+            format!("{name} {}: the program or its launcher reads project config from this folder and its parents (toolchain files, rc files, shims), which can name another program to run", args[0].text),
         );
+        return;
     }
+    v.raise(
+        Class::Delete,
+        format!("{name} runs the project's own code or other programs (build scripts, package scripts, hooks, interpreters)"),
+    );
 }
 
 /// `printf` without `-v` (which assigns a variable by name, B2). The format must be a
@@ -4295,14 +4306,38 @@ fn unsealable_key(k: &str) -> bool {
     }
 }
 
+/// A repository config file's text for [`config_keys`]: `Ok(None)` when it does not
+/// exist; `Err` (fail closed, D-554) when it cannot be read, is not UTF-8 (git reads such
+/// a file byte by byte, this parser would skip its keys) or starts with a byte order mark
+/// (git skips it, so the first header's keys would land in no section here).
+fn config_text(f: &Path) -> Result<Option<String>, &'static str> {
+    let bytes = match std::fs::read(f) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("cannot be read"),
+    };
+    let text = String::from_utf8(bytes).map_err(|_| "is not UTF-8 text")?;
+    if text.starts_with('\u{feff}') {
+        return Err("starts with a byte order mark");
+    }
+    Ok(Some(text))
+}
+
 /// Why a Read-class git in the current folders would still run a program its
 /// repository's config names (D-547): the first such key and the file it is in.
 fn unsealable_config(env: &Env) -> Option<String> {
     for cwd in env.cwds.as_ref()? {
         let Some(repo) = find_repo(cwd) else { continue };
         for f in repo_config_files(&repo) {
-            let Ok(text) = std::fs::read_to_string(&f) else {
-                continue;
+            let text = match config_text(&f) {
+                Ok(Some(t)) => t,
+                Ok(None) => continue,
+                Err(why) => {
+                    return Some(format!(
+                        "{} {why}, so the programs it names are not known",
+                        env.roots.shown(&f)
+                    ))
+                }
             };
             if let Some(k) = config_keys(&text).into_iter().find(|k| unsealable_key(k)) {
                 return Some(format!(
@@ -5008,9 +5043,13 @@ fn git_one(outer: &Env, args: &[Word], v: &mut Verdict, unsealable: &mut Option<
             ]) {
                 v.raise(Class::Delete, "git commit without -m opens an editor");
             } else {
-                // D-546: -a and pathspecs stage files first, like git add.
+                // D-546: -a and pathspecs stage files first, like git add; pathspecs
+                // read from a file (or stdin) are unknown here, so they reach runs/
+                // whenever the tree holds it (D-551).
                 let whole = p.has(&["-a", "--all"]);
-                if (whole || !p.ops.is_empty()) && tree_reaches_runs(env, &p, &p.ops, whole, false)
+                let from_file = p.has(&["--pathspec-from-file"]);
+                if (whole || from_file || !p.ops.is_empty())
+                    && tree_reaches_runs(env, &p, &p.ops, whole, false)
                 {
                     v.raise(
                         Class::Delete,
