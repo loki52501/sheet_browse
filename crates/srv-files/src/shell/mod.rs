@@ -536,6 +536,9 @@ impl GitSeal {
             ("status.submoduleSummary", "false".into()),
             ("submodule.recurse", "false".into()),
             ("log.showSignature", "false".into()),
+            // D-555: a bare repository planted with Fill writes (no `.git` entry, so the
+            // classifier's repo scan never sees it) would run its own diff driver.
+            ("safe.bareRepository", "explicit".into()),
         ] {
             pairs.push((k.into(), v));
         }
@@ -820,6 +823,64 @@ fn save_whole(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review T-14b round 2 (D-555): a bare repository made with Fill writes is not found
+    /// by sealed git, so its diff driver never runs. The same line without the seal runs
+    /// the driver (the plant is live, so the test can fail).
+    #[test]
+    fn a_planted_bare_repository_runs_nothing_under_the_seal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let foo = tmp.path().join("foo");
+        let marker = tmp.path().join("marker");
+        let empty = tmp.path().join("empty-global");
+        std::fs::write(&empty, "").unwrap();
+        let st = std::process::Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&foo)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let m = paths::plain(&marker).replace('\\', "/");
+        let mut cfg = std::fs::OpenOptions::new()
+            .append(true)
+            .open(foo.join("config"))
+            .unwrap();
+        std::io::Write::write_all(
+            &mut cfg,
+            format!("[diff \"x\"]\n\tcommand = \"echo hit > '{m}' #\"\n").as_bytes(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(foo.join("info")).unwrap();
+        std::fs::write(foo.join("info").join("attributes"), "* diff=x\n").unwrap();
+        std::fs::write(foo.join("a"), "one\n").unwrap();
+        std::fs::write(foo.join("b"), "two\n").unwrap();
+        let run = |seal: Option<&GitSeal>| {
+            let mut c = std::process::Command::new("git");
+            c.args(["diff", "--no-index", "a", "b"]).current_dir(&foo);
+            sanitize_env(&mut c);
+            c.env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", &empty)
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "safe.bareRepository")
+                .env("GIT_CONFIG_VALUE_0", "all");
+            if let Some(s) = seal {
+                s.apply(&mut c);
+            }
+            let _ = c.output().unwrap();
+        };
+        run(None);
+        assert!(
+            marker.exists(),
+            "the planted driver is live without the seal"
+        );
+        std::fs::remove_file(&marker).unwrap();
+        let seal = GitSeal::new(None, None).unwrap();
+        run(Some(&seal));
+        assert!(
+            !marker.exists(),
+            "sealed git ran the bare repository's diff driver"
+        );
+    }
 
     #[cfg(windows)]
     #[test]

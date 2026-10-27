@@ -613,3 +613,6 @@ decisions:
   - id: D-554
     text: "T-14b round 2 (review-T-14b should-fix 2; refines D-547). The unsealable-config scan reads each repository config file as bytes (classify::config_text): a missing file is skipped; a file that cannot be read, is not UTF-8, or starts with a UTF-8 byte order mark makes a Read git Delete with that reason, in the git folder, the common folder and every modules/*/config."
     why: "read_to_string skipped non-UTF-8 files that git reads fine, and git skips a leading BOM that this parser would not, leaving the first header's driver keys in no section; failing closed costs an ask only on such rare files."
+  - id: D-555
+    text: "T-14b review round 2 (F-2, rule 4, extends D-547). The Read-git seal sets safe.bareRepository=explicit in command scope, after the copied keys, so git never discovers a bare repository from the cwd; a bare repository planted outside runs/ with Fill writes (config naming a diff driver, info/attributes) cannot run its driver under a Read git (diff --no-index, log -p, show, blame, grep)."
+    why: "classify::find_repo only finds a .git entry, so the unsealable-config scan never saw a bare repository, and git's default safe.bareRepository=all ran its diff.x.command; the reviewer reproduced it with git 2.50.1 and the seal's env."
