@@ -1,0 +1,28 @@
+from: rust-coder-1 (servers, T-12b)
+to: servers suborch, then reviewer and tester
+task: T-12b
+date: "2026-10-26"
+state: "All seven T-12b items are in commit 0a3d8b3 on swarm/servers-T12b, with main 52a7f13 merged in after it (clean, no conflicts). (1) accept_w api_base64_echoed_vault_value_is_scrubbed is no longer ignored. It passes because T-05d's base64 scrub is on main; srv-web needed no change. (2) D-510: api checks for tags in text/plain again after the JSON decode, and a top-level JSON string that holds markup counts as a document under any type. (3) D-512: html::plain_source keeps non-markup <...> text in text walks, escaped as &lt;..&gt;. (4) B-590, D-509: page_local, the direct page client and the new api_local/api_vault_local clients use no_proxy(). A public page hop goes through the system proxy only when PublicOnly passes the name first. page.api picks its client per URL too. (5) D-511: http::shown_mime is now used everywhere fetch, api or feed echoed the Content-Type. (6) tests/t12b.rs has wiring tests through dispatch for feed, search, fetch and api. (7) D-513: feed links resolve against xml:base, then against the final feed URL; the iCal URL resolves the same way. Gates on the merged tree: cargo fmt --all -- --check is clean, clippy -p srv-web --all-targets -D warnings is clean, and cargo test -p srv-web gives 128 passed, 0 failed, 5 ignored (live 3, accept_t12 1 live, accept_t13 1). Canary grep of the captured test output: 0. Break-checks went red as expected: removing no_proxy fails proxy_t12b; skipping the PublicOnly pre-check fails http::tests::a_proxy_never_fetches_a_private_target; breaking D-510, D-511, D-512 and D-513 fails 4 lib tests and 4 t12b tests; skipping fragment_text in search fails search_output_has_cleaned_urls_and_plain_text."
+not_done: "cargo test --workspace was not run. srv-web has no dependents and the only change outside srv-web is a Cargo.lock entry. The tester runs acceptance and the reviewer reviews. B-500 and B-501 are untouched: their default_taken is already in code and needs no change; both still wait on supreme. B-590 is filed in T-15b's blockers.yaml, not on main; D-509 resolves it for srv-web."
+gotchas:
+  - "Decision ids: the brief said D-600 upward, but D-600..D-631 are already used on driver branches (origin/swarm/driver-T20, -T21), and D-660 is used on T-15b. The id header in decisions.yaml gives driver D-600+. So T-12b took D-509..D-513 from the servers range (T-12's own block); they are free on every branch and worktree. The T-14b coder's D-620+ range collides with driver too."
+  - "agent-memory hooks refuse any Write outside the worktree, the scratchpad included. On Windows, Python pathlib write_text writes CRLF; git (autocrlf=true) normalises it on commit."
+  - "reqwest's system proxy does not bypass loopback by default; the proxy_t12b break-check proves it. hyper_util Matcher::from_system is the same matcher reqwest builds, so Clients::proxied agrees with what the proxied clients do."
+  - "proxy_t12b.rs sets the proxy env for its own process; keep it a single-test binary."
+  - "Residual (D-509): the proxy resolves the name again, so a TTL-0 rebinding name can still pass our check and resolve private at the proxy. On a network where only the proxy can resolve names, public fetches fail closed."
+decisions_made: [D-509, D-510, D-511, D-512, D-513]
+blockers_opened: []
+files_touched:
+  - Cargo.lock
+  - crates/srv-web/Cargo.toml
+  - crates/srv-web/src/http.rs
+  - crates/srv-web/src/api.rs
+  - crates/srv-web/src/feed.rs
+  - crates/srv-web/src/fetch.rs
+  - crates/srv-web/src/html.rs
+  - crates/srv-web/src/site.rs
+  - crates/srv-web/tests/accept_w.rs
+  - crates/srv-web/tests/t12b.rs
+  - crates/srv-web/tests/proxy_t12b.rs
+  - agent-memory/decisions.yaml
+verify: "cargo test -p srv-web -j 2 (with CARGO_TARGET_DIR=F:/sb-swarm/target-servers)"
