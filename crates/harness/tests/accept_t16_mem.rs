@@ -692,8 +692,9 @@ async fn a_vault_value_in_a_review_never_reaches_a_reply_the_row_or_the_ledger()
     assert_eq!(answer, "it is @vault(test)");
 
     // Over MCP framing: due, grade, add again, a schedule with the value, and a watch state.
+    // schedule.add is the only ask; the user says yes (no answer would skip it, D-144).
     let replies = mcp_session(
-        e.harness(ScriptedAsker::new()).await,
+        e.harness(ScriptedAsker::with([AskOutcome::AnsweredProceed])).await,
         &[
             ("review.due", json!({})),
             (
