@@ -253,13 +253,13 @@ tasks:
     blocked_by: [T-24, T-25]
   - id: T-27
     step: 6
-    title: "'me' profile login flow; tools/mail.google.com and tools/calendar.google.com hand-written; 07 acceptance"
+    title: "(docs/11 shape, D-98) Hand-written BrowserOS recipes: tools/mail.google.com inbox/thread/draft/send, tools/calendar.google.com events/create, tools/lu.ma register; tested live through BrowserOS (prompts/suborch/WAVE3.md limits). Owner servers, branch swarm/servers-T27."
     docs: [docs/07-MAIL-CALENDAR-VIA-BROWSER.md]
     status: todo
     blocked_by: [T-26]
   - id: T-28
     step: 6
-    title: "toolforge: ladder, forge pipeline, static check, reflect integration; 06 acceptance"
+    title: "(docs/11 shape, D-98) toolstore `recipe` kind + harness-forge MCP server: tools.list/run/save over BrowserOS, save from browseros.jsonl, report.md includes browser calls, reflect retires a recipe after 3 failures, launcher allows browseros and harness-forge. Owner core, branch swarm/core-T28."
     docs: [docs/06-TOOLFORGE.md]
     status: todo
     blocked_by: [T-26]

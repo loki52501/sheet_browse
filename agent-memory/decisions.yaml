@@ -742,3 +742,18 @@ decisions:
   - id: D-94
     text: "Phase 1 is closed by the user on 2026-10-27 at the recorded T-17 baseline (bench/results/phase1-2026-10-27.md): 13/30 strict, 16/30 lenient, against docs/09 step 5's >= 27/30; zero vault leaks; every run has a complete report.md. The baseline is accepted as measured, not as passing. T-17 is done; its failures and the 9 missing ladder prompts are carried as T-17b..T-17f, and the step-6 no-regression check (T-29) compares against this baseline. Wave 4 (T-27, T-28, T-29, Phase 2) is not opened by this decision; page #10 and driver #6, #11, #12 stay unmerged pending the user's call on page's open password-leak rows (T-19b)."
     why: "User instruction 2026-10-27: finish the remaining work and wrap up Phase 1. Recording the red result as the accepted baseline keeps the number honest for the later regression check instead of re-running until it looks green; the password-leak hold is a hard rule and needs its own explicit answer."
+  - id: D-95
+    text: "Safety is deferred for the BrowserOS pivot (docs/11): the product ships with the gate lenient. Vault scrub, the ledger, run folders and the hooks stay; only the gate's asks are switched off. The ids docs/11 first used (D-94..D-96, D-100) were already taken (D-94 Phase 1 close, D-100+ core's range), so docs/11's decisions are D-95..D-99."
+    why: "User direction 2026-10-27: the full product working today; asks block unattended Gmail, calendar and Luma flows."
+  - id: D-96
+    text: "Gate allows everything except Challenge: allow rows ('*', Send|Pay|Account|Delete, allow) and ('*', Submit:job_application|Submit:signature|Account:schedule, allow) in the product database `sb` only, set with `harness gate set`. Challenge stays stop (checked before any rule, D-5). Not a migration: test databases keep the seeded asks so the acceptance suites stay meaningful."
+    why: "User direction (docs/11 'gate allows everything except Challenge'). A migration would rewrite every throwaway test database and break the tests that assert asks."
+  - id: D-97
+    text: "At most 3 area sessions run at once."
+    why: "15 GB RAM: four to six sessions building in parallel exhausted RAM and the paging file several times on 2026-10-26."
+  - id: D-98
+    text: "BrowserOS (BrowserOS neo, MCP at http://127.0.0.1:9010/mcp, the user's normal profile) is the product's browser tool server, registered as `browseros` in .mcp.json beside harness-web, harness-files, harness-cli, harness-mem and harness-forge. BrowserOS calls do not pass core::serve, so scripts/hooks/browseros_ledger.py (PostToolUse, matcher mcp__browseros__.*) records each call, scrubbed, with a 300-char result summary, in runs/<SB_RUN_ID>/browseros.jsonl (or .claude/state/browseros.jsonl outside a run). It writes a sibling file, not ledger.jsonl: ledger.jsonl mirrors the ledger table row for row by id (D-117) and hook lines have no row. harness-forge's tools.save and report.md read browseros.jsonl."
+    why: "docs/11 (its D-100). A separate file keeps the D-117 ledger integrity checks valid while still putting browser actions in the run folder for report.md and recipe saving."
+  - id: D-99
+    text: "The custom browser (sb-cdp, sb-driver, sb-act, injected.js, sb-mcp, sb-media; T-19..T-25) is frozen as v2: kept in the repo, not on the product path. PRs #6, #10, #11, #12 stay open with label v2; #22 (T-18d) was already merged and is labelled v2 for the record. v2 may replace BrowserOS later if T-26 shows it wins."
+    why: "docs/11. Freezing it also removes the open password-leak hold on page #10 from the critical path."

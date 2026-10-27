@@ -63,3 +63,5 @@ waves:
 
 pr_rule: "D-86/D-91: one GitHub PR per task, branch swarm/<area>-T<nn>, gh pr create --base main --head <branch>; areas push their branches, the supreme pushes main after every merge (supersedes D-46)"
 merge_rule: "D-87: review report has no Blocking items AND cargo test --workspace passes on the merge commit AND no leak hook fired; a red acceptance item becomes a follow-up task (T-xxb), never a block; supreme reviews are non-blocking; at most two review rounds (D-89)"
+session_limit: "D-97: at most 3 area sessions at once (15 GB RAM)"
+pivot: "D-95..D-99, docs/11: BrowserOS is the browser; custom browser frozen as v2 (PRs #6 #10 #11 #12 #22 labelled v2)"
