@@ -1,0 +1,22 @@
+# T-27. The eventedit URL prefills title, times and description; the recipe only saves.
+name: create
+domain: calendar.google.com
+kind: recipe
+description: "Create an event on the primary calendar. start and end are local times as YYYYMMDDTHHMMSS (20261028T100000)"
+match: ["/calendar/*"]
+args:
+  title: {type: string, required: true}
+  start: {type: string, required: true}
+  end: {type: string, required: true}
+  description: {type: string, default: ""}
+steps:
+  - tool: navigate
+    args: {url: "https://calendar.google.com/calendar/u/0/r/eventedit?text={title}&dates={start}/{end}&details={description}"}
+  - tool: wait
+    args: {for: selector, value: "[aria-label=\"Title\"]"}
+  - tool: act
+    target: {role: button, name: "Save"}
+    args: {kind: click}
+  - tool: wait
+    args: {for: text, value: "Event saved"}
+expects: {text: "Event saved"}
