@@ -48,6 +48,15 @@
             "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/hooks/scan_output.py\""
           }
         ]
+      },
+      {
+        "matcher": "mcp__browseros__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/hooks/browseros_ledger.py\""
+          }
+        ]
       }
     ],
     "Stop": [
