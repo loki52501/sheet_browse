@@ -15,10 +15,15 @@ psl = "2"
 rquickjs.workspace = true
 sb-act.workspace = true
 sb-sheet.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+# Recipe kind (T-28, D-150).
+serde_yaml_ng.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# harness_core::testing::MemStore for the recipe tests (D-108).
+harness-core = { workspace = true, features = ["testing"] }
 async-trait.workspace = true
 tempfile = "3"
 tokio.workspace = true

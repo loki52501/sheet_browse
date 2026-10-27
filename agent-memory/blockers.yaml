@@ -312,6 +312,21 @@ blockers:
     question: "For supreme (hooks and WAVE2): WAVE2 tells areas to run parallel tasks in one worktree each (git worktree add F:/sb-swarm/wt/<area>-T<nn>), but guard_write.py roots every Write/Edit at the folder its script lives in (scripts/hooks/_common.py ROOT = Path(__file__).parents[2], i.e. the session's own worktree F:/sb-swarm/wt/<area>). A session or subagent started in wt/driver cannot Write or Edit in wt/driver-T18d: the T-18d reviewer and tester were both refused. The T-18d coder and the sub-orchestrator's tasks.yaml claims reached the per-task worktree through Bash file writes, which skip the Write/Edit hooks (post_write fmt, YAML, canary checks were run by hand, not by the hook). Should guard_write.py allow the session's sibling task worktrees, or should areas work task branches in their one worktree?"
     default_taken: "D-631: area driver works every task branch inside F:/sb-swarm/wt/driver (git checkout swarm/driver-T<nn>, one at a time; RAM forces one build at a time anyway, launch.ps1 CARGO_BUILD_JOBS=2) and no longer writes files outside it through Bash. Per-task worktrees wt/driver-T18d and wt/driver-T24 were removed (branches kept). Hooks unchanged."
     needs_user: false
+  - id: B-210
+    task: T-28
+    question: "D-150 says an arg has `default` and `required` but not whether both may be set on one arg (required with a default is meaningless: tools.run would never miss it)."
+    default_taken: "parse_recipe refuses an arg with required: true and a default (message names B-210). tools.save (D-152) must not write both."
+    needs_user: false
+  - id: B-211
+    task: T-28
+    question: "D-154 fixes the Browser: line as `<n>. <tool> <short args> -> ok|failed: <summary>` but not what <n>, <short args> or an empty summary are, nor the section header."
+    default_taken: "Header `Browser: <k> calls` (k = non-blank lines). <n> is the 1-based file line number (blank lines skipped, numbers kept), the number tools.save takes (D-152). <short args> = `key=value` pairs (strings as is, others compact JSON) without page, session and agentName, clipped to 80 chars; omitted when empty. A failed call shows its why (else its result_summary). `: <summary>` is left out when the summary is empty. A line that is not JSON with a string tool and a bool ok is `<n>. (unreadable line)`; an unreadable file is `Browser: (browseros.jsonl unreadable)`."
+    needs_user: false
+  - id: B-212
+    task: T-28
+    question: "D-150 names ToolStore recipes(domain) / recipes_live / recipe but not whether a site's list merges `_generic/*.recipe.yaml` at lower precedence as load() does for .js tools, nor whether the D-153 3-fails retire (RECIPE_FAILS_TO_RETIRE) and the archive of a recipe file (lifecycle record/retire/archive and sweep only know `<name>.js`) belong to part (a)."
+    default_taken: "recipes(domain) lists the folder's own recipes only (no _generic merge). Part (a) does not change record/retire/archive/sweep: a retired recipe row hides the recipe through recipes_live while its file stays in place (D-315 semantics). Coder B (D-153) adds RECIPE_FAILS_TO_RETIRE and archiving `<name>.recipe.yaml` to `_archive/<domain>/<name>.<version>.recipe.yaml`."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core
@@ -441,5 +456,10 @@ interface_changes:
     interface: "I-3 (harness_core::gate), additive const"
     change: "pub const harness_core::gate::HINT_SCHEDULE: &str = \"schedule\" (next to HINT_JOB_APPLICATION and HINT_SIGNATURE), and migration 0003 seeding gate.rules ('*','Account:schedule','ask'); harness_core::testing::SEED_RULES grows to 7 rows. T-16, D-144."
     why: "harness-mem schedule.add classifies with this hint so the seeded hint rule decides its ask and an unanswered ask times out to skip (supreme hold of PR #17, review-T-16 r3 R3-2). Additive; no signature changes. Default until supreme answers (D-90): keep as is, list in interfaces.yaml at T-17."
+  - id: B-213
+    from: core
+    interface: "I-7 (toolstore), additive; harness_core::ledger and run (not listed in interfaces.yaml), additive"
+    change: "T-28 (D-150, D-154). toolstore: pub mod recipe; root re-exports toolstore::{parse_recipe, render_recipe, placeholders, fill_placeholders, key_shaped, Recipe, RecipeArg, RecipeStep, Target, Expects, ArgType, RecipeReport, RECIPE_KIND, RECIPE_SUFFIX, RECIPE_TOOLS}; recipe::{TARGET_ACT_KINDS, MAX_STEPS, MAX_DESCRIPTION_CHARS, MAX_RECIPE_BYTES}; ToolStore::{recipes(&self, domain) -> RecipeReport, recipes_live(&self, &dyn MemoryStore, domain) -> Result<RecipeReport, StoreError> (async), recipe(&self, domain, name) -> Result<Option<Recipe>, StoreError>, try_recipe_path(&self, domain, name) -> Result<PathBuf, StoreError>}; StoreError::Recipe { path: PathBuf, msg: String } (new variant). harness_core: ledger::{BROWSEROS_FILE, BROWSER_LINES_MAX}, RunFolder::browseros_jsonl(&self) -> PathBuf; write_report signature unchanged."
+    why: "D-150 defines the recipe kind as a separate module so ToolKind stays frozen (D-90); harness-forge (D-151..D-153) and servers T-27 build on these paths. StoreError has no exhaustive match outside toolstore. Default until supreme answers: as implemented on swarm/core-T28."
 
 proposals:
