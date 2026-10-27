@@ -1,0 +1,14 @@
+from: servers/suborch
+to: servers/suborch (next session), then supreme
+task: T-13b
+date: "2026-10-26"
+state: "Claimed (e037215) on swarm/servers-T13b, branched from swarm/servers-T13c's head (PR #14, not merged yet) because T-13b edits the same srv-web site code (D-88; say so in the PR body). rust-coder-1 started on: concurrent repair version 3, B-561 default, class Read after re-register test, docs/03 item 4 site-tool password/challenge test, relocate refusing control chars and U+2028/U+2029 in header names, and T-13d item 7 (list_jobs ledger summary names the board) if trivial. Ladder rungs and the B-560 page.api cap in the title were done by #9 and T-13c."
+not_done: "Coder result, then reviewer + tester (docs/03 step-2 acceptance), round 2, pr-ready, PR 'servers: T-13b ...'. T-15b runs in parallel in .wt/T15b."
+gotchas:
+  - "Decision ids: T-13b coder D-577..D-589, T-15b coder D-590 upward."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/tasks.yaml
+  - agent-memory/handoffs/T-13b-suborch-1.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-web -p toolstore"

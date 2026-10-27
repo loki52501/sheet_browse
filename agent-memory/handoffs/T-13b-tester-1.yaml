@@ -1,0 +1,17 @@
+from: servers/tester-1
+to: servers/suborch
+task: T-13b
+date: "2026-10-26"
+state: "Acceptance run on swarm/servers-T13b at 88a27ee (code f150f5a; 3451796 adds only review-T-13b.md). bench/results/accept-T-13b.md: 15 of 16 rows pass, docs/03 item 3 (reflect) not-run (core T-16), Verdict: red for that row only. docs/03 items 1, 2, 4 pass offline (accept_t13) and live (accept_t13 --ignored, default org ashby and SB_ASHBY_ORG=openai). All T-13b items pass: D-577 in one server and across two servers, B-561/D-581 same-run re-enable, class Read (and Fill) after re-register, site tool never sees a password value, page.api challenge stops the call (D-580), D-578 header-unsafe names and ids refused, D-579 ledger names the board. srv-web + toolstore: 295 passed, 0 failed, 6 ignored. Workspace (--no-fail-fast): 1152 passed, 0 failed, 17 ignored; Chromium tests all ok on the first run, no B-199 rerun needed. No tests or fixtures added."
+not_done: "docs/03 item 3 waits for T-16 reflect (core). The coder's open notes stay open: a site tool can still run on an earlier cached page of a site whose latest fetch was a challenge; the second server's note in the two-server repair claims the patch write."
+gotchas:
+  - "Break-checks done on a throwaway detached worktree F:/sb-swarm/tmp-servers/accept-t13b (removed): srv-web lock re-check (two_concurrent red at t13b.rs:196), toolstore carries_fingerprint shortcut (two_servers red at t13b.rs:237 with version 3, plus two toolstore tests; the in-server test stayed green because the lock covers it), toolstore header_unsafe name filter (tests.rs:1082), D-579 label (t13b.rs:537), D-580 stop return (t13b.rs:460). They used the shared target dir, so cargo clean -p srv-web -p toolstore was run before the final workspace run."
+  - "The Bash tool's heredocs collapse double backslashes: a Python heredoc writing 'src\\\\vault' produced a vertical tab. Use chr(92) or the Edit tool for backslashes."
+  - "merge_gate.py splits table rows on every '|', so keep '||' out of item, command and result cells (it is harmless only in the note cell)."
+  - "Another agent committed review-T-13b.md on the branch during the run; check HEAD before and after."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/accept-T-13b.md
+  - agent-memory/handoffs/T-13b-tester-1.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-web -p toolstore --no-fail-fast; SB_ASHBY_ORG=openai cargo test -j 2 -p srv-web --test accept_t13 -- --ignored"

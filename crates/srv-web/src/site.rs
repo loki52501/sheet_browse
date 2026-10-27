@@ -11,6 +11,9 @@
 //! Registration honours tool health (D-506): `retired` tools are not registered. A tool a
 //! fingerprint miss broke (row `needs_repair`, or disabled earlier in this process) is
 //! registered only when its fingerprint matches or relocates on the fetched page (D-561).
+//! This amends T-4's "tool disabled for this run" (B-561, kept by D-581): a tool a miss
+//! disabled stays off on every page it misses, but a later fetch in the same run of a page
+//! it holds on offers it again, and a clean run there repairs it.
 //!
 //! Running one (T-4): the page is the one classify resolved and gated ([`crate::pin`]).
 //! The fingerprint is checked against it first. `match` runs, `partial` runs with a note
@@ -18,14 +21,25 @@
 //! tool (D-506). A broken tool's run is a repair (D-561): on `partial` it is relocated, and a
 //! clean run records `Relocated` (`@fingerprint` patched, version + 1, status repaired) or,
 //! on `match`, `Ok` (needs_repair -> repaired, version + 1, D-304), then the tool is enabled
-//! again. srv-web never commits the patched file (D-560). The reader runs in
+//! again. One call repairs a tool at a time (D-577): the repair holds a per-tool lock until
+//! its outcome is recorded, and a call that waited sees the repaired tool; toolstore records
+//! a relocate to the fingerprint the file already has as a clean run, which covers two
+//! servers (runs) repairing at once. srv-web never commits the patched file (D-560). The
+//! reader runs in
 //! `spawn_blocking` over a `SheetPage`; `page.api(url)` is a GET limited to the page's
 //! registrable domain (D-501) bridged with `Handle::block_on`, read up to the JSON cap
 //! (`Config::json_max_bytes`, 32 MB, D-565) and bounded by the run's remaining time (D-64);
-//! a body cut at the cap is reported as such (B-560). JSON strings in
-//! the output cannot spell a `[text](#id)` link form.
+//! a body cut at the cap is reported as such (B-560). A challenge page.api meets (a
+//! challenge answer, or a redirect to a challenge URL on any host, which is not followed)
+//! stops the call like fetch does, whatever the reader does with the error; later page.api
+//! calls in that call refuse without a request (D-5, D-580, D-582). A site tool never runs
+//! on a challenge page, which is never cached, and a challenge on a site drops that site's
+//! cached pages for the run (D-582), so it does not run on an older page of it either. JSON strings in the output cannot spell a `[text](#id)` link form. The
+//! gate's `what` and the ledger summary name the call's arguments (D-579), so a list_jobs
+//! call for another org names that board.
 
 use crate::cache::Page;
+use crate::fetch;
 use crate::http::{self, host_of};
 use crate::pin::Pins;
 use crate::{escape, Web};
@@ -36,7 +50,7 @@ use reqwest::header::ACCEPT;
 use reqwest::Url;
 use sb_sheet::IndexRow;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
 use toolstore::{
@@ -219,7 +233,33 @@ struct SiteTool {
     pins: Pins<Option<Arc<Page>>>,
 }
 
+/// Characters of the argument list in a site tool call's `what` and summary (D-579).
+const ARGS_LABEL_MAX_CHARS: usize = 160;
+
 impl SiteTool {
+    /// `<site>.<name>` plus the call's arguments in `@args` order, `name=<compact JSON>`,
+    /// escaped and capped (D-579): `ashbyhq.list_jobs(org="openai")`. No arguments: the name.
+    fn label(&self, args: &Value) -> String {
+        let parts: Vec<String> = self
+            .tool
+            .header
+            .args
+            .iter()
+            .filter_map(|a| {
+                let v = args.get(&a.name).filter(|v| !v.is_null())?;
+                Some(format!("{}={}", a.name, serde_json::to_string(v).ok()?))
+            })
+            .collect();
+        if parts.is_empty() {
+            return self.tool.namespaced.clone();
+        }
+        format!(
+            "{}({})",
+            self.tool.namespaced,
+            escape::name(&parts.join(", "), ARGS_LABEL_MAX_CHARS)
+        )
+    }
+
     /// `record` through toolstore; the error is a note for the model.
     async fn record_row(&self, ctx: &ToolCtx, outcome: RunOutcome) -> Result<ToolHealth, String> {
         let store = ToolStore::new(&self.web.cfg.tools_root);
@@ -250,6 +290,23 @@ impl SiteTool {
             .ok()
             .flatten()
             .is_some_and(|h| h.status == ToolStatus::NeedsRepair)
+    }
+
+    /// The tool file on disk already carries `fp` as its `@fingerprint`: another run
+    /// relocated it first, and toolstore records this run's `Relocated` as a clean run
+    /// without writing (D-577), so the note must not claim a patch (D-583). The same test
+    /// toolstore makes; an unreadable file counts as not carrying it.
+    async fn file_carries(&self, fp: &[FpItem]) -> bool {
+        let path = self.tool.path.clone();
+        let fp = fp.to_vec();
+        tokio::task::spawn_blocking(move || {
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|src| toolstore::parse_header(&src).ok())
+                .is_some_and(|h| h.fingerprint == fp)
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// After a relocate patched the file: registers the patched tool in place of this one, so
@@ -315,7 +372,7 @@ impl ToolHandler for SiteTool {
             domain,
             what: Some(format!(
                 "run site tool {} on {}",
-                self.tool.namespaced,
+                self.label(args),
                 page.as_ref()
                     .map(|p| escape::name(&p.url, 200))
                     .unwrap_or_else(|| "no page".into())
@@ -339,6 +396,8 @@ impl ToolHandler for SiteTool {
         let mut notes: Vec<String> = Vec::new();
         // Set when this run repairs a broken tool by relocation: (missing, new fingerprint).
         let mut relocated: Option<(Vec<FpItem>, Vec<FpItem>)> = None;
+        // D-577: held while this call repairs the tool, until its outcome is recorded.
+        let mut _repairing: Option<tokio::sync::OwnedMutexGuard<()>> = None;
         match toolstore::fingerprint(&self.tool, &page.doc.index) {
             FingerprintResult::Match => {}
             FingerprintResult::Partial { missing } => {
@@ -346,8 +405,14 @@ impl ToolHandler for SiteTool {
                 // the patch is kept only if the run is clean. A healthy tool's partial match
                 // runs with a note and is not patched (D-505).
                 if disabled || self.needs_repair(ctx).await {
-                    relocated = toolstore::relocate(&self.tool, &page.doc.index)
-                        .map(|fp| (missing.clone(), fp));
+                    let guard = self.web.repair_lock(&name).lock_owned().await;
+                    // D-577: a call that waited for another call's repair finds the tool
+                    // healthy and runs as one; only a still-broken tool is relocated.
+                    if self.web.is_disabled(&name) || self.needs_repair(ctx).await {
+                        relocated = toolstore::relocate(&self.tool, &page.doc.index)
+                            .map(|fp| (missing.clone(), fp));
+                    }
+                    _repairing = Some(guard);
                 }
                 if relocated.is_none() {
                     notes.push(format!(
@@ -373,12 +438,14 @@ impl ToolHandler for SiteTool {
         let clients = self.web.clients()?;
         let page_url = Url::parse(&page.url)
             .map_err(|_| ToolError::Failed(format!("{name}: the cached page has no valid URL")))?;
+        let challenge: Arc<Mutex<Option<ToolOutput>>> = Arc::default();
         let api = PageApi {
             handle: Handle::current(),
             client: clients.api.clone(),
             domain: toolstore::registrable(&host_of(&page_url)),
             // B-560, D-565: the JSON cap, not the page cap; the bytes never reach the model.
             cap: self.web.cfg.json_max_bytes,
+            challenge: challenge.clone(),
         };
         let tool = self.tool.clone();
         let run_page = page.clone();
@@ -394,8 +461,22 @@ impl ToolHandler for SiteTool {
         })
         .await
         .map_err(|_| ToolError::Failed(format!("{name}: the tool runner crashed")))?;
+        // D-5, D-580: a challenge page.api met stops the call, whatever the reader made of it;
+        // it is not the tool's failure, so nothing is recorded.
+        let stop = challenge.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(stop) = stop {
+            // D-582: no site tool runs on an older cached page of a site that asked for a
+            // human check.
+            self.web.challenged(&page_url);
+            return Ok(stop);
+        }
         match res {
             Ok(mut v) => {
+                // D-583: read before record, which may write the file itself.
+                let already = match &relocated {
+                    Some((_, fp)) => self.file_carries(fp).await,
+                    None => false,
+                };
                 let outcome = match &relocated {
                     Some((_, fp)) => RunOutcome::Relocated {
                         fingerprint: fp.clone(),
@@ -409,16 +490,29 @@ impl ToolHandler for SiteTool {
                         self.web.enable(&name);
                         if let Some((missing, _)) = &relocated {
                             // D-560: srv-web never commits the patched file.
-                            notes.push(format!(
-                                "note: fingerprint relocated (was missing {}); \
-                                 tools/{}/{}.js patched to version {}, status {}; not \
-                                 committed (D-560)",
-                                list(missing),
-                                self.tool.domain,
-                                self.tool.header.name,
-                                row.version,
-                                status_name(row.status)
-                            ));
+                            notes.push(if already {
+                                format!(
+                                    "note: fingerprint already relocated by another run (was \
+                                     missing {}); tools/{}/{}.js is already at version {}, \
+                                     status {}; this call patched nothing",
+                                    list(missing),
+                                    self.tool.domain,
+                                    self.tool.header.name,
+                                    row.version,
+                                    status_name(row.status)
+                                )
+                            } else {
+                                format!(
+                                    "note: fingerprint relocated (was missing {}); \
+                                     tools/{}/{}.js patched to version {}, status {}; not \
+                                     committed (D-560)",
+                                    list(missing),
+                                    self.tool.domain,
+                                    self.tool.header.name,
+                                    row.version,
+                                    status_name(row.status)
+                                )
+                            });
                             self.reregister(ctx).await;
                         }
                     }
@@ -446,7 +540,11 @@ impl ToolHandler for SiteTool {
                 }
                 Ok(ToolOutput {
                     text,
-                    summary: Some(format!("{name} ran on {}", escape::name(&page.url, 200))),
+                    summary: Some(format!(
+                        "{} ran on {}",
+                        self.label(&args),
+                        escape::name(&page.url, 200)
+                    )),
                     consequences: json!({ "url": page.url }),
                     files: Vec::new(),
                     stopped: None,
@@ -469,16 +567,45 @@ impl ToolHandler for SiteTool {
 
 /// `page.api(url)` for `@phase 1` readers (D-53, D-501): GET only, JSON only, hosts under
 /// the page's registrable domain only, same-host redirects only, answered within the run's
-/// remaining wall time (D-64). No caller headers, so no vault value can ride along.
+/// remaining wall time (D-64). No caller headers, so no vault value can ride along. A
+/// challenge answer or a redirect to a challenge URL (D-5) is kept in `challenge` for the
+/// call to stop with (D-580), and the reader gets an error that names only the host; once
+/// it is set, every later page.api call in the run refuses without a request (D-582).
 struct PageApi {
     handle: Handle,
     client: reqwest::Client,
     domain: String,
     cap: usize,
+    challenge: Arc<Mutex<Option<ToolOutput>>>,
+}
+
+/// The stop for a challenge in a body page.api does not return (non-2xx, or not JSON):
+/// fetch's walk over the decoded text (D-580). A walk that fails finds none; the call still
+/// fails with its own error.
+async fn challenge_in_body(body: &http::Body) -> Option<ToolOutput> {
+    let text = body.text(true);
+    fetch::challenge_in_text(body, &text, "page.api")
+        .await
+        .ok()
+        .flatten()
 }
 
 impl ApiFetch for PageApi {
     fn api(&self, url: &str, remaining: Duration) -> Result<Value, String> {
+        // D-582: after a human check nothing more goes to the network in this call, whatever
+        // the reader does with the error.
+        if self
+            .challenge
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return Err(format!(
+                "page.api: this call already met a human check on {}; no further requests \
+                 (D-5)",
+                self.domain
+            ));
+        }
         let u = http::parse_url(url).map_err(|e| format!("page.api: {e}"))?;
         let host = host_of(&u);
         if toolstore::registrable(&host) != self.domain {
@@ -489,17 +616,38 @@ impl ApiFetch for PageApi {
         }
         let client = self.client.clone();
         let cap = self.cap;
+        let slot = self.challenge.clone();
         let fut = async move {
-            let resp = client
-                .get(u)
+            // D-5, D-580: a human check stops the whole call; the reader only learns the host.
+            let stopped = |out: ToolOutput| {
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(out);
+                format!("page.api: {host} answered with a human check; the call stops (D-5)")
+            };
+            let resp = match client
+                .get(u.clone())
                 .header(ACCEPT, "application/json")
                 .send()
                 .await
-                .map_err(|e| format!("page.api: {}", http::map_err(&e, &host)))?;
+            {
+                Ok(r) => r,
+                // A redirect to a challenge URL, on this host or another, is not followed.
+                Err(e) => {
+                    return Err(match http::challenge_redirect(&e) {
+                        Some(why) => stopped(fetch::challenge_output(&u, &why)),
+                        None => format!("page.api: {}", http::map_err(&e, &host)),
+                    })
+                }
+            };
             let body = http::read_capped(resp, cap)
                 .await
                 .map_err(|e| format!("page.api: {e}"))?;
+            if let Some(out) = fetch::challenge_by_response(&body) {
+                return Err(stopped(out));
+            }
             if !(200..300).contains(&body.status) {
+                if let Some(out) = challenge_in_body(&body).await {
+                    return Err(stopped(out));
+                }
                 return Err(format!("page.api: HTTP {} from {host}", body.status));
             }
             if body.truncated {
@@ -509,8 +657,13 @@ impl ApiFetch for PageApi {
                     http::cap_text(cap)
                 ));
             }
-            serde_json::from_slice::<Value>(&body.bytes)
-                .map_err(|_| format!("page.api: {host} did not answer with JSON"))
+            match serde_json::from_slice::<Value>(&body.bytes) {
+                Ok(v) => Ok(v),
+                Err(_) => match challenge_in_body(&body).await {
+                    Some(out) => Err(stopped(out)),
+                    None => Err(format!("page.api: {host} did not answer with JSON")),
+                },
+            }
         };
         self.handle.block_on(async move {
             tokio::time::timeout(remaining, fut)

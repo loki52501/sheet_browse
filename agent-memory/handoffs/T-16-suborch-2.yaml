@@ -1,0 +1,27 @@
+from: core/suborch
+to: supreme
+task: T-16
+date: "2026-10-26"
+state: "Supreme hold of PR #17 answered on swarm/core-T16 (D-89 round-2 fix, D-144). (5) schedule.add stays Account and now carries the classifier hint `schedule` (gate::HINT_SCHEDULE); migration 0003 seeds ('*','Account:schedule','ask'), so the hint rule decides and an unanswered ask times out to SKIP: an unattended harnessd firing or a page-planted call adds no schedule; a user yes still does. Tests: gate a_schedule_add_ask_times_out_to_skip (MemStore with and without the seed), accept_t16_mem planted call with no answer -> skipped, no row, no wake, ledger timeout_skip (mutation check: dropping the hint turns it red). (4) The replay session (ClaudeLauncher::readers_only) already had --strict-mcp-config with a generated harness-web-only config, cwd = run folder, --setting-sources local, --allowedTools mcp__harness-web and the built-ins denied by name (9a73571); it now also passes --tools \"\" (checked live on Claude Code 2.1.311 with srv-web: the session lists only mcp__harness-web__api/feed/fetch/find/search). launcher.rs and reflect.rs module docs say exactly that; test the_replay_session_is_readers_only asserts the argv and cwd. (3) watch.observe scrubs before write_atomic (9a73571); the accept_t16_mem canary test asserts watch.txt == 'seen @vault(test)'. cargo test -p harness-core -p harness -p core-pg green at be24f1e (the canary test answers yes to its schedule.add). review-T-16 round 3 (83f2c97): Blocking none, Verdict approve. Then 777884b acted on its R3-1: every -p session (harnessd firings too) passes --tools \"\", so the repo's Bash(psql *)/Bash(cargo *) allow rules give a fired session no path around the gate; B-205 files the HINT_SCHEDULE interface proposal (R3-2); T-16e holds the rest of R3-1 (strict MCP config, cwd, local settings for -p sessions). NOT VERIFIED: 777884b's launcher test and clippy, and cargo test --workspace on any head; Claude Code stopped both runs for low system memory. swarm/core-T16 is NOT pushed yet: rerun `cargo test -p harness --lib launcher`, clippy and the workspace tests, then push and comment on PR #17."
+not_done: "Supreme merges #17, then runs T-17. T-16b, T-05e, T-08c, T-07b, T-03b, T-04b, T-05b stay todo. B-187's default_taken text still says 'timeout proceeds'; D-144 supersedes it (blockers.yaml is append-only)."
+gotchas:
+  - "An Account ask proceeds at timeout (H-1.3) unless a hint rule decides it or the run/rule is strict (gate step 4). That is why the fix is a hinted seed rule, not a class change."
+  - "Rung 7 (bench/phase1/rung-7.md) now needs the tester to answer the schedule.add card yes; with no answer it skips."
+  - "Set CARGO_BUILD_JOBS=2 or lower on this host; full workspace tests run near the RAM limit."
+decisions_made: [D-144]
+blockers_opened: [B-205]
+files_touched:
+  - migrations/0003_schedule_ask.sql
+  - crates/core/src/gate.rs
+  - crates/core/src/testing.rs
+  - crates/core-pg/tests/accept_t03.rs
+  - crates/harness/src/mem_server.rs
+  - crates/harness/src/launcher.rs
+  - crates/harness/src/reflect.rs
+  - crates/harness/tests/accept_t16_mem.rs
+  - bench/phase1/rung-7.md
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/tasks.yaml
+  - bench/results/live-tools-T-16.md
+verify: "SB_VAULT_CANARY=sbcanary-x-$(openssl rand -hex 8) CARGO_BUILD_JOBS=2 cargo test -p harness-core -p harness -p core-pg --no-fail-fast"

@@ -23,8 +23,8 @@ use std::sync::{Mutex, MutexGuard};
 const MAX_DEPTH: u8 = 4;
 const MAX_NEIGHBORS: usize = 500;
 
-/// The `gate.rules` rows migration 0001 inserts: `(domain, class, mode, note)`.
-pub const SEED_RULES: [(&str, &str, Mode, &str); 6] = [
+/// The `gate.rules` rows migrations 0001 and 0003 insert: `(domain, class, mode, note)`.
+pub const SEED_RULES: [(&str, &str, Mode, &str); 7] = [
     ("*", "Pay", Mode::Ask, ""),
     ("*", "Account", Mode::Ask, ""),
     ("*", "Delete", Mode::Ask, ""),
@@ -40,6 +40,12 @@ pub const SEED_RULES: [(&str, &str, Mode, &str); 6] = [
         "Submit:signature",
         Mode::Ask,
         "signatures are mine (H-1.2)",
+    ),
+    (
+        "*",
+        "Account:schedule",
+        Mode::Ask,
+        "schedules are mine: no answer, no schedule (B-187)",
     ),
 ];
 
@@ -96,7 +102,7 @@ impl Default for MemStore {
 }
 
 impl MemStore {
-    /// A store with migration 0001's gate rules ([`SEED_RULES`]).
+    /// A store with the seeded gate rules of migrations 0001 and 0003 ([`SEED_RULES`]).
     pub fn new() -> MemStore {
         let store = MemStore::empty();
         {

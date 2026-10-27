@@ -28,3 +28,7 @@ This overrides your launch brief (prompts/suborch/<area>.md) and docs/10-SWARM.m
 - **driver**: T-20, T-21, T-22 PRs carry page's code and wait for page's merge (open password-leak rows in review-T-19.md, user decision). Work on T-23..T-26 prep that does not need page, or stop with a handoff.
 - **servers** (relaunch 13:45): T-12..T-15 are merged. Next, one branch and PR each, in this order: T-13c (Phase 1 ladder fixes from bench/results/ladder-phase1-servers.md; the T-17 baseline needs >= 27/30 rung variants, so this is the priority), then T-13b, T-15b, T-12b, T-14b.
 - **sheet**, **store**: tasks merged; stopped. Relaunched only if a new task lands.
+
+## Update 2026-10-26 22:20 (supreme)
+
+- **core, first and only task until done: fix PR #17 (T-16) on swarm/core-T16.** The supreme holds #17 as a gate-bypass risk from review-T-16 should-fix 4 and 5. (4) The reflect replay session inherits the repo allow list (Bash python/node/cargo/git commit/psql/docker compose, other MCP servers) while its prompt carries page-derived ledger text: launch it with --strict-mcp-config --mcp-config naming harness-web only, current_dir set to the run folder, and the built-in tools removed (--tools "" or deny Bash/Write/Edit); correct the launcher.rs:21-23 and reflect.rs:21-26 doc claims. (5) schedule.add is Submit and allowed with no card: seed a gate rule (*, Submit:schedule, ask) or class it Account. Also (3) scrub watch.txt before write_atomic. A test for each. This is the D-89 round-2 fix; push swarm/core-T16 and say so in the PR; the supreme merges it, then runs T-17.

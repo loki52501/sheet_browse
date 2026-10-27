@@ -3,6 +3,8 @@
 //! [`CACHE_PAGES`] pages, the last page overall, and the last page per tool folder.
 
 use crate::html::Doc;
+use crate::http::host_of;
+use reqwest::Url;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -70,6 +72,25 @@ impl Cache {
             .unwrap_or_else(|e| e.into_inner())
             .last
             .clone()
+    }
+
+    /// Drops every cached page on registrable domain `site` (D-582): after a challenge on a
+    /// site no site tool, `find` or cursor runs on an older page of it in this run. `last`
+    /// falls back to the newest page left.
+    pub fn drop_site(&self, site: &str) {
+        let on_site = |p: &Page| {
+            [&p.url, &p.requested].iter().any(|u| {
+                Url::parse(u)
+                    .ok()
+                    .is_some_and(|u| toolstore::registrable(&host_of(&u)) == site)
+            })
+        };
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.pages.retain(|p| !on_site(p));
+        g.by_folder.retain(|_, p| !on_site(p));
+        if g.last.as_deref().is_some_and(on_site) {
+            g.last = g.pages.back().cloned();
+        }
     }
 
     /// The last page fetched on a host of `folder`; for `_generic`, the last page.

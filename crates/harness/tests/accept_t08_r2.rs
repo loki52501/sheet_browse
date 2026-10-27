@@ -26,7 +26,7 @@ use chrono::{TimeZone, Utc};
 use clap::Parser;
 use harness::cli::{execute, Cli, Ctx};
 use harness::daemon::{Daemon, ReopenVault};
-use harness::launcher::{ClaudeLauncher, ANSWER_FILE, DISALLOWED_TOOLS};
+use harness::launcher::{ClaudeLauncher, ANSWER_FILE, DISALLOWED_TOOLS, HARNESS_ALLOWED_TOOLS};
 use harness::{CliError, Env};
 use harness_core::memory::*;
 use harness_core::run::{is_run_id, RunFolder, RunId};
@@ -49,6 +49,19 @@ use zeroize::Zeroizing;
 const CAP: Duration = Duration::from_secs(60);
 const LITERAL: &str = "@vault(test)";
 const DEFAULT_ADMIN_URL: &str = "postgres://sb@127.0.0.1:5433/postgres";
+
+/// The task part of a `claude -p` session's stdin: what follows the run preamble and its
+/// blank line (B-563, D-140 (10)). Asserts the preamble names the run.
+fn task_of(stdin: &str, run: &str) -> String {
+    assert!(
+        stdin.starts_with(&format!("Harness run {run}.\n")),
+        "stdin lacks the run preamble"
+    );
+    stdin
+        .split_once("\n\n")
+        .map(|(_, t)| t.to_owned())
+        .unwrap_or_default()
+}
 const MIB: usize = 1024 * 1024;
 const SLACK: usize = 64 * 1024;
 
@@ -419,8 +432,18 @@ fn read(p: impl AsRef<Path>) -> String {
     std::fs::read_to_string(p.as_ref()).unwrap_or_else(|e| panic!("{}: {e}", p.as_ref().display()))
 }
 
+/// A `-p` session also allows the harness servers (review T-16 r1 should-fix 1); an
+/// interactive one does not.
 fn want_argv(first: &str) -> Vec<String> {
-    let mut v = vec![first.to_owned(), "--disallowedTools".to_owned()];
+    let mut v = vec![first.to_owned()];
+    if first == "-p" {
+        // D-144: every -p session loads no built-in tools.
+        v.push("--tools".to_owned());
+        v.push(String::new());
+        v.push("--allowedTools".to_owned());
+        v.extend(HARNESS_ALLOWED_TOOLS.iter().map(|s| s.to_string()));
+    }
+    v.push("--disallowedTools".to_owned());
     v.extend(DISALLOWED_TOOLS.iter().map(|s| s.to_string()));
     v
 }
@@ -1269,7 +1292,10 @@ async fn d124_2_harnessd_reopens_the_vault_per_firing() {
     assert_eq!(read(f.folder.join("prompt.md")).trim_end(), scrubbed);
     let row = store.run_get(&f.run).await.unwrap().unwrap();
     assert_eq!(row.prompt, scrubbed);
-    assert_eq!(read(fake_dir.join(format!("{}.stdin", f.run.0))), scrubbed);
+    assert_eq!(
+        task_of(&read(fake_dir.join(format!("{}.stdin", f.run.0))), &f.run.0),
+        scrubbed
+    );
     let answer = read(f.folder.join("files").join(ANSWER_FILE));
     assert_eq!(answer, format!("aaaaaaa{LITERAL}bbbbbbb"));
     assert_clean(&read(f.folder.join("report.md")), false, "report.md");
@@ -1489,7 +1515,7 @@ async fn d124_5_b192_argv_denies_user_only_commands_and_the_prompt_arrives() {
             .collect();
         assert_eq!(argv, want_argv("-p"), "{label}: -p argv");
         assert_eq!(
-            read(fake_dir.join(format!("{}.stdin", f.run.0))),
+            task_of(&read(fake_dir.join(format!("{}.stdin", f.run.0))), &f.run.0),
             prompt,
             "{label}: stdin"
         );

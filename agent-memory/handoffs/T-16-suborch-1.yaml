@@ -1,0 +1,30 @@
+from: core/suborch
+to: supreme
+task: T-16
+date: "2026-10-26"
+state: "T-16 (step 4) ready on swarm/core-T16, PR open. The stopped session's three packages (A watch + run preamble, B reflect + proposals, C contacts touch + `harness mcp` mem server) were committed, merged and built together. review-T-16.md round 1 approve (Blocking none); round 2 9a73571 fixed all 8 should-fix items (allow list for harnessd print sessions, preamble names watch.observe, watch.txt scrubbed, readers-only replay with --strict-mcp-config and built-ins denied, schedule.add asks as Account (B-187), narrow reflect commit, stale ToolCtx doc) plus 3 nits. accept-T-16.md green 16/16: live ladder rungs 6, 7, 8 passed through Claude Code (apiKeySource none), live reflect retired a planted stale ephemeral tool, 0 canary hits. cargo test -p harness-core -p harness: 479 passed, 0 failed, 3 ignored, 0 SKIPPED; fmt and clippy clean; merge_gate.py core prints gate ok. The full cargo test --workspace on the final head was killed by Claude Code for low system memory and not rerun; the merge gate runs it. T-05d (PR #16) and T-08b (PR #15) merged."
+not_done: "T-16b (D-143 deferrals plus live-ladder leftovers), T-05e, T-08c, T-07b, T-03b, T-04b, T-05b are todo. Interface proposals awaiting supreme (deferred to wave 4 under D-90): B-189, B-197, B-198. Blockers with defaults taken: B-186, B-187."
+gotchas:
+  - "The branch carries T-08b round-1 commits; main (with T-08b final) is merged in, cli.rs normalises then scrubs watch_target."
+  - "bench/fixtures/ladder_session.py gained -p (harnessd stdin prompt) and SB_LADDER_ALLOWED; mcp.example.json gained harness-mem. Both shared bench/config files."
+  - "Set CARGO_BUILD_JOBS=1 in the environment on this host; accept_t09's nested cargo build ignores -j. rustc 0xc0000409 is memory pressure."
+decisions_made: [D-140, D-141, D-142, D-143]
+blockers_opened: [B-187, B-189, B-197, B-198]
+files_touched:
+  - crates/core/src/watch.rs
+  - crates/core/src/sched.rs
+  - crates/core/src/mcp.rs
+  - crates/harness/src/reflect.rs
+  - crates/harness/src/proposals.rs
+  - crates/harness/src/mem_server.rs
+  - crates/harness/src/launcher.rs
+  - crates/harness/src/daemon.rs
+  - crates/harness/src/cli.rs
+  - crates/harness/src/bin/harnessd.rs
+  - bench/phase1/rung-6.md
+  - bench/phase1/rung-7.md
+  - bench/phase1/rung-8.md
+  - bench/fixtures/ladder_session.py
+  - mcp.example.json
+  - agent-memory/tasks.yaml
+verify: "SB_VAULT_CANARY=sbcanary-x-$(openssl rand -hex 8) CARGO_BUILD_JOBS=1 cargo test -p harness-core -p harness --no-fail-fast"

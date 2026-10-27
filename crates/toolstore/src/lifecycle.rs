@@ -11,7 +11,9 @@
 
 use crate::archive::{touch, SetMtime};
 use crate::domain::{check_tool_id, valid_domain, valid_name, SiteConfig, ARCHIVE};
-use crate::header::{parse_header, patch_fingerprint, render_fingerprint};
+use crate::header::{
+    fp_item_writable, parse_header, patch_fingerprint, render_fingerprint, FpItem,
+};
 use crate::invariants::{check_repair, RepairKind};
 use crate::{RunOutcome, StoreError, ToolRunResult, ToolStore};
 use chrono::{DateTime, Duration, Utc};
@@ -322,7 +324,9 @@ impl ToolStore {
     /// - `Ok`: streak += 1; ephemeral/repaired -> saved at 3; needs_repair -> repaired,
     ///   version += 1 (D-304);
     /// - `Relocated`: `@fingerprint` patched on disk (relocate invariants), version += 1,
-    ///   status repaired;
+    ///   status repaired; items a header line cannot hold, or a patch that does not read back
+    ///   as the given fingerprint, are refused (D-578); a fingerprint the file already carries
+    ///   (another run relocated it first) is recorded as `Ok` and writes nothing (D-577);
     /// - `Failed`: fails += 1, streak reset, why;
     /// - `FingerprintMiss` / `ExpectsMiss`: as `Failed`, and status needs_repair;
     /// - needs_repair with fails >= 5 and not pinned: retired, file archived; when the archive
@@ -355,6 +359,16 @@ impl ToolStore {
         } = result;
         let mut h = self.row(store, &domain, &name).await?;
         let retired = h.status == ToolStatus::Retired;
+        // D-577: another run (or call) already wrote this fingerprint; this clean run on the
+        // relocated page is an Ok, not a second patch and version bump.
+        let outcome = match outcome {
+            RunOutcome::Relocated { fingerprint }
+                if !retired && self.carries_fingerprint(&domain, &name, &fingerprint) =>
+            {
+                RunOutcome::Ok
+            }
+            o => o,
+        };
         // T-5 / D-310: the user's confirmation is permission; no outcome stands in for it.
         let held = h.status == ToolStatus::Ask;
         let fail = |h: &mut ToolHealth, why: String, miss: bool| {
@@ -389,9 +403,30 @@ impl ToolStore {
                     )));
                 }
                 let path = self.try_tool_path(&domain, &name)?;
+                // D-578: only items a header line can hold, named by role (the name is page
+                // text).
+                if let Some(bad) = fingerprint.iter().find(|i| !fp_item_writable(i)) {
+                    let e = StoreError::Invariant(format!(
+                        "relocate of {domain}/{name} would write a control character, line \
+                         terminator or unreadable id into @fingerprint ({} item) (B-33, D-578)",
+                        bad.role.escape_debug()
+                    ));
+                    self.log_invariant(store, &domain, &name, &e).await?;
+                    return Err(e);
+                }
                 let old = fs::read_to_string(&path)?;
                 let new = patch_fingerprint(&old, &fingerprint);
-                if let Err(e) = check_repair(&old, &new, RepairKind::Relocate) {
+                let check = check_repair(&old, &new, RepairKind::Relocate).and_then(|()| {
+                    // D-578: the patched line must read back as exactly this fingerprint.
+                    match parse_header(&new) {
+                        Ok(hd) if hd.fingerprint == fingerprint => Ok(()),
+                        _ => Err(StoreError::Invariant(format!(
+                            "relocate of {domain}/{name}: the patched @fingerprint does not read \
+                             back as written (D-578)"
+                        ))),
+                    }
+                });
+                if let Err(e) = check {
                     self.log_invariant(store, &domain, &name, &e).await?;
                     return Err(e);
                 }
@@ -425,6 +460,16 @@ impl ToolStore {
         }
         store.tool_health_set(h.clone()).await?;
         Ok(h)
+    }
+
+    /// The tool file's `@fingerprint` is already `fingerprint` (D-577). Unreadable file or
+    /// header: `false`, so the relocate path reports the error as before.
+    fn carries_fingerprint(&self, domain: &str, name: &str, fingerprint: &[FpItem]) -> bool {
+        self.try_tool_path(domain, name)
+            .ok()
+            .and_then(|p| fs::read_to_string(p).ok())
+            .and_then(|src| parse_header(&src).ok())
+            .is_some_and(|hd| hd.fingerprint == fingerprint)
     }
 
     /// T-5 re-forge under the same name: the new `@name` must be `name` (D-312), invariants
@@ -497,7 +542,8 @@ impl ToolStore {
                     StoreError::Io(std::io::Error::new(
                         restore.kind(),
                         format!(
-                            "reforge {domain}/{name} failed ({cause}) and restoring {} failed                              too ({restore}); the old version is kept at {kept}",
+                            "reforge {domain}/{name} failed ({cause}) and restoring {} failed \
+                             too ({restore}); the old version is kept at {kept}",
                             self.rel(&path)
                         ),
                     ))

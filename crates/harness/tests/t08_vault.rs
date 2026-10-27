@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use clap::Parser;
 use harness::cli::{execute, Cli, Ctx};
 use harness::daemon::{Daemon, ReopenVault};
-use harness::launcher::{ClaudeLauncher, ANSWER_FILE, ANSWER_SCRUB_SLACK, DISALLOWED_TOOLS};
+use harness::launcher::{
+    ClaudeLauncher, ANSWER_FILE, ANSWER_SCRUB_SLACK, DISALLOWED_TOOLS, HARNESS_ALLOWED_TOOLS,
+};
 use harness::{CliError, Env};
 use harness_core::memory::*;
 use harness_core::run::{is_run_id, RunId};
@@ -391,16 +393,28 @@ async fn a_run_scrubs_prompt_slug_row_session_input_and_answer() {
     assert_clean(&row.prompt, true, "runs.prompt");
     assert_clean(&row.folder, false, "runs.folder");
     let stdin = std::fs::read_to_string(fake_dir.join("stdin.txt")).unwrap();
-    assert_eq!(stdin, format!("{LITERAL} please log in"));
+    // The run preamble (B-563, D-140 (10)), one blank line, then the scrubbed task.
+    assert_clean(&stdin, true, "session stdin");
+    assert!(
+        stdin.starts_with(&format!("Harness run {}.\n", f.run.0)),
+        "stdin lacks the run preamble"
+    );
+    assert_eq!(
+        stdin.split_once("\n\n").map(|(_, t)| t),
+        Some(format!("{LITERAL} please log in").as_str())
+    );
     let answer = std::fs::read_to_string(f.folder.join("files").join(ANSWER_FILE)).unwrap();
     assert_clean(&answer, true, "answer.md");
     assert_eq!(answer, format!("Logged in with {LITERAL}. Done."));
     let report = std::fs::read_to_string(f.folder.join("report.md")).unwrap();
     assert_clean(&report, true, "report.md");
 
-    // B-192 on the real process: -p, then the denied commands.
+    // B-192 on the real process: -p, the harness servers allowed (D-143), then the denied
+    // commands.
     let args = std::fs::read_to_string(fake_dir.join("args.txt")).unwrap();
-    let mut want = vec!["-p", "--disallowedTools"];
+    let mut want = vec!["-p", "--tools", "", "--allowedTools"]; // D-144: no built-in tools
+    want.extend(HARNESS_ALLOWED_TOOLS);
+    want.push("--disallowedTools");
     want.extend(DISALLOWED_TOOLS);
     assert_eq!(args.lines().collect::<Vec<_>>(), want);
     let env_seen = std::fs::read_to_string(fake_dir.join("env.txt")).unwrap();

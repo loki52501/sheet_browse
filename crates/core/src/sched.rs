@@ -1,4 +1,5 @@
-//! Scheduler (H-5, D-106, D-107, D-116). Owned by area core (T-08; watch and reflect are T-16).
+//! Scheduler (H-5, D-106, D-107, D-116, D-140). Owned by area core (T-08; watch and reflect
+//! fire since T-16).
 //! The row types are contract and live in `memory` (D-48).
 //!
 //! * Cron expressions are 5-field standard cron, parsed with `croner`, evaluated in UTC (D-107).
@@ -9,6 +10,12 @@
 //! * A firing ([`Runner::fire`]) records `schedules.last_run`, creates a run folder and a
 //!   `runs` row (status running, `parent_run` = the schedule's run, H-4), launches it through
 //!   a [`Launcher`] (D-106), then writes `report.md` from the ledger and sets ended/status.
+//! * A watch firing is checked after its session ends ([`crate::watch`], D-140): the state in
+//!   `files/watch.txt` against `memory.baselines`, one notification on change, and a
+//!   `Watch:` line in `report.md`.
+//! * [`run_preamble`] is what a launcher puts before the task in the session's prompt
+//!   (B-563): the run id, the files path, cite only this run's tool results; `prompt.md`
+//!   stays the task.
 //! * Due rule (D-116): the next occurrence strictly after the latest of `last_run`, the first
 //!   time this loop saw the schedule, and the loop's last attempt. Missed occurrences coalesce
 //!   into one firing; a schedule whose previous firing still runs skips.
@@ -18,6 +25,7 @@ use crate::memory::{ts_now, LedgerEvent, MemoryError, MemoryStore, Run, RunStatu
 pub use crate::memory::{Schedule, ScheduleKind};
 use crate::run::{RunFolder, RunId};
 use crate::vault::scrub;
+use crate::watch as watching;
 use async_trait::async_trait;
 use croner::parser::{CronParser, Seconds, Year};
 use croner::Cron;
@@ -48,7 +56,7 @@ const DB_RETRY_MIN: Duration = Duration::from_millis(500);
 pub enum SchedError {
     #[error("cron {cron:?}: {why}")]
     BadCron { cron: String, why: String },
-    /// watch and reflect schedules are stored, but only T-16 (wave 3) runs them.
+    /// Not returned since T-16 (watch and reflect fire); kept so existing matchers compile.
     #[error("schedule kind {0} is not in Phase 1 (T-16)")]
     NotInPhase1(&'static str),
     #[error(transparent)]
@@ -229,6 +237,38 @@ pub struct LaunchRequest<'a> {
     pub runs_root: &'a Path,
     /// Already scrubbed (vault values appear only as `@vault(name)`).
     pub prompt: &'a str,
+    /// The schedule that fired this run (`None` for `harness run` and tests). A launcher reads
+    /// its `kind` and `watch_target`, e.g. to tell a watch session where to write the
+    /// watched state (T-16, I-13 proposal B-197).
+    pub schedule: Option<&'a Schedule>,
+}
+
+/// The text a launcher puts before the task in a session's prompt (B-563, D-140 (10)): the
+/// run id, the absolute `files/` path, and "cite only what tools returned in this run"; for
+/// a watch firing also to record the watched state with harness-mem `watch.observe` (which
+/// writes [`watching::WATCH_FILE`]), not with a file write of its own. Scrubbed.
+/// One line per item, no blank line inside, ends with a newline.
+pub fn run_preamble(req: &LaunchRequest<'_>) -> String {
+    let files = std::path::absolute(req.run.files()).unwrap_or_else(|_| req.run.files());
+    let files = files.to_string_lossy().replace('\\', "/");
+    let mut p = format!(
+        "Harness run {id}.\n\
+         Save deliverables in this folder: {files}\n\
+         Cite only what tools returned in this run; earlier runs and memory are not evidence \
+         for this one.\n",
+        id = req.run.id
+    );
+    if let Some(s) = req.schedule.filter(|s| s.kind == ScheduleKind::Watch) {
+        p.push_str(&format!(
+            "This is a watch run for \"{target}\": read the watched page with harness tools, \
+             then call harness-mem `watch.observe` once with the current watched state as \
+             short plain text (it is saved as files/{file}; do not write that file yourself). \
+             The harness compares it with the last run and notifies the user on change.\n",
+            target = watching::target_key(s),
+            file = watching::WATCH_FILE,
+        ));
+    }
+    scrub(&p)
 }
 
 /// How the session ended. `code: None` means it was killed by a signal.
@@ -345,13 +385,9 @@ fn mark_failed(report: &str, why: &str) -> String {
 impl Runner {
     /// Fires a schedule (H-5): `schedule_fired` first (so a failing firing never repeats at
     /// once), then [`Runner::execute`] with `parent_run` = the schedule's run.
-    /// watch and reflect are [`SchedError::NotInPhase1`] (T-16).
+    /// Every kind fires (T-16, D-140); the launcher sees the schedule in
+    /// [`LaunchRequest::schedule`]. A reflect row launches like cron until harness handles it.
     pub async fn fire(&self, s: &Schedule) -> Result<Finished> {
-        match s.kind {
-            ScheduleKind::Cron => {}
-            ScheduleKind::Watch => return Err(SchedError::NotInPhase1("watch")),
-            ScheduleKind::Reflect => return Err(SchedError::NotInPhase1("reflect")),
-        }
         self.store.schedule_fired(s.id, self.clock.now()).await?;
         self.execute(RunSpec {
             prompt: &s.prompt,
@@ -409,6 +445,7 @@ impl Runner {
                 run: &folder,
                 runs_root: &self.runs_root,
                 prompt: &prompt,
+                schedule: spec.schedule,
             })
             .await;
         let launch_problem = match launched {
@@ -426,6 +463,27 @@ impl Runner {
             }
         }
 
+        let watch_line = match spec.schedule.filter(|s| s.kind == ScheduleKind::Watch) {
+            None => None,
+            Some(s) => {
+                let skip = self.watch_skip(&folder.id, launch_problem.is_some()).await;
+                let now = self.clock.now();
+                match watching::check(self.store.as_ref(), &ledger, &self.runs_root, s, now, skip)
+                    .await
+                {
+                    Ok(w) => Some(w.report_line()),
+                    Err(e) => {
+                        let line = scrub(&format!(
+                            "Watch: {}: check failed ({e}), nothing sent",
+                            watching::target_key(s)
+                        ));
+                        first_err.get_or_insert(e);
+                        Some(line)
+                    }
+                }
+            }
+        };
+
         let events: Vec<LedgerEvent> = match self.store.ledger_events(&folder.id).await {
             Ok(rows) => rows.into_iter().map(|(_, e)| e).collect(),
             Err(e) => {
@@ -441,8 +499,16 @@ impl Runner {
         }
         match ledger::write_report(&folder, &prompt, &events) {
             Ok(text) => {
+                let mut out = text.clone();
                 if let (RunStatus::Failed, Some(why)) = (status, &launch_problem) {
-                    if let Err(e) = std::fs::write(folder.report_md(), mark_failed(&text, why)) {
+                    out = mark_failed(&out, why);
+                }
+                if let Some(line) = &watch_line {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                if out != text {
+                    if let Err(e) = std::fs::write(folder.report_md(), out) {
                         first_err.get_or_insert(e.into());
                     }
                 }
@@ -466,6 +532,24 @@ impl Runner {
             schedule: spec.schedule.map(|s| s.id),
             launch_problem,
         })
+    }
+}
+
+impl Runner {
+    /// Why a watch firing's state must not be trusted, if it must not: the session failed,
+    /// or the ledger says the run stopped (a challenge or a refused step, D-140 (3)).
+    async fn watch_skip(&self, run: &RunId, launch_failed: bool) -> Option<String> {
+        if launch_failed {
+            return Some("the session failed".into());
+        }
+        match self.store.ledger_events(run).await {
+            Ok(rows) => {
+                let events: Vec<LedgerEvent> = rows.into_iter().map(|(_, e)| e).collect();
+                (ledger::run_status(&events) == RunStatus::Stopped)
+                    .then(|| "the run stopped".into())
+            }
+            Err(_) => Some("the ledger could not be read".into()),
+        }
     }
 }
 
@@ -582,21 +666,6 @@ impl Scheduler {
         for s in list {
             if !s.enabled || book.is_running(s.id) {
                 continue;
-            }
-            match s.kind {
-                ScheduleKind::Cron => {}
-                ScheduleKind::Watch | ScheduleKind::Reflect => {
-                    let kind = if s.kind == ScheduleKind::Watch {
-                        "watch"
-                    } else {
-                        "reflect"
-                    };
-                    book.warn_once(
-                        s.id,
-                        format!("kind {kind} is not in Phase 1 (T-16); skipped"),
-                    );
-                    continue;
-                }
             }
             let cron = match parse_cron(&s.cron) {
                 Ok(c) => c,
@@ -927,31 +996,41 @@ mod tests {
         assert!(store.run_get(&f.run).await.unwrap().unwrap().strict);
     }
 
+    /// T-16 (D-140): watch and reflect rows fire like cron rows.
     #[tokio::test]
-    async fn watch_and_reflect_are_not_phase1() {
+    async fn watch_and_reflect_fire() {
         let tmp = Tmp::new();
         let store = Arc::new(MemStore::new());
+        let launcher = FakeLauncher::ok();
         let r = runner(
             store.clone(),
-            FakeLauncher::ok(),
+            launcher.clone(),
             Arc::new(ManualClock::new(t(12, 0, 0))),
             &tmp.0,
         );
-        let mut s = cron_row("*/1 * * * *", "watch it", None);
-        s.kind = ScheduleKind::Watch;
-        assert!(matches!(
-            r.fire(&s).await,
-            Err(SchedError::NotInPhase1("watch"))
-        ));
-        s.kind = ScheduleKind::Reflect;
-        assert!(matches!(
-            r.fire(&s).await,
-            Err(SchedError::NotInPhase1("reflect"))
-        ));
+        for (kind, prompt) in [
+            (ScheduleKind::Watch, "watch it"),
+            (ScheduleKind::Reflect, "reflect"),
+        ] {
+            let mut s = cron_row("*/1 * * * *", prompt, None);
+            s.kind = kind;
+            s.id = store.schedule_add(s.clone()).await.unwrap();
+            let f = r.fire(&s).await.unwrap();
+            assert_eq!(f.schedule, Some(s.id));
+            assert!(f.folder.join("report.md").is_file());
+        }
+        let prompts: Vec<String> = launcher
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, p)| p.clone())
+            .collect();
+        assert_eq!(prompts, ["watch it", "reflect"]);
     }
 
     /// The loop: waits for a change, computes the next due minute, fires once per advance,
-    /// skips watch and disabled rows, and coalesces missed occurrences into one firing.
+    /// skips disabled rows, and coalesces missed occurrences into one firing.
     #[tokio::test]
     async fn loop_fires_on_deadline_and_wakes_on_change() {
         let tmp = Tmp::new();
@@ -971,10 +1050,7 @@ mod tests {
             let _ = stop_rx.await;
         }));
 
-        // Rows the loop must not fire.
-        let mut w = cron_row("*/1 * * * *", "watch", None);
-        w.kind = ScheduleKind::Watch;
-        store.schedule_add(w).await.unwrap();
+        // A row the loop must not fire.
         let mut off = cron_row("*/1 * * * *", "off", None);
         off.enabled = false;
         store.schedule_add(off).await.unwrap();
