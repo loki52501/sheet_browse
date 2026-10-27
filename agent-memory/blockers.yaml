@@ -281,6 +281,16 @@ blockers:
     from: core
     question: "review-T-08b round 1 should-fix: `harness gate set <domain> <class>` stores domain and class as the gate.rules key. A vault value typed into either (gate::rule_key accepts a canary-shaped label) would land in the database (rule 2). Scrubbing does not fit a key: the scrubbed text is a different rule, or one rule_key refuses. Should the CLI refuse such a domain or class, scrub it, or store it?"
     default_taken: "Refuse (T-08b round 2): before gate_rule_set, a domain or class whose scrub differs from the typed text is a Usage error that names the vault entry (`@vault(name)`), never the value, and nothing is stored. The note keeps being scrubbed (it is not a key). Test: accept_t08_r2 b186_gate_set_refuses_a_vault_value_in_the_domain_or_class."
+  - id: B-592
+    task: T-12b
+    question: "sb-sheet read plans every chunk with next_chunk, which builds piece_text of the whole rest of a unit and counts its chars (plus fit_piece counting rest_of) for each chunk, and plan_starts runs it over the whole page to number chunks. One text block of n chars therefore costs about n*n/16000 char steps: a 1.3 M char block took over 10 s in a debug build (srv-web read mode). Should the reader measure only up to the chunk cap?"
+    default_taken: "srv-web splits any walk block over 8000 chars into several blocks (D-517), so its pages never hand the reader a huge unit; the reader itself is unchanged (sheet owns it). Note: render_read runs after the walk and is not under the D-517 walk cap. Proposed for the sheet owner: next_chunk compares against the cap without materialising the whole rest (count chars up to cap+1), so plan_starts is linear."
+    needs_user: false
+  - id: B-593
+    task: T-12b
+    question: "toolstore ToolStore::carries_fingerprint (lifecycle.rs) turns any failure to resolve, read or parse the tool file into false (not carried), so record(Relocated) then patches the file again and bumps the version. t13b two_servers_repairing_the_same_tool_leave_version_2 failed once under workspace load with version 3 and why relocated: X -> X while its two repairs ran one after the other: the patch step read the same file a moment later and found X. Should an unreadable file fail closed (StoreError, nothing written) or be retried instead?"
+    default_taken: "srv-web records Ok itself when its own read before record already sees the fingerprint (D-518), so a sequential second repair no longer depends on toolstore reading the file twice. toolstore is unchanged (store owns it). Proposed for the store owner: a read or parse error in carries_fingerprint is a StoreError (or one immediate re-read), never a second patch."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core
