@@ -48,7 +48,7 @@ class RealRecipes(unittest.TestCase):
             self.assertEqual(cr.check_file(p), [], p)
 
     def test_lu_ma_alias_covers_the_luma_com_redirect(self):
-        self.assertIn("luma.com", cr.site_aliases(cr.ROOT / "tools" / "lu.ma"))
+        self.assertEqual(cr.site_aliases(cr.ROOT / "tools" / "lu.ma"), (["luma.com"], []))
 
 
 class Rules(unittest.TestCase):
@@ -106,7 +106,8 @@ class Rules(unittest.TestCase):
         self.assertFlags(bad(lambda d: d["steps"][1]["args"].pop("for")), "fixed sleep")
 
     def test_tools_are_browseros_recipe_tools(self):
-        for t in ("run", "evaluate", "request_human_help", "sleep"):
+        for t in ("run", "evaluate", "request_human_help", "sleep", "tabs", "windows", "download",
+                  "upload", "history", "pdf"):
             self.assertFlags(bad(lambda d, t=t: d["steps"][1].update(tool=t)), "not a BrowserOS recipe tool")
 
     def test_target_shape(self):
@@ -168,6 +169,62 @@ class Rules(unittest.TestCase):
             f.write_text("name: [unclosed\n", encoding="utf-8")
             self.assertFlags(cr.check_file(f), "YAML")
             self.assertFlags(cr.check_file(folder / "_site.yaml"), "does not end with")
+
+
+class ReviewRound1(unittest.TestCase):
+    """review-T-27 round 1 should-fix items 1, 2, 3, 7, 8."""
+
+    def assertFlags(self, problems, needle):
+        self.assertTrue(any(needle in p for p in problems), f"{needle!r} not in {problems}")
+
+    def test_vault_in_an_arg_default_is_refused(self):
+        self.assertFlags(bad(lambda d: d["args"]["to"].update(required=False, default="@vault(pw)")),
+                         "only act text/value")
+        self.assertFlags(bad(lambda d: d.update(description="uses @vault(k)")), "only act text/value")
+
+    def test_backslash_whitespace_and_netloc_tricks_leave_no_way_off_site(self):
+        for url in ("https://evil.com\\.mail.google.com/x", "https://evil.com\t.mail.google.com/",
+                    "https://evil.com%2f.mail.google.com/", "https://mail.google.com:99999/",
+                    "https://x@mail.google.com/"):
+            self.assertTrue(bad(lambda d, u=url: d["steps"][0]["args"].update(url=u)), url)
+
+    def test_odd_types_are_reported_not_raised(self):
+        for mutate in (lambda d: d["steps"][0].update(tool=["navigate"]),
+                       lambda d: d["steps"][2]["args"].update(kind={"k": 1}),
+                       lambda d: d["steps"][1]["args"].update({"for": ["text"]}),
+                       lambda d: d["args"]["to"].update(type=["string"]),
+                       lambda d: d["steps"][2]["target"].update(name=["x"]),
+                       lambda d: d["steps"][2].update(target="button")):
+            self.assertTrue(bad(mutate))
+
+    def test_target_name_and_nth(self):
+        self.assertFlags(bad(lambda d: d["steps"][2]["target"].update(name="a\nb")), "one-line")
+        self.assertFlags(bad(lambda d: d["steps"][2]["target"].update(nth=0)), "nth")
+        self.assertFlags(bad(lambda d: d["steps"][2]["target"].update(nth=True)), "nth")
+        self.assertFlags(bad(lambda d: d["steps"][2]["target"].update(nth="{to}")), "nth")
+        self.assertEqual(bad(lambda d: d["steps"][2]["target"].update(nth="{count}")), [])
+        self.assertEqual(bad(lambda d: d["steps"][2]["target"].update(nth=2)), [])
+
+    def test_wait_value_expects_values_read_and_grep_args(self):
+        self.assertFlags(bad(lambda d: d["steps"][1]["args"].pop("value")), "no value")
+        self.assertFlags(bad(lambda d: d.update(expects={"text": ""})), "expects")
+        self.assertFlags(bad(lambda d: d.update(expects={"text": 3})), "expects")
+        self.assertFlags(bad(lambda d: d["steps"][4]["args"].update(over="dom")), "ax or content")
+        self.assertFlags(bad(lambda d: d["steps"][4]["args"].pop("pattern")), "no pattern")
+        self.assertFlags(bad(lambda d: d["steps"].append({"tool": "read", "args": {"format": "html"}})),
+                         "markdown, text or links")
+
+    def test_site_aliases_are_hosts_with_a_dot(self):
+        with tempfile.TemporaryDirectory() as t:
+            folder = Path(t) / "lu.ma"
+            folder.mkdir()
+            site = folder / "_site.yaml"
+            for body, want in (("aliases: [com]\n", ([], 1)), ("aliases: luma.com\n", (["luma.com"], 0)),
+                               ("aliases: [luma.com, 'a b']\n", (["luma.com"], 1)),
+                               ("aliases: [unclosed\n", ([], 1))):
+                site.write_text(body, encoding="utf-8")
+                good, problems = cr.site_aliases(folder)
+                self.assertEqual((good, len(problems)), want, body)
 
 
 if __name__ == "__main__":

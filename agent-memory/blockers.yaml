@@ -332,6 +332,11 @@ blockers:
     question: "For supreme (hooks): browseros_ledger.py matches mcp__browseros__.* only. A session that has BrowserOS under another server name (this machine's user config registers it as browseros-neo, so tools are mcp__browseros-neo__*) records nothing in browseros.jsonl, and tools.save would find no steps. Widen the matcher to mcp__browseros[^_]*__.* or require the project .mcp.json name?"
     default_taken: "Acceptance runs for T-27 use the worktree .mcp.json server name `browseros` so the hook records them; the exploratory calls made under browseros-neo are not in any browseros.jsonl."
     needs_user: false
+  - id: B-599
+    task: T-27
+    question: "For core (T-28 tools.run), addendum to B-596 from review-T-27 round 1: run-time rules a static check cannot enforce. Will tools.run do these?"
+    default_taken: "(1) @vault(key) is resolved only where the recipe file itself has it as the whole act text/value; an arg value or default containing @vault( is refused (else send(body='@vault(pw)') would mail the secret). (2) target nth counts matches inside the region of the step's last wait selector when there is one ([role=main] [role=grid] for Gmail rows), not the whole snapshot, so a hidden or side-panel row cannot be picked; until then thread relies on Gmail listing result rows first (seen live). (3) a Challenge stop during a recipe does not count toward reflect's 3-failure retire rule. (4) tools.run refuses em dashes and double-dash separators in send/draft subject and body (CLAUDE.md rule 7). (5) placeholders substituted into grep patterns are regex-escaped and into CSS selectors CSS-escaped. (6) send/draft check the recipient chip equals the `to` arg before Send (a partial name makes Tab commit Gmail's top suggestion); the recipes' descriptions require one full address meanwhile. (7) register needs a stop condition for paid or approval events (a proposed optional `refuse_if: {text: ...}` step field, e.g. 'Approval Required', 'Get Ticket', '$'); until then the description says free open events only and the model checks the page before running it."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core

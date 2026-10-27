@@ -766,3 +766,6 @@ decisions:
   - id: D-1502
     text: "lu.ma register takes the event slug, not a URL, and navigates to https://luma.com/{slug}; tools/lu.ma/_site.yaml aliases luma.com, because every lu.ma page redirects there. thread takes a Gmail query (default in:inbox) and a 1-based index instead of separate subject and index modes."
     why: "A URL argument would let a recipe navigate off-site; a slug keeps the host literal, which the checker enforces. Recipes have no conditionals, so one query+index form covers both 'by subject' (subject:\"...\") and 'by index'."
+  - id: D-1503
+    text: "A recipe step may call only navigate, wait, act, grep, read, snapshot and diff. tabs, windows, tab_groups, history, download, upload, pdf and screenshot are left out until the checker has a URL or path rule for each; run, evaluate, request/await_human_help, save_skill, mark_skill_run and name_session never. Navigate URLs with a backslash, whitespace, a control character, @ or % in the authority, or a port are refused."
+    why: "review-T-27 round 1 items 2 and 3: a tab or download opened any URL and upload read any local file with no check, and Chrome reads https://evil.com\.site/ as evil.com while urlsplit sees a host ending in .site."

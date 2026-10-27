@@ -40,13 +40,16 @@ ARG_TYPES = {"string": str, "int": int, "bool": bool}
 STEP_KEYS = {"tool", "args", "target", "returns"}
 TARGET_KEYS = {"role", "name", "nth"}
 EXPECT_KEYS = {"text", "selector"}
-# BrowserOS neo 0.0.69 tools (WAVE3 "Browser"), minus the ones a recipe has no use for and
-# that would hand control away: run/evaluate (arbitrary script), save_skill/mark_skill_run,
-# request_human_help/await_human_help (a challenge is a stop, D-5), name_session.
-TOOLS = {"tabs", "tab_groups", "history", "navigate", "snapshot", "diff", "act", "download",
-         "upload", "read", "grep", "screenshot", "pdf", "wait", "windows"}
+# D-1503: the BrowserOS tools a recipe may call. Left out: run/evaluate (arbitrary script),
+# request_human_help/await_human_help (a challenge is a stop, D-5), save_skill/mark_skill_run,
+# name_session, and every tool that opens a URL or touches a local file without the navigate
+# URL check (tabs, windows, tab_groups, history, download, upload, pdf, screenshot).
+TOOLS = {"navigate", "wait", "act", "grep", "read", "snapshot", "diff"}
 TARGETED = {"click", "fill", "type", "hover", "focus", "check", "uncheck", "select", "drag"}
 UNTARGETED = {"press", "scroll"}
+READ_FORMATS = {"markdown", "text", "links"}
+GREP_OVER = {"ax", "content"}
+WHOLE = re.compile(r"^\{([a-z0-9_]+)\}$")
 NAME_RE = re.compile(r"^[a-z0-9_]+$")
 DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$")
 PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
@@ -76,12 +79,25 @@ def match_violation(p):
 
 
 def site_aliases(folder):
-    """aliases from tools/<folder>/_site.yaml (toolstore::domain::SiteConfig)."""
+    """aliases from tools/<folder>/_site.yaml (toolstore::domain::SiteConfig) and what is
+    wrong with them. A single alias may be a bare string, as toolstore's yaml_list reads it."""
     f = folder / "_site.yaml"
     if not f.exists():
-        return []
-    doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-    return [str(a).lower() for a in doc.get("aliases") or []]
+        return [], []
+    try:
+        doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        return [], [f"_site.yaml: {e}"]
+    raw = doc.get("aliases") if isinstance(doc, dict) else None
+    raw = [raw] if isinstance(raw, str) else raw or []
+    good, bad = [], []
+    for a in raw if isinstance(raw, list) else [raw]:
+        # A host with at least two labels: `com` would make every .com host on-site.
+        if isinstance(a, str) and DOMAIN_RE.match(a.lower()) and "." in a and ".." not in a:
+            good.append(a.lower())
+        else:
+            bad.append(f"_site.yaml alias {a!r} is not a host name with a dot")
+    return good, bad
 
 
 def strings(v, path=()):
@@ -110,23 +126,42 @@ def keys(v, path=()):
 def check_url(url, domain, aliases):
     if not isinstance(url, str):
         return "navigate url is not a string"
+    # Browsers read `\` as `/` and drop tabs and newlines, so `https://evil.com\.site/` goes
+    # to evil.com while urlsplit sees a host ending in .site: refuse them outright.
+    if "\\" in url or any(c.isspace() or ord(c) < 32 for c in url):
+        return f"navigate url {url!r} contains a backslash, whitespace or a control character"
     head = url.split("/", 3)
     if len(head) < 3 or head[1] != "":
         return f"navigate url {url!r} is not an absolute https URL"
     if PLACEHOLDER.search("/".join(head[:3])):
         return f"navigate url {url!r} has a placeholder before the path"
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018  (raises on a malformed port)
+    except ValueError:
+        return f"navigate url {url!r} does not parse"
     if parts.scheme != "https":
         return f"navigate url {url!r} is not https"
     host = (parts.hostname or "").lower()
-    if parts.username or parts.password or parts.port:
+    if "@" in parts.netloc or "%" in parts.netloc or parts.port:
         return f"navigate url {url!r} carries credentials or a port"
     if not any(host == d or host.endswith("." + d) for d in [domain, *aliases]):
         return f"navigate url {url!r} leaves {domain}"
     return None
 
 
-def check_step(i, step, domain, aliases):
+def one_of(v, allowed):
+    """v is a string in allowed (a list or dict value is reported, never hashed)."""
+    return isinstance(v, str) and v in allowed
+
+
+def text(v):
+    """A non-empty single-line string."""
+    return isinstance(v, str) and v.strip() != "" and "\n" not in v and "\r" not in v
+
+
+def check_step(i, step, domain, aliases, declared=None):
+    declared = declared or {}
     out = []
     where = f"steps[{i}]"
     if not isinstance(step, dict):
@@ -134,7 +169,7 @@ def check_step(i, step, domain, aliases):
     for k in step.keys() - STEP_KEYS:
         out.append(f"{where} has unknown key {k!r}")
     tool = step.get("tool")
-    if tool not in TOOLS:
+    if not one_of(tool, TOOLS):
         out.append(f"{where} tool {tool!r} is not a BrowserOS recipe tool")
     args = step.get("args", {})
     if not isinstance(args, dict):
@@ -148,20 +183,39 @@ def check_step(i, step, domain, aliases):
         else:
             for k in target.keys() - TARGET_KEYS:
                 out.append(f"{where} target has unknown key {k!r}")
-            if not isinstance(target.get("role"), str) or not target.get("role"):
+            if not text(target.get("role")):
                 out.append(f"{where} target has no role")
+            if "name" in target and not text(target["name"]):
+                out.append(f"{where} target name {target['name']!r} is not a one-line string")
+            if "nth" in target:
+                nth, m = target["nth"], WHOLE.match(str(target["nth"]))
+                if isinstance(nth, bool) or not (
+                    (isinstance(nth, int) and nth >= 1)
+                    or (isinstance(nth, str) and m and declared.get(m.group(1)) == "int")
+                ):
+                    out.append(f"{where} target nth {nth!r} is not an int >= 1 or an int arg")
     if tool == "act":
         kind = args.get("kind")
-        if kind in TARGETED and target is None:
+        if one_of(kind, TARGETED) and target is None:
             out.append(f"{where} act {kind} has no target")
-        elif kind in UNTARGETED and target is not None:
+        elif one_of(kind, UNTARGETED) and target is not None:
             out.append(f"{where} act {kind} takes no target")
-        elif kind not in TARGETED | UNTARGETED:
+        elif not one_of(kind, TARGETED | UNTARGETED):
             out.append(f"{where} act kind {kind!r} is not allowed in a recipe")
-        if kind == "press" and not args.get("key"):
+        if kind == "press" and not text(args.get("key")):
             out.append(f"{where} act press has no key")
-    if tool == "wait" and args.get("for") not in ("text", "selector"):
-        out.append(f"{where} wait is for {args.get('for')!r}: a fixed sleep (wait for text or selector)")
+    if tool == "wait":
+        if not one_of(args.get("for"), ("text", "selector")):
+            out.append(f"{where} wait is for {args.get('for')!r}: a fixed sleep (wait for text or selector)")
+        elif not text(args.get("value")):
+            out.append(f"{where} wait has no value to wait for")
+    if tool == "read" and not one_of(args.get("format", "markdown"), READ_FORMATS):
+        out.append(f"{where} read format {args.get('format')!r} is not markdown, text or links")
+    if tool == "grep":
+        if not one_of(args.get("over", "ax"), GREP_OVER):
+            out.append(f"{where} grep over {args.get('over')!r} is not ax or content")
+        if not text(args.get("pattern")):
+            out.append(f"{where} grep has no pattern")
     if tool == "navigate":
         why = check_url(args.get("url"), domain, aliases)
         if why:
@@ -216,7 +270,7 @@ def check_doc(doc, path, aliases=()):
             continue
         for k in spec.keys() - ARG_KEYS:
             out.append(f"arg {a} has unknown key {k!r}")
-        ty = ARG_TYPES.get(spec.get("type"))
+        ty = ARG_TYPES.get(spec["type"]) if isinstance(spec.get("type"), str) else None
         if ty is None:
             out.append(f"arg {a} type {spec.get('type')!r} is not string, int or bool")
         elif "default" in spec and not (
@@ -234,12 +288,13 @@ def check_doc(doc, path, aliases=()):
         out.append("steps is not a non-empty list")
         steps = []
     for i, step in enumerate(steps):
-        out += check_step(i, step, domain or "", aliases)
+        out += check_step(i, step, domain or "", aliases, declared)
 
     expects = doc.get("expects")
     if expects is not None:
-        if not isinstance(expects, dict) or not expects or expects.keys() - EXPECT_KEYS:
-            out.append(f"expects {expects!r} is not {{text|selector: ...}}")
+        if (not isinstance(expects, dict) or not expects or expects.keys() - EXPECT_KEYS
+                or not all(text(v) for v in expects.values())):
+            out.append(f"expects {expects!r} is not {{text|selector: <one-line string>}}")
 
     used = set()
     body = {"steps": steps, "expects": expects}
@@ -250,9 +305,13 @@ def check_doc(doc, path, aliases=()):
             used.add(ph)
         if RAW_REF.search(s):
             out.append(f"raw ref {s!r} at {'.'.join(kpath)}")
+    # @vault anywhere in the file (arg defaults, description, match included) except as the
+    # whole act text/value of a step.
+    for kpath, s in strings(doc):
         for key in VAULT.findall(s):
             in_act_text = (len(kpath) == 4 and kpath[0] == "steps" and kpath[2] == "args"
                            and kpath[3] in ("text", "value")
+                           and isinstance(steps[int(kpath[1])], dict)
                            and steps[int(kpath[1])].get("tool") == "act")
             if not in_act_text:
                 out.append(f"@vault at {'.'.join(kpath)} (only act text/value may use it)")
@@ -274,7 +333,7 @@ def check_doc(doc, path, aliases=()):
             continue
         t, a = step.get("target") or {}, step.get("args") or {}
         if (isinstance(t, dict) and SECRET_WORD.search(str(t.get("name", "")))
-                and isinstance(a, dict) and a.get("kind") in ("fill", "type")):
+                and isinstance(a, dict) and one_of(a.get("kind"), ("fill", "type"))):
             v = str(a.get("value", a.get("text", "")))
             if not VAULT.fullmatch(v):
                 out.append(f"steps[{i}] types into {t.get('name')!r} without @vault(key)")
@@ -289,7 +348,8 @@ def check_file(path):
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as e:
         return [f"YAML: {e}"]
-    return check_doc(doc, path, site_aliases(path.parent))
+    aliases, alias_problems = site_aliases(path.parent)
+    return alias_problems + check_doc(doc, path, aliases)
 
 
 def recipes(root=ROOT / "tools"):
