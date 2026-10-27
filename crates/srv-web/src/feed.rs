@@ -14,6 +14,7 @@ use crate::http::{self, host_of};
 use crate::{escape, fetch, html, opt_usize, req_str, Web};
 use async_trait::async_trait;
 use harness_core::{Class, Classified, ToolCtx, ToolError, ToolHandler, ToolOutput, ToolSpec};
+use reqwest::Url;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -109,7 +110,7 @@ impl ToolHandler for Feed {
         }
         let ok = (200..300).contains(&body.status);
         let parsed = if ok {
-            parse_with(&body.bytes, body.charset.as_deref())
+            parse_with(&body.bytes, body.charset.as_deref(), Some(&body.url))
         } else {
             None
         };
@@ -130,11 +131,7 @@ impl ToolHandler for Feed {
                 "feed: {} did not answer with RSS, Atom, JSON Feed or iCal ({}); use \
                  fetch(url) to read web pages",
                 host_of(&body.url),
-                if body.mime.is_empty() {
-                    "no content type".to_string()
-                } else {
-                    escape::name(&body.mime, 80)
-                }
+                http::shown_mime(&body.mime)
             )));
         };
         let total = parsed.items.len();
@@ -163,13 +160,23 @@ impl ToolHandler for Feed {
 
 /// Parses a feed body of any supported kind; `None` when it is none of them.
 pub fn parse(bytes: &[u8]) -> Option<Parsed> {
-    parse_with(bytes, None)
+    parse_with(bytes, None, None)
 }
 
-/// [`parse`] with the response's `charset`. The iCal check runs on the decoded text (a BOM
-/// or the charset honoured, so a UTF-16 calendar is one); XML and JSON feeds are parsed from
-/// the bytes, whose own encoding declaration feed-rs reads.
-pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> {
+/// [`parse`] with the response's `charset` and the feed's own URL `base` (after redirects).
+/// The iCal check runs on the decoded text (a BOM or the charset honoured, so a UTF-16
+/// calendar is one); XML and JSON feeds are parsed from the bytes, whose own encoding
+/// declaration feed-rs reads.
+///
+/// D-513: item links are resolved against `xml:base` (feed-rs) and then against `base`, so
+/// a relative link (`/posts/1`, `item.html`) reaches the model as an absolute URL instead of
+/// being dropped; then [`http::clean_url`] as before. Without a base a relative link is
+/// still dropped.
+pub(crate) fn parse_with(
+    bytes: &[u8],
+    charset: Option<&str>,
+    base: Option<&Url>,
+) -> Option<Parsed> {
     let text = http::decode(bytes, charset, false);
     let start = text.trim_start_matches('\u{feff}').trim_start();
     if start
@@ -177,9 +184,13 @@ pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> 
         .get(..15)
         .is_some_and(|h| h.eq_ignore_ascii_case(b"BEGIN:VCALENDAR"))
     {
-        return Some(ical::parse(start));
+        return Some(ical::parse_at(start, base));
     }
-    let feed = feed_rs::parser::parse(bytes).ok()?;
+    let feed = feed_rs::parser::Builder::new()
+        .base_uri(base.map(Url::as_str))
+        .build()
+        .parse(bytes)
+        .ok()?;
     let kind = match feed.feed_type {
         feed_rs::model::FeedType::Atom => "atom",
         feed_rs::model::FeedType::JSON => "json",
@@ -208,7 +219,7 @@ pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> 
                     .iter()
                     .find(|l| l.rel.as_deref().is_none_or(|r| r == "alternate"))
                     .or_else(|| e.links.first())
-                    .and_then(|l| http::clean_url(&l.href))
+                    .and_then(|l| link_url(&l.href, base))
                     .unwrap_or_default(),
                 date: e
                     .published
@@ -232,6 +243,16 @@ pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> 
     })
 }
 
+/// A feed link as the model may see it: resolved against `base` when relative (D-513), then
+/// [`http::clean_url`].
+fn link_url(href: &str, base: Option<&Url>) -> Option<String> {
+    let href = href.trim();
+    match base.and_then(|b| b.join(href).ok()) {
+        Some(abs) => http::clean_url(abs.as_str()),
+        None => http::clean_url(href),
+    }
+}
+
 /// Text of an HTML fragment (feed summaries and calendar fields are often HTML), collapsed
 /// ([`html::fragment_text`]: only text nodes, so no markup reaches the model).
 fn html_to_text(s: &str) -> String {
@@ -242,10 +263,16 @@ fn html_to_text(s: &str) -> String {
 /// Every text field goes through [`html_to_text`]: Google and Outlook calendars put `<br>`,
 /// `<a href>` and `<b>` in descriptions.
 pub mod ical {
-    use super::{escape, html_to_text, Item, Parsed, SUMMARY_MAX, TITLE_MAX};
+    use super::{escape, html_to_text, link_url, Item, Parsed, SUMMARY_MAX, TITLE_MAX};
+    use reqwest::Url;
 
     /// Parses a VCALENDAR text. Unknown properties and components are ignored.
     pub fn parse(text: &str) -> Parsed {
+        parse_at(text, None)
+    }
+
+    /// [`parse`] with the calendar's URL: a relative event `URL` resolves against it (D-513).
+    pub(crate) fn parse_at(text: &str, base: Option<&Url>) -> Parsed {
         let lines = unfold(text);
         let mut title = String::new();
         let mut items = Vec::new();
@@ -262,7 +289,7 @@ pub mod ical {
                 ("BEGIN", v) if !v.eq_ignore_ascii_case("VCALENDAR") => depth_other += 1,
                 ("END", v) if v.eq_ignore_ascii_case("VEVENT") && depth_other == 0 => {
                     if let Some(e) = cur.take() {
-                        items.push(e.item());
+                        items.push(e.item(base));
                     }
                 }
                 ("END", v) if !v.eq_ignore_ascii_case("VCALENDAR") => {
@@ -301,7 +328,7 @@ pub mod ical {
     }
 
     impl Event {
-        fn item(self) -> Item {
+        fn item(self, base: Option<&Url>) -> Item {
             let mut summary = self.description;
             if !self.location.trim().is_empty() {
                 summary = if summary.trim().is_empty() {
@@ -310,7 +337,7 @@ pub mod ical {
                     format!("at {}. {summary}", self.location)
                 };
             }
-            let url = crate::http::clean_url(&self.url).unwrap_or_default();
+            let url = link_url(&self.url, base).unwrap_or_default();
             Item {
                 title: escape::name(&self.summary, TITLE_MAX),
                 url,

@@ -262,7 +262,6 @@ async fn api_echoed_vault_value_is_scrubbed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs T-05d base64 scrub (D-77)"]
 async fn api_base64_echoed_vault_value_is_scrubbed() {
     let (_server, e) = github().await;
     let canary = canary();

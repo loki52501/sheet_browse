@@ -185,13 +185,8 @@ impl Fetch {
             )));
         }
         let mime = body.mime.clone();
-        let shown_type = || {
-            if mime.is_empty() {
-                "no content type".to_string()
-            } else {
-                escape::name(&mime, 80)
-            }
-        };
+        // D-511: the header is server text; only a plain media type is shown as written.
+        let shown_type = || http::shown_mime(&mime);
         if is_json_type(&mime) {
             return Err(ToolError::Failed(format!(
                 "fetch: {final_host} answered with JSON ({}); use api(url) for JSON",

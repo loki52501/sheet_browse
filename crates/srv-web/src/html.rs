@@ -206,7 +206,13 @@ pub fn parse(html: &str, url: &Url) -> Doc {
 /// blank line first, so plain text keeps its paragraphs (adding tags cannot let markup
 /// through: the parser still reads all of it). Without a `<title>`, the first block names
 /// the page.
+///
+/// D-512: before the walk, [`plain_source`] keeps angle-bracket text that is not markup
+/// (`Vec<String>`, `#include <stdio.h>`, `<T>`): it comes out escaped as `&lt;...&gt;`
+/// instead of being read as an unknown element and lost. Markup (an HTML element name, a
+/// custom element, a tag with attributes, a comment, a doctype) is still parsed and dropped.
 pub fn parse_text(text: &str, url: &Url) -> Doc {
+    let text = plain_source(text);
     let mut marked = String::with_capacity(text.len() + 64);
     let mut blank = false;
     for line in text.split('\n') {
@@ -240,6 +246,124 @@ pub fn parse_text(text: &str, url: &Url) -> Doc {
 
 /// Title of a page without a `<title>`: the start of its first block.
 const TEXT_TITLE_MAX: usize = 100;
+
+/// Element names the HTML, SVG and MathML parsers know (lowercase). In a text/plain body a
+/// tag with one of these names, or a custom element name (with a `-`), is markup.
+#[rustfmt::skip]
+const KNOWN_ELEMENTS: &[&str] = &[
+    "a", "abbr", "acronym", "address", "applet", "area", "article", "aside", "audio", "b",
+    "base", "basefont", "bdi", "bdo", "bgsound", "big", "blink", "blockquote", "body", "br",
+    "button", "canvas", "caption", "center", "cite", "code", "col", "colgroup", "data",
+    "datalist", "dd", "del", "details", "dfn", "dialog", "dir", "div", "dl", "dt", "em",
+    "embed", "fieldset", "figcaption", "figure", "font", "footer", "form", "frame", "frameset",
+    "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe",
+    "image", "img", "input", "ins", "isindex", "kbd", "keygen", "label", "legend", "li", "link",
+    "listing", "main", "map", "mark", "marquee", "menu", "menuitem", "meta", "meter", "nav",
+    "nobr", "noembed", "noframes", "noscript", "object", "ol", "optgroup", "option", "output",
+    "p", "param", "picture", "plaintext", "portal", "pre", "progress", "q", "rb", "rp", "rt",
+    "rtc", "ruby", "s", "samp", "script", "search", "section", "select", "selectedcontent",
+    "slot", "small", "source", "spacer", "span", "strike", "strong", "style", "sub", "summary",
+    "sup", "table", "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "time",
+    "title", "tr", "track", "tt", "u", "ul", "var", "video", "wbr", "xmp",
+    // SVG
+    "svg", "g", "path", "circle", "rect", "line", "polyline", "polygon", "ellipse", "text",
+    "tspan", "textpath", "defs", "use", "symbol", "lineargradient", "radialgradient", "stop",
+    "clippath", "mask", "pattern", "filter", "foreignobject", "desc", "marker", "animate",
+    // MathML
+    "math", "mi", "mo", "mn", "ms", "mtext", "mrow", "mfrac", "msup", "msub", "msubsup",
+    "msqrt", "mroot", "mtable", "mtr", "mtd", "semantics", "annotation", "annotation-xml",
+];
+
+/// Longest `<...>` run [`plain_source`] keeps as text.
+const PLAIN_BRACKET_MAX: usize = 200;
+
+/// D-512: a body walked as text (text/plain, or no HTML type) as HTML source in which
+/// angle-bracket text that is not markup survives. Such a `<` becomes `&amp;lt;`, and the
+/// `>` that closes it on the same line `&amp;gt;`, so the walk shows `&lt;String&gt;`: the
+/// text is kept, escaped, and no tag-shaped text from it reaches the model (rule 5).
+/// Entities elsewhere decode as before (a body with no type may be HTML). Markup is left for
+/// the parser to drop: a `<` before `!`, `?` or a non-letter, a known element name
+/// ([`KNOWN_ELEMENTS`]), a custom element name (with a `-`), and a tag with `=` or quotes
+/// (attributes). A comment is copied as written, so its end is not touched.
+pub(crate) fn plain_source(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 8);
+    let mut i = 0;
+    let mut opened = Vec::new();
+    while let Some(off) = text[i..].find('<') {
+        let at = i + off;
+        out.push_str(&text[i..at]);
+        let rest = &text[at..];
+        if let Some(body) = rest.strip_prefix("<!--") {
+            let end = body.find("-->").map_or(rest.len(), |e| 4 + e + 3);
+            out.push_str(&rest[..end]);
+            i = at + end;
+            continue;
+        }
+        match plain_bracket(rest, &mut opened) {
+            Some(close) => {
+                // `rest[..close]` is `<...` without markup; `close` is its `>` (or the end
+                // of what is kept on this line when there is none).
+                out.push_str("&amp;lt;");
+                out.push_str(&rest[1..close]);
+                if rest[close..].starts_with('>') {
+                    out.push_str("&amp;gt;");
+                    i = at + close + 1;
+                } else {
+                    i = at + close;
+                }
+            }
+            None => {
+                out.push('<');
+                i = at + 1;
+            }
+        }
+    }
+    out.push_str(&text[i..]);
+    out
+}
+
+/// For `s` starting with `<`: `Some(end)` when it starts angle-bracket text that is not
+/// markup, `end` being the byte offset of its closing `>` on the same line, or of the end of
+/// the tag name when there is none; `None` when it is markup or not a tag at all. `opened`
+/// holds the unknown names already opened as markup (a start tag with attributes): their end
+/// tags are markup too.
+fn plain_bracket(s: &str, opened: &mut Vec<String>) -> Option<usize> {
+    let after = s.strip_prefix('<')?;
+    let name_from = usize::from(after.starts_with('/')) + 1;
+    let first = s[name_from..].chars().next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    let name_len = s[name_from..]
+        .find(|c: char| c.is_whitespace() || c == '/' || c == '>' || c == '<')
+        .unwrap_or(s.len() - name_from);
+    let name = s[name_from..name_from + name_len].to_ascii_lowercase();
+    let end_tag = name_from == 2;
+    if name.contains('-')
+        || KNOWN_ELEMENTS.contains(&name.as_str())
+        || (end_tag && opened.contains(&name))
+    {
+        return None;
+    }
+    let line_end = s.find(['\n', '\r']).unwrap_or(s.len());
+    let close = s[1..line_end]
+        .find(['>', '<'])
+        .map(|c| c + 1)
+        .filter(|&c| s[c..].starts_with('>') && c <= PLAIN_BRACKET_MAX);
+    let end = match close {
+        Some(c) => c,
+        // No `>` on the line: only the tag name is escaped; the parser would otherwise read
+        // the rest of the line (and beyond) as attributes.
+        None => name_from + name_len,
+    };
+    if s[1..end].contains(['=', '"', '\'']) {
+        if !end_tag && opened.len() < 64 && !opened.contains(&name) {
+            opened.push(name);
+        }
+        return None;
+    }
+    Some(end)
+}
 
 /// The text of an HTML fragment (a feed summary, an iCal field, a `<title>` or `<textarea>`
 /// that holds markup), whitespace collapsed. Only text nodes outside [`SKIP_TAGS`],
@@ -1647,5 +1771,54 @@ mod tests {
             !raw.contains("script") && !raw.contains("onclick") && !raw.contains("pw-not-real")
         );
         assert!(raw.chars().count() <= RAW_MAX_CHARS);
+    }
+
+    /// The text of every block of a text/plain walk, one line per block.
+    fn plain_blocks(text: &str) -> String {
+        let doc = parse_text(text, &Url::parse("https://example.com/f.txt").unwrap());
+        doc.blocks
+            .iter()
+            .map(|b| b.spans.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// review-T-12 should-fix, D-512: angle-bracket text in a text/plain body is kept,
+    /// escaped; markup in it is still dropped.
+    #[test]
+    fn plain_text_keeps_angle_bracket_text_escaped() {
+        let t = plain_blocks(
+            "fn f() -> Vec<String> { todo!() }\n\n#include <stdio.h>\n\nHashMap<K, V> and \
+             </T> and x<y then z > 3\n\nmail <a.b@c.de> at <https://x.org/a>",
+        );
+        for want in [
+            "Vec&lt;String&gt; {",
+            "#include &lt;stdio.h&gt;",
+            "HashMap&lt;K, V&gt; and &lt;/T&gt; and x&lt;y then z &gt; 3",
+            "mail &lt;a.b@c.de&gt; at &lt;https://x.org/a&gt;",
+        ] {
+            assert!(t.contains(want), "missing {want:?} in {t:?}");
+        }
+        assert!(!crate::http::has_tag(&t), "{t}");
+        // Markup is still markup: known names, custom elements, attributes, comments.
+        let t = plain_blocks(
+            "<p>Kept</p><script>stealCookies()</script><my-el>Mine</my-el>\
+             <foo bar=\"1\">Attr</foo><!-- <T> hidden -->After <b>bold</b>",
+        );
+        assert!(
+            t.contains("Kept") && t.contains("Mine") && t.contains("Attr"),
+            "{t}"
+        );
+        assert!(t.contains("After bold"), "{t}");
+        for bad in ["stealCookies", "<", "&lt;", "hidden"] {
+            assert!(!t.contains(bad), "{bad} in {t:?}");
+        }
+        assert_eq!(
+            plain_source("a < b, 3<4, <!x>, <?y>"),
+            "a < b, 3<4, <!x>, <?y>"
+        );
+        assert_eq!(plain_source("<String>"), "&amp;lt;String&amp;gt;");
+        assert_eq!(plain_source("<P>x</P>"), "<P>x</P>");
+        assert_eq!(plain_source("<é>"), "<é>");
     }
 }

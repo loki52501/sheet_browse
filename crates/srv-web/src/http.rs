@@ -8,6 +8,7 @@
 //! host, so nothing a caller put in a URL or a header can come back in an error.
 
 use crate::config::Config;
+use hyper_util::client::proxy::matcher::Matcher;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{HeaderMap, ACCEPT, LOCATION};
 use reqwest::redirect::Policy;
@@ -26,32 +27,116 @@ const MAX_REDIRECTS: usize = 10;
 const MAX_API_REDIRECTS: usize = 5;
 
 /// The clients one server process uses.
+///
+/// B-590, D-509: a proxy (`HTTP(S)_PROXY`, `ALL_PROXY`, the Windows proxy settings) resolves
+/// the target itself, so [`PublicOnly`] would never see the address, and a URL written as
+/// `localhost` would reach the proxy's localhost. So the clients that may reach this machine
+/// or the user's network never use a proxy, and a page request goes through the system proxy
+/// only when the proxy applies to its URL and [`PublicOnly`] passes the name here first
+/// ([`Clients::page_for`]); otherwise it goes direct, where [`PublicOnly`] decides at the
+/// connect. An api request to a loopback or private address (the only place a `@vault`
+/// header may travel over plain http) never goes through a proxy ([`Clients::api_for`]).
 #[derive(Clone)]
 pub(crate) struct Clients {
-    /// fetch and feed of a URL that is not written as a private address: no automatic
-    /// redirects ([`get_page`] follows them), and a DNS resolver that drops loopback,
-    /// private and link-local answers ([`PublicOnly`]), so a public name can never connect
-    /// to the user's machine or network, whatever it resolves to and however often.
-    pub page: reqwest::Client,
+    /// fetch and feed of a URL that is not written as a private address, sent direct: no
+    /// proxy, no automatic redirects ([`get_page`] follows them), and a DNS resolver that
+    /// drops loopback, private and link-local answers ([`PublicOnly`]), so a public name can
+    /// never connect to the user's machine or network, whatever it resolves to and however
+    /// often.
+    page: reqwest::Client,
+    /// The same requests through the system proxy, for a URL the proxy applies to whose
+    /// name [`PublicOnly`] passed ([`Clients::page_for`]). The system resolver, so a proxy
+    /// named in the settings resolves (its address is the user's choice).
+    page_proxy: reqwest::Client,
     /// fetch and feed of a URL written as a private address or `localhost` (the user asked
     /// for their own machine), and search (the SearXNG URL is operator config, D-31): no
-    /// automatic redirects, the system resolver.
-    pub page_local: reqwest::Client,
+    /// proxy, no automatic redirects, the system resolver.
+    page_local: reqwest::Client,
+    /// The resolver [`Clients::page`] connects through, shared with the pre-check of a
+    /// proxied page request.
+    resolver: Arc<PublicOnly>,
+    /// The proxy settings, read once when the clients are built (as reqwest reads them for
+    /// the proxied clients), to tell whether a URL goes through a proxy.
+    proxy: Arc<Matcher>,
     /// api without a vault header, and page.api: redirects only within the same host and
-    /// never from https down to http.
-    pub api: reqwest::Client,
+    /// never from https down to http. The system proxy applies.
+    api: reqwest::Client,
     /// api with a resolved `@vault` header: redirects only to the same scheme, host and
     /// port, so the header never leaves the origin it was meant for, in clear or otherwise
     /// (reqwest strips `Authorization` on a host change only, and never a custom header).
-    pub api_vault: reqwest::Client,
+    /// The system proxy applies: https goes as a CONNECT tunnel, the header inside TLS.
+    api_vault: reqwest::Client,
+    /// [`Clients::api`] and [`Clients::api_vault`] without a proxy, for a URL written as a
+    /// private address or one that stays on this machine ([`Clients::api_for`]).
+    api_local: reqwest::Client,
+    api_vault_local: reqwest::Client,
+}
+
+impl Clients {
+    /// The api client for `url`, with or without a vault header (`vault`): never a proxy for
+    /// a private or loopback target (`overrides` are the config's DNS overrides, for
+    /// [`is_loopback`]).
+    pub(crate) fn api_for(
+        &self,
+        url: &Url,
+        vault: bool,
+        overrides: &[(String, SocketAddr)],
+    ) -> &reqwest::Client {
+        let local = written_private_or_local(url) || is_loopback(url, overrides);
+        match (vault, local) {
+            (true, true) => &self.api_vault_local,
+            (true, false) => &self.api_vault,
+            (false, true) => &self.api_local,
+            (false, false) => &self.api,
+        }
+    }
+
+    /// Does the system proxy apply to `url`?
+    fn proxied(&self, url: &Url) -> bool {
+        url.as_str()
+            .parse::<http::Uri>()
+            .is_ok_and(|u| self.proxy.intercept(&u).is_some())
+    }
+
+    /// The client for one hop of a page request ([`get_page`]). A hop written as a private
+    /// address or a localhost name is never proxied. With `allow_private` any other hop
+    /// follows the proxy settings. Without it a hop goes through the proxy only when the
+    /// proxy applies and [`PublicOnly`] passes its name here (a DNS override counts as
+    /// public, D-507); otherwise it goes direct, where [`PublicOnly`] decides at the connect
+    /// (a private answer is refused, a name with no answer fails to connect). So a proxy
+    /// never fetches a name that resolves to the user's machine or network here.
+    async fn page_for(&self, cfg: &Config, url: &Url, allow_private: bool) -> &reqwest::Client {
+        if written_private_or_local(url) || !self.proxied(url) {
+            return if allow_private {
+                &self.page_local
+            } else {
+                &self.page
+            };
+        }
+        if allow_private {
+            return &self.page_proxy;
+        }
+        let host = host_of(url);
+        let host = host.trim_end_matches('.');
+        if cfg.resolve.iter().any(|(h, _)| h == host) {
+            return &self.page_proxy;
+        }
+        match self.resolver.public(host).await {
+            Ok(addrs) if !addrs.is_empty() => &self.page_proxy,
+            _ => &self.page,
+        }
+    }
 }
 
 pub(crate) fn build(cfg: &Config) -> Result<Clients, String> {
-    build_with(cfg, PublicOnly::default())
+    build_with(cfg, PublicOnly::default(), None)
 }
 
-fn build_with(cfg: &Config, resolver: PublicOnly) -> Result<Clients, String> {
-    let base = || {
+/// `proxy`: `None` reads the system proxy settings (reqwest reads the same ones for the
+/// proxied clients); a test passes one proxy URL for every proxied client.
+fn build_with(cfg: &Config, resolver: PublicOnly, proxy: Option<&str>) -> Result<Clients, String> {
+    let fail = |_| "could not start the HTTP client (TLS backend)".to_string();
+    let base = |proxied: bool| -> Result<reqwest::ClientBuilder, String> {
         let mut b = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(cfg.timeout)
@@ -61,15 +146,29 @@ fn build_with(cfg: &Config, resolver: PublicOnly) -> Result<Clients, String> {
         for (host, addr) in &cfg.resolve {
             b = b.resolve(host, *addr);
         }
-        b
+        if !proxied {
+            b = b.no_proxy();
+        } else if let Some(p) = proxy {
+            let p = reqwest::Proxy::all(p).map_err(|_| "the test proxy URL is not valid")?;
+            b = b.proxy(p);
+        }
+        Ok(b)
     };
-    let fail = |_| "could not start the HTTP client (TLS backend)".to_string();
-    let page = base()
+    let matcher = match proxy {
+        None => Matcher::from_system(),
+        Some(p) => Matcher::builder().all(p.to_string()).build(),
+    };
+    let resolver = Arc::new(resolver);
+    let page = base(false)?
         .redirect(Policy::none())
-        .dns_resolver(Arc::new(resolver))
+        .dns_resolver(Arc::new(SharedPublicOnly(resolver.clone())))
         .build()
         .map_err(fail)?;
-    let page_local = base().redirect(Policy::none()).build().map_err(fail)?;
+    let page_proxy = base(true)?.redirect(Policy::none()).build().map_err(fail)?;
+    let page_local = base(false)?
+        .redirect(Policy::none())
+        .build()
+        .map_err(fail)?;
     let api_policy = |strict: bool| {
         Policy::custom(move |attempt| {
             let ok = attempt
@@ -85,13 +184,22 @@ fn build_with(cfg: &Config, resolver: PublicOnly) -> Result<Clients, String> {
             }
         })
     };
-    let api = base().redirect(api_policy(false)).build().map_err(fail)?;
-    let api_vault = base().redirect(api_policy(true)).build().map_err(fail)?;
+    let api_client = |proxied: bool, strict: bool| -> Result<reqwest::Client, String> {
+        base(proxied)?
+            .redirect(api_policy(strict))
+            .build()
+            .map_err(fail)
+    };
     Ok(Clients {
         page,
+        page_proxy,
         page_local,
-        api,
-        api_vault,
+        resolver,
+        proxy: Arc::new(matcher),
+        api: api_client(true, false)?,
+        api_vault: api_client(true, true)?,
+        api_local: api_client(false, false)?,
+        api_vault_local: api_client(false, true)?,
     })
 }
 
@@ -121,30 +229,46 @@ pub(crate) struct PublicOnly {
     fixed: Vec<(String, Vec<IpAddr>)>,
 }
 
-impl Resolve for PublicOnly {
-    fn resolve(&self, name: Name) -> Resolving {
-        let host = name.as_str().trim_end_matches('.').to_ascii_lowercase();
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+impl PublicOnly {
+    /// The public addresses of `host` (lowercase, no trailing dot): [`PrivateAnswer`] when
+    /// every answer is private, an empty list when there is no answer.
+    async fn public(&self, host: &str) -> Result<Vec<SocketAddr>, BoxError> {
         let fixed = self
             .fixed
             .iter()
-            .find(|(h, _)| *h == host)
+            .find(|(h, _)| h == host)
             .map(|(_, ips)| ips.clone());
+        let ips: Vec<IpAddr> = match fixed {
+            Some(ips) => ips,
+            None => tokio::net::lookup_host((host, 0))
+                .await?
+                .map(|a| a.ip())
+                .collect(),
+        };
+        let public: Vec<SocketAddr> = ips
+            .iter()
+            .filter(|ip| !private_ip(**ip))
+            .map(|ip| SocketAddr::new(*ip, 0))
+            .collect();
+        if public.is_empty() && !ips.is_empty() {
+            return Err(Box::new(PrivateAnswer));
+        }
+        Ok(public)
+    }
+}
+
+/// [`PublicOnly`] as the direct page client's resolver, shared with the pre-check of a
+/// proxied page request ([`Clients::page_for`]), so both ask the same resolver.
+struct SharedPublicOnly(Arc<PublicOnly>);
+
+impl Resolve for SharedPublicOnly {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().trim_end_matches('.').to_ascii_lowercase();
+        let resolver = self.0.clone();
         Box::pin(async move {
-            let ips: Vec<IpAddr> = match fixed {
-                Some(ips) => ips,
-                None => tokio::net::lookup_host((host.as_str(), 0))
-                    .await?
-                    .map(|a| a.ip())
-                    .collect(),
-            };
-            let public: Vec<SocketAddr> = ips
-                .iter()
-                .filter(|ip| !private_ip(**ip))
-                .map(|ip| SocketAddr::new(*ip, 0))
-                .collect();
-            if public.is_empty() && !ips.is_empty() {
-                return Err(Box::new(PrivateAnswer) as Box<dyn std::error::Error + Send + Sync>);
-            }
+            let public = resolver.public(&host).await?;
             Ok(Box::new(public.into_iter()) as Addrs)
         })
     }
@@ -237,13 +361,8 @@ pub(crate) async fn get_page(
     accept: &str,
     allow_private: bool,
 ) -> Result<Body, HttpError> {
-    let client = if allow_private {
-        &clients.page_local
-    } else {
-        &clients.page
-    };
     let whole = async {
-        let resp = follow(client, start, accept, allow_private).await?;
+        let resp = follow(cfg, clients, start, accept, allow_private).await?;
         read_capped(resp, cfg.max_bytes).await
     };
     tokio::time::timeout(cfg.timeout, whole)
@@ -252,7 +371,8 @@ pub(crate) async fn get_page(
 }
 
 async fn follow(
-    client: &reqwest::Client,
+    cfg: &Config,
+    clients: &Clients,
     start: &Url,
     accept: &str,
     allow_private: bool,
@@ -264,6 +384,7 @@ async fn follow(
         if !allow_private && written_private_or_local(&url) {
             return Err(HttpError::Private { from, to: host });
         }
+        let client = clients.page_for(cfg, &url, allow_private).await;
         let resp = client
             .get(url.clone())
             .header(ACCEPT, accept)
@@ -507,6 +628,28 @@ pub(crate) fn content_type(headers: &HeaderMap) -> (String, Option<String>) {
             .then(|| val.trim().trim_matches('"').to_string())
     });
     (mime, charset)
+}
+
+/// Longest content type shown as written.
+const MIME_SHOWN_MAX: usize = 80;
+
+/// The response's content type as the model may see it (D-511): `mime` itself when it is a
+/// plain media type (`type/subtype`, each made of RFC 6838 restricted-name characters, at
+/// most 80 characters in all), `no content type` when there is none, else `unusual content
+/// type`. A header is server text: nothing tag-, link- or fence-shaped from it is shown.
+pub(crate) fn shown_mime(mime: &str) -> String {
+    if mime.is_empty() {
+        return "no content type".into();
+    }
+    let name = |s: &str| {
+        s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+            && s.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(&c))
+    };
+    match mime.split_once('/') {
+        Some((t, sub)) if mime.len() <= MIME_SHOWN_MAX && name(t) && name(sub) => mime.to_string(),
+        _ => "unusual content type".into(),
+    }
 }
 
 /// Decodes `bytes`: a BOM first (UTF-8, UTF-16LE, UTF-16BE), else the header charset, else
@@ -753,7 +896,7 @@ mod tests {
             ],
         };
         let cfg = cfg_short();
-        let clients = build_with(&cfg, resolver).unwrap();
+        let clients = build_with(&cfg, resolver, None).unwrap();
         let port = addr.port();
         for host in ["rebind.test", "mixed.test"] {
             let url = Url::parse(&format!("http://{host}:{port}/")).unwrap();
@@ -785,6 +928,134 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(body.bytes, b"ok");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// A listener on 127.0.0.1 that records the first line of each request and answers
+    /// 200 `px` (a forward proxy's view: `GET http://host/path`).
+    async fn recording_proxy() -> (SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let s = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut tmp = [0u8; 4096];
+                let n = sock.read(&mut tmp).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&tmp[..n]).into_owned();
+                s.lock()
+                    .unwrap()
+                    .push(head.lines().next().unwrap_or("").to_string());
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\npx")
+                    .await;
+            }
+        });
+        (addr, seen)
+    }
+
+    /// B-590, D-509: with a proxy configured, a name that resolves private is never handed
+    /// to the proxy (which would resolve and fetch it itself), a URL written as loopback
+    /// goes direct, and a public name goes through the proxy.
+    #[tokio::test]
+    async fn a_proxy_never_fetches_a_private_target() {
+        let (origin, hits) = counting_server().await;
+        let (proxy_addr, proxied) = recording_proxy().await;
+        let resolver = PublicOnly {
+            fixed: vec![
+                ("rebind.test".into(), vec!["127.0.0.1".parse().unwrap()]),
+                ("lan.test".into(), vec!["192.168.1.10".parse().unwrap()]),
+                ("nx.test".into(), vec![]),
+                ("pub.test".into(), vec!["93.184.216.34".parse().unwrap()]),
+            ],
+        };
+        let cfg = cfg_short();
+        let proxy = format!("http://{proxy_addr}");
+        let clients = build_with(&cfg, resolver, Some(&proxy)).unwrap();
+        let port = origin.port();
+        for host in ["rebind.test", "lan.test"] {
+            let url = Url::parse(&format!("http://{host}:{port}/")).unwrap();
+            let err = get_page(&cfg, &clients, &url, "*/*", false).await.err();
+            assert!(matches!(err, Some(HttpError::Private { .. })), "{host}");
+        }
+        let url = Url::parse(&format!("http://nx.test:{port}/")).unwrap();
+        let err = get_page(&cfg, &clients, &url, "*/*", false).await.err();
+        assert!(
+            matches!(err, Some(HttpError::Connect(_))),
+            "nx.test: {err:?}"
+        );
+        assert!(
+            proxied.lock().unwrap().is_empty(),
+            "a private or unresolved name went to the proxy"
+        );
+        // Written as loopback by the user: direct to this machine, never the proxy.
+        for lit in ["127.0.0.1", "localhost"] {
+            let url = Url::parse(&format!("http://{lit}:{port}/a")).unwrap();
+            let body = get_page(&cfg, &clients, &url, "*/*", true)
+                .await
+                .unwrap_or_else(|e| panic!("{lit}: {e}"));
+            assert_eq!(body.bytes, b"ok", "{lit}");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(
+            proxied.lock().unwrap().is_empty(),
+            "loopback went to the proxy"
+        );
+        // Control: a public name goes through the proxy.
+        let url = Url::parse("http://pub.test/p").unwrap();
+        let body = get_page(&cfg, &clients, &url, "*/*", false)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(body.bytes, b"px");
+        let seen = proxied.lock().unwrap().clone();
+        assert_eq!(seen, ["GET http://pub.test/p HTTP/1.1"]);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        // api: a loopback target never uses the proxy; a public one does.
+        let resp = clients
+            .api_for(
+                &Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap(),
+                true,
+                &[],
+            )
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.text().await.unwrap(), "ok");
+        let resp = clients
+            .api_for(&Url::parse("http://pub.test/q").unwrap(), true, &[])
+            .get("http://pub.test/q")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.text().await.unwrap(), "px");
+        assert_eq!(proxied.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn content_types_are_shown_only_when_plain() {
+        for ok in [
+            "text/html",
+            "application/vnd.github+json",
+            "application/atom+xml",
+            "image/svg+xml",
+        ] {
+            assert_eq!(shown_mime(ok), ok);
+        }
+        assert_eq!(shown_mime(""), "no content type");
+        for bad in [
+            "<script>alert(1)</script>",
+            "text/<b>",
+            "text/html<!--",
+            "[x](#3)/y",
+            "text/```",
+            "text",
+            "a/b/c",
+            "/x",
+            "text/ html",
+            &format!("text/{}", "a".repeat(80)),
+        ] {
+            assert_eq!(shown_mime(bad), "unusual content type", "{bad}");
+        }
     }
 
     #[tokio::test]

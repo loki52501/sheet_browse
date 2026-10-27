@@ -375,7 +375,8 @@ impl ToolHandler for SiteTool {
             .map_err(|_| ToolError::Failed(format!("{name}: the cached page has no valid URL")))?;
         let api = PageApi {
             handle: Handle::current(),
-            client: clients.api.clone(),
+            clients: clients.clone(),
+            overrides: self.web.cfg.resolve.clone(),
             domain: toolstore::registrable(&host_of(&page_url)),
             // B-560, D-565: the JSON cap, not the page cap; the bytes never reach the model.
             cap: self.web.cfg.json_max_bytes,
@@ -472,7 +473,10 @@ impl ToolHandler for SiteTool {
 /// remaining wall time (D-64). No caller headers, so no vault value can ride along.
 struct PageApi {
     handle: Handle,
-    client: reqwest::Client,
+    /// The api client is picked per URL: never a proxy for a loopback or private target
+    /// (B-590, D-509).
+    clients: http::Clients,
+    overrides: Vec<(String, std::net::SocketAddr)>,
     domain: String,
     cap: usize,
 }
@@ -487,7 +491,7 @@ impl ApiFetch for PageApi {
                 self.domain
             ));
         }
-        let client = self.client.clone();
+        let client = self.clients.api_for(&u, false, &self.overrides).clone();
         let cap = self.cap;
         let fut = async move {
             let resp = client
