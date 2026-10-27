@@ -437,6 +437,9 @@ fn read(p: impl AsRef<Path>) -> String {
 fn want_argv(first: &str) -> Vec<String> {
     let mut v = vec![first.to_owned()];
     if first == "-p" {
+        // D-144: every -p session loads no built-in tools.
+        v.push("--tools".to_owned());
+        v.push(String::new());
         v.push("--allowedTools".to_owned());
         v.extend(HARNESS_ALLOWED_TOOLS.iter().map(|s| s.to_string()));
     }

@@ -412,7 +412,7 @@ async fn a_run_scrubs_prompt_slug_row_session_input_and_answer() {
     // B-192 on the real process: -p, the harness servers allowed (D-143), then the denied
     // commands.
     let args = std::fs::read_to_string(fake_dir.join("args.txt")).unwrap();
-    let mut want = vec!["-p", "--allowedTools"];
+    let mut want = vec!["-p", "--tools", "", "--allowedTools"]; // D-144: no built-in tools
     want.extend(HARNESS_ALLOWED_TOOLS);
     want.push("--disallowedTools");
     want.extend(DISALLOWED_TOOLS);
