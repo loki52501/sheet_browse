@@ -151,7 +151,10 @@ tasks:
     step: 3
     title: "srv-cli follow-ups: Phase 1 ladder rungs 3, 5, 9 over MCP with srv-files; loopback http honours system proxy; gh alias set can map to auth (both ask); strict letter matching false positives (git log -Sconfig); HTML labelled text/plain still shown"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md, docs/08-USE-CASES-AND-TESTS.md]
-    status: todo
+    status: doing
+    owner: servers/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/servers-T15b
   - id: T-13c
     step: 2
     title: "Phase 1 ladder fixes for servers (bench/results/ladder-phase1-servers.md, 11/19 pass, rungs 3 and 9 green): api keeps its own User-Agent and refuses model-set identity headers (B-562); fs.write and csv.clean put bare file names in runs/<id>/files (B-564); tools/ashbyhq.com/list_jobs.js pages past MAX_JOBS 60 (Ashby total 66) and api/page.api caps for large JSON (B-560); fetch's description says fetching a page announces its site tools, csv.clean's says it dedupes; then re-run the ladder (bench/fixtures/ladder_session.py). Launcher preamble and report grounding are core's (B-563)."
