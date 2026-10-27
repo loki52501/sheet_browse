@@ -280,10 +280,11 @@ tasks:
   - id: T-05d
     step: follow-up
     wave: 2
-    owner: core
+    owner: core/suborch
     branch: swarm/core-T05d
     title: "D-77/B-151: scrub base64 and base64url spellings of every vault value (both alphabets, padded and unpadded, 3 alignments, trimmed edges, patterns under 8 chars skipped); tests for Basic auth and a JWT payload carrying the canary. Not a hold (D-88), but due before the Phase 1 baseline T-17 (zero vault leaks)."
-    status: todo
+    status: done
+    claimed_at: "2026-10-25"
     from: T-05
   - id: T-07b
     step: follow-up
@@ -359,6 +360,14 @@ tasks:
     title: "review-T-18 leftovers: run the Unix Pipe launch on Linux (only compiled and clippy-checked); a real-Chromium test for getFrameTree seeding and prerender activation (restored me tab with iframes, with T-22 acceptance 4); session_events channel after detach; CdpError::Closed keeps the method; sweep stale profiles/bench-* after a crash; B-601 tab titles (T-22)."
     status: todo
     from: T-18
+  - id: T-05e
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T05e
+    title: "B-152 base64 scrub limits left by T-05d (review-T-05d should-fix 2): MIME and PEM line-wrapped base64 (76 or 64 columns, a value straddling CRLF leaks whole), base64 of UTF-16LE text (PowerShell -EncodedCommand), base64 of a base64 blob. Due before the step 3 consumers that echo encoded bodies (cdp, network readers)."
+    status: todo
+    from: T-05d
   - id: T-08c
     step: follow-up
     wave: 2
