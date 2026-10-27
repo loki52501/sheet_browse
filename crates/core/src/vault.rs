@@ -16,9 +16,10 @@
 //! Scrubbing (D-102): an ASCII-case-insensitive aho-corasick automaton over every value
 //! and its encoded spellings (JSON, Rust Debug, every common percent-encoding including
 //! the browser's WHATWG URL sets, double percent-encoding, Unicode case forms, and
-//! base64 and base64url at every byte alignment, B-151; see [`spellings`]). All overlapping matches are found and the union of their spans is
-//! replaced, so two entries that overlap in the text leave no fragment behind. A match
-//! lying wholly inside an `@vault(name)` literal of an existing entry (or inside the
+//! base64 and base64url at every byte alignment, B-151; see [`spellings`]). All
+//! overlapping matches are found and the union of their spans is replaced, so two
+//! entries that overlap in the text leave no fragment behind. A match lying wholly
+//! inside an `@vault(name)` literal of an existing entry (or inside the
 //! `@vault(` of any opener) is ignored; a match that only overlaps one is kept and widened
 //! to cover the whole literal. Scrub repeats until a pass changes nothing (at most
 //! 8 passes, after which the whole output is withheld), so a literal
@@ -62,7 +63,7 @@ use std::sync::{Arc, Once, RwLock};
 
 use age::secrecy::ExposeSecret;
 use aho_corasick::{AhoCorasick, MatchKind};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -1050,6 +1051,9 @@ impl PctSet {
     }
 }
 
+/// application/x-www-form-urlencoded (URLSearchParams, HTML forms, login POST bodies).
+const PCT_FORM: PctSet = PctSet::Keep(b"*-._");
+
 /// Every percent-encoding a value is likely to be echoed in.
 const PCT_SETS: &[PctSet] = &[
     // Every non-alphanumeric byte.
@@ -1058,8 +1062,7 @@ const PCT_SETS: &[PctSet] = &[
     PctSet::Keep(b"-_.!~*'()"),
     // encodeURI.
     PctSet::Keep(b";,/?:@&=+$-_.!~*'()#"),
-    // application/x-www-form-urlencoded (URLSearchParams, HTML forms).
-    PctSet::Keep(b"*-._"),
+    PCT_FORM,
     // RFC 3986 unreserved (Python quote(safe=''), most HTTP clients).
     PctSet::Keep(b"-._~"),
     // Python quote() default.
@@ -1083,7 +1086,7 @@ const PCT_SETS: &[PctSet] = &[
 const OUTER_PCT_SETS: &[PctSet] = &[
     PctSet::Keep(b""),
     PctSet::Keep(b"-_.!~*'()"),
-    PctSet::Keep(b"*-._"),
+    PCT_FORM,
     PctSet::Keep(b"-._~"),
     PctSet::Keep(b"-._~/"),
 ];
@@ -1099,13 +1102,20 @@ const OUTER_PCT_SETS: &[PctSet] = &[
 /// [`OUTER_PCT_SETS`] set (double encoding, `%25XX`). Duplicates up to ASCII case are
 /// dropped, so upper and lower hex are one pattern.
 ///
-/// Each base text, and its JSON forms (serde and ASCII-only) where they differ, is also
-/// spelled in base64 and base64url ([`push_base64_spellings`], B-151, D-77): HTTP Basic
-/// `user:<value>`, JWT payloads, `data:` URLs.
+/// Each base text, and where they differ from it byte for byte its JSON forms (serde and
+/// ASCII-only), its form-urlencoded form (uppercase hex, `+` for space: a login POST body
+/// that CDP returns base64-encoded) and its Latin-1 bytes (a non-ASCII value whose chars
+/// are all U+00FF or below, as JS `btoa` encodes it), is also spelled in base64 and
+/// base64url ([`push_base64_spellings`], B-151, D-77): HTTP Basic `user:<value>`, JWT
+/// payloads, `data:` URLs, CDP request and response bodies.
 ///
 /// Not covered (known limits, tracked with deadlines): input masks for phone, card and
 /// date numbers, values split across DOM nodes or ellipsis-truncated, and mixed Unicode
-/// case such as CSS `capitalize` (B-152, before step 3).
+/// case such as CSS `capitalize` (B-152, before step 3). Base64 spellings not covered
+/// (owner core, tracked in B-152 and T-05e, before the step 3 consumers that echo
+/// encoded bodies): MIME and PEM base64 wrapped at 76 or 64 columns (a value that
+/// straddles a line break leaks whole), base64 of UTF-16LE text (PowerShell
+/// `-EncodedCommand`), and base64 of a base64 blob.
 ///
 /// Every temporary is a `Zeroizing<String>` sized up front so it never reallocates.
 fn spellings(v: &str) -> Vec<Zeroizing<String>> {
@@ -1120,17 +1130,25 @@ fn spellings(v: &str) -> Vec<Zeroizing<String>> {
     }
     let mut out = Vec::new();
     for t in &bases {
-        push_spellings(t, &mut out);
-        // base64 is case-sensitive over bytes: each case base is encoded on its own,
-        // and the JSON forms only where they differ byte for byte from `t`.
-        push_base64_spellings(t.as_bytes(), &mut out);
         let json = json_escape(t, false);
+        let ascii = json_escape(t, true);
+        push_spellings(t, &json, &ascii, &mut out);
+        // base64 is case-sensitive over bytes: each case base is encoded on its own,
+        // and every other form only where it differs byte for byte from `t` (and from
+        // the forms already encoded).
+        push_base64_spellings(t.as_bytes(), &mut out);
         if json.as_str() != t.as_str() {
             push_base64_spellings(json.as_bytes(), &mut out);
         }
-        let ascii = json_escape(t, true);
         if ascii.as_str() != t.as_str() && ascii.as_str() != json.as_str() {
             push_base64_spellings(ascii.as_bytes(), &mut out);
+        }
+        let form = pct_encode(t, PCT_FORM, true);
+        if form.as_str() != t.as_str() {
+            push_base64_spellings(form.as_bytes(), &mut out);
+        }
+        if let Some(latin1) = latin1_bytes(t) {
+            push_base64_spellings(&latin1, &mut out);
         }
     }
     out.extend(bases);
@@ -1138,15 +1156,33 @@ fn spellings(v: &str) -> Vec<Zeroizing<String>> {
     out
 }
 
-fn push_spellings(t: &str, out: &mut Vec<Zeroizing<String>>) {
-    let json = json_escape(t, false);
-    if t.contains('/') {
-        out.push(json_escape_slash(&json));
+/// The Latin-1 bytes of `t` when it is non-ASCII and every char is U+00FF or below (what
+/// JS `btoa` encodes), else `None`: for ASCII text they equal the UTF-8 bytes.
+fn latin1_bytes(t: &str) -> Option<Zeroizing<Vec<u8>>> {
+    if t.is_ascii() || t.chars().any(|c| u32::from(c) > 0xff) {
+        return None;
     }
-    out.push(json_escape(&json, false));
-    out.push(debug_inner(&json));
-    out.push(json);
-    out.push(json_escape(t, true));
+    let mut out = Zeroizing::new(Vec::with_capacity(t.len()));
+    // Every char is at most U+00FF, so the cast keeps all its bits.
+    out.extend(t.chars().map(|c| u32::from(c) as u8));
+    Some(out)
+}
+
+/// `json` and `ascii` are `json_escape(t, false)` and `json_escape(t, true)`, computed
+/// once by the caller, which also base64-encodes them.
+fn push_spellings(
+    t: &str,
+    json: &Zeroizing<String>,
+    ascii: &Zeroizing<String>,
+    out: &mut Vec<Zeroizing<String>>,
+) {
+    if t.contains('/') {
+        out.push(json_escape_slash(json));
+    }
+    out.push(json_escape(json, false));
+    out.push(debug_inner(json));
+    out.push(json.clone());
+    out.push(ascii.clone());
     out.push(json_escape_with(t, JSON_HTML));
     out.push(json_escape_with(t, JSON_DOTNET));
     let debug = debug_inner(t);
@@ -1177,8 +1213,9 @@ fn push_spellings(t: &str, out: &mut Vec<Zeroizing<String>>) {
 /// The shortest base64 spelling scrub adds, counted without `=` padding (B-151, D-77).
 /// The trimmed core of a short value is a handful of characters that, matched ignoring
 /// ASCII case, would hit unrelated base64 blobs and ordinary words: the D-118 floor for
-/// the encoded form. A 4-character value gets no base64 spelling, a 6-character value
-/// gets some alignments, and from 8 characters on every alignment is covered.
+/// the encoded form. A value of 5 bytes or less gets no base64 spelling, a 6-byte value
+/// gets some alignments, and from 7 bytes on every alignment is covered (alignment 1 of
+/// a 7-byte value has a core of exactly 8 characters).
 const MIN_BASE64_CHARS: usize = 8;
 
 const BASE64_STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1188,17 +1225,21 @@ const BASE64_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv
 /// character has its missing low bits zero, as at the end of a real encoding.
 fn base64_into(bytes: &[u8], alphabet: &[u8; 64], out: &mut String) {
     for chunk in bytes.chunks(3) {
-        let b = [
+        // `b` and `n` hold value bits and are wiped after each chunk. Copies the compiler
+        // keeps in registers or spills are the residue the module doc names.
+        let mut b = [
             chunk[0],
             chunk.get(1).copied().unwrap_or(0),
             chunk.get(2).copied().unwrap_or(0),
         ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        let mut n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         // 2, 3 or 4 characters carry the chunk's 8, 16 or 24 bits.
         for i in 0..=chunk.len() {
             let idx = (n >> (18 - 6 * i)) & 0x3f;
             out.push(char::from(alphabet[idx as usize]));
         }
+        b.zeroize();
+        n.zeroize();
     }
 }
 
@@ -2026,6 +2067,54 @@ mod tests {
             }
         }
         assert!(alphabets_differ, "no blob exercised the url alphabet");
+    }
+
+    #[test]
+    fn scrub_base64_of_form_urlencoded_body() {
+        // A login POST body as CDP returns it (postDataEntries[].bytes, getResponseBody
+        // with base64Encoded): uppercase hex escapes and `+` for space.
+        let value = format!("{} p!@#%&/", canary());
+        let v = vault_with(&[("pw", value.clone())]);
+        let form = utf8_percent_encode(&value, FORM)
+            .to_string()
+            .replace("%20", "+");
+        assert!(form.contains('+') && form.contains("%40"), "form spelling");
+        let head = "user=bob&password=";
+        for tail in ["", "&remember=1"] {
+            let body = format!("{head}{form}{tail}");
+            for engine in ENGINES {
+                let enc = engine.encode(&body);
+                let out = v.scrub(&format!("x {enc} y"));
+                assert_only_edges("form", &out, "x ", &enc, " y", "pw", head.len(), form.len());
+            }
+        }
+    }
+
+    #[test]
+    fn scrub_base64_of_latin1_value() {
+        // JS `btoa(user + ':' + pass)` encodes chars up to U+00FF as one byte each.
+        let value = format!("{}\u{e9}\u{a7}\u{fc}\u{ff}", canary());
+        let v = vault_with(&[("pw", value.clone())]);
+        let latin1: Vec<u8> = value.chars().map(|c| u32::from(c) as u8).collect();
+        assert!(
+            latin1.len() < value.len(),
+            "the Latin-1 bytes equal the UTF-8 ones"
+        );
+        let mut creds = b"user:".to_vec();
+        creds.extend_from_slice(&latin1);
+        let before = "Authorization: Basic ";
+        for engine in ENGINES {
+            let enc = engine.encode(&creds);
+            let out = v.scrub(&format!("{before}{enc}"));
+            assert_only_edges("latin1", &out, before, &enc, "", "pw", 5, latin1.len());
+        }
+        // Only all-Latin-1 non-ASCII text has a Latin-1 base.
+        assert!(latin1_bytes("plain ascii").is_none());
+        assert!(latin1_bytes("caf\u{e9} \u{20ac}").is_none());
+        assert_eq!(
+            latin1_bytes("caf\u{e9}").as_deref().map(Vec::as_slice),
+            Some(&b"caf\xe9"[..])
+        );
     }
 
     #[test]
