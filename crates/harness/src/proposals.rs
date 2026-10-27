@@ -407,4 +407,89 @@ mod tests {
         assert!(proposals_section("proposals: []\n").is_err());
         assert!(proposals_section("blockers:\n").is_err());
     }
+
+    fn item(id: &str) -> Proposal {
+        let mut fields = Map::new();
+        fields.insert("kind".into(), json!("retire"));
+        Proposal {
+            id: id.into(),
+            fields,
+        }
+    }
+
+    #[test]
+    fn appends_once_under_trailing_proposals_and_keeps_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("blockers.yaml");
+        let run_files = tmp.path().join("files");
+        std::fs::create_dir_all(&run_files).unwrap();
+        let head = "blockers:\n  - id: B-1\nproposals:\n  - id: old\n    text: x";
+        std::fs::write(&file, head).unwrap();
+        let run = RunId("run-1".into());
+        let w = write_proposals(Some(&file), &run_files, &run, &[item("old"), item("p1")]).unwrap();
+        assert_eq!(w.new, ["p1"]);
+        assert_eq!(w.known, ["old"]);
+        assert_eq!(w.warning, None);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            text,
+            format!("{head}\n  - {{\"id\":\"p1\",\"kind\":\"retire\"}}\n")
+        );
+        let copy = std::fs::read_to_string(run_files.join(RUN_COPY)).unwrap();
+        assert!(copy.contains("- {\"id\":\"old\"") && copy.contains("- {\"id\":\"p1\""));
+
+        // Again: nothing new, the file is unchanged.
+        let w = write_proposals(Some(&file), &run_files, &run, &[item("p1")]).unwrap();
+        assert!(w.new.is_empty());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+    }
+
+    #[test]
+    fn a_file_it_cannot_append_to_is_left_alone_with_a_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("blockers.yaml");
+        let original = "proposals:\nblockers:\n  - id: B-1\n";
+        std::fs::write(&file, original).unwrap();
+        let run = RunId("run-1".into());
+        let w = write_proposals(Some(&file), tmp.path(), &run, &[item("p1")]).unwrap();
+        assert!(w.new.is_empty());
+        assert!(w
+            .warning
+            .unwrap_or_default()
+            .contains("not its last top-level key"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+        assert!(tmp.path().join(RUN_COPY).is_file());
+
+        let missing = tmp.path().join("nope.yaml");
+        let w = write_proposals(Some(&missing), tmp.path(), &run, &[item("p1")]).unwrap();
+        assert!(w.warning.is_some());
+        assert!(!missing.exists());
+
+        let w = write_proposals(None, tmp.path(), &run, &[]).unwrap();
+        assert_eq!(w, Written::default(), "no items: nothing written");
+    }
+
+    #[test]
+    fn retire_ids_carry_the_version_and_shapes_ignore_names() {
+        let run = RunId("r".into());
+        let p = retire_proposal("a.com", "t", 3, &StaleWhy::Misses(5), &run, "2026-10-26");
+        assert_eq!(p.id, "t7-retire-a.com-t-v3");
+        assert!(p.fields["why"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("after 5 misses"));
+        let h = header("x", "a:string b?:number", "form input");
+        assert_eq!(arg_shape(&h.args), "string,number?");
+        assert_eq!(role_sequence(&h), "form,input");
+        // No fingerprint: never grouped, however many domains.
+        let bare = parse_header("// @name x\n// @kind reader\n// @gate Read\nreturn 1;\n").unwrap();
+        let tools: Vec<MergeInput<'_>> = ["a.com", "b.com", "c.com"]
+            .iter()
+            .map(|d| MergeInput {
+                domain: d,
+                header: &bare,
+            })
+            .collect();
+        assert!(merge_proposals(&tools, &run, "2026-10-26").is_empty());
+    }
 }
