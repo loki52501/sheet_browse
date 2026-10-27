@@ -17,7 +17,7 @@ steps:
     target: {role: row, nth: "{index}"}
     args: {kind: click}
   - tool: wait
-    args: {for: selector, value: "[role=main] h2"}
+    args: {for: selector, value: "[role=main] [aria-label=\"Print all\"]"}   # only an open thread has it; [role=main] h2 also matches the results page
   - tool: read
     args: {format: text, selector: "[role=main]"}
     returns: messages
