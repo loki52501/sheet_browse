@@ -121,8 +121,10 @@ tasks:
     step: 2
     title: "T-13 follow-ups: Phase 1 ladder rungs 1, 2, 4 over MCP (with srv-files); concurrent repairs can record version 3 (per-tool repair lock or skip Relocated when @fingerprint already matches); D-561 re-enables a missed tool within the run, amending T-4 (B-561); assert registry class Read after re-register; site-tool-level password/challenge test (docs/03 item 4 mapping); B-560 page.api cap for large boards; toolstore relocate should refuse \\r U+2028 U+2029 in names it writes into headers (B-33 family)"
     docs: [docs/03-TOOL-STORE.md, docs/08-USE-CASES-AND-TESTS.md]
-    status: todo
-    owner: servers
+    status: doing
+    owner: servers/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/servers-T13b
   - id: T-14
     step: 3
     title: "srv-files: fs, shell classification, docs wrappers, csv.clean, diff, history.search"
