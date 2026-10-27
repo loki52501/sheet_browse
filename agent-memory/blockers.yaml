@@ -272,6 +272,11 @@ blockers:
     question: "For area driver: sb-driver test chromium_driver::bench_headless_launch_registry_and_cleanup (crates/sb-driver/tests/chromium_driver.rs:231) fails about 1 run in 2 on this machine under load ('bench profile ... not removed'); it passed on the next run with no code change. Seen in core's `cargo test --workspace -j 2` on swarm/core-T05c (main 14587a3 merged). It makes the D-87 workspace gate flaky for every area."
     default_taken: "Not a core fix. Core lists it in its PR bodies as a known flake and reruns that test binary once. Proposed for driver: wait for the browser process tree to exit (condition with a cap, rule 6) before asserting the profile folder is gone, or retry the removal on Windows sharing violations."
     needs_user: false
+  - id: B-590
+    task: T-15b
+    question: "For srv-web (found while fixing T-15b item 1 in srv-cli): srv-web's page/api clients follow the system proxy (reqwest auto_sys_proxy; HTTP(S)_PROXY, ALL_PROXY, Windows proxy settings). With a proxy in use reqwest resolves only the proxy's name, so http::PublicOnly never sees the target and a public name that resolves to a private address is fetched by the proxy, and fetch of a URL written as localhost/127.0.0.1 (page_local) goes to the proxy's localhost instead of this machine. Should srv-web build its clients with no_proxy() for loopback/private targets and either bypass the proxy or refuse private answers another way when one is set?"
+    default_taken: "Not changed in T-15b (srv-web is another coder's crate this wave). Proposed for srv-web: page_local with no_proxy(); page keeps the proxy only for names PublicOnly would pass, else no_proxy() (or refuse a fetch when a proxy is configured and the name resolves private). Same test shape as crates/srv-cli/tests/proxy_t15b.rs (its own test binary, proxy env set, a recording proxy on 127.0.0.1)."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core

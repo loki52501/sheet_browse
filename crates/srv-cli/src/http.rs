@@ -10,6 +10,7 @@ use harness_core::mcp::{ToolCtx, ToolError};
 use reqwest::header::{HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
 use reqwest::Method;
 use serde_json::Value;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use url::Url;
@@ -20,20 +21,50 @@ const MAX_BODY: usize = 1024 * 1024;
 /// Error body shown, in chars.
 const ERR_CHARS: usize = 1_500;
 
-/// A lazily built client shared by a handler's calls.
+/// Lazily built clients shared by a handler's calls: one for loopback hosts that never uses
+/// a proxy, one for every other host that follows the system proxy settings (D-590).
 #[derive(Default)]
-pub struct Client(OnceCell<reqwest::Client>);
+pub struct Client {
+    /// Loopback bases: no proxy (env or OS settings), `localhost` pinned to 127.0.0.1.
+    direct: OnceCell<reqwest::Client>,
+    /// https bases: the system proxy, if any, sees only a CONNECT tunnel.
+    system: OnceCell<reqwest::Client>,
+}
 
 impl Client {
-    async fn get(&self) -> Result<&reqwest::Client, ToolError> {
-        self.0
-            .get_or_try_init(|| async {
-                reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()
-                    .map_err(|e| ToolError::Failed(format!("http client: {e}")))
-            })
-            .await
+    /// The client for `url`. A loopback base may be plain http ([`secure_base`]) because the
+    /// request never leaves the machine; a system proxy (`HTTP_PROXY`, `ALL_PROXY`, the
+    /// Windows proxy settings) would carry that cleartext request, vault header included, to
+    /// another host, so loopback requests are never proxied.
+    async fn for_url(&self, url: &Url) -> Result<&reqwest::Client, ToolError> {
+        let fail = |e: reqwest::Error| ToolError::Failed(format!("http client: {e}"));
+        let builder = || reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        if is_loopback(url) {
+            self.direct
+                .get_or_try_init(|| async {
+                    builder()
+                        .no_proxy()
+                        // The port in the address is ignored; the URL's port is used.
+                        .resolve("localhost", SocketAddr::from(([127, 0, 0, 1], 0)))
+                        .build()
+                        .map_err(fail)
+                })
+                .await
+        } else {
+            self.system
+                .get_or_try_init(|| async { builder().build().map_err(fail) })
+                .await
+        }
+    }
+}
+
+/// 127.0.0.0/8, ::1 or `localhost` (any case).
+fn is_loopback(u: &Url) -> bool {
+    match u.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
     }
 }
 
@@ -95,12 +126,12 @@ pub fn join(base: &str, path: &str) -> Result<Url, ToolError> {
 /// crosses a network in cleartext or through a plain-http proxy.
 pub fn secure_base(base: &str) -> Result<Url, String> {
     let u = Url::parse(base).map_err(|e| format!("API base {base:?} is not a URL: {e}"))?;
-    let loopback = match u.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-        None => return Err(format!("API base {base:?} has no host")),
-    };
+    if u.host().is_none() {
+        return Err(format!("API base {base:?} has no host"));
+    }
+    // Loopback requests never go through a proxy ([`Client::for_url`]), so plain http to
+    // them stays on this machine.
+    let loopback = is_loopback(&u);
     match u.scheme() {
         "https" => Ok(u),
         "http" if loopback => Ok(u),
@@ -148,7 +179,7 @@ pub async fn send(
         ))
     })?;
     let host = url.host_str().unwrap_or("").to_string();
-    let client = client.get().await?;
+    let client = client.for_url(&url).await?;
     let mut rb = client
         .request(method, url)
         .header(name, value)
