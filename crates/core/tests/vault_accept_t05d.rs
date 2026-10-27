@@ -7,10 +7,17 @@
 //! 2. A JWT (base64url unpadded) whose payload carries the value is scrubbed, header and
 //!    signature untouched, also when the value needs JSON escapes.
 //! 3. The value at all 3 byte alignments in both alphabets, padded and unpadded, with any
-//!    tail after it: only the edge characters that carry neighbouring bits survive.
+//!    tail after it: only the edge characters that carry neighbouring bits survive. When
+//!    the value ends the blob (no neighbour after it), nothing after the literal survives:
+//!    neither the last, zero-filled character nor the `=` padding.
 //! 4. A trimmed base64 pattern under 8 characters is never added: base64 of a 4 or 5
 //!    character value is never touched, a 7-character core is not a pattern while an
 //!    8-character one is, and every base64 redaction removes at least 8 characters.
+//! 5. The D-118 `ValueInLiteral` rule covers the base64 spellings: `set` refuses a value
+//!    whose base64url core (any alignment, any ASCII case) lies inside another entry's
+//!    `@vault(name)`, and a name whose literal holds an existing value's base64 core, on
+//!    in-memory and file-backed (`VaultEditor`) vaults, leaving the file unchanged; a value
+//!    whose base64 is under the 8-character floor is not refused for it.
 //! 6. End to end: a tool resolves `@vault(test)` at its sink and echoes the value
 //!    base64-encoded (Basic header, JWT, data URL) in its text, summary, consequences, an
 //!    error and a stop; the client also passes an encoded value as an argument. Through
@@ -42,7 +49,7 @@ use harness_core::mcp::{
 use harness_core::memory::{ts_now, MemoryStore, Run, RunStatus};
 use harness_core::run::RunFolder;
 use harness_core::testing::{MemStore, ScriptedAsker};
-use harness_core::vault::{EntryKind, KeySource, Vault};
+use harness_core::vault::{EntryKind, KeySource, Vault, VaultError};
 use serde_json::{json, Value};
 
 /// Standard, standard unpadded, url, url unpadded.
@@ -384,6 +391,42 @@ fn r3_every_alignment_both_alphabets_padded_and_unpadded() {
     assert!(aligns == [true; 3]);
 }
 
+#[test]
+fn r3_value_ending_the_blob_leaves_no_trailing_character_or_padding() {
+    let c = canary();
+    let prefix = [0xa5_u8, 0xff, 0x00, 0x7e, 0xfb, 0x3f];
+    let mut padded_seen = false;
+    let mut partial_seen = false;
+    for value in [c.clone(), format!("{c}~"), format!("{c}~?")] {
+        let v = vault_of(&[("c", &value)]);
+        for off in 0..prefix.len() {
+            let mut blob = prefix[..off].to_vec();
+            blob.extend_from_slice(value.as_bytes());
+            partial_seen |= !blob.len().is_multiple_of(3);
+            for (i, e) in ENGINES.iter().enumerate() {
+                let enc = e.encode(&blob);
+                padded_seen |= enc.ends_with('=');
+                for (before, after) in [("x ", " y"), ("data:text/plain;base64,", "")] {
+                    let out = v.scrub(&format!("{before}{enc}{after}"));
+                    assert!(
+                        !leaks(&out, &value),
+                        "blob end leaks (off {off}, encoder {i})"
+                    );
+                    assert_edges("end", &out, before, &enc, after, "c", off, value.len());
+                    assert!(
+                        out.ends_with(&format!("{}{after}", lit("c"))),
+                        "a character or padding after the value survived (off {off}, encoder {i})"
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        padded_seen && partial_seen,
+        "no blob exercised a partial last group"
+    );
+}
+
 // =====================================================================================
 // Row 4: the 8-character floor
 // =====================================================================================
@@ -512,6 +555,134 @@ fn r4_every_base64_redaction_removes_at_least_eight_characters() {
             );
         }
     }
+}
+
+// =====================================================================================
+// Row 5: D-118 ValueInLiteral over the base64 spellings
+// =====================================================================================
+
+/// The base64url cores of `v` at alignments 0, 1, 2 that are at least 8 characters (all
+/// valid entry names: `[A-Za-z0-9_-]`), plus one with its ASCII case flipped.
+fn b64url_names(v: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for k in 0..3 {
+        let mut blob = vec![0u8; k];
+        blob.extend_from_slice(v.as_bytes());
+        let lead = (8 * k).div_ceil(6);
+        let end = 8 * (k + v.len()) / 6;
+        let enc = URL_SAFE_NO_PAD.encode(&blob);
+        if end >= lead + 8 {
+            out.push(enc[lead..end].to_owned());
+        }
+    }
+    let flipped: String = out[0]
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() {
+                c.to_ascii_uppercase()
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    out.push(flipped);
+    out
+}
+
+/// Asserts `r` is `ValueInLiteral` naming `want`; prints names only, never a value.
+fn refused_for(r: Result<(), VaultError>, want: &str, what: &str) {
+    match r {
+        Err(VaultError::ValueInLiteral { name }) => {
+            assert!(name == want, "{what}: ValueInLiteral named the wrong entry")
+        }
+        Err(_) => panic!("{what}: refused with another error than ValueInLiteral"),
+        Ok(()) => panic!("{what}: not refused"),
+    }
+}
+
+#[test]
+fn r5_value_in_literal_covers_base64_spellings() {
+    let c = canary();
+    let names = b64url_names(&c);
+    assert!(names.len() >= 4, "every alignment yields a name");
+    for (i, n) in names.iter().enumerate() {
+        // The literal is already there: setting the value is refused, naming the value.
+        let mut v = vault_of(&[(n.as_str(), "unrelated-entry-value")]);
+        refused_for(
+            v.set("pw", &c, EntryKind::Secret),
+            "pw",
+            &format!("value, name {i}"),
+        );
+        assert!(
+            v.names().iter().all(|(k, _)| k != "pw"),
+            "a refused set kept the entry"
+        );
+        // The value is already there: the name whose literal hides it is refused, naming
+        // the value's entry.
+        let mut v = vault_of(&[("pw", &c)]);
+        refused_for(
+            v.set(n, "unrelated-entry-value", EntryKind::Secret),
+            "pw",
+            &format!("name {i}"),
+        );
+        assert!(v.names().len() == 1, "a refused set added the entry");
+    }
+    // Under the floor: base64 of 4 and 5 character values is under 8 characters, so a
+    // name equal to it hides nothing scrub would match, and both orders are accepted.
+    for value in ["q7Zk", "Q7zk9"] {
+        let n = URL_SAFE_NO_PAD.encode(value);
+        assert!(n.len() < 8);
+        let mut v = vault_of(&[(n.as_str(), "unrelated-entry-value")]);
+        assert!(
+            v.set("s", value, EntryKind::Secret).is_ok(),
+            "a {}-character value refused for its sub-floor base64",
+            value.len()
+        );
+        let mut v = vault_of(&[("s", value)]);
+        assert!(
+            v.set(&n, "unrelated-entry-value", EntryKind::Secret)
+                .is_ok(),
+            "a name equal to the sub-floor base64 of a value refused"
+        );
+    }
+}
+
+#[test]
+fn r5_vault_editor_refuses_base64_in_literal_and_leaves_the_file() {
+    let c = canary();
+    let n = b64url_names(&c).remove(1);
+    let dir = TempDir::new("r5file");
+    let path = dir.0.join("vault.toml.age");
+    let key = KeySource::IdentityFile(dir.0.join("vault.key"));
+    let mut ed = Vault::open_for_set(&path, &key).unwrap();
+    ed.set(&n, "unrelated-entry-value", EntryKind::Secret)
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    refused_for(ed.set("pw", &c, EntryKind::Secret), "pw", "editor value");
+    assert!(
+        std::fs::read(&path).unwrap() == before,
+        "a refused set rewrote the file"
+    );
+    ed.save().unwrap();
+    let v = Vault::open(&path, &key).unwrap();
+    assert!(
+        v.names().iter().all(|(k, _)| k != "pw"),
+        "the refused entry is on disk"
+    );
+    // The other order, on a fresh file holding the value.
+    let path2 = dir.0.join("vault2.toml.age");
+    let mut ed = Vault::open_for_set(&path2, &key).unwrap();
+    ed.set("pw", &c, EntryKind::Secret).unwrap();
+    let before = std::fs::read(&path2).unwrap();
+    refused_for(
+        ed.set(&n, "unrelated-entry-value", EntryKind::Secret),
+        "pw",
+        "editor name",
+    );
+    assert!(
+        std::fs::read(&path2).unwrap() == before,
+        "a refused set rewrote the file"
+    );
 }
 
 // =====================================================================================
