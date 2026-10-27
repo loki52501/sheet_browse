@@ -1,84 +1,126 @@
-# Review T-15b, round 3 (confirmation, after D-89 round 2)
+# Review T-15b, round 4 (confirmation, after round 3)
 
-## Round 3 (confirmation)
+## Round 4 (confirmation)
 
-Scope: d02b19b (D-598 empty words refused in `group_first`; D-599 `remove`/`rm` are Delete). Worktree F:/sb-swarm/wt/servers/.wt/T15b.
+Scope: 005285c. D-660 makes `group_first` refuse a lone `-` anywhere, next to D-598's empty words. It also adds `is_delete_word` and a third-word rule, so hyphenated and three-word deletes are at least Delete. Worktree F:/sb-swarm/wt/servers/.wt/T15b.
 
 What I ran (CARGO_TARGET_DIR=F:/sb-swarm/target-servers, -j 2):
-- `cargo test -p srv-cli`: all green. lib 40 (the 38 from round 2 plus `empty_words_are_refused_anywhere` and `remove_and_rm_are_deletes`), accept_t15 2, accept_t15b 7, accept_t15b_open 3, accept_t15b_proxy 1, cli_t15 5, contract_paths 2, dns_t15 4 (+1 ignored, live DNS), gh_t15 7, gh_t15b 7, http_t15 6, http_t15b 1, proxy_t15b 1.
+- `cargo test -p srv-cli`: all green. lib 40, accept_t15 2, accept_t15b 7, accept_t15b_open 3, accept_t15b_proxy 1, cli_t15 5, contract_paths 2, dns_t15 4 (+1 ignored, live DNS), gh_t15 7, gh_t15b 7, http_t15 6, http_t15b 1, proxy_t15b 1.
 - `cargo clippy -p srv-cli --all-targets -- -D warnings`: clean. `cargo fmt -p srv-cli --check`: clean.
-- I probed local gh 2.93.0 with `--help` targets only, from the scratchpad with a scratch GH_CONFIG_DIR and no token variables. I ran no write and no `auth token`.
+- gh 2.93.0 probed with `--help` targets only, from the scratchpad with a scratch GH_CONFIG_DIR and token variables unset. No write, no `auth token`.
 
-**Q1a. Is the round-2 empty-word Blocking item closed? Yes.**
+**Q1. Is the lone-`-` Blocking item closed on every path? Yes.**
+- The check is in the same place as D-598, before any flag moving or classing (`crates/srv-cli/src/gh/mod.rs:161`: `t.is_empty() || t == "-"`).
+- The round-3 path list still holds. These all go through `group_first`:
+  - the call's argv, via `gh_argv` (`:142`);
+  - classify without aliases, via `plan` then `plan_at` (`:254`, `:264`);
+  - every alias-expansion depth (`:283`);
+  - `alias set`'s stored expansion (`:536`).
+- What runs is the output of the innermost `group_first`.
+- The unit test adds `label - delete --yes`, `repo - delete --yes`, `alias - set x 'auth token'` and `alias - import f.yml`. Each is checked with and without the alias list, and the test asserts the message.
+- The `alias_import_is_refused` change (`tests/gh_t15b.rs:287-289`) is a fair loosening. `alias import -` is now refused one step earlier, and still nothing runs.
 
-Every path to gh goes through `group_first`, and `group_first` now refuses any `""` before it does anything else (`crates/srv-cli/src/gh/mod.rs:160-166`):
-- The call's argv: `gh_argv` (`:137-143`) runs `group_first` for both classify (`:1080`) and call (`:1104`).
-- Classify without the alias list: `classify_args` and `classify_with` go to `plan`, then `plan_at` (`:263`).
-- Every alias-expansion depth: `alias::expand` feeds `plan_at(depth + 1)` (`:282`), which runs `group_first` again.
-- `alias set`'s stored expansion: `alias_set_class` (`:519`, `:530`) splits it and calls `plan_at(depth + 1)`.
-- What actually runs is `p.argv` (`:1124-1126`), the output of the innermost `group_first`, so it was checked. Only the `cfg.gh` prefix (from config) and the fixed `alias list` call (`:1017-1018`) are added outside that path.
-- `needs_aliases` and `aliases()` only ever see argv that has already passed the check.
+Are there other words cobra drops or reads as "no word"? None found.
+- cobra's `stripFlags` keeps a command word only if `s != ""` and it does not start with `-`.
+- `""` and `-` are now refused. `--` was handled in round 3.
+- Every other `-x`/`--x` word is a flag. An unknown flag makes `Sub::Ambiguous`, which fails closed.
+- Round 3's probes (space, tab, NUL, look-alikes) still apply.
+- Case and prefix forms do not route. `gh label DELETE --help` and `gh label del --help` print the group help.
+- In 2.93 the only leaf aliases of a delete are `secret remove` and `variable remove` (D-599).
+- Group aliases (`cs`, `at`, `rs`, `ext`, `agents`) can only raise a class to Account, because no group on the read allowlist has an alias.
 
-The unit test covers all seven round-2 fixtures plus `pr view 5 ''` and `alias set e "'' auth token"`. Each is tested both with the alias list (`p`) and without it (`c`), and it asserts the message.
+**Q2. Does `is_delete_word` or the third-word rule lower a class or cause a refusal that matters? Neither lowers a class or adds a refusal. The third-word rule is incomplete (Blocking below) and too broad (should-fix 6).**
+- They only raise. `sub_class` returns only Read, Account or Delete, and `Delete > Account` in `core::class::Class` (`crates/core/src/class.rs:21-22`). So both `c.max(Class::Delete)` and the new early Delete arm can only raise.
+- Too broad: the third word is "the first later word that does not start with `-`" (`gh/mod.rs:618`). That word is often a flag value or a positional, so some reads get raised to Delete:
+  - `issue list --label delete`
+  - `repo view my-delete-tool`
+  - `pr view rm` (a branch named `rm`)
+  - `search repos delete-me`
+- This fails closed: an unanswered Delete ask is skipped. It costs a turn on a read and is not Blocking.
 
-**Q1b. Does any other word reopen the same class of bug? Yes, a lone `-` after the group. This is the new Blocking item below.**
-
-cobra's `stripFlags` keeps a word as a command only if `s != "" && !strings.HasPrefix(s, "-")`. A lone `-` is not a two-letter flag, so cobra drops it just as it drops `""`.
-- At the root, `group_first` already refuses `-` (it starts with `-` and is not a movable flag).
-- Inside a group, `subcommand()` (`gh/mod.rs:401`) decides what is a flag with `t.len() > 1 && t.starts_with('-')`. So `-` becomes `Sub::Known(0)`, the subcommand is `-`, and the class is Account.
-
-Other candidates I checked do not reopen it:
-- A lone space or a tab word is not dropped. `gh label ' ' delete --help` and `gh label $'\t' delete --help` both printed `gh label <command>`, so gh never reached delete.
-- `--` inside a group stops command lookup. `gh repo -- delete --help` printed `unknown command "delete"`, which fails closed. At the root, `--` is refused.
-- A NUL word cannot reach gh. Rust's `Command` refuses NUL in an argument, so the spawn fails.
-- Other control characters and look-alikes are ordinary words that match no command.
-- Two-word aliases (`issue mine`) do not expand in gh 2.93: `gh issue mine` and `gh issue - mine` both went to `issue`, not to the alias.
-
-**Q2. Did d02b19b add a Blocking defect? No.**
-- The refusal names no word, so it is safe at depth > 0 (D-596).
-- D-599 only raises a class.
-- An empty flag value now has to be written `--flag=` (the message says so). This costs some convenience, not correctness.
-- No `unwrap` on input, no vault path, no sleep.
-- D-598 and D-599 are unique against main.
-- The round-2 brief also asked for gh_t15b cases. Those were not added, but the server path uses the same `group_first`, so the unit test covers it.
+**Q3. New Blocking defect? Yes. D-660's third-word rule misses a `-R`/`--repo` value placed before the third word.**
+- See Blocking. It is not a regression: before 005285c these deletes were Account in every form.
+- But D-660 claims to cover this case, and the gate effect is the same as round 3's Blocking item.
 
 ## Blocking
 
-- **gh: a lone `-` after the group is dropped by gh but read as the subcommand by srv-cli. A Delete is lowered to Account, and the `alias set`/`alias import` dispatch is skipped (rule 4; D-540, D-597, D-598).**
-  - Where: `subcommand()` at `crates/srv-cli/src/gh/mod.rs:401` (`is_flag` needs `len() > 1`), and from there `sub_class`, `alias_refusals` and the `("alias", Some(i)) if rest[i] == "set"` arm (`:626-630`).
-  - What gh does (help only): `gh label - delete --help` printed `gh label delete <name>`. The same happened for `repo - delete`, `cache - delete`, `secret - delete`, `alias - set` and `alias - import`: each reached the named subcommand.
-  - The `-` is passed on as a positional argument:
-    - `label - delete --yes` deletes the label named `-`.
-    - `cache - delete` deletes the cache keyed `-`.
-    - `repo - delete --yes` deletes `<user>/-`.
-  - srv-cli classes each of these Account, not Delete. This matters at the gate: `Gate::on_timeout` (`crates/core/src/gate.rs:370-375`) lets an unanswered Account ask proceed, but an unanswered Delete ask is skipped.
-  - In 2.93 the `alias - set`/`alias - import` forms do no harm, because `-` becomes the alias name, or import reads stdin, which is null. Even so, they skip the D-591/D-597 checks.
-  - Fix: in `subcommand()`, skip a lone `-` the way cobra does (or refuse it, as D-598 refuses `""`). Since `proc::run` closes stdin, refusing every lone `-` word in `group_first` is also safe. Add `label - delete --yes`, `repo - delete --yes` and `alias - set e "auth token"` to the unit test.
+- **gh: `repo deploy-key -R o/r delete 5` and `repo autolink --repo o/r delete 7 --yes` are still classed Account. D-660 says they are at least Delete (rule 4; D-660 claim vs code).**
+  - Where: `crates/srv-cli/src/gh/mod.rs:618`. `rest[*i + 1..].iter().find(|w| !w.starts_with('-'))` returns `o/r`, the value of `-R`, not `delete`.
+  - What gh does (help only):
+    - `gh repo deploy-key -R o/r delete --help` and `gh repo deploy-key --repo o/r delete --help` both print "Delete a deploy key from a GitHub repository".
+    - `gh repo autolink --repo o/r delete --help` prints "Delete an autolink reference for a repository."
+    - `gh repo deploy-key -R o/r -R o/r delete --help` also reaches delete.
+  - Today only the `--repo=o/r` and `-Ro/r` forms are classed Delete.
+  - Why it matters (same as round 3): an unanswered Account ask proceeds, while an unanswered Delete ask is skipped (`crates/core/src/gate.rs:370-375`).
+  - Fix: find the third word with the same parser as the second, `subcommand(&rest[*i + 1..])`.
+    - Raise to Delete on `Known(j)` when `is_delete_word(&rest[*i + 1 + j])`.
+    - Raise to Delete on `Ambiguous(ws)` when any of `ws` is a delete word.
+    - This skips `-R VALUE`/`--repo VALUE` the way gh does.
+    - Add `repo deploy-key -R o/r delete 5` and `repo autolink --repo o/r delete 7 --yes` to the Delete list in the unit test.
 
 ## Should fix
 
-1. ~~`gh secret remove` / `gh variable remove` classed Account.~~ **Fixed in d02b19b (D-599).** `remove` and `rm` are now Delete, with a test.
-2. **`--hostname` on a command other than `api` is not host-checked** (kept from round 2). `repo_host` (`gh/mod.rs:878`) reads only HOST/OWNER/REPO. Since D-594, a leading `--hostname h attestation verify` also lands there. The class is Account and it asks.
+1. ~~`gh secret remove` / `gh variable remove` classed Account.~~ **Fixed in d02b19b (D-599).**
+2. **`--hostname` on a command other than `api` is not host-checked** (kept).
+   - `repo_host` (`gh/mod.rs`) reads only HOST/OWNER/REPO.
+   - Since D-594, a leading `--hostname h attestation verify` also lands there.
+   - The class is Account, so it asks.
 3. **`-R o/r run view 5 --log` returns capped stdout, not the saved log** (kept). `is_run_log` needs `run view` as words 1 and 2.
-4. **B-591 is an implicit contract** (kept). The D-595 key is the ToolCtx address. Supreme should answer it before core changes dispatch.
-5. **New, dates from D-540 (T-15), not from T-15b.** Some deletes are Account, because `sub_class` looks only at the second word and only at the literal names.
-   - Deletes with a third word: `repo deploy-key delete`, `repo autolink delete`.
-   - Hyphenated deletes: `release delete-asset`, `project item-delete`, `project field-delete`.
-   - All of these were confirmed with `--help`.
-   - Fix: class Delete when any word that is not a flag before the positionals is `delete`/`remove`/`rm`, or ends in `-delete`.
+4. **B-591 is an implicit contract** (kept). The D-595 key is the ToolCtx address. Supreme should answer B-591 before core changes dispatch.
+5. ~~Hyphenated and three-word deletes classed Account (from D-540).~~ **Fixed in 005285c (D-660)**, with tests, for:
+   - `release delete-asset`, `project item-delete`, `project field-delete`;
+   - `repo deploy-key delete`, `repo autolink delete`.
+
+   The `-R VALUE` form is still open; it is the Blocking item above.
+6. **New: the third-word rule is broader than gh's command tree** (`gh/mod.rs:618`).
+   - It raises reads to Delete when a flag value or a positional is a delete word (`issue list --label delete`, `repo view my-delete-tool`).
+   - This fails closed.
+   - The Blocking fix (reusing `subcommand()`) narrows it. Applying the rule only to the groups that nest (`repo deploy-key`, `repo autolink`) would remove the rest.
 
 ## Notes
 
-- **Round 2 Blocking (empty word) is closed by D-598.** Q1a lists the paths. Round 2's description: cobra drops `""`, so `'' auth token`, `auth '' token`, `'' tok`, `'' repo delete --yes`, `repo '' delete --yes`, `'' api --hostname other.host /x` and `alias set e "'' auth token"` ran commands srv-cli classified differently.
-- **Round 2 notes still hold.**
-  - (a) D-594's mover reads every leading-flag form gh reads.
-  - (b) D-595 fails closed only.
-  - (c) There is no new vault, fail-open or panic path. A failed run's error still carries gh's own stderr, which may echo words from an expansion (D-596 covers only the server's own refusals).
+- **Round 3 Blocking (lone `-`) is closed by D-660.** Q1 lists the paths.
+- **Code comments.**
+  - At `gh/mod.rs:447`, the doc line "The class of `gh <group> <sub> ...` from the static rules (D-540) alone." now sits above `is_delete_word`, so `sub_class` has no doc.
+  - The comment at `:615-616` cites D-599 for the third-word rule, but that rule is D-660.
+- **Round 2 and 3 notes still hold.**
+  - D-594's mover reads every leading-flag form gh reads.
+  - D-595 fails closed only.
+  - There is no new vault, fail-open or panic path.
+  - A failed run's error still carries gh's own stderr, which may echo words from an expansion (D-596 covers only the server's own refusals).
 - **Round-1 should-fix 2, 3 and 4 remain closed.**
-- **Hard rules.** d02b19b adds no keys, sleeps, em dashes or captcha handling, and touches nothing outside srv-cli and decisions.yaml. There is no `interfaces.yaml` change.
+- **Hard rules.** 005285c adds no keys, sleeps, em dashes or captcha handling. It touches only srv-cli and decisions.yaml, with no `interfaces.yaml` change. D-660 is unique against main.
+
+## Round 3 (confirmation, kept for history)
+
+Scope: d02b19b (D-598 empty words refused in `group_first`; D-599 `remove`/`rm` are Delete).
+
+- Ran `cargo test -p srv-cli`: all green, lib 40. Clippy and fmt were clean.
+- Probed gh 2.93.0 with `--help` targets only.
+
+**Q1a. Round-2 empty-word Blocking item: closed.**
+- Every path to gh goes through `group_first`, which refuses any `""` first. The paths are the call argv via `gh_argv`, classify without aliases via `plan`/`plan_at`, every alias-expansion depth, and `alias set`'s stored expansion via `alias_set_class` -> `plan_at(depth + 1)`.
+- What runs is the innermost `group_first` output. Only the `cfg.gh` prefix and the fixed `alias list` call are added outside that path.
+
+**Q1b. Same class of bug: a lone `-` after the group (round 3's Blocking item; closed in round 4 by D-660).**
+- cobra keeps a word as a command only if `s != "" && !strings.HasPrefix(s, "-")`, so it drops a lone `-`.
+- `subcommand()` treated `-` as the subcommand, so `label - delete --yes`, `repo - delete --yes` and `cache - delete` were Account, and the `alias - set`/`alias - import` forms skipped the D-591/D-597 checks.
+- Checked and not affected:
+  - a space or tab word (not dropped);
+  - `--` inside a group (stops command lookup, fails closed);
+  - NUL (spawn fails);
+  - look-alikes (ordinary words);
+  - two-word aliases (they do not expand in 2.93).
+
+**Q2. d02b19b added no Blocking defect.**
+- The refusal names no word (D-596), and D-599 only raises a class.
+- An empty flag value must now be written `--flag=`.
+- No `unwrap` on input, vault path or sleep was added.
 
 ## Verdict
 
-D-598 closes the empty-word hole on every path an argv or alias expansion takes to gh, and D-599 fixes should-fix 1. But a lone `-` after the group is the same defect one character over. gh drops it and runs `label delete` or `repo delete`, while srv-cli classes the call Account, and an unanswered Account ask proceeds. The fix and its test are each a few lines.
+D-660 closes round 3's lone-`-` hole on every path, and no other word that cobra drops is left open. Should-fix 5 is fixed for every form it named.
+
+One gap remains. The new third-word rule takes a `-R`/`--repo` value as the third word, so `repo deploy-key -R o/r delete` is still a Delete classed Account, although D-660 says this case is covered. The fix is to reuse `subcommand()` there and add two test lines.
 
 Verdict: request changes
