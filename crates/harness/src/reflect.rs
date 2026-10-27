@@ -13,17 +13,23 @@
 //!    are retired and archived, retired files still in place are archived, archived files
 //!    older than 90 days are deleted; pinned tools are never touched. Its `tools.*` events go
 //!    into this run's ledger.
-//! 3. Commits the tool folders with changes (the sweep's moves and srv-web's unpatched
-//!    relocations, D-560) with [`ToolStore::git_commit`] and a message carrying T-16.
+//! 3. Commits exactly the paths the sweep moved or deleted (each retired or archived tool's
+//!    old and new path, each deleted archive file), with [`ToolStore::git_commit`] and a
+//!    message carrying T-16. Nothing else in the tool folders is staged: a user's edit or an
+//!    unreviewed forged tool next to a swept one stays uncommitted. srv-web's relocations
+//!    (D-560) are not committed by reflect.
 //! 4. Proposals ([`crate::proposals`]): T-8 merges, and T-7 retires for pinned tools the
 //!    sweep would have retired.
 //! 5. A `core` `reflect.sweep` event summarising all of it, and `files/reflect.md`.
 //! 6. Health refresh (G-3, "readers only"): when `@phase 1` readers have a last good call, a
-//!    session is started through [`ReflectLauncher::readers`] (harnessd: `claude -p` with only
-//!    `mcp__harness-web` allowed, where only `@phase 1` readers are ever registered) with a
-//!    generated prompt that replays those calls; srv-web checks fingerprints and updates
-//!    `tools.health`. Planners are never named in it and nothing else is offered. With nothing
-//!    to replay no session starts.
+//!    session is started through [`ReflectLauncher::readers`] with a generated prompt that
+//!    replays those calls; srv-web checks fingerprints and updates `tools.health`. Planners
+//!    are never named in it. In harnessd that session is
+//!    [`crate::launcher::ClaudeLauncher::readers_only`]: a strict MCP config naming
+//!    harness-web only, the run folder as working directory, `--setting-sources local`,
+//!    only `mcp__harness-web` allowed and Claude Code's built-in tools denied. srv-web
+//!    registers only `@phase 1` readers as site tools; its other tools stay behind its gate.
+//!    With nothing to replay no session starts.
 //!
 //! Every other schedule kind, and `harness run`, goes to [`ReflectLauncher::inner`] unchanged.
 //! Everything written (ledger, files, proposals, prompt) is scrubbed (rule 2).
@@ -46,7 +52,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use toolstore::{
     namespace, parse_header, valid_domain, SiteConfig, SweepAction, ToolHeader, ToolKind,
-    ToolStore, ARCHIVE, EPHEMERAL_IDLE_DAYS, EPHEMERAL_IDLE_VISITS, GENERIC, MISSES_TO_RETIRE,
+    ToolStore, EPHEMERAL_IDLE_DAYS, EPHEMERAL_IDLE_VISITS, GENERIC, MISSES_TO_RETIRE,
 };
 
 /// `--allowedTools` of the replay session: the harness-web server only (G-3).
@@ -499,7 +505,7 @@ pub struct ReflectLauncher {
     pub commit: bool,
     /// Every run that is not a reflect firing.
     pub inner: Arc<dyn Launcher>,
-    /// The readers-only replay session (harnessd: `claude -p --allowedTools mcp__harness-web`).
+    /// The readers-only replay session (harnessd: `ClaudeLauncher::readers_only`).
     pub readers: Arc<dyn Launcher>,
 }
 
@@ -548,24 +554,52 @@ fn rel(root: &Path, p: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// The paths `actions` moved or deleted, relative to `root`, sorted and without repeats: a
+/// retired or archived tool's old path and its archive path, and each deleted archive file.
+pub fn swept_paths(store: &ToolStore, root: &Path, actions: &[SweepAction]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut add = |p: &Path| {
+        if let Ok(r) = p.strip_prefix(root) {
+            if !r.as_os_str().is_empty() && !out.iter().any(|o| o == r) {
+                out.push(r.to_path_buf());
+            }
+        }
+    };
+    for a in actions {
+        match a {
+            SweepAction::Retired {
+                domain,
+                name,
+                archived: Some(to),
+                ..
+            }
+            | SweepAction::Archived {
+                domain, name, to, ..
+            } => {
+                if let Ok(from) = store.try_tool_path(domain, name) {
+                    add(&from);
+                }
+                add(to);
+            }
+            SweepAction::Retired { archived: None, .. } => {}
+            SweepAction::Deleted { path, .. } => add(path),
+        }
+    }
+    out.sort();
+    out
+}
+
 impl ReflectLauncher {
-    /// Tool folders (relative to the tools root) with uncommitted changes, from
-    /// `git ls-files -m -d -o --exclude-standard`. `Err` when git fails (no repository).
-    fn changed_folders(&self) -> Result<Vec<PathBuf>, String> {
+    /// Of `paths` (relative to the tools root), those git can stage: present on disk, or
+    /// tracked (a tracked file the sweep moved away is a deletion to commit; an untracked one
+    /// that is gone leaves nothing). `Err` when git fails (no repository).
+    fn stageable(&self, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
         let out = std::process::Command::new("git")
             .arg("--literal-pathspecs")
             .arg("-C")
             .arg(&self.tools_root)
-            .args([
-                "ls-files",
-                "-z",
-                "-m",
-                "-d",
-                "-o",
-                "--exclude-standard",
-                "--",
-                ".",
-            ])
+            .args(["ls-files", "-z", "--"])
+            .args(&paths)
             .stdin(std::process::Stdio::null())
             .output()
             .map_err(|e| format!("git: {e}"))?;
@@ -573,25 +607,31 @@ impl ReflectLauncher {
             let err = String::from_utf8_lossy(&out.stderr);
             return Err(format!("git ls-files: {}", err.trim()));
         }
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        for f in String::from_utf8_lossy(&out.stdout).split('\0') {
-            let mut parts = f.split('/');
-            let dir = match (parts.next(), parts.next(), parts.next()) {
-                (Some(ARCHIVE), Some(d), Some(_)) if valid_domain(d) => Path::new(ARCHIVE).join(d),
-                (Some(d), Some(_), _) if valid_domain(d) => PathBuf::from(d),
-                _ => continue,
-            };
-            if !dirs.contains(&dir) {
-                dirs.push(dir);
-            }
-        }
-        dirs.sort();
-        Ok(dirs)
+        let listed = String::from_utf8_lossy(&out.stdout);
+        let tracked: Vec<&str> = listed.split('\0').filter(|f| !f.is_empty()).collect();
+        Ok(paths
+            .into_iter()
+            .filter(|p| {
+                let slash = p.to_string_lossy().replace('\\', "/");
+                self.tools_root.join(p).exists() || tracked.contains(&slash.as_str())
+            })
+            .collect())
     }
 
-    fn commit_tools(&self, store: &ToolStore, run: &RunId) -> Result<Option<String>, String> {
-        let dirs = self.changed_folders()?;
-        if dirs.is_empty() {
+    /// Commits exactly the paths in `actions` (review T-16 r1 should-fix 7): never whole
+    /// folders, so nothing the sweep did not touch is committed.
+    fn commit_tools(
+        &self,
+        store: &ToolStore,
+        run: &RunId,
+        actions: &[SweepAction],
+    ) -> Result<Option<String>, String> {
+        let paths = swept_paths(store, &self.tools_root, actions);
+        if paths.is_empty() {
+            return Ok(None);
+        }
+        let paths = self.stageable(paths)?;
+        if paths.is_empty() {
             return Ok(None);
         }
         let msg = scrub(&format!(
@@ -599,7 +639,7 @@ impl ReflectLauncher {
             run.0
         ));
         store
-            .git_commit(&dirs, &msg)
+            .git_commit(&paths, &msg)
             .map(Some)
             .map_err(|e| e.to_string())
     }
@@ -627,7 +667,7 @@ impl ReflectLauncher {
 
         // 3. Commit.
         let (commit, commit_error) = if self.commit {
-            match self.commit_tools(&store, &run.id) {
+            match self.commit_tools(&store, &run.id, &actions) {
                 Ok(c) => (c, None),
                 Err(e) => (None, Some(scrub(&e))),
             }
@@ -868,6 +908,7 @@ impl Launcher for ReflectLauncher {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use toolstore::ARCHIVE;
 
     fn t(h: u32) -> Ts {
         Utc.with_ymd_and_hms(2026, 10, 20, h, 0, 0).unwrap()

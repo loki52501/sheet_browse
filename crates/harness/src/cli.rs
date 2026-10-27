@@ -476,6 +476,8 @@ async fn schedule_add(
     if kind == ScheduleKind::Watch && watch_target.is_none() {
         return Err(CliError::Usage("--kind watch needs --watch-target".into()));
     }
+    // One line: a line break would split the report's `Watch:` line (review T-16 r1 nit).
+    let watch_target = watch_target.map(|t| harness_core::watch::normalise(&t));
     if prompt.trim().is_empty() {
         return Err(CliError::Usage("the prompt is empty".into()));
     }

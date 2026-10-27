@@ -245,7 +245,8 @@ pub struct LaunchRequest<'a> {
 
 /// The text a launcher puts before the task in a session's prompt (B-563, D-140 (10)): the
 /// run id, the absolute `files/` path, and "cite only what tools returned in this run"; for
-/// a watch firing also where to write the watched state ([`watching::WATCH_FILE`]). Scrubbed.
+/// a watch firing also to record the watched state with harness-mem `watch.observe` (which
+/// writes [`watching::WATCH_FILE`]), not with a file write of its own. Scrubbed.
 /// One line per item, no blank line inside, ends with a newline.
 pub fn run_preamble(req: &LaunchRequest<'_>) -> String {
     let files = std::path::absolute(req.run.files()).unwrap_or_else(|_| req.run.files());
@@ -259,9 +260,10 @@ pub fn run_preamble(req: &LaunchRequest<'_>) -> String {
     );
     if let Some(s) = req.schedule.filter(|s| s.kind == ScheduleKind::Watch) {
         p.push_str(&format!(
-            "This is a watch run for \"{target}\": write the current watched state as plain \
-             text to {files}/{file} (the harness compares it with the last run and notifies \
-             the user on change).\n",
+            "This is a watch run for \"{target}\": read the watched page with harness tools, \
+             then call harness-mem `watch.observe` once with the current watched state as \
+             short plain text (it is saved as files/{file}; do not write that file yourself). \
+             The harness compares it with the last run and notifies the user on change.\n",
             target = watching::target_key(s),
             file = watching::WATCH_FILE,
         ));

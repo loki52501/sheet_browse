@@ -16,8 +16,12 @@ Session A (`harness run`):
 Tell me when the event page http://127.0.0.1:8765/event.html opens registration. Check it every minute.
 ```
 
+Session A's `schedule.add` (kind watch) is Account and asks (B-187, D-143): answer
+`harness ask <run> <n> yes`, or it proceeds at the 60 s timeout.
+
 Firings by harnessd (each a `claude -p` session in `-p` mode, prompt with the run
-preamble naming `files/watch.txt`):
+preamble naming `files/watch.txt` and telling it to record the state with harness-mem
+`watch.observe`):
 
 1. closed page: first observation, baseline set, nothing sent;
 2. closed page: no change, nothing sent;

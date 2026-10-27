@@ -18,9 +18,23 @@
 //! Both get `SB_RUN_ID` and an absolute `SB_RUNS_ROOT`, which the tool servers read in
 //! `core_pg::bootstrap()` to attach to this run. No API key is set or read (rule 1).
 //!
-//! A launcher with a non-empty [`ClaudeLauncher::allowed_tools`] adds `--allowedTools` with
-//! that list: reflect's readers-only replay session runs with only `mcp__harness-web` allowed
-//! (G-3, T-16), so in `-p` mode every other tool that needs a permission is refused.
+//! `--allowedTools` ([`ClaudeLauncher::allowed_tools`]): a `claude -p` session refuses every
+//! tool that needs a permission and has no allow rule, so [`ClaudeLauncher::print`] allows
+//! the four harness servers ([`HARNESS_ALLOWED_TOOLS`], the names in `mcp.example.json`).
+//! That is safe because the gate inside each server is the permission layer (H-1, rule 4).
+//! Interactive sessions get no allow list: the user is at the terminal.
+//!
+//! Reflect's replay session ([`ClaudeLauncher::readers_only`], G-3, T-16) is limited by
+//! what is passed, not by an allow rule alone:
+//! * `--strict-mcp-config --mcp-config <run>/replay-mcp.json`: the only MCP server is
+//!   harness-web (srv-web), written into the run folder at launch; no other configured
+//!   server is loaded;
+//! * the working directory is the run folder and `--setting-sources local`: no project or
+//!   user settings (and none of their allow rules) are loaded; `--permission-mode default`;
+//! * `--allowedTools mcp__harness-web`, and [`BUILTIN_TOOLS`] added to `--disallowedTools`
+//!   (Bash, file edits, web fetch, file reads and the rest), so in `-p` mode harness-web's
+//!   tools are all it can call. srv-web registers only `@phase 1` readers as site tools;
+//!   its own tools still pass through its gate.
 
 use crate::CliError;
 use async_trait::async_trait;
@@ -41,6 +55,54 @@ pub const DISALLOWED_TOOLS: [&str; 3] = [
     "Bash(harness gate:*)",
     "Bash(harness vault:*)",
 ];
+
+/// `--allowedTools` of every `claude -p` session harnessd starts: the harness MCP servers
+/// (names as in `mcp.example.json`). The gate in each server decides each call (H-1).
+pub const HARNESS_ALLOWED_TOOLS: [&str; 4] = [
+    "mcp__harness-web",
+    "mcp__harness-files",
+    "mcp__harness-cli",
+    "mcp__harness-mem",
+];
+
+/// Claude Code built-in tools the readers-only replay session is started without (the
+/// same list as the ladder shim, `bench/fixtures/ladder_session.py`).
+pub const BUILTIN_TOOLS: [&str; 24] = [
+    "Bash",
+    "PowerShell",
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+    "Read",
+    "Glob",
+    "Grep",
+    "Task",
+    "Agent",
+    "CronCreate",
+    "CronDelete",
+    "RemoteTrigger",
+    "ScheduleWakeup",
+    "PushNotification",
+    "SendMessage",
+    "Workflow",
+    "Skill",
+    "EnterWorktree",
+    "ExitWorktree",
+    "DesignSync",
+];
+
+/// The MCP server name of srv-web in the replay session's config (as in `mcp.example.json`).
+pub const READERS_SERVER: &str = "harness-web";
+
+/// The replay session's generated MCP config, in the run folder (not `files/`).
+pub const READERS_MCP_FILE: &str = "replay-mcp.json";
+
+/// Environment variable naming the srv-web executable for the replay session (default:
+/// `srv-web` next to the running executable, see [`srv_web_from_env`]).
+pub const SRV_WEB_VAR: &str = "SB_SRV_WEB";
 
 /// Default wall-clock cap of a `claude -p` session (D-124).
 pub const DEFAULT_SESSION_CAP: Duration = Duration::from_secs(60 * 60);
@@ -68,8 +130,48 @@ pub struct ClaudeLauncher {
     /// Bytes of a `claude -p` session's stdout kept in `files/answer.md`.
     pub max_answer_bytes: usize,
     /// Claude Code permission rules passed as `--allowedTools` (none: the flag is left out).
-    /// Reflect's replay session uses [`crate::reflect::READERS_ALLOWED_TOOLS`] (G-3, T-16).
+    /// [`ClaudeLauncher::print`]: [`HARNESS_ALLOWED_TOOLS`]; the replay session:
+    /// [`crate::reflect::READERS_ALLOWED_TOOLS`] (G-3, T-16).
     pub allowed_tools: Vec<String>,
+    /// Set: the session is the readers-only replay session (see the module doc).
+    pub readers_only: Option<ReadersOnly>,
+}
+
+/// What the readers-only replay session needs to start srv-web on its own (G-3, T-16).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadersOnly {
+    /// The srv-web executable, written into the generated MCP config.
+    pub server: PathBuf,
+    /// The tools root, passed as an absolute `SB_TOOLS_ROOT` (the session's working
+    /// directory is the run folder, so a relative one would point elsewhere).
+    pub tools_root: PathBuf,
+}
+
+/// The srv-web executable: `SB_SRV_WEB` when set, else `srv-web` next to the running
+/// executable (harnessd and srv-web are built into the same `target/<profile>/`).
+pub fn srv_web_from_env() -> Result<PathBuf, CliError> {
+    if let Some(v) = std::env::var_os(SRV_WEB_VAR).filter(|v| !v.is_empty()) {
+        return Ok(std::path::absolute(PathBuf::from(v))?);
+    }
+    let exe = std::env::current_exe()?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| CliError::Usage(format!("set {SRV_WEB_VAR} to the srv-web executable")))?;
+    Ok(dir.join(format!("srv-web{}", std::env::consts::EXE_SUFFIX)))
+}
+
+/// Writes the replay session's MCP config into `run_dir`: one server, harness-web, run as
+/// `server` with no arguments. Returns the file's path.
+pub fn write_readers_config(run_dir: &Path, server: &Path) -> std::io::Result<PathBuf> {
+    let server = std::path::absolute(server)?;
+    let doc = serde_json::json!({
+        "mcpServers": {
+            READERS_SERVER: { "command": server.to_string_lossy(), "args": [] }
+        }
+    });
+    let path = run_dir.join(READERS_MCP_FILE);
+    std::fs::write(&path, format!("{doc:#}\n"))?;
+    Ok(path)
 }
 
 /// The session cap from `SB_SESSION_CAP_SECS` (unset or blank: [`DEFAULT_SESSION_CAP`]).
@@ -98,15 +200,30 @@ impl ClaudeLauncher {
             interactive: false,
             max_session: DEFAULT_SESSION_CAP,
             max_answer_bytes: DEFAULT_MAX_ANSWER_BYTES,
-            allowed_tools: Vec::new(),
+            allowed_tools: HARNESS_ALLOWED_TOOLS.map(String::from).to_vec(),
+            readers_only: None,
         }
     }
 
-    /// `claude <prompt>` with the terminal (harness run).
+    /// `claude <prompt>` with the terminal (harness run). No allow list.
     pub fn interactive(program: impl Into<PathBuf>) -> ClaudeLauncher {
         ClaudeLauncher {
             interactive: true,
+            allowed_tools: Vec::new(),
             ..ClaudeLauncher::print(program)
+        }
+    }
+
+    /// This launcher's `claude -p` limited to harness-web readers (reflect's replay session,
+    /// see the module doc). Keeps the program and the caps.
+    pub fn readers_only(&self, server: PathBuf, tools_root: PathBuf) -> ClaudeLauncher {
+        ClaudeLauncher {
+            interactive: false,
+            allowed_tools: crate::reflect::READERS_ALLOWED_TOOLS
+                .map(String::from)
+                .to_vec(),
+            readers_only: Some(ReadersOnly { server, tools_root }),
+            ..self.clone()
         }
     }
 
@@ -120,6 +237,17 @@ impl ClaudeLauncher {
         let mut cmd = tokio::process::Command::new(program);
         cmd.env("SB_RUN_ID", &req.run.id.0)
             .env("SB_RUNS_ROOT", root);
+        let readers = self.readers_only.as_ref().map(|r| {
+            let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+            let dir = abs(&req.run.dir);
+            cmd.current_dir(&dir)
+                .env("SB_TOOLS_ROOT", abs(&r.tools_root));
+            // The working directory moves, so a relative vault path would point elsewhere.
+            if let Some(v) = std::env::var_os("SB_VAULT_PATH").filter(|v| !v.is_empty()) {
+                cmd.env("SB_VAULT_PATH", abs(Path::new(&v)));
+            }
+            dir
+        });
         if self.interactive {
             // A leading space keeps a prompt such as "-h" from being parsed as a flag. The
             // prompt goes before --disallowedTools, whose list takes every argument after it.
@@ -136,11 +264,21 @@ impl ClaudeLauncher {
                 .stderr(Stdio::inherit())
                 .kill_on_drop(true);
         }
-        // Both lists are variadic: each ends where the next flag starts.
+        if let Some(dir) = &readers {
+            cmd.arg("--strict-mcp-config")
+                .arg("--mcp-config")
+                .arg(dir.join(READERS_MCP_FILE))
+                .args(["--setting-sources", "local", "--permission-mode", "default"]);
+        }
+        // The lists are variadic: each ends where the next flag starts. --disallowedTools
+        // stays last (the ladder shim reads everything after it as the deny list).
         if !self.allowed_tools.is_empty() {
             cmd.arg("--allowedTools").args(&self.allowed_tools);
         }
         cmd.arg("--disallowedTools").args(DISALLOWED_TOOLS);
+        if readers.is_some() {
+            cmd.args(BUILTIN_TOOLS);
+        }
         cmd
     }
 
@@ -151,6 +289,10 @@ impl ClaudeLauncher {
     ) -> Result<tokio::process::Child, LaunchError> {
         let err =
             |p: &Path, e: std::io::Error| LaunchError(format!("cannot start {}: {e}", p.display()));
+        if let Some(r) = &self.readers_only {
+            write_readers_config(&req.run.dir, &r.server)
+                .map_err(|e| LaunchError(format!("writing {READERS_MCP_FILE}: {e}")))?;
+        }
         match self.command(&self.program, req, root).spawn() {
             Ok(c) => Ok(c),
             // npm installs Claude Code as claude.cmd on Windows; std only resolves .exe.
@@ -363,7 +505,8 @@ mod tests {
             "Bash(harness vault:*)",
         ];
         let p = ClaudeLauncher::print("claude");
-        let mut want = vec!["-p"];
+        let mut want = vec!["-p", "--allowedTools"];
+        want.extend(HARNESS_ALLOWED_TOOLS);
         want.extend(deny);
         assert_eq!(argv(&p.command(&p.program, &req, tmp.path())), want);
         let i = ClaudeLauncher::interactive("claude");
@@ -395,9 +538,37 @@ mod tests {
         assert_eq!(task, "-h say hi\n\nsecond paragraph");
     }
 
-    /// G-3, T-16: the reflect replay session allows only harness-web.
+    /// Review T-16 r1 should-fix 1: a scheduled `claude -p` session may call the four
+    /// harness servers (names as in mcp.example.json); the gate decides each call.
     #[test]
-    fn allowed_tools_go_before_the_deny_list() {
+    fn print_sessions_allow_the_harness_servers() {
+        let p = ClaudeLauncher::print("claude");
+        assert_eq!(
+            p.allowed_tools,
+            [
+                "mcp__harness-web",
+                "mcp__harness-files",
+                "mcp__harness-cli",
+                "mcp__harness-mem"
+            ]
+        );
+        let example: serde_json::Value =
+            serde_json::from_str(include_str!("../../../mcp.example.json")).unwrap();
+        for t in HARNESS_ALLOWED_TOOLS {
+            let name = t.strip_prefix("mcp__").unwrap();
+            assert!(example["mcpServers"].get(name).is_some(), "{name}");
+        }
+        assert!(ClaudeLauncher::interactive("claude")
+            .allowed_tools
+            .is_empty());
+        assert_eq!(p.readers_only, None);
+    }
+
+    /// Review T-16 r1 should-fix 4 (G-3): the replay session gets a strict MCP config with
+    /// harness-web only, the run folder as working directory, local settings only, only
+    /// harness-web allowed and the built-in tools denied; --disallowedTools stays last.
+    #[test]
+    fn the_replay_session_is_readers_only() {
         let tmp = tempfile::tempdir().unwrap();
         let run = RunFolder::create(tmp.path(), "x", "x").unwrap();
         let req = LaunchRequest {
@@ -406,18 +577,53 @@ mod tests {
             prompt: "replay",
             schedule: None,
         };
-        let mut p = ClaudeLauncher::print("claude");
-        p.allowed_tools = vec!["mcp__harness-web".into()];
-        let got = argv(&p.command(&p.program, &req, tmp.path()));
-        assert_eq!(
-            got[..4],
-            [
-                "-p",
-                "--allowedTools",
-                "mcp__harness-web",
-                "--disallowedTools"
-            ]
-        );
+        let mut base = ClaudeLauncher::print("claude");
+        base.max_session = Duration::from_secs(77);
+        let p = base.readers_only(tmp.path().join("srv-web"), PathBuf::from("tools"));
+        assert_eq!(p.max_session, Duration::from_secs(77), "caps are kept");
+        let cmd = p.command(&p.program, &req, tmp.path());
+        let dir = std::path::absolute(&run.dir).unwrap();
+        let config = dir.join(READERS_MCP_FILE).to_string_lossy().into_owned();
+        let mut want = vec![
+            "-p",
+            "--strict-mcp-config",
+            "--mcp-config",
+            config.as_str(),
+            "--setting-sources",
+            "local",
+            "--permission-mode",
+            "default",
+            "--allowedTools",
+            "mcp__harness-web",
+            "--disallowedTools",
+        ];
+        want.extend(DISALLOWED_TOOLS);
+        want.extend(BUILTIN_TOOLS);
+        assert_eq!(argv(&cmd), want);
+        for t in ["Bash", "Write", "Edit", "Read", "WebFetch", "Task"] {
+            assert!(BUILTIN_TOOLS.contains(&t), "{t}");
+        }
+        let std = cmd.as_std();
+        assert_eq!(std.get_current_dir(), Some(dir.as_path()));
+        let tools_root = std
+            .get_envs()
+            .find(|(k, _)| *k == "SB_TOOLS_ROOT")
+            .and_then(|(_, v)| v)
+            .map(PathBuf::from)
+            .unwrap();
+        assert!(tools_root.is_absolute(), "{}", tools_root.display());
+        assert!(tools_root.ends_with("tools"));
+
+        // The generated config names harness-web and nothing else.
+        let path = write_readers_config(&run.dir, Path::new("bin/srv-web")).unwrap();
+        assert_eq!(path, run.dir.join(READERS_MCP_FILE));
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let servers = doc["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.keys().collect::<Vec<_>>(), ["harness-web"]);
+        let command = PathBuf::from(servers["harness-web"]["command"].as_str().unwrap());
+        assert!(command.is_absolute() && command.ends_with("bin/srv-web"));
+        assert_eq!(servers["harness-web"]["args"], serde_json::json!([]));
     }
 
     #[test]

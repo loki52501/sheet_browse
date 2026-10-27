@@ -26,7 +26,7 @@ use chrono::{TimeZone, Utc};
 use clap::Parser;
 use harness::cli::{execute, Cli, Ctx};
 use harness::daemon::{Daemon, ReopenVault};
-use harness::launcher::{ClaudeLauncher, ANSWER_FILE, DISALLOWED_TOOLS};
+use harness::launcher::{ClaudeLauncher, ANSWER_FILE, DISALLOWED_TOOLS, HARNESS_ALLOWED_TOOLS};
 use harness::{CliError, Env};
 use harness_core::memory::*;
 use harness_core::run::{is_run_id, RunFolder, RunId};
@@ -432,8 +432,15 @@ fn read(p: impl AsRef<Path>) -> String {
     std::fs::read_to_string(p.as_ref()).unwrap_or_else(|e| panic!("{}: {e}", p.as_ref().display()))
 }
 
+/// A `-p` session also allows the harness servers (review T-16 r1 should-fix 1); an
+/// interactive one does not.
 fn want_argv(first: &str) -> Vec<String> {
-    let mut v = vec![first.to_owned(), "--disallowedTools".to_owned()];
+    let mut v = vec![first.to_owned()];
+    if first == "-p" {
+        v.push("--allowedTools".to_owned());
+        v.extend(HARNESS_ALLOWED_TOOLS.iter().map(|s| s.to_string()));
+    }
+    v.push("--disallowedTools".to_owned());
     v.extend(DISALLOWED_TOOLS.iter().map(|s| s.to_string()));
     v
 }

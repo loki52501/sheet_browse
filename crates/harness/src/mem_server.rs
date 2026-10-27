@@ -14,15 +14,19 @@
 //! | `review.due`    | Read   | items due by now + `days`, with question and answer         |
 //! | `schedule.list` | Read   | every schedule with its next firing (UTC)                   |
 //! | `contact.get`   | Read   | one `memory.contacts` row (H-1.1)                           |
-//! | `schedule.add`  | Submit | `schedule_add` with the session's run as parent, wakes harnessd |
+//! | `schedule.add`  | Account| `schedule_add` with the session's run as parent, wakes harnessd |
 //! | `schedule.rm`   | Delete | `schedule_rm` (asks by default), wakes harnessd             |
 //! | `watch.observe` | Fill   | writes the watched state to `runs/<run>/files/watch.txt`    |
 //!
+//! `schedule.add` is Account, so it asks (H-1.1; a timeout proceeds, H-1.3): a schedule makes
+//! unattended runs persist, and one injected page must not plant one without a card (B-187).
+//!
 //! Text stored in memory (review item and answer, schedule prompt and watch target) is
-//! scrubbed against the vault first: a vault value is stored only as `@vault(name)`. The
-//! watch state file is written as given, since the harness hashes it after the run (T-16
-//! package A); the tool's reply is scrubbed by the wrapper. Replies are short text (rule 5):
-//! user text is cut to one line of at most [`SHOW_MAX`] characters per field.
+//! scrubbed against the vault first: a vault value is stored only as `@vault(name)`. A watch
+//! target is also collapsed to one line. The watch state file is scrubbed too before it is
+//! written (D-143): the harness scrubs before hashing anyway, so no hash changes. The tool's
+//! reply is scrubbed by the wrapper. Replies are short text (rule 5): user text is cut to one
+//! line of at most [`SHOW_MAX`] characters per field.
 
 use crate::CliError;
 use async_trait::async_trait;
@@ -48,8 +52,8 @@ pub const WATCH_FILE: &str = harness_core::watch::WATCH_FILE;
 pub const TEXT_MAX: usize = 4000;
 /// Longest watch target accepted, in characters.
 pub const TARGET_MAX: usize = 200;
-/// Largest watch state accepted, in bytes.
-pub const STATE_MAX_BYTES: usize = 256 * 1024;
+/// Largest watch state accepted, in bytes (the harness reads no more of the file).
+pub const STATE_MAX_BYTES: usize = harness_core::watch::WATCH_MAX_BYTES;
 /// Characters of one user-text field shown in a reply.
 pub const SHOW_MAX: usize = 200;
 /// `review.due` default and largest `k`.
@@ -164,11 +168,12 @@ pub fn tools(harness: &Harness) -> Vec<ToolSpec> {
         spec(
             Op::ScheduleAdd,
             "schedule.add",
-            Class::Submit,
+            // B-187: asks (Account), so no page can plant a recurring run without a card.
+            Class::Account,
             "Schedule a prompt to run later in its own fresh run, e.g. `0 8 * * 1-5` (5-field \
              cron, UTC). kind cron (default), watch (needs watch_target; the run writes the \
              watched state with watch.observe and the harness notifies once on change) or \
-             reflect. This run becomes the parent.",
+             reflect. This run becomes the parent. Asks the user first.",
             schema(
                 json!({
                     "cron": {"type": "string"},
@@ -439,7 +444,9 @@ impl Mem {
         };
         let watch_target = match (kind, args.get("watch_target")) {
             (ScheduleKind::Watch, Some(Value::String(_))) => {
-                Some(self.stored_text(args, "watch_target", TARGET_MAX)?)
+                // One line: a line break would split the report's `Watch:` line.
+                let t = self.stored_text(args, "watch_target", TARGET_MAX)?;
+                Some(harness_core::watch::normalise(&t))
             }
             (ScheduleKind::Watch, _) => {
                 return Err(ToolError::Args("kind watch needs watch_target".into()))
@@ -525,6 +532,9 @@ impl Mem {
                 STATE_MAX_BYTES / 1024
             )));
         }
+        // D-143: scrubbed like everything else this server stores; the harness hashes the
+        // scrubbed text anyway, so the comparison is unchanged.
+        let state = self.vault.scrub(state);
         let files = ctx.run_dir.join("files");
         let path = write_atomic(&files, WATCH_FILE, state.as_bytes())
             .map_err(|e| ToolError::Failed(format!("writing files/{WATCH_FILE}: {e}")))?;

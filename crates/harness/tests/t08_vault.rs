@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use clap::Parser;
 use harness::cli::{execute, Cli, Ctx};
 use harness::daemon::{Daemon, ReopenVault};
-use harness::launcher::{ClaudeLauncher, ANSWER_FILE, ANSWER_SCRUB_SLACK, DISALLOWED_TOOLS};
+use harness::launcher::{
+    ClaudeLauncher, ANSWER_FILE, ANSWER_SCRUB_SLACK, DISALLOWED_TOOLS, HARNESS_ALLOWED_TOOLS,
+};
 use harness::{CliError, Env};
 use harness_core::memory::*;
 use harness_core::run::{is_run_id, RunId};
@@ -407,9 +409,12 @@ async fn a_run_scrubs_prompt_slug_row_session_input_and_answer() {
     let report = std::fs::read_to_string(f.folder.join("report.md")).unwrap();
     assert_clean(&report, true, "report.md");
 
-    // B-192 on the real process: -p, then the denied commands.
+    // B-192 on the real process: -p, the harness servers allowed (D-143), then the denied
+    // commands.
     let args = std::fs::read_to_string(fake_dir.join("args.txt")).unwrap();
-    let mut want = vec!["-p", "--disallowedTools"];
+    let mut want = vec!["-p", "--allowedTools"];
+    want.extend(HARNESS_ALLOWED_TOOLS);
+    want.push("--disallowedTools");
     want.extend(DISALLOWED_TOOLS);
     assert_eq!(args.lines().collect::<Vec<_>>(), want);
     let env_seen = std::fs::read_to_string(fake_dir.join("env.txt")).unwrap();

@@ -19,7 +19,7 @@ use harness_core::run::RunId;
 use harness_core::scrub;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use toolstore::{ArgSpec, ToolHeader, GENERIC, MISSES_TO_RETIRE};
 
@@ -300,8 +300,16 @@ pub fn write_proposals(
         out.warning = Some("no proposals file configured; written to the run folder only".into());
         return Ok(out);
     };
-    let text = match std::fs::read_to_string(file) {
-        Ok(t) => t,
+    // One handle for the read and the append, under an exclusive lock held until it is
+    // dropped: two reflect passes cannot both miss an id and append it twice, and the append
+    // is one write at the end of the file (O_APPEND).
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(file)
+        .and_then(|f| f.lock().map(|()| f));
+    let mut handle = match opened {
+        Ok(f) => f,
         Err(e) => {
             out.warning = Some(format!(
                 "proposals file {} not readable ({e}); written to the run folder only",
@@ -310,6 +318,14 @@ pub fn write_proposals(
             return Ok(out);
         }
     };
+    let mut text = String::new();
+    if let Err(e) = handle.read_to_string(&mut text) {
+        out.warning = Some(format!(
+            "proposals file {} not readable ({e}); written to the run folder only",
+            file.display()
+        ));
+        return Ok(out);
+    }
     let (indent, known) = match proposals_section(&text) {
         Ok(s) => s,
         Err(why) => {
@@ -336,8 +352,7 @@ pub fn write_proposals(
         out.new.push(id.clone());
     }
     if !out.new.is_empty() {
-        let mut f = std::fs::OpenOptions::new().append(true).open(file)?;
-        f.write_all(scrub(&add).as_bytes())?;
+        handle.write_all(scrub(&add).as_bytes())?;
     }
     Ok(out)
 }
@@ -442,6 +457,37 @@ mod tests {
         let w = write_proposals(Some(&file), &run_files, &run, &[item("p1")]).unwrap();
         assert!(w.new.is_empty());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+    }
+
+    /// Review T-16 r1 nit: passes racing on one file append each id once (the read and the
+    /// append are under one lock).
+    #[test]
+    fn concurrent_passes_append_each_id_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("blockers.yaml");
+        std::fs::write(&file, "blockers:\n  - id: B-1\nproposals:\n").unwrap();
+        let ids: Vec<String> = (0..40).map(|i| format!("p{i}")).collect();
+        let items: Vec<Proposal> = ids.iter().map(|i| item(i)).collect();
+        let go = std::sync::Barrier::new(8);
+        std::thread::scope(|s| {
+            for n in 0..8 {
+                let (file, items, go) = (&file, &items, &go);
+                let dir = tmp.path().join(format!("files{n}"));
+                std::fs::create_dir_all(&dir).unwrap();
+                s.spawn(move || {
+                    let run = RunId(format!("run-{n}"));
+                    go.wait();
+                    for _ in 0..5 {
+                        write_proposals(Some(file), &dir, &run, items).unwrap();
+                    }
+                });
+            }
+        });
+        let text = std::fs::read_to_string(&file).unwrap();
+        for id in &ids {
+            let line = format!("{{\"id\":\"{id}\",");
+            assert_eq!(text.matches(&line).count(), 1, "{id}:\n{text}");
+        }
     }
 
     #[test]

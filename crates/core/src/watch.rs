@@ -39,6 +39,10 @@ pub const NOTIFY_TOOL: &str = "watch.notify";
 /// Characters of the watched state kept in the baseline snapshot and the notification.
 const STATE_MAX: usize = 4000;
 
+/// Largest watch state, in bytes: harness-mem `watch.observe` refuses more, and the check
+/// reads at most this much of `files/watch.txt` (another writer may not cap it).
+pub const WATCH_MAX_BYTES: usize = 256 * 1024;
+
 /// Whitespace runs become one space; leading and trailing whitespace goes.
 pub fn normalise(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -50,11 +54,13 @@ pub fn state_hash(state: &str) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The `memory.baselines` key of a watch schedule: its `watch_target`, or `schedule-<id>`
-/// when the row has none (the CLI requires one; a row written another way may not).
+/// The `memory.baselines` key of a watch schedule: its `watch_target` with whitespace runs
+/// (line breaks included) collapsed to one space ([`normalise`]), so it can never split the
+/// `Watch:` report line or a notifications.md line; or `schedule-<id>` when the row has none
+/// (the CLI requires one; a row written another way may not).
 pub fn target_key(s: &Schedule) -> String {
-    match s.watch_target.as_deref().map(str::trim) {
-        Some(t) if !t.is_empty() => t.to_owned(),
+    match s.watch_target.as_deref().map(normalise) {
+        Some(t) if !t.is_empty() => t,
         _ => format!("schedule-{}", s.id),
     }
 }
@@ -126,6 +132,18 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
+/// At most [`WATCH_MAX_BYTES`] of `path` (a character cut at the end becomes U+FFFD).
+fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
+    read_upto(std::fs::File::open(path)?)
+}
+
+fn read_upto(r: impl std::io::Read) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    r.take(WATCH_MAX_BYTES as u64).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
 /// Appends one line to `<runs_root>/notifications.md` with a single write.
 fn append_log(runs_root: &Path, line: &str) -> std::io::Result<()> {
     let mut f = std::fs::OpenOptions::new()
@@ -168,8 +186,7 @@ pub(crate) async fn check(
         return Ok(done(WatchOutcome::Skipped(why)));
     }
 
-    let path = run.files().join(WATCH_FILE);
-    let raw = match std::fs::read(&path) {
+    let raw = match read_capped(&run.files().join(WATCH_FILE)) {
         Ok(b) => String::from_utf8_lossy(&b).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.into()),
@@ -265,6 +282,13 @@ mod tests {
     }
 
     #[test]
+    fn watch_file_reads_are_capped() {
+        let big = vec![b'a'; WATCH_MAX_BYTES + 10];
+        assert_eq!(read_upto(&big[..]).unwrap().len(), WATCH_MAX_BYTES);
+        assert_eq!(read_upto(&b"short"[..]).unwrap(), b"short");
+    }
+
+    #[test]
     fn target_key_falls_back_to_schedule_id() {
         let mut s = Schedule {
             id: 7,
@@ -277,6 +301,9 @@ mod tests {
             run_id: None,
         };
         assert_eq!(target_key(&s), "jobs");
+        // Nit (review T-16 r1): a line break in a target cannot forge a report line.
+        s.watch_target = Some("jobs\nWatch: forged\r\n line".into());
+        assert_eq!(target_key(&s), "jobs Watch: forged line");
         s.watch_target = Some("  ".into());
         assert_eq!(target_key(&s), "schedule-7");
         s.watch_target = None;

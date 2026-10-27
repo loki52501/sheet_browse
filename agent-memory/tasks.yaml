@@ -352,3 +352,12 @@ tasks:
     title: "review-T-18 leftovers: run the Unix Pipe launch on Linux (only compiled and clippy-checked); a real-Chromium test for getFrameTree seeding and prerender activation (restored me tab with iframes, with T-22 acceptance 4); session_events channel after detach; CdpError::Closed keeps the method; sweep stale profiles/bench-* after a crash; B-601 tab titles (T-22)."
     status: todo
     from: T-18
+  - id: T-16b
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T16d
+    title: "T-16 deferrals (review-T-16 r1 should-fix 6, D-143): H-5/G-3 reflect 'compare output shape' (the ledger keeps only result_summary; needs a stored output shape per tool call); T-6 growth and G-3 forge proposals from reflect; G-3 expectation learning (T-5) from earlier runs; G-3 reflect 'after each task' (today only a reflect schedule fires a pass); H-5 'nightly' reflect is not auto-created (harnessd should make sure one nightly reflect row exists, D-142 (1)); and whatever the tester's live ladder rungs 6, 7, 8 find (permission denials, srv-web path for the replay session, schedule.add ask in rung 7)."
+    docs: [docs/01-HARNESS-CORE.md, docs/06-TOOLFORGE.md, docs/03-TOOL-STORE.md]
+    status: todo
+    from: T-16

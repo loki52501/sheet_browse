@@ -7,8 +7,9 @@
 //!
 //! * rung 6 shape: `review.add` -> `review.grade` -> a new connection -> `review.due` shows
 //!   the SM-2 date the grade reported (1 day, then 6, a fail resets to 1);
-//! * `schedule.add` creates a row whose parent is the session's run and rewrites the
-//!   schedules-changed marker; `schedule.rm` is Delete and asks (timeout skips);
+//! * `schedule.add` is Account and asks (B-187): a yes creates a row whose parent is the
+//!   session's run and rewrites the schedules-changed marker, a no adds nothing;
+//!   `schedule.rm` is Delete and asks (timeout skips);
 //! * a vault value in a review text never reaches a tool reply (in-process and over MCP
 //!   stdio framing), the stored row, or the ledger;
 //! * `watch.observe` writes `runs/<run>/files/watch.txt` (rung 8's input to the harness);
@@ -385,9 +386,11 @@ async fn schedule_add_creates_a_row_with_this_run_as_parent_and_wakes_harnessd()
     else {
         return;
     };
-    let h = e
-        .harness(ScriptedAsker::with([AskOutcome::AnsweredProceed]))
-        .await;
+    // Asks in order: add (yes), add (no), five bad adds (yes, then refused on their
+    // arguments), watch add (yes), rm (yes); the last rm gets no answer.
+    let mut script = vec![AskOutcome::AnsweredProceed, AskOutcome::AnsweredSkip];
+    script.extend([AskOutcome::AnsweredProceed; 7]);
+    let h = e.harness(ScriptedAsker::with(script)).await;
     let marker = changed_dir(&e.runs_root).join("changed");
     assert!(!marker.exists());
 
@@ -399,6 +402,18 @@ async fn schedule_add_creates_a_row_with_this_run_as_parent_and_wakes_harnessd()
     .await;
     let id = id_after(&out, "schedule ") as i32;
     assert!(out.contains("cron `0 8 * * 1-5` UTC"), "{out}");
+    std::fs::remove_file(&marker).unwrap();
+    // B-187: the user says no, nothing is added and harnessd is not woken.
+    let no = ok(
+        &h,
+        "schedule.add",
+        json!({"cron": "0 * * * *", "prompt": "planted by a page"}),
+    )
+    .await;
+    assert!(no.starts_with("skipped"), "{no}");
+    assert!(!marker.exists());
+    assert_eq!(h.store.schedule_list().await.unwrap().len(), 1);
+    std::fs::write(&marker, "").unwrap();
     assert!(out.contains(&format!("parent run {}", e.run.id)), "{out}");
     assert!(
         marker.is_file(),
@@ -443,7 +458,7 @@ async fn schedule_add_creates_a_row_with_this_run_as_parent_and_wakes_harnessd()
         &h,
         "schedule.add",
         json!({"cron": "*/30 * * * *", "prompt": "Tell me when lu.ma/x opens registration",
-               "kind": "watch", "watch_target": "luma-x-registration"}),
+               "kind": "watch", "watch_target": "luma-x\n  registration"}),
     )
     .await;
     let wid = id_after(&watch, "schedule ") as i32;
@@ -457,7 +472,11 @@ async fn schedule_add_creates_a_row_with_this_run_as_parent_and_wakes_harnessd()
         .find(|s| s.id == wid)
         .unwrap();
     assert_eq!(w.kind, ScheduleKind::Watch);
-    assert_eq!(w.watch_target.as_deref(), Some("luma-x-registration"));
+    assert_eq!(
+        w.watch_target.as_deref(),
+        Some("luma-x registration"),
+        "stored on one line"
+    );
 
     let list = ok(&h, "schedule.list", json!({})).await;
     assert!(list.starts_with("2 schedules"), "{list}");
@@ -465,9 +484,9 @@ async fn schedule_add_creates_a_row_with_this_run_as_parent_and_wakes_harnessd()
         list.contains(&format!("schedule {id} cron `0 8 * * 1-5`")),
         "{list}"
     );
-    assert!(list.contains("watching luma-x-registration"), "{list}");
+    assert!(list.contains("watching luma-x registration"), "{list}");
 
-    // The tool event carries the Submit class (rule 4).
+    // B-187: the tool event carries the Account class and the answered ask (rule 4).
     let events = h.store.ledger_events(&e.run.id).await.unwrap();
     let adds: Vec<_> = events
         .iter()
@@ -476,8 +495,14 @@ async fn schedule_add_creates_a_row_with_this_run_as_parent_and_wakes_harnessd()
     assert_eq!(adds.len(), 2);
     assert!(adds
         .iter()
-        .all(|(_, ev)| ev.class == Some(harness_core::Class::Submit)
-            && ev.mode == Some(LedgerMode::Allow)));
+        .all(|(_, ev)| ev.class == Some(harness_core::Class::Account)
+            && ev.mode == Some(LedgerMode::AnsweredProceed)));
+    let add_asks = events
+        .iter()
+        .filter(|(_, ev)| ev.server == "core" && ev.tool == "schedule.add")
+        .filter(|(_, ev)| ev.class == Some(harness_core::Class::Account))
+        .count();
+    assert!(add_asks >= 2, "every schedule.add asked: {add_asks}");
 
     // schedule.rm is Delete: it asks. Answered yes removes it and wakes harnessd.
     std::fs::remove_file(&marker).unwrap();
@@ -679,6 +704,14 @@ async fn a_vault_value_in_a_review_never_reaches_a_reply_the_row_or_the_ledger()
     );
     let watch: Value = serde_json::from_str(&replies[9]).unwrap();
     assert_eq!(watch["result"]["isError"], false, "{watch}");
+    // D-143: the watch state file is scrubbed before it is written.
+    let state =
+        std::fs::read_to_string(e.run.dir.join("files").join(mem_server::WATCH_FILE)).unwrap();
+    assert!(
+        !state.to_ascii_lowercase().contains(&lower),
+        "watch.txt holds a vault value"
+    );
+    assert_eq!(state, "seen @vault(test)");
 
     // The stored rows and the ledger (table and jsonl) hold only the reference.
     let mut conn = sqlx::PgConnection::connect(&e.db.url).await.unwrap();
@@ -728,6 +761,19 @@ async fn harness_mcp_serves_the_mem_tools_over_stdio() {
         .expect("spawn harness mcp");
     let mut stdin = child.stdin.take().unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    // B-187: schedule.add asks through the file channel (D-105); answer it the way
+    // `harness ask <run> 1 yes` does once the server prints the card's notice line.
+    let mut errs = BufReader::new(child.stderr.take().unwrap()).lines();
+    let (runs_root, run_id) = (e.runs_root.clone(), e.run.id.clone());
+    let answered = tokio::spawn(async move {
+        while let Ok(Some(l)) = errs.next_line().await {
+            if l.starts_with("ask 1 (") {
+                harness_core::ask::answer(&runs_root, &run_id, 1, true).unwrap();
+                return Some(l);
+            }
+        }
+        None
+    });
     let rpc = |v: Value| format!("{v}\n");
     stdin
         .write_all(
@@ -779,6 +825,9 @@ async fn harness_mcp_serves_the_mem_tools_over_stdio() {
         .await
         .unwrap();
     let added = next_reply(&mut lines).await;
+    let notice = timeout(CAP, answered).await.unwrap().unwrap();
+    let notice = notice.expect("schedule.add asked");
+    assert!(notice.contains("Account"), "{notice}");
     let text = added["result"]["content"][0]["text"].as_str().unwrap();
     assert_eq!(added["result"]["isError"], false, "{added}");
     assert!(text.contains(&format!("parent run {}", e.run.id)), "{text}");

@@ -654,7 +654,8 @@ async fn reflect_row_fires_a_fresh_run() {
 // ------------------------------------------------------------------ B-563 preamble
 
 /// The run preamble names the run id and the absolute files/ path and says to cite only
-/// what tools returned in this run; for a watch run it says where to write the state.
+/// what tools returned in this run; for a watch run it says to record the state with
+/// harness-mem `watch.observe`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_preamble_names_run_files_and_watch_file() {
     install();
@@ -682,8 +683,13 @@ async fn run_preamble_names_run_files_and_watch_file() {
     let w = row(ScheduleKind::Watch, "0 * * * *", "watch it", None);
     req.schedule = Some(&w);
     let p = run_preamble(&req);
-    assert!(p.contains(&format!("{files}/{WATCH_FILE}")), "{p}");
+    assert!(p.contains(&format!("files/{WATCH_FILE}")), "{p}");
     assert!(p.contains("\"jobs\""), "{p}");
+    // Review T-16 r1 should-fix 2: the state goes through the gated mem tool, never a
+    // built-in file write (refused in -p and outside the gate).
+    assert!(p.contains("harness-mem `watch.observe`"), "{p}");
+    assert!(p.contains("do not write that file yourself"), "{p}");
+    assert!(!p.contains(&format!("to {files}/{WATCH_FILE}")), "{p}");
     // A user may send nothing of this, but keep rule 7's style anyway.
     assert!(!p.contains('\u{2014}') && !p.contains("--"), "{p}");
 

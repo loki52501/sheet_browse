@@ -353,8 +353,10 @@ impl ToolCtx {
         self.vault.resolve_into(template, sink)
     }
 
-    /// Memory for tool-store health (`toolstore::record`) and contacts (`touch_contact`
-    /// after a send). Never `append`: the wrapper owns the ledger (H-6).
+    /// Memory for tool-store health (`toolstore::record`) and read-only lookups. Never
+    /// `append`: the wrapper owns the ledger (H-6). Never `touch_contact` after a send
+    /// either: the wrapper touches contacts itself after an allowed Send returns ok (B-198,
+    /// D-141), so a handler that also did would count the contact twice.
     pub fn store(&self) -> &Arc<dyn MemoryStore> {
         &self.store
     }

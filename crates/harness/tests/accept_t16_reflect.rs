@@ -667,6 +667,27 @@ async fn reflect_commits_the_sweep() {
     );
     git(&["add", "tools"]);
     git(&["commit", "-q", "-m", "plant (T-16)"]);
+    // Review T-16 r1 should-fix 7: work the sweep did not make stays out of its commit: an
+    // untracked draft (an unreviewed forged tool) and an edit to a tracked tool, both in
+    // the swept folder, and an untracked file in a folder the sweep never touched.
+    plant(
+        &tools,
+        "example.com",
+        "draft",
+        &reader("draft", "q:string", "ol li"),
+    );
+    plant(
+        &tools,
+        "example.com",
+        "kept",
+        &reader("kept", "q:string", "table tr"),
+    );
+    plant(
+        &tools,
+        "other.org",
+        "wip",
+        &reader("wip", "q:string", "ul li"),
+    );
 
     let store: Arc<dyn MemoryStore> = Arc::new(MemStore::new());
     let now = micros(ts_now());
@@ -715,7 +736,35 @@ async fn reflect_commits_the_sweep() {
     assert_eq!(git(&["rev-parse", "HEAD"]).trim(), head);
     let msg = git(&["log", "-1", "--format=%s"]);
     assert!(msg.contains("T-16"), "{msg}");
-    let status = git(&["status", "--porcelain", "--", "tools"]);
-    assert!(status.trim().is_empty(), "tools left uncommitted: {status}");
+    // The commit holds the sweep's move and nothing else.
+    let changed = git(&["show", "--no-renames", "--name-status", "--format=", "HEAD"]);
+    let mut names: Vec<&str> = changed.lines().filter(|l| !l.is_empty()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "A\ttools/_archive/example.com/stale_list.1.js",
+            "D\ttools/example.com/stale_list.js"
+        ],
+        "{changed}"
+    );
+    let status = git(&[
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        "tools",
+    ]);
+    let mut left: Vec<&str> = status.lines().collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            " M tools/example.com/kept.js",
+            "?? tools/example.com/draft.js",
+            "?? tools/other.org/wip.js"
+        ],
+        "only the sweep's paths are committed"
+    );
     assert!(done.prompt.is_none(), "nothing to replay, no session");
 }

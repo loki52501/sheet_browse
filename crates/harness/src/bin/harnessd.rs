@@ -7,14 +7,19 @@
 //! `reflect` schedules run a reflect pass (H-5, G-3, T-16) through
 //! `harness::reflect::ReflectLauncher`: sweep, proposals (to `SB_PROPOSALS_FILE`, default
 //! `<SB_TOOLS_ROOT>/../agent-memory/blockers.yaml`) and, when readers have a call to replay,
-//! a `claude -p` session allowed only `mcp__harness-web`. No reflect schedule is created
-//! automatically: add one with `harness schedule add` (kind reflect) (D-142).
+//! a readers-only `claude -p` session (`ClaudeLauncher::readers_only`: harness-web as the
+//! only MCP server, `SB_SRV_WEB` or `srv-web` next to harnessd; the run folder as working
+//! directory; local settings only; built-in tools denied). No reflect schedule is created
+//! automatically: add one with `harness schedule add` (kind reflect) (D-142, T-16b).
+//!
+//! Every other firing is a `claude -p` session allowed the four harness MCP servers
+//! (`harness::launcher::HARNESS_ALLOWED_TOOLS`); the gate in each server decides each call.
 
 use clap::Parser;
 use harness::daemon::{Daemon, ReopenVault};
-use harness::launcher::session_cap_from_env;
+use harness::launcher::{session_cap_from_env, srv_web_from_env};
 use harness::proposals::proposals_file_from_env;
-use harness::reflect::{ReflectLauncher, READERS_ALLOWED_TOOLS};
+use harness::reflect::ReflectLauncher;
 use harness::{ClaudeLauncher, Env};
 use harness_core::memory::MemoryStore;
 use harness_core::sched::SystemClock;
@@ -36,8 +41,15 @@ async fn run() -> anyhow::Result<()> {
     let mut claude = ClaudeLauncher::print(env.claude.clone());
     claude.max_session = session_cap_from_env()?;
     let store: Arc<dyn MemoryStore> = Arc::new(env.connect().await?);
-    let mut readers = claude.clone();
-    readers.allowed_tools = READERS_ALLOWED_TOOLS.map(String::from).to_vec();
+    let srv_web = srv_web_from_env()?;
+    if !srv_web.is_file() {
+        eprintln!(
+            "harnessd: warning: {} not found; reflect replay sessions will have no harness-web \
+             (set SB_SRV_WEB)",
+            srv_web.display()
+        );
+    }
+    let readers = claude.readers_only(srv_web, std::path::absolute(&env.tools_root)?);
     let reflect = ReflectLauncher {
         store: store.clone(),
         tools_root: env.tools_root.clone(),

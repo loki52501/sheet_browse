@@ -797,7 +797,7 @@ async fn acc4_schedule_add_fires_with_real_harness_and_harnessd() {
     let argv = std::fs::read_to_string(calls.join(format!("{}.argv", run.0))).unwrap();
     assert_eq!(
         argv,
-        "-p\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
+        "-p\n--allowedTools\nmcp__harness-web\nmcp__harness-files\nmcp__harness-cli\nmcp__harness-mem\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
         "claude argv (B-192 denials)"
     );
     let stdin = std::fs::read_to_string(calls.join(format!("{}.stdin", run.0))).unwrap();
@@ -1502,7 +1502,7 @@ async fn child_claude_launcher_stdin_scrub() {
     let argv = std::fs::read_to_string(calls.join(format!("{}.argv", f.run.0))).unwrap();
     assert_eq!(
         argv,
-        "-p\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
+        "-p\n--allowedTools\nmcp__harness-web\nmcp__harness-files\nmcp__harness-cli\nmcp__harness-mem\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
         "the prompt must not be in argv (B-192 denials)"
     );
     let stdin = std::fs::read_to_string(calls.join(format!("{}.stdin", f.run.0))).unwrap();

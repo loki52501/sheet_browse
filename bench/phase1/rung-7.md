@@ -19,7 +19,7 @@ recorded in the results) and runs `harnessd` until that firing's report is writt
 firing is a `claude -p` session through `bench/fixtures/ladder_session.py` (`-p` mode, prompt
 from harnessd's stdin with the run preamble).
 
-Expected: A: one `schedule.add` (Submit, allow) with a weekday cron at 8 am (`0 8 * * 1-5`
+Expected: A: one `schedule.add` (Account, asks: B-187, D-143; the tester answers `harness ask <run> <n> yes`, or it proceeds at the 60 s timeout) with a weekday cron at 8 am (`0 8 * * 1-5`
 UTC, or the user's 8 am converted, stated in the answer), kind cron, parent run = A's run.
 Firing: a new run folder with `prompt.md` = the stored prompt, `runs.parent_run` set, a file
 with the matching postings in `runs/<fired>/files/`, listed in `report.md`.
