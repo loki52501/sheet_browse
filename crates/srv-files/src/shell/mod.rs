@@ -487,6 +487,17 @@ pub struct GitSeal {
     kept: Vec<(String, String)>,
 }
 
+/// D-556: every git a line runs that is not sealed still never discovers a bare
+/// repository from the cwd. A bare repository's config and hooks sit at plain names
+/// (`foo/config`, `foo/hooks/`) that Fill writes outside runs/ can plant, and the
+/// classifier's repository scan only follows `.git`; a real bare repository is reached
+/// with `--git-dir`, which asks.
+pub fn no_bare_discovery(c: &mut std::process::Command) {
+    c.env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "safe.bareRepository")
+        .env("GIT_CONFIG_VALUE_0", "explicit");
+}
+
 impl GitSeal {
     /// `git`: the git whose system and global config is read for [`KEPT_KEYS`] (none:
     /// nothing is copied). `home`: HOME for that read (tests; the runner keeps HOME).
@@ -701,8 +712,9 @@ impl ToolHandler for Shell {
             None
         };
         let mut cmd = self.runner.command(&a.cmd)?;
-        if let Some(s) = &seal {
-            s.apply(cmd.as_std_mut());
+        match &seal {
+            Some(s) => s.apply(cmd.as_std_mut()),
+            None => no_bare_discovery(cmd.as_std_mut()),
         }
         cmd.current_dir(paths::plain(&cwd));
         let started = Instant::now();
@@ -879,6 +891,18 @@ mod tests {
         assert!(
             !marker.exists(),
             "sealed git ran the bare repository's diff driver"
+        );
+        // D-556: a line that is not sealed (a git above Read in it) gets the same key.
+        let mut c = std::process::Command::new("git");
+        c.args(["diff", "--no-index", "a", "b"]).current_dir(&foo);
+        sanitize_env(&mut c);
+        c.env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &empty);
+        no_bare_discovery(&mut c);
+        let _ = c.output().unwrap();
+        assert!(
+            !marker.exists(),
+            "unsealed git ran the bare repository's diff driver"
         );
     }
 
