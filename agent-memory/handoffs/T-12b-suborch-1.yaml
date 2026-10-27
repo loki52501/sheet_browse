@@ -1,0 +1,13 @@
+from: servers/suborch
+to: servers/suborch (next session), then supreme
+task: T-12b
+date: "2026-10-26"
+state: "Claimed (a2c9bf1) on swarm/servers-T12b in F:/sb-swarm/wt/servers, from main. rust-coder-1 done (0a3d8b3, D-509..D-513): base64 vault test un-ignored, api tag check after JSON decode, plain_source keeps non-markup angle text, B-590 proxy fix (no proxy for loopback/private, public via proxy only after PublicOnly), shown_mime, feed/search wiring tests, relative feed links. srv-web 128 passed. Round 1 reviewer and tester running."
+not_done: "Round 1 results, round 2 fixes, pr-ready, PR. Decision ids: servers range is D-500..D-599 (driver owns D-600+); free now: 514-519, 526-539, 550-559 (T-14b took 543-549), 587-589."
+gotchas:
+  - "Decision id collisions: D-600+ is driver's (decisions.yaml header, D-42)."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/handoffs/T-12b-suborch-1.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-web"
