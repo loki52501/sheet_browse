@@ -1,0 +1,35 @@
+from: rust-coder-2
+to: tester
+task: T-16
+date: "2026-10-26"
+state: "Round 2 (D-89 last round) of review-T-16 r1, commit 9a73571 on swarm/core-T16. Should-fix 1: ClaudeLauncher::print sessions (every harnessd firing) pass --allowedTools mcp__harness-web mcp__harness-files mcp__harness-cli mcp__harness-mem (launcher::HARNESS_ALLOWED_TOOLS, names checked against mcp.example.json in a unit test) before the unchanged B-192 --disallowedTools list; interactive harness run has no allow list. Should-fix 2: the watch run preamble says to call harness-mem watch.observe with the state and not to write files/watch.txt itself. Should-fix 3: watch.observe scrubs the state before writing watch.txt (D-143 corrects D-141 (4)). Should-fix 4: reflect's replay session is ClaudeLauncher::readers_only: -p --strict-mcp-config --mcp-config <run dir>/replay-mcp.json (generated at launch, harness-web only, srv-web from SB_SRV_WEB or next to harnessd) --setting-sources local --permission-mode default --allowedTools mcp__harness-web --disallowedTools <B-192 three> <24 built-ins: Bash, PowerShell, Edit, Write, Read, WebFetch, Task ...>, cwd = run folder, absolute SB_TOOLS_ROOT and SB_VAULT_PATH; the doc comments in launcher.rs, reflect.rs and harnessd.rs say exactly that. Should-fix 5: schedule.add is Account (asks, timeout proceeds), B-187. Should-fix 6: T-16b (owner core, branch swarm/core-T16d) lists the deferrals; D-143 names them. Should-fix 7: reflect commits only the paths the sweep moved or deleted (old and archive path of each retired or archived tool, each deleted archive file; paths neither present nor tracked are dropped); toolstore's API is unchanged. Should-fix 8: ToolCtx::store doc fixed. Nits: watch targets collapsed to one line (watch::target_key, mem_server, CLI); watch.txt reads capped at watch::WATCH_MAX_BYTES (256 KiB, the same constant watch.observe enforces); the proposals file is read and appended through one handle under File::lock. bench/phase1/rung-7.md and rung-8.md say schedule.add asks now. Gates (CARGO_TARGET_DIR=<worktree>/target, -j 1, compose Postgres on 5433, no SKIPPED lines): fmt check clean, clippy -p harness-core -p harness --all-targets -D warnings clean, cargo test -p harness-core -p harness --no-fail-fast all green."
+not_done: "1. Live ladder rungs 6, 7, 8 (tester). Rung 7 and 8 Session A: schedule.add now shows an ask card; answer `harness ask <run> <n> yes` or wait out the 60 s timeout (proceeds). 2. A live reflect replay session against srv-web was not run; it needs target/<profile>/srv-web next to harnessd or SB_SRV_WEB set (harnessd warns at startup when the file is missing). 3. T-16b deferrals (H-5/G-3 compare output shape, T-6 growth and forge proposals, G-3 expectation learning and after-each-task reflect, nightly reflect row not auto-created). 4. Two watch schedules with the same target can still race baseline_get/baseline_set (review nit, not changed). 5. tasks.yaml T-16 status left for the sub-orchestrator."
+gotchas:
+  - "The ladder shim (bench/fixtures/ladder_session.py) takes everything after --disallowedTools as its deny list and ignores harnessd's --allowedTools (it uses SB_LADDER_ALLOWED), so every new launcher flag goes before --disallowedTools, which stays last."
+  - "Git Bash heredocs passed through this tool turned \\\\n into a real newline in Python string literals; edit Rust string literals with backslashes through the Edit tool, not python/sed one-liners."
+  - "The proposals lock red proof is race-dependent: with the lock removed, concurrent_passes_append_each_id_once failed 3 of 5 runs."
+  - "accept_t16_mem's harness_mcp test now answers the schedule.add ask through harness_core::ask::answer after reading the server's `ask 1 (` stderr line; without that it would wait out the 60 s FileAsker timer."
+decisions_made: [D-143]
+blockers_opened: [B-187]
+files_touched:
+  - crates/harness/src/launcher.rs
+  - crates/harness/src/bin/harnessd.rs
+  - crates/harness/src/reflect.rs
+  - crates/harness/src/mem_server.rs
+  - crates/harness/src/proposals.rs
+  - crates/harness/src/cli.rs
+  - crates/core/src/sched.rs
+  - crates/core/src/watch.rs
+  - crates/core/src/mcp.rs
+  - crates/core/tests/accept_t16_watch.rs
+  - crates/harness/tests/accept_t16_mem.rs
+  - crates/harness/tests/accept_t16_reflect.rs
+  - crates/harness/tests/accept_t08.rs
+  - crates/harness/tests/accept_t08_r2.rs
+  - crates/harness/tests/t08_vault.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/tasks.yaml
+  - bench/phase1/rung-7.md
+  - bench/phase1/rung-8.md
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/wt/core/wt/T16/target SB_VAULT_CANARY=sbcanary-x-<random hex> cargo test -j 1 -p harness-core -p harness --no-fail-fast"
