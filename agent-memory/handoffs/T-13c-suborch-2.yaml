@@ -1,0 +1,19 @@
+from: servers/suborch
+to: supreme
+task: T-13c
+date: "2026-10-26"
+state: "T-13c done on swarm/servers-T13c, PR to main opened. cargo test --workspace -j 2 --no-fail-fast: 1137 passed 0 failed 17 ignored (main 8dedda3 merged). Review: round 1 one Blocking (a @VAULT( in another case or an unclosed @vault( passed B-562 while core resolved only lower-case @vault(name), so an address or raw token went out as Read), fixed in ac60642 (D-575, header refs validated with harness_core::vault::vault_refs); should-fix 3 (pick cap only for JSON answers, f2f009e) and 4 (email in api url asks as Send, 35a2f88, D-576) fixed; round 2 approve, Blocking none (bench/results/review-T-13c.md). Ladder re-run (bench/results/accept-T-13c.md, binaries at 29862a0): 14/18 runs pass (was 11/19); rung 4 3/3 (was 0/3); bare names land in files/ in 5/5 cases; canary 0 hits; Verdict red only on rows owned by core (B-563: rung 1 v1, v2 answer from memory; rung 2 v1, rung 5 v3 wrote deliverables to absolute paths outside runs/). Merge gate on this tree: gate ok for servers."
+not_done: "T-13d (tasks.yaml): review should-fix 1, 2, 5, pick index paths versions[0] (cost every rung-2 session 3 calls), list_jobs ledger summary, srv-cli classing of the curl and python3 -c commands as Delete, two review-round-2 notes. Then T-13b, T-15b, T-12b, T-14b per WAVE2.md 13:40 update. T-17's >= 27/30 needs core's B-563 preamble: without it rung 1 and the absolute-path deliverables stay red."
+gotchas:
+  - "guard_bash.py blocks any Bash command whose text contains the word curl followed by a url-ish token, even inside a heredoc that edits YAML; use the Edit tool for such text."
+  - "Shared target dir: a reviewer's leftover build of a git-archive copy (same crate names) made one srv-web lib test report a stale failure; rerun before trusting a single red."
+  - "sb-driver accept_t18 and chromium_driver bench_headless_launch_registry_and_cleanup fail under load (B-199) and pass on rerun; this branch does not touch sb-driver."
+decisions_made: [D-575, D-576]
+blockers_opened: []
+files_touched:
+  - crates/srv-web/src/api.rs
+  - crates/srv-web/tests/t13c_api.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/tasks.yaml
+  - agent-memory/handoffs/T-13c-suborch-2.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-web -p srv-files -p toolstore"

@@ -15,6 +15,11 @@ pub const DEFAULT_SEARXNG_URL: &str = "http://127.0.0.1:8888";
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 /// W-2: 5 MB body cap; the rest of the body is not read.
 pub const DEFAULT_MAX_BYTES: usize = 5 * 1024 * 1024;
+/// B-560, D-565: the cap for JSON that is parsed and reduced before anything reaches the
+/// model (a site tool's `page.api`, and `api` answering JSON: only the `pick` projection or
+/// the first [`crate::api::API_MAX_CHARS`] characters are shown). Still bounded by the
+/// request timeout, and for `page.api` by the run's remaining wall time (D-64).
+pub const DEFAULT_JSON_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -26,6 +31,8 @@ pub struct Config {
     pub timeout: Duration,
     /// Body cap in bytes.
     pub max_bytes: usize,
+    /// Body cap in bytes for JSON that is reduced before the model sees it (D-565).
+    pub json_max_bytes: usize,
     /// DNS overrides: `host` resolves to `addr`. A URL without an explicit port connects to
     /// the override's port. Tests use it to serve `http://docs.rs/...` from a local listener
     /// while classification still sees the real domain. Empty in production.
@@ -39,6 +46,7 @@ impl Default for Config {
             searxng_url: DEFAULT_SEARXNG_URL.to_string(),
             timeout: DEFAULT_TIMEOUT,
             max_bytes: DEFAULT_MAX_BYTES,
+            json_max_bytes: DEFAULT_JSON_MAX_BYTES,
             resolve: Vec::new(),
         }
     }

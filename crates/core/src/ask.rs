@@ -148,7 +148,7 @@ impl FileAsker {
         let d = dir.clone();
         if let Err(e) = blocking(move || std::fs::create_dir_all(&d)).await {
             self.diag(&format!(
-                "ask: cannot create {}: {e}; skipped, nobody saw the card",
+                "ask: skipped, nobody saw the card: cannot create {}: {e}",
                 dir.display()
             ));
             return None;
@@ -171,7 +171,7 @@ impl FileAsker {
             Err(_) => io::Error::other("ask: file task failed"),
         };
         self.diag(&format!(
-            "ask: cannot write the card: {err}; skipped, nobody saw it"
+            "ask: skipped, nobody saw the card: cannot write it: {err}"
         ));
         None
     }

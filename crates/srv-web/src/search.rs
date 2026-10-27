@@ -25,7 +25,7 @@ pub(crate) fn spec(web: Arc<Web>) -> ToolSpec {
         name: "search".into(),
         description: "Web search through the local SearXNG instance. Returns k results \
             (default 8, max 20) as [{title, url, snippet}], and names engines that did not \
-            answer."
+            answer. Cite only what search and fetch returned in this run, not memory."
             .into(),
         class: Class::Read,
         args: json!({

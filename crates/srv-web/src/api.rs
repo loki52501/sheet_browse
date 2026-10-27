@@ -1,4 +1,16 @@
-//! W-3 `api(url, method="GET", body?, headers?)` -> JSON, pretty-printed and capped.
+//! W-3 `api(url, method="GET", body?, headers?, pick?)` -> JSON, pretty-printed and capped.
+//!
+//! `pick` (D-566, B-560) projects the JSON onto dotted paths (`jobs[].title`) before it is
+//! printed and capped, so a large answer fits in one call ([`crate::pick`]). A pick call
+//! reads up to `Config::json_max_bytes` (32 MB, D-565) because only the projection reaches
+//! the model; other calls keep the W-2 5 MB cap. A cut answer ends with a line naming its
+//! top-level keys and array lengths and a `pick` example.
+//!
+//! Identity (B-562, D-567, W-2): the client always sends its own browser User-Agent. A
+//! caller's `User-Agent` or `From` header is refused, and `Authorization`,
+//! `Proxy-Authorization` and `Cookie` are refused unless the value uses `@vault(...)`. Any
+//! other header whose literal text holds an email address raises the class to Send with the
+//! host as the recipient (D-39), so personal data leaves only after an ask.
 //!
 //! Class by method (D-500): GET and HEAD are Read, POST/PUT/PATCH are Submit, DELETE is
 //! Delete; the classifier fills the registrable domain so `gate.rules` apply per site.
@@ -18,6 +30,7 @@
 //! strings cannot spell a `[text](#id)` link form ([`escape::json_strings`]).
 
 use crate::http::{self, host_of};
+use crate::pick::{self, Pick};
 use crate::{escape, fetch, html, opt_str, req_str, Web};
 use async_trait::async_trait;
 use harness_core::{Class, Classified, ToolCtx, ToolError, ToolHandler, ToolOutput, ToolSpec};
@@ -29,6 +42,13 @@ use std::sync::Arc;
 
 /// Response text shown to the model, in characters.
 pub const API_MAX_CHARS: usize = 20_000;
+
+/// B-562: identity headers the caller may never set, even from the vault: the client sends
+/// its own User-Agent (W-2) and no one's contact details.
+const IDENTITY_HEADERS: &[&str] = &["user-agent", "from"];
+
+/// B-562: credential headers the caller may set only from the vault (`@vault(name)`).
+const CREDENTIAL_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cookie"];
 
 /// Headers the caller may not set (the client owns them).
 const FORBIDDEN_HEADERS: &[&str] = &[
@@ -48,8 +68,11 @@ pub(crate) fn spec(web: Arc<Web>) -> ToolSpec {
         name: "api".into(),
         description: "Call a JSON HTTP API. method GET (default), HEAD, POST, PUT, PATCH or \
             DELETE; body is JSON (an object or array) or a string; header values may contain \
-            @vault(name), resolved only when the request is sent. Returns the status and the \
-            JSON, pretty-printed and capped."
+            @vault(name), resolved only when the request is sent (Authorization and Cookie \
+            only that way; User-Agent and From are refused). Returns the status and the JSON, \
+            pretty-printed and capped at 20000 characters; for a large answer pass pick, \
+            dotted paths with [] for arrays (e.g. [\"jobs[].title\", \"jobs[].jobUrl\"]), to \
+            get only those fields in one call."
             .into(),
         class: Class::Read,
         args: json!({
@@ -58,7 +81,13 @@ pub(crate) fn spec(web: Arc<Web>) -> ToolSpec {
                 "url": {"type": "string"},
                 "method": {"type": "string", "enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"], "default": "GET"},
                 "body": {"description": "JSON value, or a string sent as text"},
-                "headers": {"type": "object", "additionalProperties": {"type": "string"}}
+                "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                "pick": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": pick::MAX_PATHS,
+                    "description": "keep only these fields: dotted paths, [] for arrays, e.g. jobs[].title"
+                }
             },
             "required": ["url"]
         }),
@@ -88,14 +117,126 @@ struct Req {
     body: Option<Body>,
     /// (name, value template); a template may hold `@vault(k)`.
     headers: Vec<(HeaderName, String)>,
+    /// Headers whose literal text holds an email address (B-562): the call is a Send.
+    personal: Vec<HeaderName>,
+    /// The url's path or query holds an email address: the call is a Send too.
+    personal_url: bool,
+    /// The `pick` projection (D-566).
+    pick: Option<Pick>,
 }
 
+/// B-562: refuses a caller's identity header, and a credential header that does not come
+/// from the vault. One line saying why, naming only the header, so the model does not retry
+/// with another value and no value (vault or not) is echoed.
+fn check_identity(name: &HeaderName, tmpl: &str) -> Result<(), ToolError> {
+    let n = name.as_str();
+    if IDENTITY_HEADERS.contains(&n) {
+        return Err(ToolError::Args(format!(
+            "header {n} is refused: api always sends its own browser User-Agent and never \
+             sends who the user is (B-562); call again without it"
+        )));
+    }
+    if CREDENTIAL_HEADERS.contains(&n) && !has_vault(tmpl) {
+        return Err(ToolError::Args(format!(
+            "header {n} is refused: credentials and cookies are sent only from the vault, \
+             written as @vault(name) in the value (B-562)"
+        )));
+    }
+    Ok(())
+}
+
+/// Is `c` a byte of an email address's local part?
+fn local_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || b".!#$%&'*+/=?^_`{|}~-".contains(&c)
+}
+
+/// Does `s` hold something shaped like an email address (`local@domain.tld`, also with the
+/// `@` percent-encoded)? Errs on the side of yes: it decides an ask, not a refusal.
+pub(crate) fn has_email(s: &str) -> bool {
+    let s = s
+        .replace("%2540", "@")
+        .replace("%40", "@")
+        .replace("%2E", ".")
+        .replace("%2e", ".");
+    let b = s.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        if c != b'@' {
+            continue;
+        }
+        let local = b[..i].iter().rev().take_while(|&&c| local_byte(c)).count();
+        let local_ok = b[i - local..i].iter().any(|c| c.is_ascii_alphanumeric());
+        let dom = &b[i + 1..];
+        let n = dom
+            .iter()
+            .take_while(|c| c.is_ascii_alphanumeric() || **c == b'.' || **c == b'-')
+            .count();
+        let domain = std::str::from_utf8(&dom[..n])
+            .unwrap_or("")
+            .trim_end_matches('.');
+        let labels: Vec<&str> = domain.split('.').collect();
+        let domain_ok = labels.len() >= 2
+            && labels.iter().all(|l| !l.is_empty())
+            && labels
+                .last()
+                .is_some_and(|t| t.len() >= 2 && t.bytes().all(|c| c.is_ascii_alphabetic()));
+        if local_ok && domain_ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// The literal text of a header template: `@vault(name)` references removed, so a vault
+/// reference never counts as an address. Only for templates [`check_vault_refs`] accepted.
+fn literal_part(tmpl: &str) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while let Some(at) = tmpl[i..].find(VAULT_OPEN) {
+        out.push_str(&tmpl[i..i + at]);
+        match tmpl[i + at..].find(')') {
+            Some(close) => i += at + close + 1,
+            None => return out,
+        }
+    }
+    out.push_str(&tmpl[i..]);
+    out
+}
+
+/// The spelling core resolves (`harness_core::vault`, exact case).
+const VAULT_OPEN: &str = "@vault(";
+
+/// True when the template holds a reference core will resolve at the sink.
 fn has_vault(s: &str) -> bool {
-    s.to_ascii_lowercase().contains("@vault(")
+    s.contains(VAULT_OPEN)
+}
+
+/// Any spelling of `@vault(`, for the places where none is allowed.
+fn mentions_vault(s: &str) -> bool {
+    s.to_ascii_lowercase().contains(VAULT_OPEN)
+}
+
+/// A header template's vault references must parse the way core parses them at the sink:
+/// a `@VAULT(` or an unclosed `@vault(name` would be sent as typed while this module
+/// treated it as a reference (B-562 bypass), so it is refused.
+fn check_vault_refs(name: &HeaderName, tmpl: &str) -> Result<(), ToolError> {
+    if !mentions_vault(tmpl) {
+        return Ok(());
+    }
+    let exact = tmpl.matches(VAULT_OPEN).count();
+    let any_case = tmpl.to_ascii_lowercase().matches(VAULT_OPEN).count();
+    let parsed = harness_core::vault::vault_refs(tmpl).map(|r| r.len());
+    if exact != any_case || parsed.ok() != Some(exact) {
+        return Err(ToolError::Args(format!(
+            "header {}: write a vault reference exactly as @vault(name), lower case, the \
+             name made of letters, digits, _ - .",
+            name.as_str()
+        )));
+    }
+    Ok(())
 }
 
 fn no_vault(s: &str, place: &str) -> Result<(), ToolError> {
-    if has_vault(s) {
+    if mentions_vault(s) {
         return Err(ToolError::Args(format!(
             "@vault(...) is allowed only in header values, not in the {place}"
         )));
@@ -158,6 +299,8 @@ fn parse(args: &Value, overrides: &[(String, SocketAddr)]) -> Result<Req, ToolEr
                         name.as_str()
                     )));
                 }
+                check_vault_refs(&name, tmpl)?;
+                check_identity(&name, tmpl)?;
                 if tmpl.chars().any(|c| c.is_control()) {
                     return Err(ToolError::Args(format!(
                         "header {}: control characters are not allowed",
@@ -179,6 +322,13 @@ fn parse(args: &Value, overrides: &[(String, SocketAddr)]) -> Result<Req, ToolEr
             ))
         }
     }
+    let personal: Vec<HeaderName> = headers
+        .iter()
+        .filter(|(_, t)| has_email(&literal_part(t)))
+        .map(|(n, _)| n.clone())
+        .collect();
+    let personal_url = has_email(url.path()) || url.query().is_some_and(has_email);
+    let pick = Pick::parse(args.get("pick")).map_err(ToolError::Args)?;
     // Rule 2: a resolved value never crosses a network in clear text.
     if headers.iter().any(|(_, t)| has_vault(t))
         && url.scheme() != "https"
@@ -195,6 +345,9 @@ fn parse(args: &Value, overrides: &[(String, SocketAddr)]) -> Result<Req, ToolEr
         class,
         body,
         headers,
+        personal,
+        personal_url,
+        pick,
     })
 }
 
@@ -209,10 +362,16 @@ impl ToolHandler for Api {
         let host = host_of(&req.url);
         let mut values = Vec::new();
         for (name, tmpl) in &req.headers {
-            if has_vault(tmpl) {
+            if has_vault(tmpl) || req.personal.contains(name) {
                 // The template, never the value: `@vault(name)` as written.
-                values.push((format!("header {}", name.as_str()), tmpl.clone()));
+                values.push((
+                    format!("header {}", name.as_str()),
+                    escape::cap_chars(tmpl, 300),
+                ));
             }
+        }
+        if req.personal_url {
+            values.push(("url".into(), escape::cap_chars(req.url.as_str(), 300)));
         }
         if let Some(b) = &req.body {
             let s = match b {
@@ -221,11 +380,31 @@ impl ToolHandler for Api {
             };
             values.push(("body".into(), escape::cap_chars(&s, 300)));
         }
+        // B-562: an email address in a header leaves the machine only after an ask; the
+        // recipient is the host it goes to (D-39).
+        let mut places: Vec<String> = req
+            .personal
+            .iter()
+            .map(|n| format!("header {}", n.as_str()))
+            .collect();
+        if req.personal_url {
+            places.push("the url".into());
+        }
+        let (class, recipients, note) = if places.is_empty() {
+            (req.class, Vec::new(), String::new())
+        } else {
+            (
+                req.class.max(Class::Send),
+                vec![host.clone()],
+                format!(" (sends an email address in {})", places.join(", ")),
+            )
+        };
         Ok(Classified {
-            class: Some(req.class),
+            class: Some(class),
             domain: Some(toolstore::registrable(&host)),
+            recipients,
             what: Some(format!(
-                "{} {}{}",
+                "{} {}{}{note}",
                 req.method.as_str(),
                 host,
                 escape::cap_chars(req.url.path(), 120)
@@ -306,14 +485,26 @@ impl ToolHandler for Api {
             .send()
             .await
             .map_err(|e| ToolError::Failed(format!("api: {}", http::map_err(&e, &host))))?;
-        let body = http::read_capped(resp, self.web.cfg.max_bytes)
+        // D-565: a pick call shows only its projection, so it reads up to the JSON cap;
+        // every other call, and an answer pick cannot apply to (not JSON, untyped or
+        // text/plain), keeps the W-2 page cap.
+        let cfg = &self.web.cfg;
+        let pick_cap = cfg.json_max_bytes.max(cfg.max_bytes);
+        let (mime, _) = http::content_type(resp.headers());
+        let pickable = fetch::is_json_type(&mime) || mime.is_empty() || mime == "text/plain";
+        let cap = if req.pick.is_some() && pickable {
+            pick_cap
+        } else {
+            cfg.max_bytes
+        };
+        let body = http::read_capped(resp, cap)
             .await
             .map_err(|e| ToolError::Failed(format!("api: {e}")))?;
         // D-5: a challenge stops the call, whatever the status and content type.
         if let Some(stop) = fetch::challenge_by_response(&body) {
             return Ok(stop);
         }
-        let text = match render(&body, &req.method) {
+        let text = match render(&body, &req.method, req.pick.as_ref(), cap, pick_cap) {
             Rendered::Shown(t) => t,
             Rendered::NotShown { line, text } => {
                 // Only a body the model does not see is walked for a challenge: a JSON
@@ -366,7 +557,18 @@ fn strip_xssi(text: &str) -> &str {
 /// (HTML, XML, other types, a missing type that is not JSON, text with tags) is one line:
 /// status, type, size, not shown. Nothing here recognises HTML; the rule only lets through
 /// what is known to be data or plain text.
-fn render(body: &http::Body, method: &Method) -> Rendered {
+///
+/// `pick` (D-566) projects the parsed JSON first; a cut answer ends with a `truncated:` line
+/// naming the top-level keys and array lengths and a `pick` example ([`pick::shape`]). `cap`
+/// is the byte cap the body was read with, for the cut notes; `pick_cap` the cap a pick call
+/// reads up to (D-565), offered when JSON was cut.
+fn render(
+    body: &http::Body,
+    method: &Method,
+    pick: Option<&Pick>,
+    cap: usize,
+    pick_cap: usize,
+) -> Rendered {
     let mime = body.mime.as_str();
     let ctype = if mime.is_empty() {
         "(no content type)".to_string()
@@ -375,22 +577,14 @@ fn render(body: &http::Body, method: &Method) -> Rendered {
     };
     let mut head = format!("HTTP {} {ctype}", body.status);
     if body.truncated {
-        head.push_str(" (body cut at the 5 MB cap)");
+        head.push_str(&format!(" (body cut at the {} cap)", http::cap_text(cap)));
     }
     if *method == Method::HEAD || body.bytes.is_empty() {
         return Rendered::Shown(head);
     }
     let text = body.text(false);
-    let as_json = |t: &str| {
-        serde_json::from_str::<Value>(strip_xssi(t))
-            .ok()
-            .map(|mut v| {
-                escape::json_strings(&mut v);
-                serde_json::to_string_pretty(&v).unwrap_or_default()
-            })
-    };
     let shown = if fetch::is_json_type(mime) || mime.is_empty() {
-        as_json(&text)
+        as_json(&text, pick)
     } else if mime == "text/plain" && !http::has_tag(&text) {
         if http::looks_binary(&text) {
             return Rendered::Shown(format!(
@@ -398,23 +592,366 @@ fn render(body: &http::Body, method: &Method) -> Rendered {
                 body.bytes.len()
             ));
         }
-        Some(as_json(&text).unwrap_or_else(|| escape::text(&text)))
+        Some(as_json(&text, pick).unwrap_or_else(|| {
+            let mut s = Json::plain(escape::text(&text));
+            if pick.is_some() {
+                s.note = Some("pick ignored: the answer is not JSON".into());
+            }
+            s
+        }))
     } else {
         None
     };
     let Some(shown) = shown else {
+        let why = if body.truncated && (fetch::is_json_type(mime) || mime.is_empty()) {
+            let mut w = format!(
+                "not shown (the JSON was cut at the {} cap and cannot be parsed",
+                http::cap_text(cap)
+            );
+            if pick.is_none() && pick_cap > cap {
+                w.push_str(&format!(
+                    "; call again with pick, which reads JSON up to {}",
+                    http::cap_text(pick_cap)
+                ));
+            }
+            w.push(')');
+            w
+        } else {
+            NOT_SHOWN.to_string()
+        };
         return Rendered::NotShown {
-            line: format!("{head}, {} bytes, {NOT_SHOWN}", body.bytes.len()),
+            line: format!("{head}, {} bytes, {why}", body.bytes.len()),
             text,
         };
     };
-    let n = shown.chars().count();
-    let mut out = format!("{head}\n{}", escape::cap_chars(&shown, API_MAX_CHARS));
+    let mut out = head;
+    if let Some(note) = &shown.note {
+        out.push('\n');
+        out.push_str(note);
+    }
+    if shown.text.is_empty() {
+        return Rendered::Shown(out);
+    }
+    let n = shown.text.chars().count();
+    out.push('\n');
+    out.push_str(&escape::cap_chars(&shown.text, API_MAX_CHARS));
     if n > API_MAX_CHARS {
         out.push_str(&format!(
             "\ntruncated: {} more characters not shown",
             n - API_MAX_CHARS
         ));
+        let how = if pick.is_some() {
+            "; pick fewer fields or a narrower path".to_string()
+        } else if shown.shape.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", shown.shape)
+        };
+        out.push_str(&how);
     }
     Rendered::Shown(out)
+}
+
+/// What [`render`] shows of a body that is data.
+struct Json {
+    /// The text after the head line (pretty JSON or plain text); empty when nothing is shown.
+    text: String,
+    /// [`pick::shape`] of the whole answer, for the cut note; empty for plain text.
+    shape: String,
+    /// A line before the text (a pick that matched nothing, or was ignored).
+    note: Option<String>,
+}
+
+impl Json {
+    fn plain(text: String) -> Json {
+        Json {
+            text,
+            shape: String::new(),
+            note: None,
+        }
+    }
+}
+
+/// `t` as pretty JSON, projected by `pick`; `None` when it does not parse.
+fn as_json(t: &str, pick: Option<&Pick>) -> Option<Json> {
+    let v = serde_json::from_str::<Value>(strip_xssi(t)).ok()?;
+    let shape = pick::shape(&v);
+    let mut shown = match pick {
+        None => v,
+        Some(p) => match p.apply(&v) {
+            Some(x) => x,
+            None => {
+                let mut note = "pick matched nothing in this answer".to_string();
+                if !shape.is_empty() {
+                    note.push_str("; ");
+                    note.push_str(&shape);
+                }
+                return Some(Json {
+                    text: String::new(),
+                    shape,
+                    note: Some(note),
+                });
+            }
+        },
+    };
+    escape::json_strings(&mut shown);
+    Some(Json {
+        text: serde_json::to_string_pretty(&shown).unwrap_or_default(),
+        shape,
+        note: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(headers: Value) -> Result<Req, ToolError> {
+        parse(
+            &json!({"url": "https://crates.io/api/v1/crates/serde", "headers": headers}),
+            &[],
+        )
+    }
+
+    fn refusal(headers: Value) -> String {
+        match parsed(headers) {
+            Err(ToolError::Args(m)) => m,
+            Err(e) => panic!("not an args error: {e}"),
+            Ok(_) => panic!("accepted"),
+        }
+    }
+
+    #[test]
+    fn identity_headers_are_refused_even_from_the_vault() {
+        for (name, value) in [
+            ("User-Agent", "my-tool (someone@example.com)"),
+            ("user-agent", "@vault(gh_token)"),
+            ("From", "someone@example.com"),
+            ("FROM", "@vault(gh_token)"),
+        ] {
+            let m = refusal(json!({ name: value }));
+            assert!(m.contains("refused") && m.contains("B-562"), "{m}");
+            assert!(m.contains("own browser User-Agent"), "{m}");
+            assert!(!m.contains("someone@example.com"), "value echoed: {m}");
+            assert!(!m.contains('\n'), "one line: {m}");
+        }
+    }
+
+    #[test]
+    fn credential_headers_need_a_vault_template() {
+        for name in ["Authorization", "Proxy-Authorization", "Cookie"] {
+            let m = refusal(json!({ name: "Bearer abc.def.ghi" }));
+            assert!(m.contains("only from the vault"), "{m}");
+            assert!(!m.contains("abc.def"), "value echoed: {m}");
+            let ok = parsed(json!({ name: "token @vault(gh_token)" })).expect(name);
+            assert_eq!(ok.headers.len(), 1);
+            assert!(ok.personal.is_empty());
+        }
+    }
+
+    #[test]
+    fn an_email_in_any_other_header_marks_the_call_personal() {
+        let r = parsed(json!({"X-Contact": "me <someone@example.com>", "Accept": "*/*"})).unwrap();
+        assert_eq!(r.personal.len(), 1);
+        assert_eq!(r.personal[0].as_str(), "x-contact");
+        let r = parsed(json!({"X-Contact": "someone%40example.com"})).unwrap();
+        assert_eq!(r.personal.len(), 1);
+        // A vault reference is not an address, and plain values are not personal.
+        let r =
+            parsed(json!({"X-Api-Key": "@vault(gh_token)", "Accept": "application/json"})).unwrap();
+        assert!(r.personal.is_empty());
+    }
+
+    #[test]
+    fn email_shapes() {
+        for yes in [
+            "a@b.co",
+            "first.last+tag@mail.example.org",
+            "x (someone@example.com)",
+            "someone%40example.com",
+            "Someone@Example.COM.",
+        ] {
+            assert!(has_email(yes), "{yes}");
+        }
+        for no in [
+            "@vault(x)",
+            "token @vault(gh.token)",
+            "user@localhost",
+            "a@b.c",
+            "@example.com",
+            "a@.com",
+            "foo@bar.123",
+            "application/json",
+            "",
+        ] {
+            assert!(!has_email(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn literal_part_drops_vault_references() {
+        assert_eq!(literal_part("token @vault(a.b-c_1)"), "token ");
+        assert_eq!(literal_part("x@vault(k) y"), "x y");
+        assert_eq!(literal_part("plain"), "plain");
+    }
+
+    #[test]
+    fn vault_refs_must_parse_the_way_core_resolves_them() {
+        let n = HeaderName::from_static("x-contact");
+        for ok in ["plain", "Bearer @vault(tok)", "@vault(a) @vault(b.c)"] {
+            assert!(check_vault_refs(&n, ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "@VAULT(someone@example.com)",
+            "@Vault(tok)",
+            "@vault(tok) @VAULT(x)",
+            "@vault(a.b@c.de)",
+            "@vault(tok",
+        ] {
+            let e = check_vault_refs(&n, bad).unwrap_err().to_string();
+            assert!(
+                e.contains("x-contact") && !e.contains("example"),
+                "{bad}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn pick_is_parsed_and_checked() {
+        let r = parse(
+            &json!({"url": "https://api.example.com/x", "pick": ["jobs[].title"]}),
+            &[],
+        )
+        .unwrap();
+        assert!(r.pick.is_some());
+        let e = parse(
+            &json!({"url": "https://api.example.com/x", "pick": ["jobs[0]"]}),
+            &[],
+        )
+        .err()
+        .unwrap();
+        assert!(e.to_string().contains("like jobs[].title"), "{e}");
+    }
+
+    fn body(mime: &str, bytes: &[u8], truncated: bool) -> http::Body {
+        http::Body {
+            status: 200,
+            url: Url::parse("https://api.example.com/x").unwrap(),
+            mime: mime.into(),
+            charset: None,
+            headers: HeaderMap::new(),
+            bytes: bytes.to_vec(),
+            truncated,
+        }
+    }
+
+    fn shown(r: Rendered) -> String {
+        match r {
+            Rendered::Shown(t) => t,
+            Rendered::NotShown { line, .. } => panic!("not shown: {line}"),
+        }
+    }
+
+    fn big_board(n: usize) -> Vec<u8> {
+        let jobs: Vec<Value> = (0..n)
+            .map(|i| {
+                json!({"title": format!("Role {i}"), "jobUrl": format!("https://x/{i}"),
+                       "descriptionHtml": "<p>".repeat(100)})
+            })
+            .collect();
+        serde_json::to_vec(&json!({"apiVersion": "1", "jobs": jobs})).unwrap()
+    }
+
+    #[test]
+    fn a_cut_answer_names_its_shape_and_suggests_pick() {
+        let t = shown(render(
+            &body("application/json", &big_board(200), false),
+            &Method::GET,
+            None,
+            1 << 20,
+            1 << 20,
+        ));
+        let last = t.lines().last().unwrap();
+        assert!(last.starts_with("truncated: "), "{last}");
+        assert!(last.contains("jobs (array of 200 objects)"), "{last}");
+        assert!(last.contains("apiVersion (string)"), "{last}");
+        assert!(
+            last.contains(r#"pick: ["jobs[].title", "jobs[].jobUrl"]"#),
+            "{last}"
+        );
+    }
+
+    #[test]
+    fn pick_fits_a_large_answer_in_one_call() {
+        let p = Pick::parse(Some(&json!(["jobs[].title", "jobs[].jobUrl"])))
+            .unwrap()
+            .unwrap();
+        let t = shown(render(
+            &body("application/json", &big_board(200), false),
+            &Method::GET,
+            Some(&p),
+            1 << 20,
+            1 << 20,
+        ));
+        assert!(!t.contains("truncated:"), "{t}");
+        assert!(t.contains("Role 199") && t.contains("https://x/199"), "{t}");
+        assert!(!t.contains("descriptionHtml") && !t.contains("<p>"), "{t}");
+        assert!(t.chars().count() <= API_MAX_CHARS + 100);
+    }
+
+    #[test]
+    fn pick_that_matches_nothing_says_so_with_the_shape() {
+        let p = Pick::parse(Some(&json!(["postings[].name"])))
+            .unwrap()
+            .unwrap();
+        let t = shown(render(
+            &body("application/json", &big_board(3), false),
+            &Method::GET,
+            Some(&p),
+            1 << 20,
+            1 << 20,
+        ));
+        assert!(t.contains("pick matched nothing"), "{t}");
+        assert!(t.contains("jobs (array of 3 objects)"), "{t}");
+        assert!(!t.contains("Role 0"), "{t}");
+    }
+
+    #[test]
+    fn cut_json_names_the_cap() {
+        let whole = big_board(10);
+        let r = render(
+            &body("application/json", &whole[..500], true),
+            &Method::GET,
+            None,
+            500,
+            32 << 20,
+        );
+        match r {
+            Rendered::NotShown { line, .. } => {
+                assert!(line.contains("body cut at the 500 byte cap"), "{line}");
+                assert!(line.contains("cannot be parsed"), "{line}");
+                assert!(
+                    line.contains("call again with pick, which reads JSON up to 32 MB"),
+                    "{line}"
+                );
+            }
+            Rendered::Shown(t) => panic!("{t}"),
+        }
+    }
+
+    #[test]
+    fn pick_on_plain_text_is_ignored_with_a_note() {
+        let p = Pick::parse(Some(&json!(["a"]))).unwrap().unwrap();
+        let t = shown(render(
+            &body("text/plain", b"hello there", false),
+            &Method::GET,
+            Some(&p),
+            1 << 20,
+            1 << 20,
+        ));
+        assert!(
+            t.contains("pick ignored") && t.contains("hello there"),
+            "{t}"
+        );
+    }
 }

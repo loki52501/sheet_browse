@@ -114,7 +114,7 @@ fn tools_line(text: &str) -> String {
 
 fn expected_jobs() -> Value {
     json!({
-        "org": "acme", "total": 2, "shown": 2,
+        "org": "acme", "total": 2, "matched": 2, "offset": 0, "shown": 2,
         "jobs": [
             {"title": "Senior Backend Engineer", "location": "Berlin (remote)", "department": "Engineering",
              "url": "https://jobs.ashbyhq.com/acme/0a1b2c3d-0000-4000-8000-000000000001"},
@@ -168,7 +168,7 @@ async fn accept_1_seeded_list_jobs_loads_on_fetch_and_returns_its_json() {
     let out = fetch_board(&e).await;
     assert_eq!(
         tools_line(&out),
-        "tools for this site: ashbyhq.list_jobs(org?) · generic.read_table(id?,max?)",
+        "tools for this site: ashbyhq.list_jobs(org?,offset?,q?) · generic.read_table(id?,max?)",
         "{out}"
     );
     let spec = e.registry.get("ashbyhq.list_jobs").expect("registered");
@@ -345,10 +345,10 @@ async fn a_healthy_tool_on_a_partial_page_runs_with_a_note_and_is_not_patched() 
     assert!(!events(&e).iter().any(|x| x.tool == "tools.relocate"));
 }
 
-/// B-560: a board over the body cap fails with the cap named, not "not JSON" (a cut JSON
-/// body never parses). Live, OpenAI's board is over 5 MB.
+/// B-560, D-565: page.api reads JSON up to its own cap (32 MB by default), not the 5 MB page
+/// cap: a board answer larger than the page cap is listed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_board_over_the_cap_names_the_cap() {
+async fn page_api_reads_json_past_the_page_cap() {
     let tmp = tempfile::tempdir().unwrap();
     let tools = repo_tools_copy(tmp.path());
     let server = Server::start(routes(BOARD_OK)).await;
@@ -356,7 +356,244 @@ async fn a_board_over_the_cap_names_the_cap() {
         max_bytes: 1500,
         ..config(&server, &HOSTS, tools)
     };
+    assert_eq!(cfg.json_max_bytes, 32 * 1024 * 1024);
     assert!(ashby_json().len() > 1500 && board(BOARD_OK).len() < 1500);
+    let e = env(cfg).await;
+    fetch_board(&e).await;
+    let run = call(&e, "ashbyhq.list_jobs", json!({}))
+        .await
+        .expect("a board over the page cap is still read");
+    assert_eq!(json_part(&run.text), expected_jobs(), "{}", run.text);
+}
+
+/// A posting-API answer with `n` listed jobs (and one unlisted), each carrying a long
+/// description the tool must drop. Every 7th job is in Machine Learning; every 11th has
+/// "ML" in its title; job 5's team (not department) is "Applied ML".
+fn big_board_json(n: usize) -> Vec<u8> {
+    let mut jobs: Vec<Value> = (0..n)
+        .map(|i| {
+            let title = if i % 11 == 0 {
+                format!("Senior ML Engineer {i}")
+            } else {
+                format!("Role {i}")
+            };
+            let dept = if i % 7 == 0 {
+                "Machine Learning"
+            } else {
+                "Sales"
+            };
+            let mut j = json!({
+                "title": title, "department": dept, "location": "Remote",
+                "isListed": true, "jobUrl": format!("https://jobs.ashbyhq.com/acme/{i}"),
+                "descriptionHtml": "<p>FIXTURE_HTML_MARKER</p>".repeat(50)
+            });
+            if i == 5 {
+                j["team"] = json!("Applied ML");
+            }
+            j
+        })
+        .collect();
+    jobs.push(json!({"title": "Hidden ML", "isListed": false}));
+    serde_json::to_vec(&json!({ "jobs": jobs })).unwrap()
+}
+
+fn big_routes(n: usize) -> Vec<Route> {
+    let mut r = routes(BOARD_OK);
+    r[1] = route(
+        Some("api.ashbyhq.com"),
+        API_PATH,
+        200,
+        "application/json",
+        big_board_json(n),
+    );
+    r
+}
+
+fn titles(v: &Value) -> Vec<String> {
+    v["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["title"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Ladder rung 4 (T-13c): a 66-job board is listed in two calls, 60 then 6, through
+/// `next_offset`; the second page starts where the first ended and nothing repeats.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_jobs_pages_past_60_with_offset() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = repo_tools_copy(tmp.path());
+    let server = Server::start(big_routes(66)).await;
+    let e = env(config(&server, &HOSTS, tools)).await;
+    fetch_board(&e).await;
+
+    let first = call(&e, "ashbyhq.list_jobs", json!({}))
+        .await
+        .expect("page 1");
+    let a = json_part(&first.text);
+    assert_eq!(
+        (
+            &a["total"],
+            &a["matched"],
+            &a["offset"],
+            &a["shown"],
+            &a["next_offset"]
+        ),
+        (&json!(66), &json!(66), &json!(0), &json!(60), &json!(60)),
+        "{}",
+        first.text
+    );
+    assert!(!first.text.contains("FIXTURE_HTML_MARKER"));
+    assert!(!first.text.contains("truncated:"), "{}", first.text);
+
+    let second = call(&e, "ashbyhq.list_jobs", json!({"offset": a["next_offset"]}))
+        .await
+        .expect("page 2");
+    let b = json_part(&second.text);
+    assert_eq!(
+        (&b["offset"], &b["shown"], &b["matched"]),
+        (&json!(60), &json!(6), &json!(66)),
+        "{}",
+        second.text
+    );
+    assert!(b.get("next_offset").is_none(), "{}", second.text);
+    let mut all = titles(&a);
+    all.extend(titles(&b));
+    assert_eq!(all.len(), 66);
+    assert_eq!(all[60], "Role 60");
+    assert_eq!(all[65], "Role 65");
+    let mut dedup = all.clone();
+    dedup.sort();
+    dedup.dedup();
+    assert_eq!(dedup.len(), 66, "no job twice");
+
+    // Past the end: an empty page, not an error; a bad offset is refused in words.
+    let past = call(&e, "ashbyhq.list_jobs", json!({"offset": 500}))
+        .await
+        .expect("past the end");
+    assert_eq!(json_part(&past.text)["shown"], 0);
+    let bad = call(&e, "ashbyhq.list_jobs", json!({"offset": -1}))
+        .await
+        .expect_err("negative offset");
+    assert!(bad.to_string().contains("offset"), "{bad}");
+}
+
+/// D-569: 60 long job rows whose pretty JSON is over the 20 000-character output cap come
+/// back compact and whole, so `next_offset` (after `jobs`) is not cut off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sixty_long_rows_are_shown_whole_with_next_offset() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = repo_tools_copy(tmp.path());
+    let jobs: Vec<Value> = (0..66)
+        .map(|i| {
+            json!({"title": format!("{i:03} {}", "Staff Engineer, Platform ".repeat(6)),
+                   "department": "Infrastructure Engineering", "location": "San Francisco, California",
+                   "isListed": true, "jobUrl": format!("https://jobs.ashbyhq.com/acme/{i:08}-0000-4000-8000-000000000000")})
+        })
+        .collect();
+    let mut r = routes(BOARD_OK);
+    r[1] = route(
+        Some("api.ashbyhq.com"),
+        API_PATH,
+        200,
+        "application/json",
+        serde_json::to_vec(&json!({ "jobs": jobs })).unwrap(),
+    );
+    let server = Server::start(r).await;
+    let e = env(config(&server, &HOSTS, tools)).await;
+    fetch_board(&e).await;
+    let run = call(&e, "ashbyhq.list_jobs", json!({}))
+        .await
+        .expect("page 1");
+    assert!(!run.text.contains("truncated:"), "{}", &run.text[..200]);
+    let v: Value = serde_json::from_str(run.text.lines().next().unwrap()).expect("compact");
+    assert!(
+        serde_json::to_string_pretty(&v).unwrap().chars().count() > 20_000,
+        "the fixture must be over the cap when pretty"
+    );
+    assert_eq!((&v["shown"], &v["next_offset"]), (&json!(60), &json!(60)));
+}
+
+/// Ladder rung 4 (T-13c): `q` is a case-insensitive substring over title, department and
+/// team, so "ML roles" is one call; `matched` counts the filtered jobs, `total` the board.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_jobs_q_filters_title_department_and_team() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = repo_tools_copy(tmp.path());
+    let server = Server::start(big_routes(66)).await;
+    let e = env(config(&server, &HOSTS, tools)).await;
+    fetch_board(&e).await;
+
+    let run = call(&e, "ashbyhq.list_jobs", json!({"q": "ml"}))
+        .await
+        .expect("q");
+    let v = json_part(&run.text);
+    // Titles with "ML" (i % 11 == 0), job 5's team; "Machine Learning" holds no "ml".
+    let want: Vec<String> = (0..66)
+        .filter(|i| i % 11 == 0 || *i == 5)
+        .map(|i| {
+            if i % 11 == 0 {
+                format!("Senior ML Engineer {i}")
+            } else {
+                format!("Role {i}")
+            }
+        })
+        .collect();
+    assert_eq!(titles(&v), want, "{}", run.text);
+    assert_eq!(v["total"], 66);
+    assert_eq!(v["matched"], want.len());
+    assert!(v.get("next_offset").is_none());
+    assert!(!run.text.contains("Hidden ML"), "unlisted jobs stay out");
+
+    let dept = call(&e, "ashbyhq.list_jobs", json!({"q": "  MACHINE learning "}))
+        .await
+        .expect("department");
+    let d = json_part(&dept.text);
+    assert_eq!(d["matched"], (0..66).filter(|i| i % 7 == 0).count());
+    assert!(titles(&d).contains(&"Role 7".to_string()));
+
+    let none = call(&e, "ashbyhq.list_jobs", json!({"q": "astronaut"}))
+        .await
+        .expect("no hits");
+    let n = json_part(&none.text);
+    assert_eq!((&n["matched"], &n["shown"]), (&json!(0), &json!(0)));
+}
+
+/// The site tool's description carries the first paragraph of its header prose (D-568), so
+/// the model learns offset and q before its first call; later notes stay out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_jobs_description_explains_offset_and_q() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = repo_tools_copy(tmp.path());
+    let server = Server::start(routes(BOARD_OK)).await;
+    let e = env(config(&server, &HOSTS, tools)).await;
+    fetch_board(&e).await;
+    let spec = e.registry.get("ashbyhq.list_jobs").expect("registered");
+    for want in ["60 per call", "next_offset", "q keeps jobs", "department"] {
+        assert!(
+            spec.description.contains(want),
+            "{want}: {}",
+            spec.description
+        );
+    }
+    assert!(!spec.description.contains("D-561"), "{}", spec.description);
+    assert_eq!(spec.args["properties"]["offset"]["type"], "number");
+    assert_eq!(spec.args["properties"]["q"]["type"], "string");
+}
+
+/// B-560: a board over the body cap fails with the cap named, not "not JSON" (a cut JSON
+/// body never parses). page.api's cap is `json_max_bytes` (D-565).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_board_over_the_cap_names_the_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = repo_tools_copy(tmp.path());
+    let server = Server::start(routes(BOARD_OK)).await;
+    let cfg = srv_web::Config {
+        json_max_bytes: 1500,
+        ..config(&server, &HOSTS, tools)
+    };
+    assert!(ashby_json().len() > 1500);
     let e = env(cfg).await;
     fetch_board(&e).await;
     let err = call(&e, "ashbyhq.list_jobs", json!({}))
@@ -373,8 +610,8 @@ async fn a_board_over_the_cap_names_the_cap() {
 // Live (network): `cargo test -p srv-web --test accept_t13 -- --ignored`
 
 /// The seeded tool against a real public Ashby board. `SB_ASHBY_ORG` picks the org
-/// (default `ashby`, Ashby's own board; `linear` also passed on 2026-10-26; `openai` fails:
-/// its posting API answer is over the 5 MB cap, B-560).
+/// (default `ashby`, Ashby's own board; `linear` also passed on 2026-10-26; `openai`, whose
+/// posting API answer is over 5 MB, needs page.api's 32 MB JSON cap, B-560 / D-565).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "network: fetches jobs.ashbyhq.com and api.ashbyhq.com"]
 async fn live_ashby_board_list_jobs() {
@@ -392,7 +629,7 @@ async fn live_ashby_board_list_jobs() {
         .await
         .expect("fetch");
     assert!(
-        tools_line(&out.text).contains("ashbyhq.list_jobs(org?)"),
+        tools_line(&out.text).contains("ashbyhq.list_jobs(org?,offset?,q?)"),
         "{}",
         out.text
     );

@@ -480,8 +480,18 @@ pub(crate) async fn read_capped(mut resp: Response, cap: usize) -> Result<Body, 
     })
 }
 
+/// A byte cap as the model reads it: `5 MB` for whole mebibytes, else `1500 byte`.
+pub(crate) fn cap_text(cap: usize) -> String {
+    const MB: usize = 1024 * 1024;
+    if cap >= MB && cap.is_multiple_of(MB) {
+        format!("{} MB", cap / MB)
+    } else {
+        format!("{cap} byte")
+    }
+}
+
 /// `(mime, charset)` from `Content-Type`.
-fn content_type(headers: &HeaderMap) -> (String, Option<String>) {
+pub(crate) fn content_type(headers: &HeaderMap) -> (String, Option<String>) {
     let Some(v) = headers
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())

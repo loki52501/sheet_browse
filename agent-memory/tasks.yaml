@@ -156,8 +156,15 @@ tasks:
     step: 2
     title: "Phase 1 ladder fixes for servers (bench/results/ladder-phase1-servers.md, 11/19 pass, rungs 3 and 9 green): api keeps its own User-Agent and refuses model-set identity headers (B-562); fs.write and csv.clean put bare file names in runs/<id>/files (B-564); tools/ashbyhq.com/list_jobs.js pages past MAX_JOBS 60 (Ashby total 66) and api/page.api caps for large JSON (B-560); fetch's description says fetching a page announces its site tools, csv.clean's says it dedupes; then re-run the ladder (bench/fixtures/ladder_session.py). Launcher preamble and report grounding are core's (B-563)."
     docs: [docs/04-TOOL-SERVERS-PHASE1.md, docs/08-USE-CASES-AND-TESTS.md]
+    status: done
+    owner: servers/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/servers-T13c
+  - id: T-13d
+    step: 2
+    title: "T-13c review should-fix (bench/results/review-T-13c.md): (1) srv-files call re-plans and recheck compares only the class, so a bare-name Delete whose base file vanished after the ask acts on runs/<id>/files/<name> instead (D-572); carry the classified target into call or refuse when it moved; (2) a 32 MB JSON answer has no memory guard (Value tree, shape and pick clones; page.api into the 32 MiB JS runner); (5) no test for the docs readers' bare-name fallback (pdf/xlsx/docx.read, md.to_pdf). From accept-T-13c.md (ladder 14/18, no red row owned by servers): (6) pick refuses index paths like versions[0].license and its error shows the path as versions(0); every rung-2 session lost 3 calls to it: support [N] steps or steer to versions[].license in the error; (7) the ashbyhq.list_jobs ledger summary names the last page fetched, not the board; (8) srv-cli classes `curl <url>` and `python3 -c` as Delete so each waits out a 60 s ask (check against T-15b). From review round 2: (9) a credential header with a literal token beside a real ref still passes; (10) the url-email test does not assert recipients == [host]."
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
     status: todo
-    owner: servers
   - id: T-16
     step: 4
     title: "reviews SM-2, contacts in gate, baselines, watch diff + single notify, reflect readers-only, proposals"
@@ -292,7 +299,7 @@ tasks:
     owner: core/suborch
     branch: swarm/core-T08b
     title: "D-85 not done at merge: SchedError #[non_exhaustive]. Plus T-08 red acceptance rows: D-124 (1) ledger header and tools pin/unpin/retire echo ids as literals, and `harness gate set --note` stores no vault value (scrub the note before the database; vault rule)."
-    status: doing
+    status: done
     claimed_at: "2026-10-25"
     from: T-08
   - id: T-10b
@@ -361,3 +368,11 @@ tasks:
     docs: [docs/01-HARNESS-CORE.md, docs/06-TOOLFORGE.md, docs/03-TOOL-STORE.md]
     status: todo
     from: T-16
+  - id: T-08c
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T08c
+    title: "review-T-08b round 2 should-fix: the B-186 refusal in `harness gate set` checks the typed domain and class, but gate_rule_set stores the UTS-46-normalised key (gate::rule_domain: full-width to ASCII, soft hyphens dropped). Run the vault-value refusal on gate::rule_key's output too, with a full-width and a soft-hyphen test case."
+    status: todo
+    from: T-08b

@@ -7,7 +7,9 @@
 //! (columns that must not be blank; default: the key columns), `drop_empty_rows` (default
 //! true), `delimiter` (default `,`, or tab for `.tsv`). Duplicate keys compare after
 //! normalising, ignoring ASCII case. Rows missing a required value are kept and named in an
-//! added `_missing` column. The output defaults to `files/<name>.clean.csv`.
+//! added `_missing` column. The output defaults to `files/<name>.clean.csv`; a bare `out`
+//! lands in this run's `files/` and a bare input name not found in the base folder is read
+//! from there (B-564, D-570, D-571). Classify and call use one `out_path`.
 
 use crate::paths::Roots;
 use crate::text;
@@ -28,12 +30,12 @@ pub const MISSING_COL: &str = "_missing";
 pub fn tools() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "csv.clean".into(),
-        description: "Clean a CSV into a new file: trim and collapse spaces, set case per column, drop duplicate rows (by key columns), flag rows missing required values in a _missing column. Returns a short report. rules: {key, dedupe, required, trim, collapse_spaces, case:{col:lower|upper|title}, drop_empty_rows, delimiter}.".into(),
+        description: "Dedupe and normalise a CSV/TSV into a new file; use it instead of deduping rows yourself. Drops duplicate rows by rules.key (the columns that identify a row, e.g. [\"email\"]; default the whole row; compared trimmed, spaces collapsed, ASCII case ignored), trims and collapses spaces, sets case per column, flags rows missing rules.required values (default the key columns) in a _missing column. Returns a short report (rows in/out, duplicates by line). A bare path not found next to runs/ is read from this run's files/. out: a bare name lands in this run's files/ (default files/<name>.clean.csv) and is listed in the run report. rules: {key, dedupe, required, trim, collapse_spaces, case:{col:lower|upper|title}, drop_empty_rows, delimiter}.".into(),
         class: Class::Fill,
         args: json!({"type":"object","properties":{
             "path":{"type":"string"},
             "rules":{"type":"object","properties":{
-                "key":{"type":"array","items":{"type":"string"}},
+                "key":{"type":"array","items":{"type":"string"},"description":"columns that identify a row for dedupe; default the whole row"},
                 "dedupe":{"type":"boolean","default":true},
                 "required":{"type":"array","items":{"type":"string"}},
                 "trim":{"type":"boolean","default":true},
@@ -42,7 +44,7 @@ pub fn tools() -> Vec<ToolSpec> {
                 "drop_empty_rows":{"type":"boolean","default":true},
                 "delimiter":{"type":"string","maxLength":1}
             },"additionalProperties":false},
-            "out":{"type":"string"}
+            "out":{"type":"string","description":"output file; a bare name lands in this run's files/"}
         },"required":["path"],"additionalProperties":false}),
         handler: Arc::new(Clean),
     }]
@@ -81,7 +83,7 @@ enum Case {
 
 /// Where the cleaned file goes.
 fn out_path(roots: &Roots, a: &Args) -> Result<(PathBuf, PathBuf), ToolError> {
-    let input = roots.resolve(&a.path)?;
+    let input = roots.resolve_existing(&a.path)?;
     let out = match &a.out {
         Some(o) => roots.resolve_out(o)?,
         None => {

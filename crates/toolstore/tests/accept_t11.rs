@@ -366,7 +366,7 @@ fn accept_1_ashby_list_jobs_loads_announces_and_reads_api() {
         assert_eq!(lj.header.gate, Class::Read);
         assert_eq!(
             skeleton_line(&report.tools).unwrap(),
-            "tools for this site: ashbyhq.list_jobs(org?) · generic.read_table(id?,max?)"
+            "tools for this site: ashbyhq.list_jobs(org?,offset?,q?) · generic.read_table(id?,max?)"
         );
     }
 
@@ -393,7 +393,7 @@ fn accept_1_ashby_list_jobs_loads_announces_and_reads_api() {
     assert_eq!(
         out,
         json!({
-            "org": "acme", "total": 2, "shown": 2,
+            "org": "acme", "total": 2, "matched": 2, "offset": 0, "shown": 2,
             "jobs": [
                 {"title": "Senior Backend Engineer", "location": "Berlin (remote)", "department": "Engineering",
                  "url": "https://jobs.ashbyhq.com/acme/0a1b2c3d-0000-4000-8000-000000000001"},
