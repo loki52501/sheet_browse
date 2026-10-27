@@ -272,6 +272,11 @@ blockers:
     question: "For area driver: sb-driver test chromium_driver::bench_headless_launch_registry_and_cleanup (crates/sb-driver/tests/chromium_driver.rs:231) fails about 1 run in 2 on this machine under load ('bench profile ... not removed'); it passed on the next run with no code change. Seen in core's `cargo test --workspace -j 2` on swarm/core-T05c (main 14587a3 merged). It makes the D-87 workspace gate flaky for every area."
     default_taken: "Not a core fix. Core lists it in its PR bodies as a known flake and reruns that test binary once. Proposed for driver: wait for the browser process tree to exit (condition with a cap, rule 6) before asserting the profile folder is gone, or retry the removal on Windows sharing violations."
     needs_user: false
+  - id: B-619
+    task: T-18d
+    question: "For supreme (hooks and WAVE2): WAVE2 tells areas to run parallel tasks in one worktree each (git worktree add F:/sb-swarm/wt/<area>-T<nn>), but guard_write.py roots every Write/Edit at the folder its script lives in (scripts/hooks/_common.py ROOT = Path(__file__).parents[2], i.e. the session's own worktree F:/sb-swarm/wt/<area>). A session or subagent started in wt/driver cannot Write or Edit in wt/driver-T18d: the T-18d reviewer and tester were both refused. The T-18d coder and the sub-orchestrator's tasks.yaml claims reached the per-task worktree through Bash file writes, which skip the Write/Edit hooks (post_write fmt, YAML, canary checks were run by hand, not by the hook). Should guard_write.py allow the session's sibling task worktrees, or should areas work task branches in their one worktree?"
+    default_taken: "D-631: area driver works every task branch inside F:/sb-swarm/wt/driver (git checkout swarm/driver-T<nn>, one at a time; RAM forces one build at a time anyway, launch.ps1 CARGO_BUILD_JOBS=2) and no longer writes files outside it through Bash. Per-task worktrees wt/driver-T18d and wt/driver-T24 were removed (branches kept). Hooks unchanged."
+    needs_user: false
 interface_changes:
   - id: B-194
     from: core

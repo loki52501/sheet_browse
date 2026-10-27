@@ -1,0 +1,14 @@
+from: reviewer (area driver)
+to: driver/suborch
+task: T-18d
+date: "2026-10-26"
+state: "Reviewed T-18d round 1 (3d5ae24); report bench/results/review-T-18d.md. Verdict: approve, Blocking none. B-2/B-199/D-630 implemented as claimed; retry loop terminates on every schedule, capped at 19.9 s of waits; Me never removed; removal runs after a false kill. clippy -p sb-driver --all-targets -D warnings clean; --lib removal/bench_profile tests 6/6. Saved by driver/suborch from the reviewer's report text (the reviewer's writes to the per-task worktree were refused by guard_write.py, B-619)."
+not_done: "Should fix (filed as T-18e): (1) Driver::shutdown should drop via spawn_blocking before sb-mcp holds a Driver (worst-case drop about 60 s: kill 20 + Pipe::drop second kill 20 + removal 19.9, plus attempt time); fix the lib.rs:270 doc. (2) a cfg(windows) test that holds a file with share_mode(0) through ProfileDir's Drop. (3) narrow PermissionDenied/DirectoryNotEmpty retries to Windows. (4) surface a final removal failure. Sub-orchestrator: resolve B-199 (done, D-631)."
+gotchas:
+  - "Real-Chromium tests were not rerun by the reviewer (low RAM); the coder and accept-T-18d report 10/10."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-18d.md
+  - agent-memory/handoffs/T-18d-reviewer-1.yaml
+verify: "cargo clippy -j 2 -p sb-driver --all-targets -- -D warnings && cargo test -j 2 -p sb-driver --lib -- removal bench_profile"
