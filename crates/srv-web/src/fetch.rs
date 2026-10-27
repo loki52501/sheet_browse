@@ -35,6 +35,7 @@ use reqwest::Url;
 use sb_sheet::{Cursor, ElemRef, FindOpts, PageMeta, ReadOpts, SheetOpts, SkeletonOpts};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// W-5 default chunk size, applied here so the documented default is visible in code.
 pub const CHUNK_TOKENS: usize = 4000;
@@ -193,13 +194,8 @@ impl Fetch {
             )));
         }
         let mime = body.mime.clone();
-        let shown_type = || {
-            if mime.is_empty() {
-                "no content type".to_string()
-            } else {
-                escape::name(&mime, 80)
-            }
-        };
+        // D-511: the header is server text; only a plain media type is shown as written.
+        let shown_type = || http::shown_mime(&mime);
         if is_json_type(&mime) {
             return Err(ToolError::Failed(format!(
                 "fetch: {final_host} answered with JSON ({}); use api(url) for JSON",
@@ -290,23 +286,49 @@ pub(crate) fn cf_mitigated(body: &http::Body) -> bool {
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("challenge"))
 }
 
+/// D-517: the longest a walk may take (W-2's 15 s request budget).
+pub(crate) const WALK_MAX: Duration = crate::config::DEFAULT_TIMEOUT;
+
 /// The W-2 walk of decoded `text`, off the async threads: as a document, or (`plain`) as
-/// text whose blank lines separate paragraphs ([`html::parse_text`]).
+/// text whose blank lines separate paragraphs ([`html::parse_text`]). At most
+/// [`WALK_MAX`]: a walk that has not finished by then fails the call ([`walk_within`]).
 pub(crate) async fn walk(
     text: String,
     base: Url,
     plain: bool,
     tool: &str,
 ) -> Result<Doc, ToolError> {
-    tokio::task::spawn_blocking(move || {
+    walk_within(text, base, plain, tool, WALK_MAX).await
+}
+
+/// [`walk`] with a cap of `max` (D-517). The walk checks its deadline as it goes and stops
+/// its blocking thread soon after it; the call does not wait past `max` in any case.
+pub(crate) async fn walk_within(
+    text: String,
+    base: Url,
+    plain: bool,
+    tool: &str,
+    max: Duration,
+) -> Result<Doc, ToolError> {
+    let deadline = Instant::now() + max;
+    let task = tokio::task::spawn_blocking(move || {
         if plain {
-            html::parse_text(&text, &base)
+            html::parse_text_within(&text, &base, deadline)
         } else {
-            html::parse(&text, &base)
+            html::parse_within(&text, &base, deadline)
         }
-    })
-    .await
-    .map_err(|_| ToolError::Failed(format!("{tool}: the HTML walk failed")))
+    });
+    let too_long = || {
+        ToolError::Failed(format!(
+            "{tool}: the page took longer than {} s to read, so nothing of it is shown",
+            max.as_secs()
+        ))
+    };
+    match tokio::time::timeout(max, task).await {
+        Ok(Ok(Some(doc))) => Ok(doc),
+        Ok(Ok(None)) | Err(_) => Err(too_long()),
+        Ok(Err(_)) => Err(ToolError::Failed(format!("{tool}: the HTML walk failed"))),
+    }
 }
 
 /// D-5 by the response alone, for api and feed: the `cf-mitigated: challenge` header or a
@@ -452,6 +474,11 @@ fn skeleton(page: &Page) -> String {
     if page.truncated {
         s.push_str("\npage cut at the 5 MB cap; the end of the page is missing");
     }
+    // D-519: what of the page the bounded parse or walk did not read.
+    if let Some(cut) = &page.doc.cut {
+        s.push('\n');
+        s.push_str(cut);
+    }
     s
 }
 
@@ -560,5 +587,32 @@ impl ToolHandler for Find {
             files: Vec::new(),
             stopped: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D-517: a walk that cannot finish within its cap fails the call with a short line
+    /// (the cap here is zero, so the walk's first clock check stops it).
+    #[tokio::test]
+    async fn a_walk_past_its_cap_fails_the_call() {
+        let base = Url::parse("https://slow.test/p").unwrap();
+        for plain in [false, true] {
+            let text = "<p>words</p>".repeat(10_000);
+            let err = walk_within(text, base.clone(), plain, "fetch", Duration::ZERO)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("plain={plain}: the walk finished"));
+            let msg = err.to_string();
+            assert!(msg.contains("took longer than 0 s"), "{msg}");
+            assert!(!msg.contains("words"), "{msg}");
+        }
+        // With room, the same walk finishes.
+        let doc = walk("<p>words</p>".into(), base, false, "fetch")
+            .await
+            .unwrap();
+        assert_eq!(doc.blocks.len(), 1);
     }
 }

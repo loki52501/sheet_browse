@@ -1,0 +1,20 @@
+from: tester-1 (servers, T-12b)
+to: servers suborch, then rust-coder for the fixes
+task: T-12b
+date: "2026-10-26"
+state: "Acceptance run on swarm/servers-T12b at 4e3b601 (implementation 0a3d8b3); report bench/results/accept-T-12b.md, committed in 7e57c76 with new tests crates/srv-web/tests/accept_t12b.rs (10 tests) and accept_t12b_proxy.rs (1 test, own binary). 30 rows: 23 pass, 7 fail, 0 not-run; Verdict red. Pass: item 1 (api_base64_echoed_vault_value_is_scrubbed runs un-ignored and passes; adversarial base64/base64url at all alignments passes), item 2 (27 dressed-up pages incl. real backslash-u003c escapes, all not shown), item 3a, item 4 for fetch/feed/search and every vault check (no canary at the proxy), item 5, item 6a, item 7a, every docs/04 W row re-run incl. live (docs.rs, api.github.com, SearXNG, Ashby). Break-checks of D-509, D-510, D-511, D-512, D-513 on a throwaway worktree each went red. Canary grep 0 in every capture. cargo test -p srv-web: 134 passed, 5 failed (tester tests), 5 ignored. Workspace: 1195 passed, 6 failed (the 5 tester tests plus a t13b load flake that passed 3/3 reruns), 14 ignored."
+not_done: "Fixes for the failing rows, in order: (1) 3c, Blocking: plain_source/plain_bracket quadratic on a line of '<x' (html.rs:348); bound the '>' search to PLAIN_BRACKET_MAX and cap the spawn_blocking walk; test accept_t12b::text_plain_hostile_angle_runs_finish_in_time. (2) 4b: Clients::api_for sends a name that resolves private through the system proxy (http and https CONNECT); pre-resolve with PublicOnly like page_for when proxied(url); test accept_t12b_proxy. (3) 7b: link_url turns an empty, whitespace or '#' link and an iCal event without URL into the feed's own URL (feed.rs:255); test accept_t12b::feed_items_without_a_link_do_not_get_the_feed_url. (4) 3b and 6b: entity-spelled markup (&lt;script&gt;) is decoded after the tag strip and reaches the model as '<script>' in text/plain fetch, search and feed (the text/html walk does the same since T-12); needs a ruling: escape '<' in decoded text or decide that entity text is not markup under rule 5. Then rerun accept-T-12b."
+gotchas:
+  - "A literal JSON unicode escape (backslash + u003c) typed through the agent tool layer reaches the file as a bare '<'. The coder's D-510 escape tests (t12b::api_never_shows_markup_hidden_in_json_escapes, api::tests::escaped_markup_in_plain_text_or_a_json_string_document_is_not_shown) therefore hold plain '<' and stay green with the decoded check removed. Build the backslash with char::from(92u8) as accept_t12b does."
+  - "accept_t12b_proxy needs this machine's name (COMPUTERNAME or HOSTNAME) to resolve only to private addresses; it checks this first and panics with 'precondition' otherwise."
+  - "In the proxy test, public.test is a config override to 127.0.0.1, so api treats it as loopback (is_loopback) and never proxies it; use an unresolvable public name (api.example.invalid) for api controls."
+  - "text_plain_hostile_angle_runs_finish_in_time runs the call on its own thread and runtime and gives up at 20 s; the stuck walk keeps one blocking thread until the process exits."
+  - "LNK1104 (cannot open the test exe) in the shared target dir means another process still has that exe open; retry. t13b::two_servers_repairing_the_same_tool_leave_version_2 failed once under workspace load (version 3) and passed 3/3 alone."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/accept-T-12b.md
+  - crates/srv-web/tests/accept_t12b.rs
+  - crates/srv-web/tests/accept_t12b_proxy.rs
+  - agent-memory/handoffs/T-12b-tester-1.yaml
+verify: "cargo test -p srv-web -j 2 --no-fail-fast --test accept_t12b --test accept_t12b_proxy (CARGO_TARGET_DIR=F:/sb-swarm/target-servers)"

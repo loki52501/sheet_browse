@@ -6,6 +6,7 @@
 //! (D-31): unresponsive engines are listed, zero results say so, and a backend that is
 //! down is an error that says how to start it.
 
+use crate::dom::Budget;
 use crate::http;
 use crate::{escape, opt_usize, req_str, Web};
 use async_trait::async_trait;
@@ -13,6 +14,7 @@ use harness_core::{Class, Classified, ToolCtx, ToolError, ToolHandler, ToolOutpu
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// W-1 default result count, and the most a caller can ask for.
 pub const SEARCH_K: usize = 8;
@@ -58,6 +60,13 @@ pub struct Answer {
 
 /// Parses a SearXNG `format=json` answer. Results without an http(s) URL are dropped.
 pub fn parse_answer(v: &Value) -> Answer {
+    parse_answer_in(v, &Budget::unlimited())
+}
+
+/// [`parse_answer`] within `budget` (D-519): titles and snippets are bounded HTML parses
+/// ([`crate::html::fragment_text_in`]); once the budget is spent the rest are empty and
+/// [`Budget::spent`] says so.
+pub(crate) fn parse_answer_in(v: &Value, budget: &Budget) -> Answer {
     let hits = v
         .get("results")
         .and_then(Value::as_array)
@@ -66,7 +75,10 @@ pub fn parse_answer(v: &Value) -> Answer {
                 .filter_map(|r| {
                     let url = http::clean_url(r.get("url")?.as_str()?)?;
                     let s = |k: &str| {
-                        crate::html::fragment_text(r.get(k).and_then(Value::as_str).unwrap_or(""))
+                        crate::html::fragment_text_in(
+                            r.get(k).and_then(Value::as_str).unwrap_or(""),
+                            budget,
+                        )
                     };
                     Some(Hit {
                         title: escape::name(&s("title"), TITLE_MAX),
@@ -99,6 +111,27 @@ pub fn parse_answer(v: &Value) -> Answer {
         })
         .unwrap_or_default();
     Answer { hits, unresponsive }
+}
+
+/// [`parse_answer_in`] off the async threads, capped at `max` like fetch's walk (D-517,
+/// D-519): a backend that sends deep or huge markup in its fields cannot stall a worker.
+async fn answer_off_thread(v: Value, max: Duration) -> Result<Answer, ToolError> {
+    let deadline = Instant::now() + max;
+    let task = tokio::task::spawn_blocking(move || {
+        let budget = Budget::until(deadline);
+        let answer = parse_answer_in(&v, &budget);
+        (!budget.spent()).then_some(answer)
+    });
+    match tokio::time::timeout(max, task).await {
+        Ok(Ok(Some(answer))) => Ok(answer),
+        Ok(Ok(None)) | Err(_) => Err(ToolError::Failed(format!(
+            "search: the SearXNG answer took longer than {} s to read",
+            max.as_secs()
+        ))),
+        Ok(Err(_)) => Err(ToolError::Failed(
+            "search: reading the SearXNG answer failed".into(),
+        )),
+    }
 }
 
 struct Search {
@@ -159,7 +192,7 @@ impl ToolHandler for Search {
         }
         let v: Value = serde_json::from_slice(&body.bytes)
             .map_err(|_| ToolError::Failed("search: SearXNG did not answer with JSON".into()))?;
-        let answer = parse_answer(&v);
+        let answer = answer_off_thread(v, crate::fetch::WALK_MAX).await?;
         let total = answer.hits.len();
         let hits: Vec<&Hit> = answer.hits.iter().take(k).collect();
         let mut text = format!(
@@ -190,5 +223,26 @@ impl ToolHandler for Search {
             files: Vec::new(),
             stopped: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D-519: search's title and snippet parses run under a cap like fetch's walk.
+    #[tokio::test]
+    async fn a_search_answer_past_its_cap_fails_the_call() {
+        let v = json!({"results": [
+            {"url": "https://a.test/", "title": "<b>T</b>", "content": "<p>words</p>"}
+        ]});
+        let err = answer_off_thread(v.clone(), Duration::ZERO)
+            .await
+            .expect_err("a zero cap fails the call");
+        assert!(err.to_string().contains("took longer than 0 s"), "{err}");
+        let a = answer_off_thread(v, crate::fetch::WALK_MAX).await.unwrap();
+        assert_eq!(a.hits.len(), 1);
+        assert_eq!(a.hits[0].title, "T");
+        assert_eq!(a.hits[0].snippet, "words");
     }
 }

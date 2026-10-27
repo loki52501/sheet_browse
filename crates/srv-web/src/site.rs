@@ -284,12 +284,17 @@ impl SiteTool {
     /// The tool's row says `needs_repair` (a miss broke it). An unreadable row counts as not
     /// broken, so nothing is patched on a guess.
     async fn needs_repair(&self, ctx: &ToolCtx) -> bool {
+        self.status(ctx).await == Some(ToolStatus::NeedsRepair)
+    }
+
+    /// The tool's `tools.health` status; `None` when there is no row or it cannot be read.
+    async fn status(&self, ctx: &ToolCtx) -> Option<ToolStatus> {
         ToolStore::new(&self.web.cfg.tools_root)
             .health(&**ctx.store(), &self.tool.domain, &self.tool.header.name)
             .await
             .ok()
             .flatten()
-            .is_some_and(|h| h.status == ToolStatus::NeedsRepair)
+            .map(|h| h.status)
     }
 
     /// The tool file on disk already carries `fp` as its `@fingerprint`: another run
@@ -441,7 +446,8 @@ impl ToolHandler for SiteTool {
         let challenge: Arc<Mutex<Option<ToolOutput>>> = Arc::default();
         let api = PageApi {
             handle: Handle::current(),
-            client: clients.api.clone(),
+            clients: clients.clone(),
+            overrides: self.web.cfg.resolve.clone(),
             domain: toolstore::registrable(&host_of(&page_url)),
             // B-560, D-565: the JSON cap, not the page cap; the bytes never reach the model.
             cap: self.web.cfg.json_max_bytes,
@@ -477,13 +483,27 @@ impl ToolHandler for SiteTool {
                     Some((_, fp)) => self.file_carries(fp).await,
                     None => false,
                 };
+                // D-518: when this read already saw the fingerprint in the file, the run is
+                // recorded as the clean run toolstore would make of it (D-577), so the result
+                // does not hang on toolstore reading the file a second time (a read that fails
+                // there counts as "not carried" and patches again). D-527: not for a tool
+                // retired meanwhile (its file can still be in place when the archive step
+                // failed, D-316): it keeps Relocated, which toolstore refuses for a retired
+                // tool (T-7), so the run neither counts as clean nor brings the tool back.
+                let retired = already && self.status(ctx).await == Some(ToolStatus::Retired);
                 let outcome = match &relocated {
-                    Some((_, fp)) => RunOutcome::Relocated {
+                    Some((_, fp)) if !already || retired => RunOutcome::Relocated {
                         fingerprint: fp.clone(),
                     },
-                    None => RunOutcome::Ok,
+                    _ => RunOutcome::Ok,
                 };
                 match self.record_row(ctx, outcome).await {
+                    Ok(row) if row.status == ToolStatus::Retired => {
+                        // D-527: retired between the read and the record: never enabled or
+                        // registered again (as register() drops a retired tool).
+                        ctx.registry().remove(&name);
+                        notes.push(format!("note: {name} is retired; it is not offered again"));
+                    }
                     Ok(row) => {
                         // D-561: a clean repair run (relocated, or a match recorded Ok)
                         // enables a tool a miss disabled.
@@ -516,7 +536,13 @@ impl ToolHandler for SiteTool {
                             self.reregister(ctx).await;
                         }
                     }
-                    Err(n) => notes.push(n),
+                    Err(n) => {
+                        if retired {
+                            // D-527: toolstore refused to revive it; neither does this server.
+                            ctx.registry().remove(&name);
+                        }
+                        notes.push(n);
+                    }
                 }
                 escape::json_strings(&mut v);
                 let mut body = serde_json::to_string_pretty(&v).unwrap_or_else(|_| "null".into());
@@ -573,7 +599,10 @@ impl ToolHandler for SiteTool {
 /// it is set, every later page.api call in the run refuses without a request (D-582).
 struct PageApi {
     handle: Handle,
-    client: reqwest::Client,
+    /// The api client is picked per URL: never a proxy for a loopback or private target
+    /// (B-590, D-509).
+    clients: http::Clients,
+    overrides: Vec<(String, std::net::SocketAddr)>,
     domain: String,
     cap: usize,
     challenge: Arc<Mutex<Option<ToolOutput>>>,
@@ -614,10 +643,12 @@ impl ApiFetch for PageApi {
                 self.domain
             ));
         }
-        let client = self.client.clone();
+        let clients = self.clients.clone();
+        let overrides = self.overrides.clone();
         let cap = self.cap;
         let slot = self.challenge.clone();
         let fut = async move {
+            let client = clients.api_for(&u, false, &overrides).await;
             // D-5, D-580: a human check stops the whole call; the reader only learns the host.
             let stopped = |out: ToolOutput| {
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(out);

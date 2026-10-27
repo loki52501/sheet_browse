@@ -106,8 +106,15 @@ tasks:
     step: 2
     title: "srv-web follow-ups: un-ignore api_base64_echoed_vault_value_is_scrubbed once T-05d is on main; api text/plain tag check before JSON decode; text/plain walk loses <...> content (Vec<String>); page client honours system proxy so PublicOnly is skipped; Content-Type echoed; wiring tests for feed/search cleaned URLs and text; relative feed links without xml:base dropped; B-500 and B-501 need supreme answers"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: done
+    owner: servers/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/servers-T12b
+  - id: T-12c
+    step: 2
+    title: "T-12b review should-fix (bench/results/review-T-12b.md rounds 1-3): render_read and find run on the async thread after the walk, outside its cap, and the walk deadline starts only after an HTTP read that can itself take 15 s (one budget for the whole call); wall-clock asserts in debug tests may flake under workspace load; a ~500-deep then multi-MB block-tag body is linear times depth in html5ever, bounded only by the deadline; D-526's test checks the cap value, not a stalled resolver; B-592 (sb-sheet reader quadratic in block size, owner sheet; srv-web splits blocks at 8000 chars); B-593 (toolstore treats an unreadable tool file as fingerprint missing, owner store)."
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
     status: todo
-    owner: servers
   - id: T-13
     step: 2
     title: "Seed tools/ashbyhq.com/list_jobs.js (@phase 1) and step-2 acceptance; ladder rungs 1, 2, 4"

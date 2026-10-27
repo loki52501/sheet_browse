@@ -10,13 +10,16 @@
 //! echoed, whatever its content type (rule 5, D-508). The request goes through
 //! [`http::get_page`] (one deadline, private-address guard).
 
+use crate::dom::Budget;
 use crate::http::{self, host_of};
 use crate::{escape, fetch, html, opt_usize, req_str, Web};
 use async_trait::async_trait;
 use harness_core::{Class, Classified, ToolCtx, ToolError, ToolHandler, ToolOutput, ToolSpec};
+use reqwest::Url;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Items returned by default, and the most a caller can ask for.
 pub const FEED_LIMIT: usize = 30;
@@ -116,7 +119,7 @@ impl ToolHandler for Feed {
         }
         let ok = (200..300).contains(&body.status);
         let parsed = if ok {
-            parse_with(&body.bytes, body.charset.as_deref())
+            parse_off_thread(&body, fetch::WALK_MAX).await?
         } else {
             None
         };
@@ -137,11 +140,7 @@ impl ToolHandler for Feed {
                 "feed: {} did not answer with RSS, Atom, JSON Feed or iCal ({}); use \
                  fetch(url) to read web pages",
                 host_of(&body.url),
-                if body.mime.is_empty() {
-                    "no content type".to_string()
-                } else {
-                    escape::name(&body.mime, 80)
-                }
+                http::shown_mime(&body.mime)
             )));
         };
         let total = parsed.items.len();
@@ -170,13 +169,49 @@ impl ToolHandler for Feed {
 
 /// Parses a feed body of any supported kind; `None` when it is none of them.
 pub fn parse(bytes: &[u8]) -> Option<Parsed> {
-    parse_with(bytes, None)
+    parse_with(bytes, None, None, &Budget::unlimited())
 }
 
-/// [`parse`] with the response's `charset`. The iCal check runs on the decoded text (a BOM
-/// or the charset honoured, so a UTF-16 calendar is one); XML and JSON feeds are parsed from
-/// the bytes, whose own encoding declaration feed-rs reads.
-pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> {
+/// [`parse_with`] off the async threads, capped at `max` like fetch's walk (D-517, D-519):
+/// the item text parses check the deadline as they go, and the call does not wait longer in
+/// any case. Past the cap the call fails with one line; nothing of the feed is shown.
+async fn parse_off_thread(body: &http::Body, max: Duration) -> Result<Option<Parsed>, ToolError> {
+    let deadline = Instant::now() + max;
+    let bytes = body.bytes.clone();
+    let charset = body.charset.clone();
+    let base = body.url.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let budget = Budget::until(deadline);
+        let parsed = parse_with(&bytes, charset.as_deref(), Some(&base), &budget);
+        (!budget.spent()).then_some(parsed)
+    });
+    match tokio::time::timeout(max, task).await {
+        Ok(Ok(Some(parsed))) => Ok(parsed),
+        Ok(Ok(None)) | Err(_) => Err(ToolError::Failed(format!(
+            "feed: the feed took longer than {} s to read, so nothing of it is shown",
+            max.as_secs()
+        ))),
+        Ok(Err(_)) => Err(ToolError::Failed("feed: reading the feed failed".into())),
+    }
+}
+
+/// [`parse`] with the response's `charset` and the feed's own URL `base` (after redirects),
+/// within `budget` (D-519: once it is spent, item text is empty and the caller discards the
+/// result).
+/// The iCal check runs on the decoded text (a BOM or the charset honoured, so a UTF-16
+/// calendar is one); XML and JSON feeds are parsed from the bytes, whose own encoding
+/// declaration feed-rs reads.
+///
+/// D-513: item links are resolved against `xml:base` (feed-rs) and then against `base`, so
+/// a relative link (`/posts/1`, `item.html`) reaches the model as an absolute URL instead of
+/// being dropped; then [`http::clean_url`] as before. Without a base a relative link is
+/// still dropped.
+pub(crate) fn parse_with(
+    bytes: &[u8],
+    charset: Option<&str>,
+    base: Option<&Url>,
+    budget: &Budget,
+) -> Option<Parsed> {
     let text = http::decode(bytes, charset, false);
     let start = text.trim_start_matches('\u{feff}').trim_start();
     if start
@@ -184,9 +219,13 @@ pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> 
         .get(..15)
         .is_some_and(|h| h.eq_ignore_ascii_case(b"BEGIN:VCALENDAR"))
     {
-        return Some(ical::parse(start));
+        return Some(ical::parse_at(start, base, budget));
     }
-    let feed = feed_rs::parser::parse(bytes).ok()?;
+    let feed = feed_rs::parser::Builder::new()
+        .base_uri(base.map(Url::as_str))
+        .build()
+        .parse(bytes)
+        .ok()?;
     let kind = match feed.feed_type {
         feed_rs::model::FeedType::Atom => "atom",
         feed_rs::model::FeedType::JSON => "json",
@@ -206,7 +245,7 @@ pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> 
                 title: escape::name(
                     &e.title
                         .as_ref()
-                        .map(|t| html_to_text(&t.content))
+                        .map(|t| html_to_text(&t.content, budget))
                         .unwrap_or_default(),
                     TITLE_MAX,
                 ),
@@ -215,14 +254,14 @@ pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> 
                     .iter()
                     .find(|l| l.rel.as_deref().is_none_or(|r| r == "alternate"))
                     .or_else(|| e.links.first())
-                    .and_then(|l| http::clean_url(&l.href))
+                    .and_then(|l| link_url(&l.href, base))
                     .unwrap_or_default(),
                 date: e
                     .published
                     .or(e.updated)
                     .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
                     .unwrap_or_default(),
-                summary: escape::name(&html_to_text(&summary), SUMMARY_MAX),
+                summary: escape::name(&html_to_text(&summary, budget), SUMMARY_MAX),
             }
         })
         .collect();
@@ -230,7 +269,7 @@ pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> 
         title: escape::name(
             &feed
                 .title
-                .map(|t| html_to_text(&t.content))
+                .map(|t| html_to_text(&t.content, budget))
                 .unwrap_or_default(),
             TITLE_MAX,
         ),
@@ -239,20 +278,59 @@ pub(crate) fn parse_with(bytes: &[u8], charset: Option<&str>) -> Option<Parsed> 
     })
 }
 
+/// A feed link as the model may see it: resolved against `base` when relative (D-513), then
+/// [`http::clean_url`].
+///
+/// D-516: an empty, whitespace-only or fragment-only (`#`, `#top`) href is no link, and
+/// neither is a link that is the feed's own URL (`base`, fragment ignored): feed-rs joins
+/// such an href against the feed URL before it gets here. Otherwise every item without a
+/// link would repeat the feed URL (a secret calendar address once per event) and point the
+/// model at the feed instead of an item.
+fn link_url(href: &str, base: Option<&Url>) -> Option<String> {
+    let href = href.trim();
+    if href.is_empty() || href.starts_with('#') {
+        return None;
+    }
+    let abs = match base.and_then(|b| b.join(href).ok()) {
+        Some(abs) => abs,
+        None => Url::parse(href).ok()?,
+    };
+    if base.is_some_and(|b| same_document(&abs, b)) {
+        return None;
+    }
+    http::clean_url(abs.as_str())
+}
+
+/// `a` and `b` name the same document (equal once the fragment is dropped).
+fn same_document(a: &Url, b: &Url) -> bool {
+    let (mut a, mut b) = (a.clone(), b.clone());
+    a.set_fragment(None);
+    b.set_fragment(None);
+    a == b
+}
+
 /// Text of an HTML fragment (feed summaries and calendar fields are often HTML), collapsed
-/// ([`html::fragment_text`]: only text nodes, so no markup reaches the model).
-fn html_to_text(s: &str) -> String {
-    html::fragment_text(s)
+/// ([`html::fragment_text_in`]: only text nodes, so no markup reaches the model; a bounded
+/// parse that stops when `budget` is spent, D-519).
+fn html_to_text(s: &str, budget: &Budget) -> String {
+    html::fragment_text_in(s, budget)
 }
 
 /// A minimal RFC 5545 reader: VEVENTs with SUMMARY, URL, DTSTART, DESCRIPTION, LOCATION.
 /// Every text field goes through [`html_to_text`]: Google and Outlook calendars put `<br>`,
 /// `<a href>` and `<b>` in descriptions.
 pub mod ical {
-    use super::{escape, html_to_text, Item, Parsed, SUMMARY_MAX, TITLE_MAX};
+    use super::{escape, html_to_text, link_url, Budget, Item, Parsed, SUMMARY_MAX, TITLE_MAX};
+    use reqwest::Url;
 
     /// Parses a VCALENDAR text. Unknown properties and components are ignored.
     pub fn parse(text: &str) -> Parsed {
+        parse_at(text, None, &Budget::unlimited())
+    }
+
+    /// [`parse`] with the calendar's URL: a relative event `URL` resolves against it (D-513),
+    /// within `budget` (D-519).
+    pub(crate) fn parse_at(text: &str, base: Option<&Url>, budget: &Budget) -> Parsed {
         let lines = unfold(text);
         let mut title = String::new();
         let mut items = Vec::new();
@@ -269,21 +347,21 @@ pub mod ical {
                 ("BEGIN", v) if !v.eq_ignore_ascii_case("VCALENDAR") => depth_other += 1,
                 ("END", v) if v.eq_ignore_ascii_case("VEVENT") && depth_other == 0 => {
                     if let Some(e) = cur.take() {
-                        items.push(e.item());
+                        items.push(e.item(base));
                     }
                 }
                 ("END", v) if !v.eq_ignore_ascii_case("VCALENDAR") => {
                     depth_other = depth_other.saturating_sub(1)
                 }
                 _ if depth_other > 0 => {}
-                ("X-WR-CALNAME", _) if cur.is_none() => title = text_value(&value),
+                ("X-WR-CALNAME", _) if cur.is_none() => title = text_value(&value, budget),
                 _ => {
                     if let Some(e) = cur.as_mut() {
                         match name.as_str() {
-                            "SUMMARY" => e.summary = text_value(&value),
+                            "SUMMARY" => e.summary = text_value(&value, budget),
                             "URL" => e.url = value.trim().to_string(),
-                            "DESCRIPTION" => e.description = text_value(&value),
-                            "LOCATION" => e.location = text_value(&value),
+                            "DESCRIPTION" => e.description = text_value(&value, budget),
+                            "LOCATION" => e.location = text_value(&value, budget),
                             "DTSTART" => e.start = date(&value, &params),
                             _ => {}
                         }
@@ -308,7 +386,7 @@ pub mod ical {
     }
 
     impl Event {
-        fn item(self) -> Item {
+        fn item(self, base: Option<&Url>) -> Item {
             let mut summary = self.description;
             if !self.location.trim().is_empty() {
                 summary = if summary.trim().is_empty() {
@@ -317,7 +395,7 @@ pub mod ical {
                     format!("at {}. {summary}", self.location)
                 };
             }
-            let url = crate::http::clean_url(&self.url).unwrap_or_default();
+            let url = link_url(&self.url, base).unwrap_or_default();
             Item {
                 title: escape::name(&self.summary, TITLE_MAX),
                 url,
@@ -368,8 +446,8 @@ pub mod ical {
     }
 
     /// A TEXT value as the model may see it: unescaped, then reduced to text (rule 5).
-    fn text_value(v: &str) -> String {
-        html_to_text(&unescape(v))
+    fn text_value(v: &str, budget: &Budget) -> String {
+        html_to_text(&unescape(v), budget)
     }
 
     /// TEXT unescaping (RFC 5545 3.3.11).
@@ -461,5 +539,50 @@ pub mod ical {
             }
             assert_eq!(date("2026101éT1", ""), "2026101éT1");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(text: &str) -> http::Body {
+        http::Body {
+            status: 200,
+            url: Url::parse("https://feeds.test/rss").unwrap(),
+            mime: "application/rss+xml".into(),
+            charset: None,
+            headers: reqwest::header::HeaderMap::new(),
+            bytes: text.as_bytes().to_vec(),
+            truncated: false,
+        }
+    }
+
+    /// D-519 (review-T-12b round 2 Blocking 2, feed): the feed parse runs under the same
+    /// kind of cap as fetch's walk. With a cap of zero, the first item's HTML parse sees
+    /// the deadline and the call fails with one line; with room, it reads the items.
+    #[tokio::test]
+    async fn a_feed_parse_past_its_cap_fails_the_call() {
+        let rss = format!(
+            "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>T</title>{}\
+             </channel></rss>",
+            "<item><title>A &lt;b&gt;x&lt;/b&gt;</title><description>&lt;p&gt;words\
+             </description></item>"
+                .repeat(200)
+        );
+        let b = body(&rss);
+        let err = parse_off_thread(&b, Duration::ZERO)
+            .await
+            .expect_err("a zero cap fails the call");
+        let msg = err.to_string();
+        assert!(msg.contains("took longer than 0 s"), "{msg}");
+        assert!(!msg.contains("words"), "{msg}");
+        let parsed = parse_off_thread(&b, fetch::WALK_MAX)
+            .await
+            .unwrap()
+            .expect("a feed");
+        assert_eq!(parsed.items.len(), 200);
+        assert_eq!(parsed.items[0].title, "A x");
+        assert_eq!(parsed.items[0].summary, "words");
     }
 }

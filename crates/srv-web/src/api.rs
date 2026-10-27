@@ -456,13 +456,18 @@ impl ToolHandler for Api {
                 HeaderValue::from_static("application/json, text/plain;q=0.9, */*;q=0.5"),
             );
         }
-        // A vault header only follows redirects within the same scheme, host and port.
-        let client = if vault {
-            &clients.api_vault
-        } else {
-            &clients.api
-        };
-        let mut rb = client.request(req.method.clone(), req.url.clone());
+        // A vault header only follows redirects within the same scheme, host and port; a
+        // loopback or private target never goes through a proxy (B-590, D-509).
+        let started = std::time::Instant::now();
+        let client = clients
+            .api_for(&req.url, vault, &self.web.cfg.resolve)
+            .await;
+        // D-526: api_for's name lookup (at most http::LOOKUP_MAX) counts against the
+        // request's own timeout, so the whole call stays within W-2's budget.
+        let left = self.web.cfg.timeout.saturating_sub(started.elapsed());
+        let mut rb = client
+            .request(req.method.clone(), req.url.clone())
+            .timeout(left.max(std::time::Duration::from_millis(1)));
         match req.body {
             Some(Body::Json(v)) => {
                 if !hm.contains_key(CONTENT_TYPE) {
@@ -571,7 +576,10 @@ fn strip_xssi(text: &str) -> &str {
 
 /// Rule 5, D-508: a body reaches the model only as JSON (a JSON content type, or none, and
 /// the decoded text parses; JSON strings may hold HTML, which is data) or as `text/plain`
-/// whose decoded text holds no tag-like sequence ([`http::has_tag`]). Everything else
+/// whose decoded text holds no tag-like sequence ([`http::has_tag`]), checked on the body and
+/// again on what would be shown (D-510: JSON in a text/plain body, once its `<` escapes
+/// are decoded). A top-level JSON string holding markup is a document, not data, under any
+/// type. Everything else
 /// (HTML, XML, other types, a missing type that is not JSON, text with tags) is one line:
 /// status, type, size, not shown. Nothing here recognises HTML; the rule only lets through
 /// what is known to be data or plain text.
@@ -588,10 +596,11 @@ fn render(
     pick_cap: usize,
 ) -> Rendered {
     let mime = body.mime.as_str();
+    // D-511: the header is server text; only a plain media type is shown as written.
     let ctype = if mime.is_empty() {
         "(no content type)".to_string()
     } else {
-        escape::name(mime, 80)
+        http::shown_mime(mime)
     };
     let mut head = format!("HTTP {} {ctype}", body.status);
     if body.truncated {
@@ -602,7 +611,8 @@ fn render(
     }
     let text = body.text(false);
     let shown = if fetch::is_json_type(mime) || mime.is_empty() {
-        as_json(&text, pick)
+        // D-510: a top-level JSON string holding markup is a document, not data.
+        as_json(&text, pick).filter(|j| !j.document)
     } else if mime == "text/plain" && !http::has_tag(&text) {
         if http::looks_binary(&text) {
             return Rendered::Shown(format!(
@@ -610,13 +620,20 @@ fn render(
                 body.bytes.len()
             ));
         }
-        Some(as_json(&text, pick).unwrap_or_else(|| {
-            let mut s = Json::plain(escape::text(&text));
-            if pick.is_some() {
-                s.note = Some("pick ignored: the answer is not JSON".into());
+        match as_json(&text, pick) {
+            // D-510: the tag check runs again on what would be shown. JSON escapes
+            // (`<`) spell markup only once decoded, and text/plain is not a JSON type,
+            // so no string in it is trusted to be data.
+            Some(j) if j.document || http::has_tag(&j.text) => None,
+            Some(j) => Some(j),
+            None => {
+                let mut s = Json::plain(escape::text_checked(&text));
+                if pick.is_some() {
+                    s.note = Some("pick ignored: the answer is not JSON".into());
+                }
+                Some(s)
             }
-            s
-        }))
+        }
     } else {
         None
     };
@@ -678,6 +695,8 @@ struct Json {
     shape: String,
     /// A line before the text (a pick that matched nothing, or was ignored).
     note: Option<String>,
+    /// The whole answer is one JSON string holding markup: a document, not data (D-510).
+    document: bool,
 }
 
 impl Json {
@@ -686,6 +705,7 @@ impl Json {
             text,
             shape: String::new(),
             note: None,
+            document: false,
         }
     }
 }
@@ -693,6 +713,7 @@ impl Json {
 /// `t` as pretty JSON, projected by `pick`; `None` when it does not parse.
 fn as_json(t: &str, pick: Option<&Pick>) -> Option<Json> {
     let v = serde_json::from_str::<Value>(strip_xssi(t)).ok()?;
+    let document = matches!(&v, Value::String(s) if http::has_tag(s));
     let shape = pick::shape(&v);
     let mut shown = match pick {
         None => v,
@@ -708,6 +729,7 @@ fn as_json(t: &str, pick: Option<&Pick>) -> Option<Json> {
                     text: String::new(),
                     shape,
                     note: Some(note),
+                    document,
                 });
             }
         },
@@ -717,6 +739,7 @@ fn as_json(t: &str, pick: Option<&Pick>) -> Option<Json> {
         text: serde_json::to_string_pretty(&shown).unwrap_or_default(),
         shape,
         note: None,
+        document,
     })
 }
 
@@ -955,6 +978,77 @@ mod tests {
             }
             Rendered::Shown(t) => panic!("{t}"),
         }
+    }
+
+    fn not_shown(r: Rendered) -> String {
+        match r {
+            Rendered::NotShown { line, .. } => line,
+            Rendered::Shown(t) => panic!("shown: {t}"),
+        }
+    }
+
+    /// review-T-12 should-fix, D-510: markup that JSON escapes hide from the raw-text tag
+    /// check is caught on what would be shown.
+    #[test]
+    fn escaped_markup_in_plain_text_or_a_json_string_document_is_not_shown() {
+        let r = |mime: &str, b: &[u8]| {
+            render(&body(mime, b, false), &Method::GET, None, 1 << 20, 1 << 20)
+        };
+        // T-12b round 2 (tester-1): a real JSON escape, a backslash built from its byte (so
+        // no tool on the way into this file turns it back into `<`) and `u003c`. The bodies
+        // hold no tag until decoded, so only D-510's decoded check can refuse them.
+        let esc = |s: &str| s.replace('<', &format!("{}u003c", char::from(92u8)));
+        for b in [
+            esc(r#""<script>stealCookies()</script>""#),
+            esc(r#"{"h": "<!DOCTYPE html><html>"}"#),
+            esc(r#"["<p>x"]"#),
+            esc(r#"{"a": [{"b": "</div><img src=x>"}]}"#),
+        ] {
+            assert!(!crate::http::has_tag(&b) && b.contains("u003c"), "{b}");
+            let line = not_shown(r("text/plain", b.as_bytes()));
+            assert!(line.contains("not shown") && !line.contains('<'), "{line}");
+        }
+        for mime in ["application/json", ""] {
+            for b in [
+                esc(r#""<html><body>Hi""#),
+                r#""<html><body>Hi""#.to_string(),
+            ] {
+                let line = not_shown(r(mime, b.as_bytes()));
+                assert!(!line.contains('<'), "{line}");
+            }
+            let line = not_shown(r(mime, br#"")]}'<p>x</p>""#));
+            assert!(!line.contains("<p"), "{line}");
+        }
+        // Data stays data: nested HTML under a JSON type, and strings without markup.
+        let t = shown(r("application/json", br#"{"body_html":"<b>hi"}"#));
+        assert!(t.contains(r#""body_html": "<b>hi""#), "{t}");
+        let t = shown(r("application/json", br#""a < b""#));
+        assert!(t.contains(r#""a < b""#), "{t}");
+        let t = shown(r("text/plain", br#"{"k": "v < w"}"#));
+        assert!(t.contains(r#""k": "v < w""#), "{t}");
+    }
+
+    #[test]
+    fn an_unusual_content_type_is_not_echoed() {
+        let line = not_shown(render(
+            &body("<script>stealcookies()</script>", b"x", false),
+            &Method::GET,
+            None,
+            1 << 20,
+            1 << 20,
+        ));
+        assert!(
+            line.starts_with("HTTP 200 unusual content type, 1 bytes"),
+            "{line}"
+        );
+        let t = shown(render(
+            &body("text/<b>", b"", false),
+            &Method::GET,
+            None,
+            1,
+            1,
+        ));
+        assert_eq!(t, "HTTP 200 unusual content type");
     }
 
     #[test]

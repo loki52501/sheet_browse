@@ -16,12 +16,14 @@
 //! row or a block goes through [`crate::escape`]; a challenge (captcha widget, challenge
 //! frame, human-check prompt, Cloudflare interstitial) is reported in [`Doc::challenge`].
 
+use crate::dom::{self, Budget};
 use crate::escape;
 use ego_tree::NodeRef;
 use reqwest::Url;
 use sb_sheet::{BlockKind, ElemRef, FieldValue, Flags, IndexRow, Span, State, TextBlock};
 use scraper::{ElementRef, Html, Node, Selector};
 use std::collections::HashMap;
+use std::time::Instant;
 
 /// `raw_main_html` cap (W-2 `mode="raw"`: 60 k chars).
 pub const RAW_MAX_CHARS: usize = 60_000;
@@ -173,16 +175,48 @@ pub struct Doc {
     pub hrefs: HashMap<u32, String>,
     /// Why this page is a challenge (D-5), if it is one.
     pub challenge: Option<String>,
+    /// D-519: one line saying what of the page was not read (nested too deep, or markup
+    /// that makes the parser repeat elements), shown under the skeleton.
+    pub cut: Option<String>,
 }
 
 /// Walks `html` fetched from `url` (the final URL, used to resolve links).
 pub fn parse(html: &str, url: &Url) -> Doc {
-    let doc = Html::parse_document(html);
+    parse_inner(html, url, None).unwrap_or_default()
+}
+
+/// [`parse`] that gives up at `deadline` (D-517, W-2): `None` when the walk did not finish
+/// by then. The walk checks the clock as it goes, so a page that would take longer stops
+/// its thread soon after the deadline instead of holding it.
+pub(crate) fn parse_within(html: &str, url: &Url, deadline: Instant) -> Option<Doc> {
+    parse_inner(html, url, Some(deadline))
+}
+
+fn parse_inner(html: &str, url: &Url, deadline: Option<Instant>) -> Option<Doc> {
+    let budget = deadline.map_or_else(Budget::unlimited, Budget::until);
+    // D-519: the parse stops past dom::NEST_MAX levels or on runaway element repetition,
+    // and gives up at the deadline.
+    let parsed = dom::document(html, &budget)?;
+    let doc = parsed.html;
     let base = base_url(&doc, url);
-    let mut w = Walker::new(&doc, base);
+    let mut w = Walker::new(&doc, base, &budget);
     w.walk(doc.tree.root(), &Cx::default());
+    if w.out_of_time {
+        return None;
+    }
     w.flush();
-    let title = page_title(&doc);
+    let title = page_title(&doc, &budget);
+    if budget.spent() {
+        return None;
+    }
+    let cut = match (parsed.cut, w.flattened) {
+        (Some(c), _) => Some(c.note()),
+        (None, true) => Some(format!(
+            "page nests elements more than {WALK_DEPTH_MAX} levels deep; what is deeper is \
+             shown as plain text without its links and fields"
+        )),
+        (None, false) => None,
+    };
     let mut challenge = challenge_url(url).or(w.challenge);
     if challenge.is_none() {
         let t = title.trim().to_ascii_lowercase();
@@ -190,13 +224,14 @@ pub fn parse(html: &str, url: &Url) -> Doc {
             challenge = Some(format!("challenge interstitial \"{}\"", title.trim()));
         }
     }
-    Doc {
+    Some(Doc {
         title,
         index: w.rows,
         blocks: w.blocks,
         hrefs: w.hrefs,
         challenge,
-    }
+        cut,
+    })
 }
 
 /// A body not declared as HTML (`text/plain`, no content type, anything else fetch reads)
@@ -206,7 +241,22 @@ pub fn parse(html: &str, url: &Url) -> Doc {
 /// blank line first, so plain text keeps its paragraphs (adding tags cannot let markup
 /// through: the parser still reads all of it). Without a `<title>`, the first block names
 /// the page.
+///
+/// D-512: before the walk, [`plain_source`] keeps angle-bracket text that is not markup
+/// (`Vec<String>`, `#include <stdio.h>`, `<T>`): it comes out escaped as `&lt;...&gt;`
+/// instead of being read as an unknown element and lost. Markup (an HTML element name, a
+/// custom element, a tag with attributes, a comment, a doctype) is still parsed and dropped.
 pub fn parse_text(text: &str, url: &Url) -> Doc {
+    parse_text_inner(text, url, None).unwrap_or_default()
+}
+
+/// [`parse_text`] that gives up at `deadline`, like [`parse_within`].
+pub(crate) fn parse_text_within(text: &str, url: &Url, deadline: Instant) -> Option<Doc> {
+    parse_text_inner(text, url, Some(deadline))
+}
+
+fn parse_text_inner(text: &str, url: &Url, deadline: Option<Instant>) -> Option<Doc> {
+    let text = plain_source(text);
     let mut marked = String::with_capacity(text.len() + 64);
     let mut blank = false;
     for line in text.split('\n') {
@@ -223,7 +273,7 @@ pub fn parse_text(text: &str, url: &Url) -> Doc {
         blank = false;
         marked.push_str(line);
     }
-    let mut doc = parse(&marked, url);
+    let mut doc = parse_inner(&marked, url, deadline)?;
     if doc.title.is_empty() {
         if let Some(b) = doc.blocks.first() {
             let first = b
@@ -235,49 +285,236 @@ pub fn parse_text(text: &str, url: &Url) -> Doc {
             doc.title = escape::name(&first, TEXT_TITLE_MAX);
         }
     }
-    doc
+    Some(doc)
 }
 
 /// Title of a page without a `<title>`: the start of its first block.
 const TEXT_TITLE_MAX: usize = 100;
 
+/// Element names the HTML, SVG and MathML parsers know (lowercase). In a text/plain body a
+/// tag with one of these names, or a custom element name (with a `-`), is markup.
+#[rustfmt::skip]
+const KNOWN_ELEMENTS: &[&str] = &[
+    "a", "abbr", "acronym", "address", "applet", "area", "article", "aside", "audio", "b",
+    "base", "basefont", "bdi", "bdo", "bgsound", "big", "blink", "blockquote", "body", "br",
+    "button", "canvas", "caption", "center", "cite", "code", "col", "colgroup", "data",
+    "datalist", "dd", "del", "details", "dfn", "dialog", "dir", "div", "dl", "dt", "em",
+    "embed", "fieldset", "figcaption", "figure", "font", "footer", "form", "frame", "frameset",
+    "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe",
+    "image", "img", "input", "ins", "isindex", "kbd", "keygen", "label", "legend", "li", "link",
+    "listing", "main", "map", "mark", "marquee", "menu", "menuitem", "meta", "meter", "nav",
+    "nobr", "noembed", "noframes", "noscript", "object", "ol", "optgroup", "option", "output",
+    "p", "param", "picture", "plaintext", "portal", "pre", "progress", "q", "rb", "rp", "rt",
+    "rtc", "ruby", "s", "samp", "script", "search", "section", "select", "selectedcontent",
+    "slot", "small", "source", "spacer", "span", "strike", "strong", "style", "sub", "summary",
+    "sup", "table", "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "time",
+    "title", "tr", "track", "tt", "u", "ul", "var", "video", "wbr", "xmp",
+    // SVG
+    "svg", "g", "path", "circle", "rect", "line", "polyline", "polygon", "ellipse", "text",
+    "tspan", "textpath", "defs", "use", "symbol", "lineargradient", "radialgradient", "stop",
+    "clippath", "mask", "pattern", "filter", "foreignobject", "desc", "marker", "animate",
+    // MathML
+    "math", "mi", "mo", "mn", "ms", "mtext", "mrow", "mfrac", "msup", "msub", "msubsup",
+    "msqrt", "mroot", "mtable", "mtr", "mtd", "semantics", "annotation", "annotation-xml",
+];
+
+/// Is tag name `raw` (any case) in [`KNOWN_ELEMENTS`]? Lowercased on the stack and looked up
+/// by binary search in a sorted copy, so the check per `<` stays cheap on a body of millions
+/// of them. No known name is longer than [`KNOWN_NAME_MAX`] bytes.
+fn known_element(raw: &[u8]) -> bool {
+    static SORTED: std::sync::OnceLock<Vec<&'static [u8]>> = std::sync::OnceLock::new();
+    if raw.len() > KNOWN_NAME_MAX {
+        return false;
+    }
+    let mut buf = [0u8; KNOWN_NAME_MAX];
+    let low = &mut buf[..raw.len()];
+    low.copy_from_slice(raw);
+    low.make_ascii_lowercase();
+    let sorted = SORTED.get_or_init(|| {
+        let mut v: Vec<&'static [u8]> = KNOWN_ELEMENTS.iter().map(|k| k.as_bytes()).collect();
+        v.sort_unstable();
+        v
+    });
+    sorted.binary_search(&&*low).is_ok()
+}
+
+/// The longest name in [`KNOWN_ELEMENTS`] (`selectedcontent`), checked by a test.
+const KNOWN_NAME_MAX: usize = 15;
+
+/// Longest `<...>` run [`plain_source`] keeps as text.
+const PLAIN_BRACKET_MAX: usize = 200;
+
+/// The marks [`plain_source`] writes for a `<` and `>` of text (shown as `&lt;`/`&gt;`).
+const LT: &str = escape::LT_MARK_STR;
+const GT: &str = escape::GT_MARK_STR;
+
+/// D-512: a body walked as text (text/plain, or no HTML type) as HTML source in which
+/// angle-bracket text that is not markup survives. Such a `<` becomes [`LT`], and the `>`
+/// that closes it on the same line [`GT`] (two Unicode noncharacters, which the parser keeps
+/// as text), and the shown text writes both as `&lt;`/`&gt;` ([`escape::angles`]), so the
+/// walk shows `Vec&lt;String&gt;`: the text is kept, escaped, and no tag-shaped text from it
+/// reaches the model (rule 5). D-517: marks instead of entities, because the parser takes
+/// tens of microseconds per character reference in a debug build, and a body can hold
+/// millions of brackets. Entities elsewhere decode as before (a body with no type may be
+/// HTML); the walk's output then shows every `<` and `>`, decoded or literal, as
+/// `&lt;`/`&gt;` (D-514). One pass, at most [`PLAIN_BRACKET_MAX`] bytes looked at past each
+/// `<` (linear in the body). Markup is left for the parser to drop: a `<` before `!`, `?` or
+/// a non-letter, a known element name ([`KNOWN_ELEMENTS`]), a custom element name (with a
+/// `-`), and a tag with `=` or quotes (attributes). A comment is copied as written, so its
+/// end is not touched.
+pub(crate) fn plain_source(text: &str) -> String {
+    // A byte loop: `<`, `>`, `-` and the other delimiters are ASCII, so every cut below is a
+    // char boundary, and the loop costs a few steps per byte even in a debug build.
+    let b = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len() + b.len() / 8);
+    let mut opened = Vec::new();
+    // `b[done..at]` is copied when the next `<` at `at` is reached.
+    let mut done = 0;
+    let mut at = 0;
+    while at < b.len() {
+        if b[at] != b'<' {
+            at += 1;
+            continue;
+        }
+        out.extend_from_slice(&b[done..at]);
+        let rest = &text[at..];
+        let next = if let Some(body) = rest.strip_prefix("<!--") {
+            let end = body.find("-->").map_or(rest.len(), |e| 4 + e + 3);
+            out.extend_from_slice(&rest.as_bytes()[..end]);
+            at + end
+        } else {
+            match plain_bracket(rest, &mut opened) {
+                Some(close) => {
+                    // `rest[..close]` is `<...` without markup; `close` is its `>` (or the
+                    // end of what is kept on this line when there is none).
+                    out.extend_from_slice(LT.as_bytes());
+                    out.extend_from_slice(&rest.as_bytes()[1..close]);
+                    if rest.as_bytes().get(close) == Some(&b'>') {
+                        out.extend_from_slice(GT.as_bytes());
+                        at + close + 1
+                    } else {
+                        at + close
+                    }
+                }
+                None => {
+                    out.push(b'<');
+                    at + 1
+                }
+            }
+        };
+        done = next;
+        at = next;
+    }
+    out.extend_from_slice(&b[done..]);
+    // Cut only at ASCII bytes of valid UTF-8, so this is valid UTF-8.
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+/// For `s` starting with `<`: `Some(end)` when it starts angle-bracket text that is not
+/// markup, `end` being the byte offset of its closing `>` on the same line, or of the end of
+/// the tag name when there is none; `None` when it is markup or not a tag at all. `opened`
+/// holds the unknown names already opened as markup (a start tag with attributes): their end
+/// tags are markup too.
+fn plain_bracket(s: &str, opened: &mut Vec<String>) -> Option<usize> {
+    // Bytes, no allocation on the common path: this runs once per `<` of a body that may
+    // hold millions of them (W-2).
+    let b = s.as_bytes();
+    if b.first() != Some(&b'<') {
+        return None;
+    }
+    let end_tag = b.get(1) == Some(&b'/');
+    let name_from = usize::from(end_tag) + 1;
+    if !b.get(name_from).is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    // The tag name ends where the HTML tokenizer ends it: ASCII whitespace, `/` or `>`; and
+    // at a `<`, which starts the next bracket here.
+    let name_len = b[name_from..]
+        .iter()
+        .position(|c| c.is_ascii_whitespace() || matches!(c, b'/' | b'>' | b'<'))
+        .unwrap_or(b.len() - name_from);
+    let raw = &b[name_from..name_from + name_len];
+    if raw.contains(&b'-') || known_element(raw) {
+        return None;
+    }
+    let is_opened = |opened: &[String]| {
+        opened
+            .iter()
+            .any(|o| o.as_bytes().eq_ignore_ascii_case(raw))
+    };
+    if end_tag && is_opened(opened) {
+        return None;
+    }
+    // The closing `>`: the first `>`, `<` or line end within PLAIN_BRACKET_MAX bytes of the
+    // `<` decides. The window is bounded, so the pass over a body stays linear whatever it
+    // holds (review-T-12b Blocking: a line of `<x` repeated was quadratic). All four bytes
+    // are ASCII, so a position found is a char boundary.
+    let window = &b[1..b.len().min(PLAIN_BRACKET_MAX + 1)];
+    let close = window
+        .iter()
+        .position(|c| matches!(c, b'>' | b'<' | b'\n' | b'\r'))
+        .map(|c| c + 1)
+        .filter(|&c| b[c] == b'>');
+    let end = match close {
+        Some(c) => c,
+        // No `>` on the line: only the tag name is escaped; the parser would otherwise read
+        // the rest of the line (and beyond) as attributes.
+        None => name_from + name_len,
+    };
+    if b[1..end].iter().any(|c| matches!(c, b'=' | b'"' | b'\'')) {
+        if !end_tag && opened.len() < 64 && !is_opened(opened) {
+            // Every delimiter is ASCII, so the name is on char boundaries.
+            opened.push(s[name_from..name_from + name_len].to_ascii_lowercase());
+        }
+        return None;
+    }
+    Some(end)
+}
+
 /// The text of an HTML fragment (a feed summary, an iCal field, a `<title>` or `<textarea>`
 /// that holds markup), whitespace collapsed. Only text nodes outside [`SKIP_TAGS`],
 /// `textarea` and `iframe` come out, so the result holds no markup (rule 5); block edges and
 /// line breaks separate words.
-pub(crate) fn fragment_text(s: &str) -> String {
+///
+/// D-519: within `budget`. The parse is bounded ([`dom::fragment`]: the text of a fragment
+/// nested past [`dom::NEST_MAX`] levels ends there), and when the budget runs out the text
+/// is empty and [`Budget::spent`] says so. The walk over the tree keeps its own stack, so
+/// no depth can exhaust the thread's.
+pub(crate) fn fragment_text_in(s: &str, budget: &Budget) -> String {
     if !s.contains('<') && !s.contains('&') {
         return s.split_whitespace().collect::<Vec<_>>().join(" ");
     }
-    let frag = Html::parse_fragment(s);
+    let Some(frag) = dom::fragment(s, budget) else {
+        return String::new();
+    };
     let mut out = String::new();
-    for node in frag.tree.root().descendants() {
+    let mut stack = vec![frag.html.tree.root()];
+    while let Some(node) = stack.pop() {
         match node.value() {
-            Node::Text(t) => {
-                let hidden = node.ancestors().any(|a| {
-                    a.value().as_element().is_some_and(|e| {
-                        SKIP_TAGS.contains(&e.name()) || matches!(e.name(), "textarea" | "iframe")
-                    })
-                });
-                if !hidden {
-                    out.push_str(t);
+            Node::Text(t) => out.push_str(t),
+            Node::Element(e) => {
+                let name = e.name();
+                // Raw text, field values and frame content are never text (rule 5).
+                if SKIP_TAGS.contains(&name) || matches!(name, "textarea" | "iframe") {
+                    continue;
                 }
+                // Block edges and line breaks separate words; inline tags do not.
+                if name == "br" || BLOCK_TAGS.contains(&name) {
+                    out.push(' ');
+                }
+                stack.extend(node.children().rev());
             }
-            // Block edges and line breaks separate words; inline tags do not.
-            Node::Element(e) if e.name() == "br" || BLOCK_TAGS.contains(&e.name()) => {
-                out.push(' ');
-            }
-            _ => {}
+            _ => stack.extend(node.children().rev()),
         }
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// [`fragment_text`] when `s` holds markup (raw-text and RCDATA content such as a `<title>`
-/// or `<textarea>`), else `s` unchanged.
-fn no_markup(s: &str) -> String {
+/// [`fragment_text_in`] when `s` holds markup (raw-text and RCDATA content such as a
+/// `<title>` or `<textarea>`), else `s` unchanged.
+fn no_markup(s: &str, budget: &Budget) -> String {
     if crate::http::has_tag(s) {
-        fragment_text(s)
+        fragment_text_in(s, budget)
     } else {
         s.to_string()
     }
@@ -307,7 +544,11 @@ pub fn challenge_url(url: &Url) -> Option<String> {
 /// [`RAW_MAX_CHARS`]. Not a model-facing tool output (CLAUDE.md rule 5, B-500): it is kept
 /// for in-process site-tool hosts that need structure.
 pub fn raw_main_html(html: &str) -> String {
-    let doc = Html::parse_document(html);
+    // D-519: a bounded parse (no deadline: in-process hosts call this on a fetched page).
+    let Some(doc) = dom::document(html, &Budget::unlimited()) else {
+        return String::new();
+    };
+    let doc = doc.html;
     let pick = ["main", "[role=main]"]
         .iter()
         .filter_map(|s| Selector::parse(s).ok())
@@ -383,10 +624,28 @@ struct Walker<'a> {
     tables: u32,
     order: u32,
     challenge: Option<String>,
+    /// D-517: when the walk must stop ([`parse_within`]); `out_of_time` once it has.
+    budget: &'a Budget,
+    steps: u32,
+    out_of_time: bool,
+    /// D-519: how many walk calls are open (the walk's own recursion depth), and whether a
+    /// subtree past [`WALK_DEPTH_MAX`] was read as plain text.
+    depth: usize,
+    flattened: bool,
 }
 
+/// D-519: the deepest the walk recurses. A subtree below this depth is read as plain text
+/// ([`collect_text`], which keeps its own stack) instead of walked: its controls get no
+/// rows. Each level costs two stack frames (the walk and the element), so 256 levels stay
+/// well inside the 2 MiB stack of a test or tokio blocking thread even in a debug build
+/// (`html::tests::the_walk_fits_a_small_stack` walks the cap on a 1 MiB thread).
+pub(crate) const WALK_DEPTH_MAX: usize = 256;
+
+/// The walk looks at the clock once per this many nodes.
+const CLOCK_EVERY: u32 = 256;
+
 impl<'a> Walker<'a> {
-    fn new(doc: &'a Html, base: Url) -> Walker<'a> {
+    fn new(doc: &'a Html, base: Url, budget: &'a Budget) -> Walker<'a> {
         let mut by_id = HashMap::new();
         let mut label_for = HashMap::new();
         for e in doc.root_element().descendent_elements() {
@@ -414,10 +673,23 @@ impl<'a> Walker<'a> {
             tables: 0,
             order: 0,
             challenge: None,
+            budget,
+            steps: 0,
+            out_of_time: false,
+            depth: 0,
+            flattened: false,
         }
     }
 
     fn walk(&mut self, node: NodeRef<'a, Node>, cx: &Cx) {
+        if self.out_of_time {
+            return;
+        }
+        self.steps = self.steps.wrapping_add(1);
+        if self.steps % CLOCK_EVERY == 1 && self.budget.spent() {
+            self.out_of_time = true;
+            return;
+        }
         match node.value() {
             Node::Text(t) => {
                 if !cx.hidden {
@@ -426,7 +698,13 @@ impl<'a> Walker<'a> {
             }
             Node::Element(_) => {
                 if let Some(e) = ElementRef::wrap(node) {
-                    self.element(e, cx);
+                    if self.depth >= WALK_DEPTH_MAX {
+                        self.flat(e, cx);
+                    } else {
+                        self.depth += 1;
+                        self.element(e, cx);
+                        self.depth -= 1;
+                    }
                 }
             }
             Node::Document | Node::Fragment => {
@@ -625,12 +903,6 @@ impl<'a> Walker<'a> {
                 elem: s.elem,
             })
             .collect();
-        // A prose block cannot open with `# ` or `- ` and pass for a heading or outline line.
-        if !matches!(kind, BlockKind::Code | BlockKind::Heading) {
-            if let Some(first) = spans.first_mut().filter(|s| s.elem.is_none()) {
-                first.text = escape::block_start(&first.text);
-            }
-        }
         let plain = spans
             .iter()
             .map(|s| s.text.as_str())
@@ -648,22 +920,40 @@ impl<'a> Walker<'a> {
             BlockKind::ListItem => b.level,
             _ => None,
         };
-        self.blocks.push(TextBlock {
-            order: self.order,
-            frame: 0,
-            kind,
-            level,
-            landmark: b.landmark.map(str::to_string),
-            heading: self.heading.clone(),
-            table: if kind == BlockKind::TableRow {
-                b.table
-            } else {
-                None
-            },
-            header: b.header,
-            spans,
-        });
-        self.order += 1;
+        let pieces = if kind == BlockKind::TableRow {
+            // A row stays one row: a cell is capped instead of split.
+            for s in &mut spans {
+                cap_span(s, BLOCK_MAX_CHARS);
+            }
+            vec![spans]
+        } else {
+            split_long(spans, BLOCK_MAX_CHARS)
+        };
+        for mut spans in pieces {
+            // A prose block cannot open with `# ` or `- ` and pass for a heading or outline
+            // line (each piece of a split block too).
+            if !matches!(kind, BlockKind::Code | BlockKind::Heading) {
+                if let Some(first) = spans.first_mut().filter(|s| s.elem.is_none()) {
+                    first.text = escape::block_start(&first.text);
+                }
+            }
+            self.blocks.push(TextBlock {
+                order: self.order,
+                frame: 0,
+                kind,
+                level,
+                landmark: b.landmark.map(str::to_string),
+                heading: self.heading.clone(),
+                table: if kind == BlockKind::TableRow {
+                    b.table
+                } else {
+                    None
+                },
+                header: b.header,
+                spans,
+            });
+            self.order += 1;
+        }
         if kind == BlockKind::Heading && !plain.is_empty() {
             self.heading = Some(escape::cap_chars(&plain, NAME_MAX));
         }
@@ -739,6 +1029,45 @@ impl<'a> Walker<'a> {
 
     fn control(&mut self, e: ElementRef<'a>, role: String, cx: &Cx) {
         let tag = e.value().name();
+        let elem = self.row(e, &role, cx);
+        // Controls nested inside this one (rare: a button in a link) get rows too, so ids
+        // stay complete; their text is part of this control's name already.
+        let mut inner = cx.clone();
+        inner.hidden = true;
+        self.nested_controls(*e, &inner);
+        if cx.hidden {
+            return;
+        }
+        if tag == "iframe" || tag == "frame" {
+            // I-11: an iframe is a placeholder block linking its row.
+            self.boundary(cx);
+            let mut ocx = cx.clone();
+            ocx.kind = BlockKind::Other;
+            self.push_elem(String::new(), elem, &ocx);
+            self.boundary(cx);
+            return;
+        }
+        let text = match tag {
+            "input" | "select" | "textarea" => String::new(),
+            _ => self.inner_text(e, false),
+        };
+        // A permalink anchor (`§`, `¶`, `#` linking a fragment of this page) keeps its row
+        // but adds nothing to the text: it would sit in every heading and outline entry.
+        let permalink = role == "link"
+            && e.attr("href")
+                .is_some_and(|h| h.trim_start().starts_with('#'))
+            && !text.chars().any(char::is_alphanumeric);
+        if permalink {
+            return;
+        }
+        self.push_elem(escape::cap_chars(&text, NAME_MAX), elem, cx);
+    }
+
+    /// The index row of control `e` (its id, name, state and flags); `cx.hidden` makes it
+    /// invisible. Adds nothing to the text and does not look at nested controls.
+    fn row(&mut self, e: ElementRef<'a>, role: &str, cx: &Cx) -> ElemRef {
+        let role = role.to_string();
+        let tag = e.value().name();
         let id = self.next_id;
         self.next_id += 1;
         let elem = ElemRef::main(id);
@@ -798,7 +1127,7 @@ impl<'a> Walker<'a> {
             }
             "textarea" => {
                 // RCDATA: markup inside a textarea is text to the parser, not to rule 5.
-                let t = no_markup(&e.text().collect::<String>());
+                let t = no_markup(&e.text().collect::<String>(), self.budget);
                 state.value = Some(if t.trim().is_empty() {
                     FieldValue::Empty
                 } else if secret {
@@ -883,42 +1212,15 @@ impl<'a> Walker<'a> {
             child_frame: None,
             bbox: None,
         });
-        // Controls nested inside this one (rare: a button in a link) get rows too, so ids
-        // stay complete; their text is part of this control's name already.
-        let mut inner = cx.clone();
-        inner.hidden = true;
-        self.nested_controls(*e, &inner);
-        if cx.hidden {
-            return;
-        }
-        if tag == "iframe" || tag == "frame" {
-            // I-11: an iframe is a placeholder block linking its row.
-            self.boundary(cx);
-            let mut ocx = cx.clone();
-            ocx.kind = BlockKind::Other;
-            self.push_elem(String::new(), elem, &ocx);
-            self.boundary(cx);
-            return;
-        }
-        let text = match tag {
-            "input" | "select" | "textarea" => String::new(),
-            _ => self.inner_text(e, false),
-        };
-        // A permalink anchor (`§`, `¶`, `#` linking a fragment of this page) keeps its row
-        // but adds nothing to the text: it would sit in every heading and outline entry.
-        let permalink = role == "link"
-            && e.attr("href")
-                .is_some_and(|h| h.trim_start().starts_with('#'))
-            && !text.chars().any(char::is_alphanumeric);
-        if permalink {
-            return;
-        }
-        self.push_elem(escape::cap_chars(&text, NAME_MAX), elem, cx);
+        elem
     }
 
-    /// Rows for the controls under `node` (outermost ones; each handles its own subtree).
+    /// Rows for the controls under `node`, in document order, all with `cx` (hidden: their
+    /// text is part of the outer control's name already). D-519: one loop with its own
+    /// stack, also for controls inside controls, so no nesting costs thread stack.
     fn nested_controls(&mut self, node: NodeRef<'a, Node>, cx: &Cx) {
-        for c in node.children() {
+        let mut stack: Vec<NodeRef<'a, Node>> = node.children().rev().collect();
+        while let Some(c) = stack.pop() {
             let Some(ce) = ElementRef::wrap(c) else {
                 continue;
             };
@@ -926,11 +1228,22 @@ impl<'a> Walker<'a> {
             if SKIP_TAGS.contains(&tag) || tag == "option" {
                 continue;
             }
-            match control_role(ce) {
-                Some(role) => self.control(ce, role, cx),
-                None => self.nested_controls(c, cx),
+            if let Some(role) = control_role(ce) {
+                self.row(ce, &role, cx);
             }
+            stack.extend(c.children().rev());
         }
+    }
+
+    /// D-519: a subtree past [`WALK_DEPTH_MAX`] as plain text in the current block.
+    fn flat(&mut self, e: ElementRef<'a>, cx: &Cx) {
+        self.flattened = true;
+        if cx.hidden {
+            return;
+        }
+        let mut s = String::new();
+        collect_text(*e, false, &mut s, false);
+        self.push_text(&s, cx);
     }
 
     /// The B-5 name ladder, approximated: aria-labelledby, aria-label, label, content,
@@ -1019,43 +1332,148 @@ impl<'a> Walker<'a> {
     }
 }
 
+/// D-517: the most characters one text block holds. A longer block (a text/plain body with
+/// no blank line, a page that is one paragraph) is split into blocks of at most this many,
+/// at a space where one is near: the reader re-reads a whole block for every chunk it plans,
+/// so one block of megabytes costs time that grows with its square.
+const BLOCK_MAX_CHARS: usize = 8_000;
+
+/// How far back from a cut [`split_long`] looks for a space to cut at instead.
+const SPLIT_LOOKBACK: usize = 200;
+
+/// `spans` in groups of at most `max` characters each. A linked span is never split (one
+/// longer than `max` is capped, [`cap_span`]); a plain span is cut at the last whitespace
+/// within [`SPLIT_LOOKBACK`] characters of the limit, else at the limit, never inside an
+/// `&lt;`/`&gt;` escape.
+fn split_long(spans: Vec<Span>, max: usize) -> Vec<Vec<Span>> {
+    let total: usize = spans.iter().map(|s| s.text.len()).sum();
+    if total <= max {
+        // Bytes bound chars from above: nothing to split.
+        return vec![spans];
+    }
+    let mut out: Vec<Vec<Span>> = Vec::new();
+    let mut cur: Vec<Span> = Vec::new();
+    let mut used = 0usize;
+    for mut s in spans {
+        let len = s.text.chars().count();
+        if used + len <= max {
+            used += len;
+            cur.push(s);
+            continue;
+        }
+        if s.elem.is_some() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            cap_span(&mut s, max);
+            used = s.text.chars().count();
+            cur.push(s);
+            continue;
+        }
+        let mut rest = s.text.as_str();
+        while !rest.is_empty() {
+            if used >= max {
+                out.push(std::mem::take(&mut cur));
+                used = 0;
+            }
+            let at = cut_point(rest, max - used);
+            let (piece, tail) = rest.split_at(at);
+            used += piece.chars().count();
+            cur.push(Span {
+                text: piece.to_string(),
+                elem: None,
+            });
+            rest = tail;
+            if !rest.is_empty() {
+                out.push(std::mem::take(&mut cur));
+                used = 0;
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Byte offset at which to cut `s` so the head holds at most `room` characters (at least
+/// one): after the last whitespace within [`SPLIT_LOOKBACK`] characters before the limit,
+/// else at the limit moved back before an `&` that starts an escape it would cut.
+fn cut_point(s: &str, room: usize) -> usize {
+    let limit = match s.char_indices().nth(room.max(1)) {
+        Some((at, _)) => at,
+        None => return s.len(),
+    };
+    let head = &s[..limit];
+    let floor = head
+        .char_indices()
+        .rev()
+        .nth(SPLIT_LOOKBACK)
+        .map_or(0, |(at, _)| at);
+    if let Some(ws) = head[floor..].rfind(char::is_whitespace) {
+        let at = floor + ws;
+        if at > 0 {
+            // Cut after the whitespace char.
+            return at + head[at..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    // `&lt;` and `&gt;` are four bytes: an `&` in the last three bytes would be cut. `&` is
+    // ASCII, so its position is a char boundary.
+    let from = limit.saturating_sub(3);
+    match head.as_bytes()[from..].iter().rposition(|&b| b == b'&') {
+        Some(amp) if from + amp > 0 => from + amp,
+        _ => limit,
+    }
+}
+
+/// Caps a span's text at `max` characters, marking the cut with ` ...`.
+fn cap_span(s: &mut Span, max: usize) {
+    if s.text.len() > max && s.text.chars().count() > max {
+        s.text = format!("{} ...", escape::cap_chars(&s.text, max.saturating_sub(4)));
+    }
+}
+
+/// Visible text under `node` into `out` (image alt text included). `top`: `node` is the
+/// element asked about, whose own hidden state the caller has decided. D-519: an explicit
+/// stack, so a subtree of any depth costs no thread stack.
 fn collect_text(node: NodeRef<'_, Node>, skip_controls: bool, out: &mut String, top: bool) {
-    match node.value() {
-        Node::Text(t) => {
-            out.push(' ');
-            out.push_str(t);
+    let mut stack = vec![(node, top)];
+    while let Some((node, top)) = stack.pop() {
+        let el = match node.value() {
+            Node::Text(t) => {
+                out.push(' ');
+                out.push_str(t);
+                continue;
+            }
+            Node::Element(el) => el,
+            _ => continue,
+        };
+        let tag = el.name();
+        // A frame's text is a separate document, never read (module doc, rule 5).
+        if SKIP_TAGS.contains(&tag) || matches!(tag, "iframe" | "frame" | "frameset") {
+            continue;
         }
-        Node::Element(el) => {
-            let tag = el.name();
-            // A frame's text is a separate document, never read (module doc, rule 5).
-            if SKIP_TAGS.contains(&tag) || matches!(tag, "iframe" | "frame" | "frameset") {
-                return;
-            }
-            // A textarea adds nothing to a name: its text is the field's value (maybe a
-            // secret, rule 5) and is reported once, as the value, through no_markup.
-            if tag == "textarea" {
-                return;
-            }
-            if let Some(e) = ElementRef::wrap(node) {
-                if !top && is_hidden(e) {
-                    return;
-                }
-            }
-            if skip_controls && matches!(tag, "input" | "select" | "textarea") {
-                return;
-            }
-            if tag == "img" {
-                if let Some(a) = el.attr("alt") {
-                    out.push(' ');
-                    out.push_str(a);
-                }
-                return;
-            }
-            for c in node.children() {
-                collect_text(c, skip_controls, out, false);
+        // A textarea adds nothing to a name: its text is the field's value (maybe a
+        // secret, rule 5) and is reported once, as the value, through no_markup.
+        if tag == "textarea" {
+            continue;
+        }
+        if let Some(e) = ElementRef::wrap(node) {
+            if !top && is_hidden(e) {
+                continue;
             }
         }
-        _ => {}
+        if skip_controls && matches!(tag, "input" | "select" | "textarea") {
+            continue;
+        }
+        if tag == "img" {
+            if let Some(a) = el.attr("alt") {
+                out.push(' ');
+                out.push_str(a);
+            }
+            continue;
+        }
+        stack.extend(node.children().rev().map(|c| (c, false)));
     }
 }
 
@@ -1305,14 +1723,14 @@ fn challenge_text(plain: &str) -> bool {
 // ---------------------------------------------------------------------------------------
 // Page-level helpers
 
-fn page_title(doc: &Html) -> String {
+fn page_title(doc: &Html, budget: &Budget) -> String {
     let Ok(sel) = Selector::parse("title") else {
         return String::new();
     };
     doc.select(&sel)
         .next()
         // RCDATA: markup inside a title is text to the parser, not to rule 5.
-        .map(|t| escape::name(&no_markup(&t.text().collect::<String>()), NAME_MAX))
+        .map(|t| escape::name(&no_markup(&t.text().collect::<String>(), budget), NAME_MAX))
         .unwrap_or_default()
 }
 
@@ -1368,17 +1786,40 @@ const VOID: &[&str] = &[
     "wbr",
 ];
 
+/// D-519: an explicit stack of nodes to open and end tags to write, so a tree of any depth
+/// costs no thread stack.
 fn serialize(node: NodeRef<'_, Node>, out: &mut String) {
-    match node.value() {
-        Node::Text(t) => out.push_str(&esc_html(t)),
-        Node::Element(el) => {
+    enum Step<'a> {
+        Open(NodeRef<'a, Node>),
+        Close(&'a str),
+    }
+    let mut stack = vec![Step::Open(node)];
+    while let Some(step) = stack.pop() {
+        let node = match step {
+            Step::Open(n) => n,
+            Step::Close(tag) => {
+                out.push_str("</");
+                out.push_str(tag);
+                out.push('>');
+                continue;
+            }
+        };
+        let el = match node.value() {
+            Node::Text(t) => {
+                out.push_str(&esc_html(t));
+                continue;
+            }
+            Node::Element(el) => el,
+            _ => continue,
+        };
+        {
             let tag = el.name();
             if SKIP_TAGS.contains(&tag) || tag == "iframe" {
-                return;
+                continue;
             }
             if let Some(e) = ElementRef::wrap(node) {
                 if is_hidden(e) {
-                    return;
+                    continue;
                 }
             }
             out.push('<');
@@ -1407,16 +1848,11 @@ fn serialize(node: NodeRef<'_, Node>, out: &mut String) {
             }
             out.push('>');
             if VOID.contains(&tag) {
-                return;
+                continue;
             }
-            for c in node.children() {
-                serialize(c, out);
-            }
-            out.push_str("</");
-            out.push_str(tag);
-            out.push('>');
+            stack.push(Step::Close(tag));
+            stack.extend(node.children().rev().map(Step::Open));
         }
-        _ => {}
     }
 }
 
@@ -1663,5 +2099,323 @@ mod tests {
             !raw.contains("script") && !raw.contains("onclick") && !raw.contains("pw-not-real")
         );
         assert!(raw.chars().count() <= RAW_MAX_CHARS);
+    }
+
+    /// The text of every block of a text/plain walk, one line per block.
+    fn plain_blocks(text: &str) -> String {
+        let doc = parse_text(text, &Url::parse("https://example.com/f.txt").unwrap());
+        doc.blocks
+            .iter()
+            .map(|b| b.spans.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// review-T-12 should-fix, D-512: angle-bracket text in a text/plain body is kept,
+    /// escaped; markup in it is still dropped.
+    #[test]
+    fn plain_text_keeps_angle_bracket_text_escaped() {
+        let t = plain_blocks(
+            "fn f() -> Vec<String> { todo!() }\n\n#include <stdio.h>\n\nHashMap<K, V> and \
+             </T> and x<y then z > 3\n\nmail <a.b@c.de> at <https://x.org/a>",
+        );
+        for want in [
+            "Vec&lt;String&gt; {",
+            "#include &lt;stdio.h&gt;",
+            "HashMap&lt;K, V&gt; and &lt;/T&gt; and x&lt;y then z &gt; 3",
+            "mail &lt;a.b@c.de&gt; at &lt;https://x.org/a&gt;",
+        ] {
+            assert!(t.contains(want), "missing {want:?} in {t:?}");
+        }
+        assert!(!crate::http::has_tag(&t), "{t}");
+        // Markup is still markup: known names, custom elements, attributes, comments.
+        let t = plain_blocks(
+            "<p>Kept</p><script>stealCookies()</script><my-el>Mine</my-el>\
+             <foo bar=\"1\">Attr</foo><!-- <T> hidden -->After <b>bold</b>",
+        );
+        assert!(
+            t.contains("Kept") && t.contains("Mine") && t.contains("Attr"),
+            "{t}"
+        );
+        assert!(t.contains("After bold"), "{t}");
+        for bad in ["stealCookies", "<", "&lt;", "hidden"] {
+            assert!(!t.contains(bad), "{bad} in {t:?}");
+        }
+        assert_eq!(
+            plain_source("a < b, 3<4, <!x>, <?y>"),
+            "a < b, 3<4, <!x>, <?y>"
+        );
+        assert_eq!(plain_source("<String>"), format!("{LT}String{GT}"));
+        assert_eq!(plain_source("<P>x</P>"), "<P>x</P>");
+        assert_eq!(plain_source("<é>"), "<é>");
+        // The bracket window ends at PLAIN_BRACKET_MAX bytes: a longer run is not one bracket.
+        let long = format!("<x {}>", "y".repeat(PLAIN_BRACKET_MAX));
+        assert_eq!(
+            plain_source(&long),
+            format!("{LT}x {}>", "y".repeat(PLAIN_BRACKET_MAX))
+        );
+        let fits = format!("<x {}>", "y".repeat(PLAIN_BRACKET_MAX - 4));
+        assert!(plain_source(&fits).ends_with(GT), "{fits}");
+    }
+
+    /// review-T-12b Blocking (W-2): hostile angle-bracket runs of several MB on one line
+    /// are escaped in linear time (the window past each `<` is bounded), and the walk of
+    /// such a body finishes well within W-2's budget even in a debug build.
+    #[test]
+    fn hostile_angle_runs_are_linear() {
+        let mb = 1024 * 1024;
+        for unit in ["<x", "<x ", "<ab/", "<x=", "</q", "<abc-"] {
+            let body = unit.repeat(4 * mb / unit.len());
+            let started = Instant::now();
+            let out = plain_source(&body);
+            let took = started.elapsed();
+            assert!(out.len() >= body.len(), "{unit}");
+            assert!(
+                took < std::time::Duration::from_secs(3),
+                "plain_source of 4 MB of {unit:?} took {took:?}"
+            );
+        }
+        let body = "<x".repeat(2 * mb);
+        let started = Instant::now();
+        let doc = parse_text_within(
+            &body,
+            &Url::parse("https://example.com/f.txt").unwrap(),
+            started + std::time::Duration::from_secs(60),
+        )
+        .expect("the walk finished");
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(12),
+            "the walk of 4 MB of `<x` took {took:?}"
+        );
+        assert!(!doc.blocks.is_empty());
+    }
+
+    /// D-517: a long block is split into blocks of at most BLOCK_MAX_CHARS characters, at a
+    /// space when one is near, never inside an escape; nothing is lost.
+    #[test]
+    fn long_blocks_are_split_without_losing_text() {
+        let plain = |t: &str| Span {
+            text: t.to_string(),
+            elem: None,
+        };
+        let words = "word ".repeat(5_000);
+        let groups = split_long(vec![plain(&words)], 1_000);
+        assert!(groups.len() >= 25, "{}", groups.len());
+        let mut joined = String::new();
+        for g in &groups {
+            let n: usize = g.iter().map(|s| s.text.chars().count()).sum();
+            assert!(n <= 1_000, "{n}");
+            joined.extend(g.iter().map(|s| s.text.as_str()));
+        }
+        assert_eq!(joined, words);
+        assert!(groups[0][0].text.ends_with("word "), "cut at a space");
+        // One long word of escapes and multi-byte chars: cut by characters, never in `&lt;`.
+        let word = "&lt;éx".repeat(3_000);
+        let groups = split_long(vec![plain(&word)], 997);
+        let mut joined = String::new();
+        for g in &groups {
+            let t: String = g.iter().map(|s| s.text.as_str()).collect();
+            assert!(t.chars().count() <= 997);
+            assert!(
+                !t.ends_with('&') && !t.ends_with("&l") && !t.ends_with("&lt"),
+                "{t}"
+            );
+            joined.push_str(&t);
+        }
+        assert_eq!(joined, word);
+        // A short block is one group, untouched.
+        assert_eq!(split_long(vec![plain("a b")], 1_000).len(), 1);
+        // The walk splits a long paragraph into several blocks.
+        let doc = parse(
+            &format!("<p>{}</p>", "word ".repeat(10_000)),
+            &Url::parse("https://example.com/").unwrap(),
+        );
+        assert!(doc.blocks.len() >= 6, "{}", doc.blocks.len());
+        assert!(doc.blocks.iter().all(|b| {
+            b.spans
+                .iter()
+                .map(|s| s.text.chars().count())
+                .sum::<usize>()
+                <= BLOCK_MAX_CHARS
+        }));
+    }
+
+    /// D-514 (rule 5): markup a text/html page spells with entities, or a literal `<` the
+    /// parser keeps as text, reaches no block, code block, link name or title as a tag.
+    #[test]
+    fn entity_spelled_markup_in_html_is_shown_escaped() {
+        let doc = page(
+            "<title>T &lt;b&gt;x&lt;/b&gt;</title><p>a &lt;script&gt;steal()&lt;/script&gt; \
+             and &#60;img src=x&#62; and a < b</p><pre>&lt;i&gt;code&lt;/i&gt;</pre>\
+             <a href=\"/x\">&lt;svg onload=1&gt;</a>",
+        );
+        let text: String = doc
+            .blocks
+            .iter()
+            .flat_map(|b| b.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let names: String = doc.index.iter().map(|r| r.name.clone()).collect();
+        for t in [&text, &names, &doc.title] {
+            assert!(!crate::http::has_tag(t), "{t}");
+            assert!(!t.contains('<') && !t.contains('>'), "{t}");
+        }
+        assert!(
+            text.contains("a &lt;script&gt;steal()&lt;/script&gt; and &lt;img src=x&gt;"),
+            "{text}"
+        );
+        assert!(text.contains("a &lt; b"), "{text}");
+        assert!(text.contains("&lt;i&gt;code&lt;/i&gt;"), "{text}");
+        assert!(names.contains("&lt;svg onload=1&gt;"), "{names}");
+        // A title that holds markup once decoded loses it (no_markup, as before).
+        assert_eq!(doc.title, "T x");
+    }
+
+    #[test]
+    fn known_names_are_found_in_any_case() {
+        assert_eq!(
+            KNOWN_ELEMENTS.iter().map(|k| k.len()).max(),
+            Some(KNOWN_NAME_MAX)
+        );
+        for k in KNOWN_ELEMENTS {
+            assert!(known_element(k.as_bytes()), "{k}");
+            assert!(known_element(k.to_ascii_uppercase().as_bytes()), "{k}");
+        }
+        for no in ["string", "t", "stdio.h", "selectedcontentx", "x"] {
+            assert!(!known_element(no.as_bytes()), "{no}");
+        }
+    }
+
+    /// D-517: a walk whose deadline has passed stops and returns nothing; one with time
+    /// finishes.
+    #[test]
+    fn a_walk_past_its_deadline_returns_nothing() {
+        let url = Url::parse("https://example.com/p").unwrap();
+        let html = "<div><p>words</p></div>".repeat(5_000);
+        assert!(parse_within(&html, &url, Instant::now()).is_none());
+        assert!(parse_text_within("plain words", &url, Instant::now()).is_none());
+        let later = Instant::now() + std::time::Duration::from_secs(60);
+        assert!(parse_within(&html, &url, later).is_some_and(|d| !d.blocks.is_empty()));
+    }
+
+    /// Runs `f` on a thread with a 1 MiB stack, half of what a test or tokio blocking thread
+    /// gets. A stack overflow aborts the whole test binary, so passing proves the margin.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    fn shown(d: &Doc) -> String {
+        let mut all = String::new();
+        for b in &d.blocks {
+            for s in &b.spans {
+                all.push_str(&s.text);
+                all.push(' ');
+            }
+        }
+        for r in &d.index {
+            all.push_str(&r.name);
+            all.push(' ');
+        }
+        all
+    }
+
+    /// D-519, review-T-12b round 2 Blocking 1: a page nested deeper than the walk recurses
+    /// (but not past the parse cap) is walked on half the usual stack, whatever the nesting
+    /// is made of, and its deepest text is shown as plain text with a note.
+    #[test]
+    fn the_walk_fits_a_small_stack() {
+        // (open, close, levels per repetition)
+        let shapes = [
+            ("<div>", "</div>", 1),
+            ("<span>", "</span>", 1),
+            ("<div role=button>", "</div>", 1),
+            ("<a href=/x><div role=button>", "</div></a>", 2),
+            ("<table><tr><td>", "</td></tr></table>", 4),
+            ("<ul><li>", "</li></ul>", 2),
+            ("<details open><summary>s</summary>", "</details>", 1),
+            ("<label>L ", "</label>", 1),
+            ("<form><fieldset>", "</fieldset></form>", 1),
+        ];
+        for (open, close, per) in shapes {
+            let n = (dom::NEST_MAX - 40) / per;
+            assert!(n * per > WALK_DEPTH_MAX + 100, "{open}");
+            let page = format!(
+                "<p>top words</p>{}deepest words <a href=/deep>deep link</a>{}<p>after words</p>",
+                open.repeat(n),
+                close.repeat(n)
+            );
+            let d = on_small_stack(move || page_at(&page));
+            let all = shown(&d);
+            for want in ["top words", "deepest words", "after words"] {
+                assert!(all.contains(want), "{open}: {want} missing");
+            }
+            // A control takes its subtree as its name (nested controls get rows in one
+            // loop); anything else is walked to the cap and read as plain text below it.
+            let cut = d.cut.clone().unwrap_or_default();
+            if open.contains("role=button") {
+                assert_eq!(cut, "", "{open}");
+                assert!(d.index.len() > n, "{open}: {} rows", d.index.len());
+            } else {
+                assert!(cut.contains("plain text"), "{open}: {cut:?}");
+            }
+        }
+        // A page within the walk's depth has no note.
+        let page = format!("{}x", "<div>".repeat(WALK_DEPTH_MAX - 10));
+        assert_eq!(on_small_stack(move || page_at(&page)).cut, None);
+    }
+
+    fn page_at(html: &str) -> Doc {
+        parse(html, &Url::parse("https://example.com/a/b").unwrap())
+    }
+
+    /// D-519, review-T-12b round 2 Blockings 1 and 2: 100 000 nested elements (as HTML and,
+    /// with known names, as text/plain) parse only to the nesting cap, walk on half the
+    /// usual stack, and say the rest is missing; the text before them is shown.
+    #[test]
+    fn a_hundred_thousand_nested_elements_return_quickly() {
+        let url = Url::parse("https://example.com/p").unwrap();
+        for open in ["<div>", "<span>", "<b>", "<div role=button>", "<td>"] {
+            for plain in [false, true] {
+                let page = format!("before words\n\n{}deep words", open.repeat(100_000));
+                let u = url.clone();
+                let t = Instant::now();
+                let d = on_small_stack(move || {
+                    if plain {
+                        parse_text(&page, &u)
+                    } else {
+                        parse(&page, &u)
+                    }
+                });
+                let took = t.elapsed();
+                assert!(took.as_secs() < 10, "{open} plain={plain}: {took:?}");
+                let all = shown(&d);
+                assert!(all.contains("before words"), "{open} plain={plain}");
+                if open != "<td>" {
+                    // `<td>` outside a table is dropped by the parser: nothing nests.
+                    let cut = d.cut.clone().unwrap_or_default();
+                    assert!(
+                        cut.contains("nested too deep"),
+                        "{open} plain={plain}: {cut:?}"
+                    );
+                    assert!(!all.contains("deep words"), "{open} plain={plain}");
+                }
+            }
+        }
+        // The other walks over a parsed tree: fragment text and the raw main HTML.
+        let deep = format!("<main>a {}b", "<div><i>".repeat(50_000));
+        let (text, raw) = on_small_stack(move || {
+            (
+                fragment_text_in(&deep, &Budget::unlimited()),
+                raw_main_html(&deep),
+            )
+        });
+        assert!(text.starts_with("a"), "{text:.40}");
+        assert!(raw.starts_with("<main>a <div><i>"), "{raw:.40}");
     }
 }
