@@ -230,5 +230,29 @@ class ReviewRound1(unittest.TestCase):
                 self.assertEqual((good, len(problems)), want, body)
 
 
+class ReviewRound2(unittest.TestCase):
+    """review-T-27 round 2 should-fix items 1 and 2, and the host allowlist note."""
+
+    def assertFlags(self, problems, needle):
+        self.assertTrue(any(needle in p for p in problems), f"{needle!r} not in {problems}")
+
+    def test_steps_as_a_mapping_is_reported_not_raised(self):
+        for steps in ({"x": {"tool": "act", "args": {"value": "@vault(k)"}}}, "navigate", 3):
+            self.assertFlags(bad(lambda d, s=steps: d.update(steps=s)), "steps is not a non-empty list")
+
+    def test_args_outside_each_tools_list_are_refused(self):
+        for step, key in ((0, "tabId"), (0, "newTab"), (4, "url"), (2, "path"), (1, "@vault(pw)")):
+            self.assertFlags(bad(lambda d, s=step, k=key: d["steps"][s]["args"].update({k: "x"})),
+                             f"arg {key!r} is not allowed")
+        self.assertFlags(bad(lambda d: d["steps"].append({"tool": "read", "args": {"path": "C:/x"}})),
+                         "arg 'path' is not allowed")
+        self.assertFlags(bad(lambda d: d["steps"].append({"tool": "snapshot", "args": {"url": "https://e.com/"}})),
+                         "arg 'url' is not allowed")
+
+    def test_navigate_host_is_plain_ascii(self):
+        self.assertFlags(bad(lambda d: d["steps"][0]["args"].update(url="https://evil.com\uff3c.mail.google.com/")),
+                         "not plain")
+
+
 if __name__ == "__main__":
     unittest.main()

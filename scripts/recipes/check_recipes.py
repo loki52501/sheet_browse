@@ -47,6 +47,15 @@ EXPECT_KEYS = {"text", "selector"}
 TOOLS = {"navigate", "wait", "act", "grep", "read", "snapshot", "diff"}
 TARGETED = {"click", "fill", "type", "hover", "focus", "check", "uncheck", "select", "drag"}
 UNTARGETED = {"press", "scroll"}
+ARG_KEYS_BY_TOOL = {
+    "navigate": {"url"},
+    "wait": {"for", "value", "timeout"},
+    "act": {"kind", "value", "text", "key", "direction", "amount", "clear"},
+    "grep": {"over", "pattern", "limit"},
+    "read": {"format", "selector", "includeLinks", "includeImages", "viewportOnly"},
+    "snapshot": {"mode", "depth"},
+    "diff": set(),
+}
 READ_FORMATS = {"markdown", "text", "links"}
 GREP_OVER = {"ax", "content"}
 WHOLE = re.compile(r"^\{([a-z0-9_]+)\}$")
@@ -145,6 +154,8 @@ def check_url(url, domain, aliases):
     host = (parts.hostname or "").lower()
     if "@" in parts.netloc or "%" in parts.netloc or parts.port:
         return f"navigate url {url!r} carries credentials or a port"
+    if not DOMAIN_RE.match(host):
+        return f"navigate url {url!r} host is not plain [a-z0-9.-]"
     if not any(host == d or host.endswith("." + d) for d in [domain, *aliases]):
         return f"navigate url {url!r} leaves {domain}"
     return None
@@ -174,6 +185,10 @@ def check_step(i, step, domain, aliases, declared=None):
     args = step.get("args", {})
     if not isinstance(args, dict):
         return out + [f"{where} args is not a mapping"]
+    # review-T-27 round 2: only the args each tool needs, so no url, path, tab or new-tab
+    # option slips past the navigate URL check through another key.
+    for k in sorted(map(str, args.keys() - ARG_KEYS_BY_TOOL.get(tool, set()))) if isinstance(tool, str) else []:
+        out.append(f"{where} {tool} arg {k!r} is not allowed")
     target = step.get("target")
     if target is not None:
         if tool != "act":
@@ -309,8 +324,9 @@ def check_doc(doc, path, aliases=()):
         if RAW_REF.search(s):
             out.append(f"raw ref {s!r} at {'.'.join(kpath)}")
     # @vault anywhere in the file (arg defaults, description, match included) except as the
-    # whole act text/value of a step.
-    for kpath, s in strings(doc):
+    # whole act text/value of a step. `steps` here is the checked list ([] when the file's
+    # steps is not a list), so a mapping or scalar never reaches the index below.
+    for kpath, s in strings({**doc, "steps": steps}):
         for key in VAULT.findall(s):
             in_act_text = (len(kpath) == 4 and kpath[0] == "steps" and kpath[2] == "args"
                            and kpath[3] in ("text", "value")
