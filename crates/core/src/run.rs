@@ -126,6 +126,10 @@ impl RunFolder {
     pub fn report_md(&self) -> PathBuf {
         self.dir.join("report.md")
     }
+    /// `browseros.jsonl`, the BrowserOS hook's call log (D-98, D-154).
+    pub fn browseros_jsonl(&self) -> PathBuf {
+        self.dir.join(crate::ledger::BROWSEROS_FILE)
+    }
     pub fn files(&self) -> PathBuf {
         self.dir.join("files")
     }

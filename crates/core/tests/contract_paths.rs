@@ -104,3 +104,17 @@ fn sched_paths_and_launch_request_schedule() {
         NOTIFY_TOOL,
     ];
 }
+
+/// T-28 (D-154, B-213): the browseros.jsonl name and the Browser: cap; write_report keeps
+/// its signature (D-90).
+#[test]
+fn ledger_browseros_paths() {
+    use harness_core::ledger::{write_report, BROWSEROS_FILE, BROWSER_LINES_MAX};
+    use harness_core::memory::LedgerEvent;
+    use harness_core::run::RunFolder;
+    let _: fn(&RunFolder, &str, &[LedgerEvent]) -> harness_core::ledger::Result<String> =
+        write_report;
+    let _: fn(&RunFolder) -> std::path::PathBuf = RunFolder::browseros_jsonl;
+    assert_eq!(BROWSEROS_FILE, "browseros.jsonl");
+    assert_eq!(BROWSER_LINES_MAX, 200);
+}

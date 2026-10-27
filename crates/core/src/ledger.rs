@@ -1114,8 +1114,124 @@ fn walk_files(dir: &Path) -> std::io::Result<Vec<String>> {
     Ok(out)
 }
 
+/// File name of the BrowserOS hook's call log in a run folder, beside `ledger.jsonl` (D-98;
+/// one LedgerEvent-shaped JSON line per call, written by `scripts/hooks/browseros_ledger.py`).
+pub const BROWSEROS_FILE: &str = "browseros.jsonl";
+/// Most calls the `Browser:` section of report.md lists before `... <k> more` (D-154).
+pub const BROWSER_LINES_MAX: usize = 200;
+/// Longest result summary (or why) on a `Browser:` line, in chars (D-154).
+const BROWSER_SUMMARY_MAX: usize = 120;
+/// Longest `<short args>` on a `Browser:` line, in chars.
+const BROWSER_ARGS_MAX: usize = 80;
+/// Arg keys a `Browser:` line leaves out: per-session ids (WAVE3).
+const BROWSER_ARGS_SKIP: [&str; 3] = ["page", "session", "agentName"];
+
+/// `k=v` pairs of a browser call's args (strings as is, other values as compact JSON),
+/// per-session ids dropped, clipped (and so scrubbed). Empty when nothing is left.
+fn browser_args(args: Option<&Value>) -> String {
+    let text = match args {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::Object(o)) => o
+            .iter()
+            .filter(|(k, _)| !BROWSER_ARGS_SKIP.contains(&k.as_str()))
+            .map(|(k, v)| match v {
+                Value::String(s) => format!("{k}={s}"),
+                other => format!("{k}={other}"),
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        Some(other) => other.to_string(),
+    };
+    clip(&text, BROWSER_ARGS_MAX)
+}
+
+/// One `Browser:` line (D-154): `<n>. <tool> <short args> -> ok|failed: <summary>`, the
+/// summary of a failed call being its `why` (else its result summary). `: <summary>` is left
+/// out when there is none. A line that is not UTF-8 JSON with a string `tool` and a bool
+/// `ok` is `<n>. (unreadable line)`.
+fn browser_line(n: usize, raw: &[u8]) -> String {
+    let unreadable = || format!("{n}. (unreadable line)");
+    let Some(Value::Object(o)) = std::str::from_utf8(raw)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+    else {
+        return unreadable();
+    };
+    let (Some(tool), Some(ok)) = (
+        o.get("tool").and_then(Value::as_str),
+        o.get("ok").and_then(Value::as_bool),
+    ) else {
+        return unreadable();
+    };
+    let text = |k: &str| o.get(k).and_then(Value::as_str).unwrap_or("");
+    let summary = if ok {
+        text("result_summary")
+    } else {
+        Some(text("why"))
+            .filter(|w| !w.trim().is_empty())
+            .unwrap_or_else(|| text("result_summary"))
+    };
+    let mut line = format!("{n}. {}", clip(tool, ITEM_MAX));
+    let args = browser_args(o.get("args"));
+    if !args.is_empty() {
+        line.push(' ');
+        line.push_str(&args);
+    }
+    line.push_str(if ok { " -> ok" } else { " -> failed" });
+    let summary = clip(summary, BROWSER_SUMMARY_MAX);
+    if !summary.is_empty() {
+        line.push_str(": ");
+        line.push_str(&summary);
+    }
+    line
+}
+
+/// The `Browser:` section for `path` (D-154): `Browser: <calls> calls`, then one line per
+/// non-blank line of the file in file order, numbered by its 1-based line number (the
+/// number `tools.save` takes, D-152), at most [`BROWSER_LINES_MAX`], then `... <k> more`.
+/// `None` when the file does not exist. Never fails: an unreadable file or line is shown as
+/// such. Every part is scrubbed.
+fn browser_section(path: &Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(format!("Browser: ({BROWSEROS_FILE} unreadable)\n")),
+    };
+    let mut lines = Vec::new();
+    let mut calls = 0usize;
+    for (i, chunk) in std::io::BufReader::new(file).split(b'\n').enumerate() {
+        let n = i + 1;
+        let Ok(raw) = chunk else {
+            calls += 1;
+            if lines.len() < BROWSER_LINES_MAX {
+                lines.push(format!("{n}. (unreadable line)"));
+            }
+            break;
+        };
+        let raw = raw.strip_suffix(b"\r").unwrap_or(&raw);
+        if raw.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        calls += 1;
+        if lines.len() < BROWSER_LINES_MAX {
+            lines.push(browser_line(n, raw));
+        }
+    }
+    let mut out = format!("Browser: {calls} calls\n");
+    for l in &lines {
+        out.push_str(l);
+        out.push('\n');
+    }
+    if calls > lines.len() {
+        out.push_str(&format!("... {} more\n", calls - lines.len()));
+    }
+    Some(scrub(&out))
+}
+
 /// [`report`] plus every file found on disk under `files/`, written to `report.md`.
-/// Absolute paths in consequences count only under this run's `files/`.
+/// Absolute paths in consequences count only under this run's `files/`. When the run folder
+/// holds [`BROWSEROS_FILE`], a `Browser:` section follows the Q-4 lines (D-154).
 /// Returns the text written.
 pub fn write_report(run: &RunFolder, prompt: &str, events: &[LedgerEvent]) -> Result<String> {
     let io = |path: PathBuf| move |source| LedgerError::Io { path, source };
@@ -1133,7 +1249,11 @@ pub fn write_report(run: &RunFolder, prompt: &str, events: &[LedgerEvent]) -> Re
         id: Some(&run.id.0),
         files_abs,
     };
-    let text = build_report(prompt, events, &ctx, &disk);
+    let mut text = build_report(prompt, events, &ctx, &disk);
+    if let Some(browser) = browser_section(&run.browseros_jsonl()) {
+        text.push_str(&browser);
+        text = scrub(&text);
+    }
     std::fs::write(run.report_md(), &text).map_err(io(run.report_md()))?;
     Ok(text)
 }
@@ -1913,6 +2033,110 @@ Did: 0 actions
             )),
             "{text}"
         );
+    }
+
+    /// One browseros.jsonl line as the hook writes it (scripts/hooks/browseros_ledger.py).
+    fn bos(tool: &str, args: Value, ok: bool, summary: &str, why: Option<&str>) -> String {
+        json!({
+            "run_id": RUN, "ts": "2026-10-27T09:00:00+0000", "server": "browseros",
+            "tool": tool, "class": null, "mode": "external", "args": args,
+            "result_summary": summary, "ok": ok, "why": why, "session_id": "s1",
+        })
+        .to_string()
+    }
+
+    /// D-154: the Browser: section follows the Q-4 lines, one line per call in file order,
+    /// numbered by file line, per-session ids dropped, a failed call shows its why, a summary
+    /// is cut to 120 chars, blank lines are skipped and a malformed line is shown, not fatal.
+    #[tokio::test]
+    async fn write_report_browser_section() {
+        let tmp = Tmp::new();
+        let run = RunFolder::create(&tmp.0, "bos", "Check mail").unwrap();
+        let long = "x".repeat(300);
+        let body = [
+            bos(
+                "navigate",
+                json!({"url": "https://mail.google.com/", "page": 7}),
+                true,
+                "Navigated",
+                None,
+            ),
+            bos(
+                "act",
+                json!({"kind": "click", "ref": "e5", "agentName": "claude"}),
+                false,
+                "",
+                Some("ref e5 not found"),
+            ),
+            String::new(),
+            "{not json".to_string(),
+            bos("read", json!({}), true, &long, None),
+            json!({"tool": "snapshot"}).to_string(),
+        ]
+        .join("\n");
+        std::fs::write(run.browseros_jsonl(), format!("{body}\n")).unwrap();
+        assert_eq!(run.browseros_jsonl(), run.dir.join(BROWSEROS_FILE));
+        let text = write_report(&run, "Check mail", &[]).unwrap();
+        assert_eq!(std::fs::read_to_string(run.report_md()).unwrap(), text);
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| *l == "Browser: 5 calls")
+            .expect(&text);
+        assert!(
+            at > 0 && lines[at - 1].starts_with("Not done / needs you: "),
+            "{text}"
+        );
+        assert_eq!(
+            lines[at + 1],
+            "1. navigate url=https://mail.google.com/ -> ok: Navigated"
+        );
+        assert_eq!(
+            lines[at + 2],
+            "2. act kind=click ref=e5 -> failed: ref e5 not found"
+        );
+        assert_eq!(lines[at + 3], "4. (unreadable line)");
+        let read = lines[at + 4];
+        assert!(read.starts_with("5. read -> ok: xxx"), "{read}");
+        assert_eq!(
+            read.chars().count(),
+            "5. read -> ok: ".len() + 120,
+            "{read}"
+        );
+        assert!(read.ends_with("..."), "{read}");
+        assert_eq!(lines[at + 5], "6. (unreadable line)");
+        assert_eq!(lines.len(), at + 6, "{text}");
+    }
+
+    /// D-154: at most 200 lines, then `... <k> more`.
+    #[tokio::test]
+    async fn write_report_browser_section_caps_at_200() {
+        let tmp = Tmp::new();
+        let run = RunFolder::create(&tmp.0, "cap", "p").unwrap();
+        let body: String = (0..230)
+            .map(|i| bos("snapshot", json!({"i": i}), true, "ok", None) + "\n")
+            .collect();
+        std::fs::write(run.browseros_jsonl(), body).unwrap();
+        let text = write_report(&run, "p", &[]).unwrap();
+        let section: Vec<&str> = text
+            .lines()
+            .skip_while(|l| !l.starts_with("Browser: "))
+            .collect();
+        assert_eq!(section[0], "Browser: 230 calls");
+        assert_eq!(section.len(), 1 + BROWSER_LINES_MAX + 1, "{text}");
+        assert_eq!(section[1], "1. snapshot i=0 -> ok: ok");
+        assert_eq!(section[200], "200. snapshot i=199 -> ok: ok");
+        assert_eq!(section[201], "... 30 more");
+    }
+
+    /// D-154: no browseros.jsonl, no section; the Q-4 text is what it was.
+    #[tokio::test]
+    async fn write_report_without_browseros_has_no_section() {
+        let tmp = Tmp::new();
+        let run = RunFolder::create(&tmp.0, "none", "Make a pdf").unwrap();
+        let text = write_report(&run, "Make a pdf", &[]).unwrap();
+        assert!(!text.contains("Browser:"), "{text}");
+        assert!(text.ends_with('\n') && text.lines().last().unwrap().starts_with("Not done"));
     }
 
     /// Item 9 through write_report: an absolute path under this run's files/ counts, the
