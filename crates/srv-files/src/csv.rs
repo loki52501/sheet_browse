@@ -7,9 +7,10 @@
 //! (columns that must not be blank; default: the key columns), `drop_empty_rows` (default
 //! true), `delimiter` (default `,`, or tab for `.tsv`). Duplicate keys compare after
 //! normalising, ignoring ASCII case. Rows missing a required value are kept and named in an
-//! added `_missing` column. The output defaults to `files/<name>.clean.csv`; a bare `out`
-//! lands in this run's `files/` and a bare input name not found in the base folder is read
-//! from there (B-564, D-570, D-571). Classify and call use one `out_path`.
+//! added `_missing` column. The output defaults to `files/<name>.clean.csv`; a relative
+//! `out` lands under this run's `files/` and a relative input path not found in the base
+//! folder is read from there (B-564, D-570, D-571, D-146). Classify and call use one
+//! `out_path`.
 
 use crate::paths::Roots;
 use crate::text;
@@ -30,7 +31,7 @@ pub const MISSING_COL: &str = "_missing";
 pub fn tools() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "csv.clean".into(),
-        description: "Dedupe and normalise a CSV/TSV into a new file; use it instead of deduping rows yourself. Drops duplicate rows by rules.key (the columns that identify a row, e.g. [\"email\"]; default the whole row; compared trimmed, spaces collapsed, ASCII case ignored), trims and collapses spaces, sets case per column, flags rows missing rules.required values (default the key columns) in a _missing column. Returns a short report (rows in/out, duplicates by line). A bare path not found next to runs/ is read from this run's files/. out: a bare name lands in this run's files/ (default files/<name>.clean.csv) and is listed in the run report. rules: {key, dedupe, required, trim, collapse_spaces, case:{col:lower|upper|title}, drop_empty_rows, delimiter}.".into(),
+        description: "Dedupe and normalise a CSV/TSV into a new file; use it instead of deduping rows yourself. Drops duplicate rows by rules.key (the columns that identify a row, e.g. [\"email\"]; default the whole row; compared trimmed, spaces collapsed, ASCII case ignored), trims and collapses spaces, sets case per column, flags rows missing rules.required values (default the key columns) in a _missing column. Returns a short report (rows in/out, duplicates by line). A relative path not found next to runs/ is read from this run's files/. out: a relative path lands in this run's files/ (default files/<name>.clean.csv) and is listed in the run report. rules: {key, dedupe, required, trim, collapse_spaces, case:{col:lower|upper|title}, drop_empty_rows, delimiter}.".into(),
         class: Class::Fill,
         args: json!({"type":"object","properties":{
             "path":{"type":"string"},
@@ -44,7 +45,7 @@ pub fn tools() -> Vec<ToolSpec> {
                 "drop_empty_rows":{"type":"boolean","default":true},
                 "delimiter":{"type":"string","maxLength":1}
             },"additionalProperties":false},
-            "out":{"type":"string","description":"output file; a bare name lands in this run's files/"}
+            "out":{"type":"string","description":"output file; a relative path lands in this run's files/"}
         },"required":["path"],"additionalProperties":false}),
         handler: Arc::new(Clean),
     }]

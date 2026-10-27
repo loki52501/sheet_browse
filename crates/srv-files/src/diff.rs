@@ -32,7 +32,7 @@ const CELLS_SHOWN: usize = 6;
 pub fn tools() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "diff".into(),
-        description: "Compare two files. mode=text (default): unified diff of lines. mode=table: CSV/TSV/xlsx rows matched by key columns (default the first column), reporting rows added, removed and the cells that changed. A bare name not found next to runs/ is read from this run's files/.".into(),
+        description: "Compare two files. mode=text (default): unified diff of lines. mode=table: CSV/TSV/xlsx rows matched by key columns (default the first column), reporting rows added, removed and the cells that changed. A relative path not found next to runs/ is read from this run's files/.".into(),
         class: Class::Read,
         args: json!({"type":"object","properties":{
             "a":{"type":"string"},

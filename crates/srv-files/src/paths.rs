@@ -8,6 +8,10 @@
 //! on the real target. Only the part of a path that does not exist yet is kept as
 //! written (it cannot be a link).
 //!
+//! Outputs (D-146, amends D-570): a relative path a tool writes (or `fs.mkdir` makes)
+//! resolves under this run's `files/` instead ([`Roots::resolve_out`]); reads try the base
+//! first and fall back to `files/` ([`Roots::resolve_existing`]).
+//!
 //! [`place`] then says whether a resolved path is scratch (inside `runs/`, safe to change
 //! without asking), bookkeeping (the runs root, a run folder itself, or a run's `asks/`,
 //! `ledger.jsonl`, `report.md`, `prompt.md`: the user's answer channel and the evidence,
@@ -26,7 +30,8 @@ const BOOKKEEPING: [&str; 4] = ["asks", "ledger.jsonl", "report.md", "prompt.md"
 /// The folders a call resolves against, all canonical.
 #[derive(Debug, Clone)]
 pub struct Roots {
-    /// Where relative paths resolve: the folder that holds `runs/`.
+    /// Where relative paths resolve for reads (and where [`Roots::resolve`] joins them):
+    /// the folder that holds `runs/`. Relative outputs go to [`Roots::files`] (D-146).
     pub base: PathBuf,
     /// The harness runs root (`Harness::runs_root`).
     pub runs: PathBuf,
@@ -64,39 +69,69 @@ impl Roots {
         resolve(dir, raw).map_err(|e| ToolError::Args(format!("path {raw:?}: {e}")))
     }
 
-    /// Where a file a tool writes goes (B-564, D-570): this run's `files/<raw>` when `raw`
-    /// is a bare file name ([`is_bare`]), else `raw` resolved against the base as written
-    /// (`./x.csv`, `out/x.csv` and absolute paths keep their meaning). Every tool that
-    /// names an output file uses this, in classify and in call alike.
+    /// Where a file (or folder) a tool writes goes (B-564, D-570 amended by D-146): a
+    /// relative `raw` ([`is_relative`]: `x.csv`, `./x.csv`, `out/x.csv`) resolves under
+    /// this run's `files/`; one that would leave `files/` (`../x`, `a/../../x`, a link in
+    /// `files/` that points out) is refused. Explicit places keep their meaning: an
+    /// absolute path (and `~`, `~/x`, a rooted `/x`) resolves as written, and a relative
+    /// path that already names a place inside the runs root from the base
+    /// (`runs/<id>/files/x.csv`, the way replies show a path in `files/`) resolves against
+    /// the base, so a session reusing a path it was shown does not nest it in `files/`.
+    ///
+    /// A Windows drive-relative path (`C:x`) is refused, the safe one of the two choices:
+    /// it means the server process's working folder on that drive, which the session
+    /// cannot know, and it would land outside both the base and `files/`. Every tool that
+    /// names an output uses this, in classify and in call alike (D-572).
     pub fn resolve_out(&self, raw: &str) -> Result<PathBuf, ToolError> {
-        if is_bare(raw) {
-            self.resolve_in(&self.files, raw)
+        if is_drive_relative(raw) {
+            return Err(ToolError::Args(format!(
+                "path {raw:?}: a drive-relative path is not accepted; give an absolute path or one relative to this run's files/"
+            )));
+        }
+        let in_base = self.resolve(raw)?;
+        if !is_relative(raw) || in_base.starts_with(&self.runs) {
+            return Ok(in_base);
+        }
+        self.in_files(raw)
+    }
+
+    /// `raw` (relative) resolved against this run's `files/`; refused unless the result
+    /// is `files/` or below it (D-146).
+    fn in_files(&self, raw: &str) -> Result<PathBuf, ToolError> {
+        let f = self.resolve_in(&self.files, raw)?;
+        if f.starts_with(&self.files) {
+            Ok(f)
         } else {
-            self.resolve(raw)
+            Err(ToolError::Args(format!(
+                "path {raw:?} leaves this run's files/ folder; give a path inside it or an absolute path"
+            )))
         }
     }
 
-    /// Where a file a tool reads (or moves or deletes) is (B-564, D-571): `raw` resolved
-    /// against the base; a bare name that does not exist there but does exist in this
-    /// run's `files/` is that file, so a session reads back what it wrote with the same
-    /// name. When both exist the base wins (as before T-13c); [`Roots::shadowed`] names
-    /// the other one.
+    /// Where a file a tool reads (or moves or deletes) is (B-564, D-571 widened by D-146):
+    /// `raw` resolved against the base; a relative `raw` that does not exist there but
+    /// does exist under this run's `files/` is that file, so a session reads back what it
+    /// wrote with the same path. When both exist the base wins (as before T-13c);
+    /// [`Roots::shadowed`] names the other one. The fallback never leaves `files/`, and a
+    /// path that is in neither is the base path (the error names it).
     pub fn resolve_existing(&self, raw: &str) -> Result<PathBuf, ToolError> {
         let p = self.resolve(raw)?;
-        if !is_bare(raw) || exists(&p) {
+        if !is_relative(raw) || exists(&p) {
             return Ok(p);
         }
-        let f = self.resolve_in(&self.files, raw)?;
-        Ok(if exists(&f) { f } else { p })
+        Ok(match self.in_files(raw) {
+            Ok(f) if exists(&f) => f,
+            _ => p,
+        })
     }
 
-    /// For a bare `raw` that [`Roots::resolve_existing`] resolved to `p` in the base while
-    /// this run's `files/<raw>` exists too: that file (D-571).
+    /// For a relative `raw` that [`Roots::resolve_existing`] resolved to `p` in the base
+    /// while this run's `files/<raw>` exists too: that file (D-571, D-146).
     pub fn shadowed(&self, raw: &str, p: &Path) -> Option<PathBuf> {
-        if !is_bare(raw) || p.starts_with(&self.files) {
+        if !is_relative(raw) || p.starts_with(&self.files) {
             return None;
         }
-        let f = self.resolve_in(&self.files, raw).ok()?;
+        let f = self.in_files(raw).ok()?;
         (f != p && exists(&f)).then_some(f)
     }
 
@@ -114,15 +149,26 @@ impl Roots {
     }
 }
 
-/// True when `raw` is a bare file name: one plain component with no folder part, root,
-/// drive, `.`, `..`, `~` or trailing separator (`report.csv`; not `./report.csv`,
-/// `out/report.csv`, `archive/`, `C:x`).
-pub fn is_bare(raw: &str) -> bool {
-    if raw.starts_with('~') || raw.ends_with('/') || raw.ends_with('\\') {
+/// True when `raw` is relative in the sense of D-146: its first component is a plain
+/// name, `.` or `..` (`report.csv`, `./report.csv`, `out/report.csv`, `archive/`,
+/// `../x`). Not relative: absolute and rooted paths (`/x`, `C:/x`, Git Bash `/c/x`), `~`
+/// and `~/x` (the home folder), a Windows drive-relative `C:x` ([`is_drive_relative`]),
+/// and the empty path.
+pub fn is_relative(raw: &str) -> bool {
+    if raw.starts_with('~') {
         return false;
     }
-    let mut comps = Path::new(raw).components();
-    matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
+    matches!(
+        Path::new(raw).components().next(),
+        Some(Component::Normal(_) | Component::CurDir | Component::ParentDir)
+    )
+}
+
+/// True for a Windows drive-relative path (`C:x`, `C:../x`): a drive with no root after
+/// it. Always false elsewhere (there `C:x` is a plain name).
+pub fn is_drive_relative(raw: &str) -> bool {
+    let p = PathBuf::from(msys_drive(raw));
+    matches!(p.components().next(), Some(Component::Prefix(_))) && !p.has_root()
 }
 
 /// Where a resolved path is, for the gate.
@@ -930,8 +976,10 @@ mod tests {
         }
     }
 
+    /// D-146 (amends D-570): every relative output path is under files/; absolute paths
+    /// and paths already inside runs/ keep their meaning.
     #[test]
-    fn bare_names_go_to_files() {
+    fn relative_outputs_go_to_files() {
         let (_t, r) = setup();
         assert_eq!(
             r.resolve_out("report.pdf").unwrap(),
@@ -939,53 +987,128 @@ mod tests {
         );
         assert_eq!(
             r.resolve_out("x/report.pdf").unwrap(),
-            r.base.join("x").join("report.pdf")
+            r.files.join("x").join("report.pdf")
         );
         assert_eq!(
             r.resolve_out("./report.pdf").unwrap(),
-            r.base.join("report.pdf")
+            r.files.join("report.pdf")
+        );
+        assert_eq!(r.resolve_out("a/../b.pdf").unwrap(), r.files.join("b.pdf"));
+        assert_eq!(r.resolve_out(".").unwrap(), r.files);
+        let abs = plain(&r.base.join("abs.pdf")).replace('\\', "/");
+        assert_eq!(r.resolve_out(&abs).unwrap(), r.base.join("abs.pdf"));
+        // The way replies show a path in files/: not nested again.
+        assert_eq!(
+            r.resolve_out("runs/2026-10-25T00-00-00-t/files/y.csv")
+                .unwrap(),
+            r.files.join("y.csv")
+        );
+        assert_eq!(
+            r.resolve_out("runs/2026-10-25T00-00-00-t/ledger.jsonl")
+                .unwrap(),
+            r.files.parent().unwrap().join("ledger.jsonl")
         );
     }
 
-    /// B-564 (D-570): only a plain one-component name is bare.
+    /// D-146: a relative output path that leaves files/ is refused, naming the path.
     #[test]
-    fn bare_names() {
-        for b in ["report.csv", "a b.txt", "x"] {
-            assert!(is_bare(b), "{b}");
+    fn relative_outputs_that_leave_files_are_refused() {
+        let (t, r) = setup();
+        for raw in ["../x.csv", "a/../../x.csv", "..", "./../../../x"] {
+            match r.resolve_out(raw) {
+                Err(ToolError::Args(m)) => assert!(m.contains(raw), "{raw}: {m}"),
+                other => panic!("{raw}: {other:?}"),
+            }
         }
-        for n in [
-            "./report.csv",
-            "out/report.csv",
-            "archive/",
-            "/abs.txt",
-            "..",
-            ".",
-            "~",
-            "~/x.txt",
-            "",
-        ] {
-            assert!(!is_bare(n), "{n}");
-        }
-        #[cfg(windows)]
-        for n in ["C:x.txt", "C:\\x.txt", "archive\\", "out\\report.csv"] {
-            assert!(!is_bare(n), "{n}");
+        // A link inside files/ that points out of it.
+        let outside = t.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        if make_link(&outside, &r.files.join("out")) {
+            assert!(matches!(
+                r.resolve_out("out/x.csv"),
+                Err(ToolError::Args(_))
+            ));
         }
     }
 
-    /// B-564 (D-571): a bare read falls back to files/ only when the base has no such
-    /// file; the base wins when both exist and `shadowed` names the other.
+    /// D-146: the drive-relative Windows spelling is refused for outputs.
+    #[cfg(windows)]
     #[test]
-    fn bare_reads_fall_back_to_files() {
+    fn drive_relative_outputs_are_refused() {
+        let (_t, r) = setup();
+        for raw in ["C:x.csv", "c:out/x.csv", "C:"] {
+            assert!(is_drive_relative(raw), "{raw}");
+            assert!(
+                matches!(r.resolve_out(raw), Err(ToolError::Args(_))),
+                "{raw}"
+            );
+        }
+        for raw in ["C:/x.csv", "C:\\x.csv", "/c/x.csv", "x.csv", "\\x.csv"] {
+            assert!(!is_drive_relative(raw), "{raw}");
+        }
+    }
+
+    /// D-146: which spellings are relative.
+    #[test]
+    fn relative_paths() {
+        for b in [
+            "report.csv",
+            "a b.txt",
+            "x",
+            "./report.csv",
+            "out/report.csv",
+            "archive/",
+            "..",
+            ".",
+            "../x",
+        ] {
+            assert!(is_relative(b), "{b}");
+        }
+        for n in ["/abs.txt", "~", "~/x.txt", ""] {
+            assert!(!is_relative(n), "{n}");
+        }
+        #[cfg(windows)]
+        for n in ["C:x.txt", "C:\\x.txt", "\\x.txt", "\\\\host\\share\\x"] {
+            assert!(!is_relative(n), "{n}");
+        }
+        #[cfg(windows)]
+        for b in ["archive\\", "out\\report.csv", ".\\x"] {
+            assert!(is_relative(b), "{b}");
+        }
+    }
+
+    /// B-564 (D-571, widened by D-146): a relative read falls back to files/ only when the
+    /// base has no such file; the base wins when both exist and `shadowed` names the other.
+    #[test]
+    fn relative_reads_fall_back_to_files() {
         let (_t, r) = setup();
         std::fs::write(r.files.join("a.csv"), "run").unwrap();
         assert_eq!(r.resolve_existing("a.csv").unwrap(), r.files.join("a.csv"));
         assert_eq!(r.shadowed("a.csv", &r.files.join("a.csv")), None);
-        assert_eq!(r.resolve_existing("./a.csv").unwrap(), r.base.join("a.csv"));
+        assert_eq!(
+            r.resolve_existing("./a.csv").unwrap(),
+            r.files.join("a.csv")
+        );
         assert_eq!(r.resolve_existing("b.csv").unwrap(), r.base.join("b.csv"));
+        std::fs::create_dir_all(r.files.join("out")).unwrap();
+        std::fs::write(r.files.join("out").join("c.csv"), "run").unwrap();
+        assert_eq!(
+            r.resolve_existing("out/c.csv").unwrap(),
+            r.files.join("out").join("c.csv")
+        );
         std::fs::write(r.base.join("a.csv"), "base").unwrap();
         let p = r.resolve_existing("a.csv").unwrap();
         assert_eq!(p, r.base.join("a.csv"));
         assert_eq!(r.shadowed("a.csv", &p), Some(r.files.join("a.csv")));
-        assert_eq!(r.shadowed("./a.csv", &p), None);
+        assert_eq!(r.shadowed("./a.csv", &p), Some(r.files.join("a.csv")));
+        let abs = plain(&p).replace('\\', "/");
+        assert_eq!(r.shadowed(&abs, &p), None, "an absolute path never shadows");
+        // The fallback never leaves files/: runs/<id>/x is not reached as ../x.
+        std::fs::write(r.files.parent().unwrap().join("x.txt"), "run dir").unwrap();
+        assert_eq!(r.resolve_existing("../x.txt").unwrap(), {
+            let mut b = r.base.clone();
+            b.pop();
+            b.join("x.txt")
+        });
     }
 }

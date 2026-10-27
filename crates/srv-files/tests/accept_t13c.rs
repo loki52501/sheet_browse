@@ -2,8 +2,11 @@
 //! given lands in this run's `files/` (D-570), a bare name a reader is given falls back to
 //! `files/<name>` when the base folder has no such file, the base winning when both exist
 //! (D-571), classify and call act on the same resolved path (D-572), and a move's bare
-//! destination follows D-573. Driven through `harness_core::mcp::dispatch` with the shared
-//! MemStore and ScriptedAsker, in a temp folder that holds `runs/`. Offline.
+//! destination follows D-573. D-146 (T-17b, T-17c) widens bare names to every relative
+//! path: `./x`, `out/x` land under `files/` too, a relative output that leaves `files/` is
+//! refused, `fs.mkdir` follows the output rule, and reads fall back for any relative path.
+//! Driven through `harness_core::mcp::dispatch` with the shared MemStore and
+//! ScriptedAsker, in a temp folder that holds `runs/`. Offline.
 
 use harness_core::memory::{ts_now, LedgerMode, MemoryStore, Run, RunStatus};
 use harness_core::run::RunFolder;
@@ -181,34 +184,134 @@ async fn bare_write_lands_in_files_and_is_reported() {
     assert_eq!(e.last(), (Some(Class::Fill), Some(LedgerMode::Allow)));
 }
 
+/// D-146 (amends D-570): `./x` and `out/x` land under files/ like a bare name; absolute
+/// paths and a path already inside runs/ keep their meaning.
 #[tokio::test]
-async fn explicit_paths_keep_their_meaning() {
+async fn relative_paths_go_to_files_and_absolute_ones_keep_their_meaning() {
     let e = env().await;
     e.ok("fs.write", json!({"path": "./here.txt", "content": "a"}))
         .await;
-    assert!(e.p("here.txt").is_file());
-    e.ok("fs.write", json!({"path": "out/there.txt", "content": "b"}))
+    assert!(e.files("here.txt").is_file());
+    assert!(!e.p("here.txt").exists(), "not in the base folder (D-146)");
+    let out = e
+        .ok("fs.write", json!({"path": "out/there.txt", "content": "b"}))
         .await;
-    assert!(e.p("out/there.txt").is_file());
+    assert!(e.files("out").join("there.txt").is_file());
+    assert!(!e.p("out").exists(), "not in the base folder (D-146)");
+    assert_eq!(out.consequences["wrote"], json!(e.shown("out/there.txt")));
+    assert_eq!(e.last(), (Some(Class::Fill), Some(LedgerMode::Allow)));
     let abs = slash(&e.p("abs.txt"));
     e.ok("fs.write", json!({"path": abs, "content": "c"})).await;
     assert!(e.p("abs.txt").is_file());
+    assert!(
+        !e.files("abs.txt").exists(),
+        "an absolute path is unchanged"
+    );
     let rel = format!("runs/{}/files/deep/x.txt", e.run.id);
     e.ok("fs.write", json!({"path": rel, "content": "d"})).await;
     assert!(e.files("deep").join("x.txt").is_file());
-    for n in ["here.txt", "there.txt", "abs.txt", "x.txt"] {
-        assert!(!e.files(n).exists(), "{n} did not go to files/");
-    }
-    // A bare folder name for fs.mkdir stays in the base folder (D-570).
+    assert!(
+        !e.files("runs").exists(),
+        "a path shown by a reply is not nested"
+    );
+    // fs.mkdir follows the output rule (D-146), so mkdir then write agree.
     e.ok("fs.mkdir", json!({"path": "made"})).await;
-    assert!(e.p("made").is_dir());
-    // Outside runs/ still classes as before: replacing an existing file asks.
-    let out = e
-        .ok("fs.write", json!({"path": "./here.txt", "content": "z"}))
+    assert!(e.files("made").is_dir());
+    assert!(!e.p("made").exists());
+    e.ok("fs.write", json!({"path": "made/x.csv", "content": "x"}))
         .await;
+    assert!(e.files("made").join("x.csv").is_file());
+    // Outside runs/ still classes as before: replacing an existing file asks.
+    let out = e.ok("fs.write", json!({"path": abs, "content": "z"})).await;
     assert!(out.text.starts_with("skipped"), "{}", out.text);
     assert_eq!(e.asker.cards().len(), 1);
     assert_eq!(e.asker.cards()[0].class, Class::Delete);
+    assert_eq!(std::fs::read_to_string(e.p("abs.txt")).unwrap(), "c");
+}
+
+/// D-146: a relative output path that leaves files/ is refused, naming the path, for
+/// fs.write, fs.mkdir and csv.clean out; nothing is written and nothing asks.
+#[tokio::test]
+async fn relative_outputs_that_leave_files_are_refused() {
+    let e = env().await;
+    e.ok("fs.write", json!({"path": "in.csv", "content": "a\n1\n"}))
+        .await;
+    for (tool, args, raw) in [
+        (
+            "fs.write",
+            json!({"path": "../x.txt", "content": "x"}),
+            "../x.txt",
+        ),
+        (
+            "fs.write",
+            json!({"path": "a/../../x.txt", "content": "x"}),
+            "a/../../x.txt",
+        ),
+        ("fs.mkdir", json!({"path": "../made"}), "../made"),
+        (
+            "csv.clean",
+            json!({"path": "in.csv", "out": "../../out.csv"}),
+            "../../out.csv",
+        ),
+    ] {
+        match e.call(tool, args).await {
+            Err(ToolError::Args(m)) => assert!(m.contains(raw), "{tool}: {m}"),
+            other => panic!("{tool} {raw}: {other:?}"),
+        }
+    }
+    assert!(!e.run.dir.join("x.txt").exists());
+    assert!(!e.run.dir.join("made").exists());
+    assert!(!e.p("runs/out.csv").exists());
+    assert!(e.asker.cards().is_empty());
+}
+
+/// D-146: write `out/x.csv`, then read, clean and diff `out/x.csv` get it back.
+#[tokio::test]
+async fn relative_write_then_read_round_trip() {
+    let e = env().await;
+    e.ok(
+        "fs.write",
+        json!({"path": "out/x.csv", "content": "k\n1\n1\n"}),
+    )
+    .await;
+    let out = e.ok("fs.read", json!({"path": "out/x.csv"})).await;
+    assert_eq!(out.text, "k\n1\n1\n");
+    assert_eq!(out.consequences["path"], json!(e.shown("out/x.csv")));
+    let out = e.ok("fs.read", json!({"path": "./out/x.csv"})).await;
+    assert_eq!(out.text, "k\n1\n1\n");
+    let out = e
+        .ok(
+            "csv.clean",
+            json!({"path": "out/x.csv", "out": "out/y.csv"}),
+        )
+        .await;
+    assert!(
+        out.text
+            .starts_with(&format!("wrote: {}\n", e.shown("out/y.csv"))),
+        "{}",
+        out.text
+    );
+    assert!(e.files("out").join("y.csv").is_file());
+    e.ok("diff", json!({"a": "out/x.csv", "b": "out/y.csv"}))
+        .await;
+    // A base file of the same relative path wins and the note names the run's one.
+    std::fs::create_dir_all(e.p("out")).unwrap();
+    std::fs::write(e.p("out/x.csv"), "base").unwrap();
+    let out = e.ok("fs.read", json!({"path": "out/x.csv"})).await;
+    assert!(out.text.starts_with("base\n"), "{}", out.text);
+    assert!(
+        out.text.contains(&format!(
+            "this run's {} has the same name",
+            e.shown("out/x.csv")
+        )),
+        "{}",
+        out.text
+    );
+    // Once the base file is gone the run's file is the one deleted, as Read (in runs/).
+    std::fs::remove_file(e.p("out/x.csv")).unwrap();
+    e.ok("fs.delete", json!({"path": "out/x.csv"})).await;
+    assert!(!e.files("out").join("x.csv").exists());
+    assert_eq!(e.last(), (Some(Class::Read), Some(LedgerMode::Allow)));
 }
 
 #[tokio::test]
@@ -241,13 +344,17 @@ async fn bare_read_falls_back_to_files_and_the_base_wins() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("nowhere.md"), "{err}");
-    // An explicit relative path never falls back.
+    // D-146: every relative path falls back, `./name` too; an absolute one never does.
     std::fs::write(e.files("only.md"), "x").unwrap();
+    assert_eq!(
+        e.ok("fs.read", json!({"path": "./only.md"})).await.text,
+        "x"
+    );
+    assert_eq!(e.ok("fs.read", json!({"path": "only.md"})).await.text, "x");
     assert!(e
-        .call("fs.read", json!({"path": "./only.md"}))
+        .call("fs.read", json!({"path": slash(&e.p("only.md"))}))
         .await
         .is_err());
-    assert_eq!(e.ok("fs.read", json!({"path": "only.md"})).await.text, "x");
 }
 
 #[tokio::test]
