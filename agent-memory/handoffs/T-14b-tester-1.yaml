@@ -1,0 +1,21 @@
+from: tester-1
+to: next (servers suborch, T-14b rust-coder)
+task: T-14b
+date: "2026-10-26"
+state: "bench/results/accept-T-14b.md written at 19a3a60 (code 3a9cd80): 21 pass, 5 fail, 1 not-run, Verdict: red. Items 1, 2, 3, 4 (stash/commit -a), 5 (seal, end to end with 17 live plants), 6 (existing-folder junction race, 1200 calls), 7 (dotfiles scratch, git names strict) and 8 pass, each break-checked red on a throwaway worktree. Fails: 4b git commit --pathspec-from-file reaching runs/ is Fill; 6b fs.mkdir / fs.write into a not-yet-existing subfolder create folders through a swapped junction (check_parent skips a missing parent, create_dir_all runs before the check); 7b cd runs/x && yarn --version is Read while .yarnrc(.yml) in runs/ is now a Read write (D-545); 7c (pre-existing) rust-toolchain.toml path toolchain makes a Read cargo --version run a planted exe, shown end to end; workspace run red only from those plus the B-199 sb-driver flake (passed on rerun). Docs rows: xlsx, pdf, docx pass; pptx not-run (python-pptx missing). Vault canary: 0 hits everywhere."
+not_done: "1) Coder fixes for 4b, 6b, 7b (review-T-14b Blocking and should-fix 1 and 6); the added tests in crates/srv-files/tests/accept_t14b.rs are the acceptance for them. 2) 7c needs a new servers task from supreme (RUNS_CODE --version exception for programs that read cwd config: rustup proxies, pytest, mvn, dotnet). 3) Re-run accept after the fixes. 4) pptx row needs python-pptx in the environment."
+gotchas:
+  - "cargo test -p srv-files without --no-fail-fast stops at the first failing test binary, so accept_t14b_* and contract_paths silently do not run; use --no-fail-fast for totals."
+  - "cargo test sets RUSTUP_TOOLCHAIN for its children, which beats rust-toolchain.toml; the toolchain probe removes it, since the MCP server is not started by cargo."
+  - "The Bash tool refuses rm with an unguarded variable target; use \"${M:?}\"/* for marker cleanup in scripts."
+  - "accept_t14b_home and accept_t14b_seal set HOME (and SB_BASH) for their whole process: keep one test per binary."
+  - "Race tests are timing based (T14B_RACE_ITERS, default 600); with safeio's verify broken the existing-folder race went red at call 210, the new-subfolder race at calls 2 and 23."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/srv-files/tests/accept_t14b.rs
+  - crates/srv-files/tests/accept_t14b_home.rs
+  - crates/srv-files/tests/accept_t14b_seal.rs
+  - bench/results/accept-T-14b.md
+  - agent-memory/handoffs/T-14b-tester-1.yaml
+verify: "export CARGO_TARGET_DIR=F:/sb-swarm/target-servers TMP=F:/sb-swarm/tmp-servers TEMP=F:/sb-swarm/tmp-servers && cargo test -p srv-files -j 2 --no-fail-fast"

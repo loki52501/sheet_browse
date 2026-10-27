@@ -218,8 +218,6 @@ fn read_only_controls_stay_below_delete() {
             "set -euo pipefail; ls",
             "for f in a b; do echo $f; done",
             "f=runs/x/a.txt; cat \"$f\"",
-            "cargo --version",
-            "python --version",
             "gh pr list --state open",
             "gh run view 123 --log",
             "gh api repos/a/b",
@@ -374,9 +372,31 @@ fn build_tools_run_project_code_s2() {
         ],
         Class::Delete,
     );
-    assert_eq!(class(&f, "cargo --version"), Class::Read);
-    assert_eq!(class(&f, "go version"), Class::Read);
-    assert_eq!(class(&f, "make --version"), Class::Read);
+    // D-550: a version probe reads project config (rust-toolchain.toml, go.mod
+    // toolchain, .yarnrc, global.json, shims), so it is Delete too, in runs/ and outside.
+    for line in [
+        "cargo --version",
+        "go version",
+        "make --version",
+        "python --version",
+        "yarn --version",
+        "dotnet --version",
+        "mvn --version",
+        "pytest --version",
+        "docker version",
+        "cd runs/x && cargo --version",
+        "cd runs/x && yarn --version",
+    ] {
+        let v = classify(&f.roots, &f.roots.base, line, false);
+        assert_eq!(v.class, Class::Delete, "{line}");
+    }
+    let v = classify(
+        &f.roots,
+        &f.roots.base,
+        "cd runs/x && cargo --version",
+        false,
+    );
+    assert!(v.why().contains("project config"), "{}", v.why());
 }
 
 #[test]
@@ -856,5 +876,331 @@ fn every_forbidden_name_is_delete_anywhere() {
         ] {
             assert_eq!(class(&f, &line), Class::Delete, "{line}");
         }
+    }
+}
+
+/// A repository rooted at the base folder (the one that holds runs/), as git finds it.
+fn base_repo(f: &Fx, config: &str) {
+    let git = f.roots.base.join(".git");
+    std::fs::create_dir_all(git.join("hooks")).unwrap();
+    std::fs::write(git.join("config"), config).unwrap();
+}
+
+/// T-14b item 3 (D-525 (3), D-546): updating an existing repository outside runs/ in
+/// place keeps the D-523 class of local git: Fill, never Read; in a repository whose
+/// working tree is a configuration folder it is Delete.
+#[test]
+fn in_place_updates_of_a_repo_outside_runs_keep_their_class() {
+    let f = fx();
+    base_repo(&f, "[core]\n\tbare = false\n");
+    std::fs::write(f.roots.base.join(".gitignore"), "runs/\n").unwrap();
+    assert_all(
+        &f,
+        &[
+            "git pull",
+            "git pull --rebase",
+            "git pull --ff-only origin main",
+            "git checkout main",
+            "git switch main",
+            "git stash pop",
+            "git stash apply",
+            "git merge feat",
+            "git rebase main",
+            "git cherry-pick abc123",
+        ],
+        Class::Fill,
+    );
+    // The same updates in a repository whose tree is a configuration folder.
+    let cfg = f.roots.base.join(".config").join("app");
+    std::fs::create_dir_all(cfg.join(".git")).unwrap();
+    assert_all(
+        &f,
+        &[
+            "git -C .config/app pull",
+            "git -C .config/app checkout main",
+            "git -C .config/app stash pop",
+        ],
+        Class::Delete,
+    );
+}
+
+/// T-14b item 4 (D-546): `git stash` and `git commit -a` take the files of the whole
+/// working tree; when that tree holds runs/ (the run's own files, a repository planted
+/// there) and runs/ is not ignored, they are Delete like `git add -A`. `stash -a` takes
+/// ignored files too. In the planted repository itself git is Delete (D-525 (3)).
+#[test]
+fn stash_and_commit_all_reaching_runs_are_delete() {
+    let f = fx();
+    base_repo(&f, "[core]\n\tbare = false\n");
+    let planted = f.roots.runs.join("x").join("r");
+    std::fs::create_dir_all(planted.join(".git").join("hooks")).unwrap();
+    std::fs::write(
+        planted.join(".git").join("config"),
+        "[core]\n\tfsmonitor = rm -rf ../../../file.txt\n",
+    )
+    .unwrap();
+    assert_all(
+        &f,
+        &[
+            "git stash -u",
+            "git stash push -u",
+            "git stash push --include-untracked",
+            "git stash save -u wip",
+            "git stash",
+            "git stash -a",
+            "git commit -a -m x",
+            "git commit -am x",
+            "git commit --all -m x",
+            "git commit -m x runs/x/r",
+            "git commit -m x .",
+            "git stash push -u -- runs",
+            "git -C runs/x/r stash -u",
+            "git -C runs/x/r commit -a -m x",
+            "cd runs/x/r && git stash -u",
+        ],
+        Class::Delete,
+    );
+    // Paths that cannot reach runs/ keep the class of local git.
+    assert_all(
+        &f,
+        &[
+            "git commit -m x",
+            "git commit -m x src",
+            "git stash push -u -- src",
+        ],
+        Class::Fill,
+    );
+    // With runs/ ignored, stash -u and commit -a leave it alone; stash -a does not.
+    std::fs::write(f.roots.base.join(".gitignore"), "target/\nruns/\n").unwrap();
+    assert_all(
+        &f,
+        &[
+            "git stash -u",
+            "git stash",
+            "git commit -a -m x",
+            "git commit -am x",
+        ],
+        Class::Fill,
+    );
+    assert_all(
+        &f,
+        &[
+            "git stash -a",
+            "git stash push --all",
+            "git -C runs/x/r stash -u",
+            "git -C runs/x/r commit -a -m x",
+        ],
+        Class::Delete,
+    );
+    let v = classify(&f.roots, &f.roots.base, "git stash -a", false);
+    assert!(v.why().contains("runs/"), "{}", v.why());
+}
+
+/// T-14b item 5 (D-547): a line whose git is all Read runs sealed; a commit (or any git
+/// above Read) in the line runs git as configured. A repository config that names a
+/// program the seal cannot switch off makes a Read git Delete; hooks, fsmonitor and
+/// credential helpers are switched off by the seal and keep it Read.
+#[test]
+fn read_git_is_sealed_or_raised() {
+    let f = fx();
+    base_repo(
+        &f,
+        "[core]\n\tfsmonitor = sh -c 'echo x > m'\n\thooksPath = hooks2\n[credential]\n\thelper = evil\n",
+    );
+    for line in [
+        "git status",
+        "git log --oneline -3 && git diff --stat",
+        "gh pr list",
+        "git status && echo x > notes.txt",
+    ] {
+        let v = classify(&f.roots, &f.roots.base, line, false);
+        assert!(v.class <= Class::Fill, "{line}: {:?} {}", v.class, v.why());
+        assert!(v.seal_git(), "{line}");
+    }
+    for line in [
+        "git status && git commit -m x",
+        "git fetch",
+        "gh pr create -t x -b y",
+    ] {
+        let v = classify(&f.roots, &f.roots.base, line, false);
+        assert!(v.runs_git && !v.seal_git(), "{line}");
+    }
+    assert!(!classify(&f.roots, &f.roots.base, "ls", false).seal_git());
+    let cases: &[(&str, &str)] = &[
+        (
+            "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n",
+            "filter.lfs.clean",
+        ),
+        (
+            "[diff \"x\"]\n\ttextconv = sh -c 'echo x > m'\n",
+            "diff.x.textconv",
+        ),
+        ("[diff \"x\"]\n\tcommand = evil\n", "diff.x.command"),
+        ("[diff]\n\texternal = evil\n", "diff.external"),
+        ("[include]\n\tpath = other.cfg\n", "include.path"),
+        (
+            "[includeIf \"gitdir:x/\"]\n\tpath = o.cfg\n",
+            "includeif.gitdir:x/.path",
+        ),
+        (
+            "[remote \"o\"]\n\turl = x\n\tuploadpack = evil\n",
+            "remote.o.uploadpack",
+        ),
+        ("[filter \"y\"] clean = evil\n", "filter.y.clean"),
+        (
+            "[filter \"y\"]\n\tdummy = a \\\n[user]\n\tclean = evil\n",
+            "filter.y.clean",
+        ),
+    ];
+    for (cfg, key) in cases {
+        base_repo(&f, cfg);
+        let v = classify(&f.roots, &f.roots.base, "git status", false);
+        assert_eq!(v.class, Class::Delete, "{cfg}");
+        assert!(v.why().contains(key), "{cfg}: {}", v.why());
+        assert!(!v.seal_git());
+    }
+    // A header inside a continued value is value: git reads user.name, no driver.
+    base_repo(
+        &f,
+        "[user]\n\tname = a \\\n[filter \"y\"]\n\tclean = evil\n",
+    );
+    assert_eq!(class(&f, "git status"), Class::Read);
+    // A submodule's git folder counts too.
+    base_repo(&f, "[core]\n\tbare = false\n");
+    let m = f.roots.base.join(".git").join("modules").join("sub");
+    std::fs::create_dir_all(&m).unwrap();
+    std::fs::write(m.join("config"), "[diff \"z\"]\n\ttextconv = evil\n").unwrap();
+    assert_eq!(class(&f, "git status"), Class::Delete);
+}
+
+/// D-554 (review-T-14b should-fix 2): a repository config this parser cannot read as git
+/// does fails closed: not UTF-8 (git reads the bytes), or a byte order mark before the
+/// first header (git skips it). A plain file with the same harmless keys stays Read.
+#[test]
+fn unreadable_repo_config_makes_read_git_delete() {
+    let f = fx();
+    let git = f.roots.base.join(".git");
+    base_repo(&f, "[core]\n\tbare = false\n");
+    assert_eq!(class(&f, "git status"), Class::Read);
+    let cases: &[(&[u8], &str)] = &[
+        (
+            b"\xef\xbb\xbf[filter \"x\"]\n\tclean = evil\n",
+            "byte order mark",
+        ),
+        (b"\xef\xbb\xbf[core]\n\tbare = false\n", "byte order mark"),
+        (b"# caf\xe9\n[filter \"x\"]\n\tclean = evil\n", "not UTF-8"),
+        (b"[user]\n\tname = \xff\xfe\n", "not UTF-8"),
+    ];
+    for (bytes, why) in cases {
+        std::fs::write(git.join("config"), bytes).unwrap();
+        let v = classify(&f.roots, &f.roots.base, "git status", false);
+        assert_eq!(v.class, Class::Delete, "{bytes:?}");
+        assert!(v.why().contains(why), "{bytes:?}: {}", v.why());
+        assert!(!v.seal_git());
+    }
+    // In a submodule's git folder too.
+    base_repo(&f, "[core]\n\tbare = false\n");
+    let m = git.join("modules").join("sub");
+    std::fs::create_dir_all(&m).unwrap();
+    std::fs::write(m.join("config"), b"\xef\xbb\xbf[core]\n").unwrap();
+    assert_eq!(class(&f, "git status"), Class::Delete);
+}
+
+#[test]
+fn config_keys_read_like_git() {
+    let keys = config_keys(
+        "# c\n[core]\n\tbare = false ; x\n[filter \"a b\"]\n\tclean = x \\\n[diff \"q\"]\n\tsmudge = y\n[remote.origin] url = u\n\tvcs\r\n",
+    );
+    assert_eq!(
+        keys,
+        vec![
+            "core.bare",
+            "filter.a b.clean",
+            "filter.a b.smudge",
+            "remote.origin.url",
+            "remote.origin.vcs"
+        ]
+    );
+}
+
+/// T-14b item 2 (D-544): Git's system config folder of the runner's Git is a code
+/// location (appending to an existing file there was Fill).
+#[test]
+fn writes_to_git_system_config_are_delete() {
+    let f = fx();
+    for dir in crate::shell::git_config_dirs() {
+        let gc = paths::plain(&dir.join("gitconfig")).replace('\\', "/");
+        for line in [
+            format!("echo x >> '{gc}'"),
+            format!("echo x > '{gc}'"),
+            format!("tee -a '{gc}' < runs/x/a.txt"),
+        ] {
+            assert_eq!(class(&f, &line), Class::Delete, "{line}");
+        }
+    }
+}
+
+/// D-550 (reverts D-545, review-T-14b Blocking): a dotfile in a run folder is Delete,
+/// whatever writes it, like git's names and code folders there.
+#[test]
+fn dotfiles_in_runs_are_delete_again() {
+    let f = fx();
+    assert_all(
+        &f,
+        &[
+            "echo x > runs/x/.env",
+            "echo x > runs/2026-10-25T00-00-00-t/files/.something",
+            "touch runs/x/.eslintrc",
+            "cp runs/x/a.txt runs/x/.bashrc",
+            "mv runs/x/a.txt runs/x/.hidden",
+            "echo 'yarn-path \"e.js\"' > runs/x/.yarnrc",
+            "cp runs/x/a.txt runs/x/.yarnrc.yml",
+            "echo x > runs/x/.pytest.ini",
+            "echo x > runs/x/r/.git/hooks/pre-commit",
+            "echo x > runs/x/.git",
+            "echo '* filter=x' > runs/x/.gitattributes",
+            "echo x > runs/x/.gitmodules",
+            "echo x > runs/x/.vscode/tasks.json",
+            "echo x >> .env",
+        ],
+        Class::Delete,
+    );
+}
+
+/// T-14b item 8 (D-548): a fetch to stdout is Read already (no -o/-O, no redirection,
+/// no data); python -c stays Delete: the interpreter runs startup code (site, .pth
+/// files) and any expression can write.
+#[test]
+fn fetch_to_stdout_is_read_and_python_c_stays_delete() {
+    let f = fx();
+    let fetch = ["cu", "rl"].concat();
+    let lines: Vec<String> = [
+        "https://example.com",
+        "-s https://api.example.com/a",
+        "-sSL -H 'Accept: application/json' 'https://api.example.com/a?b=1&c=2'",
+        "-s https://api.example.com/a | jq .name",
+        "-sI https://example.com",
+    ]
+    .iter()
+    .map(|a| format!("{fetch} {a}"))
+    .collect();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    assert_all(&f, &refs, Class::Read);
+    assert_eq!(
+        class(&f, &format!("{fetch} -s https://x > runs/x/p.json")),
+        Class::Read
+    );
+    assert_eq!(
+        class(&f, &format!("{fetch} -s https://x > page.json")),
+        Class::Fill
+    );
+    for line in [
+        "python3 -c 'print(1+1)'",
+        "python -c \"print(len('abc'))\"",
+        "python3 -I -S -c 'print(2)'",
+    ] {
+        let v = classify(&f.roots, &f.roots.base, line, false);
+        assert_eq!(v.class, Class::Delete, "{line}");
+        assert!(v.why().contains("interpreters"), "{}", v.why());
     }
 }

@@ -597,7 +597,7 @@ impl ToolHandler for Docs {
         let (out, v) = self.plan_out(&roots, &a)?;
         recheck(ctx, &v)?;
         if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent)
+            crate::safeio::create_dirs(parent)
                 .map_err(|e| ToolError::Failed(format!("mkdir: {e}")))?;
         }
         let out_s = crate::paths::plain(&out);

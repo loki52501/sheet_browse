@@ -19,6 +19,7 @@ pub mod fs;
 pub mod history;
 pub mod paths;
 pub mod proc;
+pub mod safeio;
 pub mod shell;
 pub mod text;
 pub mod util;

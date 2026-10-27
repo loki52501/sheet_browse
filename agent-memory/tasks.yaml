@@ -138,8 +138,15 @@ tasks:
     step: 3
     title: "srv-files follow-ups: pptx.write acceptance needs python-pptx installed (row 6d not-run); docs tests need SB_PYTHON with openpyxl; $HOME/bin missed when the bash PATH probe fails (add <home>/bin for every paths::homes() entry or fail closed); <msys_root>/etc/gitconfig and mingw64/etc not code locations yet; updating an existing repo outside runs/ in place (pull, checkout, stash pop) keeps its D-523 class; git stash -u / commit -a in a planted nested repo; hooks/drivers already present in a repo and an existing global git config still run under Read-class git; TOCTOU between reclassify and the syscall for links/junctions; dotfiles inside runs/ cost an ask (over-match); B-520..B-522 need supreme answers; not run on Linux/macOS"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: done
+    owner: servers/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/servers-T14b
+  - id: T-14c
+    step: 2
+    title: "T-14b review should-fix (bench/results/review-T-14b.md rounds 1-4): submodule scan stops silently at its 400-file/depth-6 cap (raise to Delete); find_repo misses non-absorbed submodule .git folders and fails open when it cannot resolve a gitdir; an invalid .git folder stops the classifier's walk while git keeps walking up; cache the seal's config reads (two git spawns per Read git line); the seal drops a global filter.lfs and shows an empty global file to git config --global; CODE_DIRS lacks project dot folders (.mvn, .volta, .yarn); off Windows create_dirs leaves a one-syscall window per level; D-550 (2) cost: --version of make/node/python/java/gcc/clang/docker could be Read when which finds a real .exe; unit test panics without git on PATH; accept_t14b_bare does not assert each line ran Allow with no ask; no_bare_discovery always sets pair 0 (an approved line setting only GIT_CONFIG_KEY_0 replaces it); B-594 (Account asks on user-global git config proceed on timeout)."
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
     status: todo
-    owner: servers
   - id: T-15
     step: 3
     title: "srv-cli: gh, dns, flags, allowlisted cli; ladder rungs 3, 5, 9"

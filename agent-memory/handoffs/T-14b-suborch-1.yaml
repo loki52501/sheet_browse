@@ -1,0 +1,13 @@
+from: servers/suborch
+to: servers/suborch (next session), then supreme
+task: T-14b
+date: "2026-10-26"
+state: "Claimed (9a4cb59) on swarm/servers-T14b in F:/sb-swarm/wt/servers/.wt/T14b, from main. rust-coder-1 done (3a9cd80, D-543..D-549): home bin for every home, msys/mingw64/ProgramData Git config folders, in-place repo updates stay Fill, stash/commit -a Delete with non-ignored runs/, sealed Read-class git, open-then-verify writes, dotfiles in runs/ scratch except git/curl/wget names, python -c stays Delete. srv-files 105 passed. Round 1 reviewer and tester running."
+not_done: "Round 1 results, round 2 fixes, pr-ready, PR. pptx/openpyxl rows stay not-run (environment); Linux/macOS not run."
+gotchas:
+  - "T-13d item 8's 60 s asks for a fetch to stdout come from srv-cli's cli classifier, not srv-files (D-548)."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/handoffs/T-14b-suborch-1.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-files"
