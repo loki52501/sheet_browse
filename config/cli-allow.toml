@@ -11,7 +11,12 @@
 #   delete = ["sub", ...]         first arguments that delete: class Delete (asks)
 #   default = "refuse"            any other first argument: read | write | delete | refuse
 #   deny_flags = ["-x", "--y"]    refused anywhere: as given, as --y=value, -xvalue, and a
-#                                 short letter anywhere in a single-dash cluster (-ax, -abx)
+#                                 short letter in a single-dash cluster (-ax, -abx)
+#   value_flags = ["-S"]          short flags that take a value, which may follow in the
+#                                 same token: a cluster is read left to right and ends at
+#                                 one of these (-Sconfig is -S "config", not -c). List only
+#                                 letters that take a value in every allowed subcommand;
+#                                 an unlisted one only makes the check stricter.
 #   timeout_secs = 60             optional cap on one run
 #
 # Shipped with read-only examples only. Add write entries yourself; each one asks first.
@@ -38,11 +43,17 @@ deny_flags = [
   "--upload-pack",
   "--receive-pack",
 ]
+# Take a value in every read subcommand above that has them (log/diff/show: pickaxe -S/-G,
+# -L range, -O orderfile, attached -U<n> -M<n> -B<n>; blame: -L, -S revs file, -M<n>).
+# Not -n, -l or -u: they are boolean in blame or log.
+value_flags = ["-S", "-G", "-L", "-O", "-U", "-M", "-B"]
 
 [programs.dig]
 default = "read"
 # -f reads queries from a file; -k and -y use TSIG keys.
 deny_flags = ["-f", "-k", "-y"]
+# -b address, -c class, -p port, -q name, -t type, -x address (dig -qkey.example.com).
+value_flags = ["-b", "-c", "-p", "-q", "-t", "-x"]
 
 [programs.nslookup]
 default = "read"
