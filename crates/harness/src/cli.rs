@@ -35,7 +35,7 @@ use harness_core::memory::{
 };
 use harness_core::run::{is_run_id, RunFolder, RunId};
 use harness_core::sched::{self, next_after, parse_cron, RunSpec, Runner, SystemClock};
-use harness_core::vault::{scrub, EntryKind};
+use harness_core::vault::{scrub, vault_literal, vault_refs, EntryKind};
 use serde_json::json;
 use std::io::Write;
 use std::path::PathBuf;
@@ -292,9 +292,13 @@ pub async fn execute(cli: Cli, ctx: &Ctx, out: &mut dyn Write) -> Result<(), Cli
             let mode: Mode = mode
                 .parse()
                 .map_err(|e: harness_core::class::UnknownMode| CliError::Usage(e.to_string()))?;
+            // B-186: the domain and class are the rule's key, so scrubbing them would store a
+            // different rule; one holding a vault value is refused instead (rule 2).
+            refuse_vault_value("gate set", "domain", &domain)?;
+            refuse_vault_value("gate set", "class", &class)?;
             ctx.store()
                 .await?
-                .gate_rule_set(&domain, &class, GateRule { mode, strict }, &note)
+                .gate_rule_set(&domain, &class, GateRule { mode, strict }, &scrub(&note))
                 .await?;
             writeln!(
                 out,
@@ -339,6 +343,44 @@ fn cell(s: &str, max: usize) -> String {
 
 fn clean(s: &str) -> String {
     cell(s, 0)
+}
+
+/// `<domain>/<name>` as printed: through [`clean`], so a tool id that holds a vault value
+/// (a folder or row named before the value was in the vault) shows the literal (D-124 (1)).
+fn tool_id(d: &str, n: &str) -> String {
+    clean(&format!("{d}/{n}"))
+}
+
+/// Refuses (Usage) a typed `what` that holds a vault value and cannot be scrubbed because it
+/// is a key (B-186). The error names the vault entries, never the values (rule 2).
+fn refuse_vault_value(cmd: &str, what: &str, s: &str) -> Result<(), CliError> {
+    let scrubbed = scrub(s);
+    if scrubbed == s {
+        return Ok(());
+    }
+    // Entries the scrub added: refs in the scrubbed text minus refs typed literally.
+    let mut typed = vault_refs(s).unwrap_or_default();
+    let mut names: Vec<&str> = Vec::new();
+    for r in vault_refs(&scrubbed).unwrap_or_default() {
+        if let Some(i) = typed.iter().position(|t| *t == r) {
+            typed.swap_remove(i);
+        } else if !names.contains(&r) {
+            names.push(r);
+        }
+    }
+    let names = if names.is_empty() {
+        "a vault entry".to_owned()
+    } else {
+        names
+            .iter()
+            .map(|n| vault_literal(n))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Err(CliError::Usage(format!(
+        "{cmd}: the {what} {} holds the value of {names}; not stored (B-186)",
+        clean(s)
+    )))
 }
 
 fn ts_cell(t: Option<Ts>) -> String {
@@ -471,6 +513,8 @@ async fn schedule_add(
     }
     let store = ctx.store().await?;
     let prompt = scrub(prompt);
+    // Rule 2: stored in schedules.watch_target, so scrubbed like the prompt (D-124 (1)).
+    let watch_target = watch_target.map(|w| scrub(&w));
     let cron = cron.split_whitespace().collect::<Vec<_>>().join(" ");
     let args = |id: i32| {
         json!({"schedule": id, "cron": cron, "kind": kind_str(kind), "prompt": prompt,
@@ -489,7 +533,7 @@ async fn schedule_add(
             (folder, false)
         }
         None => {
-            let task = format!("schedule add `{cron}`: {prompt}\n");
+            let task = scrub(&format!("schedule add `{cron}`: {prompt}\n"));
             let started = ts_now();
             let folder = RunFolder::create_at(&ctx.env.runs_root, "schedule-add", &task, started)?;
             store
@@ -567,7 +611,7 @@ async fn schedule_add(
         out,
         "schedule {id} added: `{cron}` UTC, next {}; parent run {}",
         ts_cell(next),
-        parent.id
+        clean(&parent.id.0)
     )?;
     if kind != ScheduleKind::Cron {
         writeln!(
@@ -683,16 +727,18 @@ async fn print_ledger(ctx: &Ctx, run: &str, out: &mut dyn Write) -> Result<(), C
     let store = ctx.store().await?;
     let id = RunId(run.to_owned());
     let Some(r) = store.run_get(&id).await? else {
-        return Err(CliError::NotFound(format!("no run {run}")));
+        return Err(CliError::NotFound(format!("no run {}", clean(run))));
     };
     writeln!(
         out,
         "run {}  {}  started {}  ended {}  parent {}{}",
-        r.id,
+        clean(&r.id.0),
         status_str(r.status),
         ts_cell(Some(r.started)),
         ts_cell(r.ended),
-        r.parent_run.as_ref().map_or("-", |p| p.0.as_str()),
+        r.parent_run
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |p| clean(&p.0)),
         if r.strict { "  strict" } else { "" }
     )?;
     let events = store.ledger_events(&id).await?;
@@ -808,7 +854,7 @@ async fn tools(ctx: &Ctx, cmd: ToolsCmd, out: &mut dyn Write) -> Result<(), CliE
                         .map(|p| p.is_file())
                         .unwrap_or(false);
                     rows.push(vec![
-                        format!("{d}/{}", cell(&n, 0)),
+                        tool_id(&d, &n),
                         h.map_or_else(|| "-".to_owned(), |h| h.version.to_string()),
                         h.map_or_else(|| "no row".to_owned(), |h| tool_status(h.status)),
                         if h.is_some_and(|h| h.pinned) {
@@ -857,14 +903,19 @@ async fn tools(ctx: &Ctx, cmd: ToolsCmd, out: &mut dyn Write) -> Result<(), CliE
             )?;
         }
         ToolsCmd::Pin { tool } => {
-            let (d, n) = split_tool(&tool)?;
+            let (d, n) = known_tool(&ts, store.as_ref(), &tool).await?;
             let h = ts.set_pinned(store.as_ref(), d, n, true).await?;
-            writeln!(out, "{d}/{n}: pinned ({})", tool_status(h.status))?;
+            writeln!(out, "{}: pinned ({})", tool_id(d, n), tool_status(h.status))?;
         }
         ToolsCmd::Unpin { tool } => {
-            let (d, n) = split_tool(&tool)?;
+            let (d, n) = known_tool(&ts, store.as_ref(), &tool).await?;
             let h = ts.set_pinned(store.as_ref(), d, n, false).await?;
-            writeln!(out, "{d}/{n}: unpinned ({})", tool_status(h.status))?;
+            writeln!(
+                out,
+                "{}: unpinned ({})",
+                tool_id(d, n),
+                tool_status(h.status)
+            )?;
         }
         ToolsCmd::Retire {
             tool,
@@ -873,6 +924,22 @@ async fn tools(ctx: &Ctx, cmd: ToolsCmd, out: &mut dyn Write) -> Result<(), CliE
         } => retire(&ts, store.as_ref(), &tool, why, no_commit, out).await?,
     }
     Ok(())
+}
+
+/// `<domain>/<name>` of a tool that has a `tools.health` row or a file on disk. Pinning or
+/// unpinning anything else is refused (NotFound) instead of creating a row named with
+/// whatever was typed (D-124 (1)).
+async fn known_tool<'a>(
+    ts: &ToolStore,
+    store: &dyn MemoryStore,
+    tool: &'a str,
+) -> Result<(&'a str, &'a str), CliError> {
+    let (d, n) = split_tool(tool)?;
+    let on_disk = ts.try_tool_path(d, n)?.is_file();
+    if !on_disk && ts.health(store, d, n).await?.is_none() {
+        return Err(CliError::NotFound(format!("no tool {}", tool_id(d, n))));
+    }
+    Ok((d, n))
 }
 
 /// T-7 retire by the user: status retired with its why, file moved to `_archive/`, and the
@@ -886,15 +953,16 @@ async fn retire(
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
     let (d, n) = split_tool(tool)?;
+    let id = tool_id(d, n);
     let path = ts.try_tool_path(d, n)?;
     let row = ts.health(store, d, n).await?;
     if row.as_ref().is_some_and(|h| h.pinned) {
         return Err(CliError::Usage(format!(
-            "{d}/{n} is pinned; `harness tools unpin {d}/{n}` first"
+            "{id} is pinned; `harness tools unpin {id}` first"
         )));
     }
     if row.is_none() && !path.is_file() {
-        return Err(CliError::NotFound(format!("no tool {d}/{n}")));
+        return Err(CliError::NotFound(format!("no tool {id}")));
     }
     let mut h = row.unwrap_or(ToolHealth {
         domain: d.to_owned(),
@@ -916,11 +984,15 @@ async fn retire(
     store.tool_health_set(h.clone()).await?;
     let moved = ts.archive(d, n, h.version)?;
     match &moved {
-        Some(to) => writeln!(out, "{d}/{n}: retired, archived to {}", to.display())?,
-        None => writeln!(out, "{d}/{n}: retired (no file to archive)")?,
+        Some(to) => writeln!(
+            out,
+            "{id}: retired, archived to {}",
+            clean(&to.display().to_string())
+        )?,
+        None => writeln!(out, "{id}: retired (no file to archive)")?,
     }
     if let (Some(to), false) = (moved, no_commit) {
-        let msg = format!("tools: retire {d}/{n} by the user (T-7)");
+        let msg = format!("tools: retire {id} by the user (T-7)");
         let paths: Vec<PathBuf> = vec![path, to];
         let hash = ts.git_commit(&paths, &msg)?;
         writeln!(out, "committed {hash}")?;
