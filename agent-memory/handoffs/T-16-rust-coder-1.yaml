@@ -1,0 +1,24 @@
+from: rust-coder-1
+to: reviewer
+task: T-16
+date: "2026-10-26"
+state: "Packages A (watch firing, run preamble; D-140, B-197), B (reflect, proposals, harnessd wiring; D-142, B-189) and C (contacts touch in mcp::dispatch, `harness mcp` mem server; D-141, B-198) build together on swarm/core-T16. Fixes needed were small: one clippy lint in reflect.rs (pinned contains), one in accept_t16_mem.rs (useless format!); mem_server::WATCH_FILE now aliases harness_core::watch::WATCH_FILE. New: crates/harness/tests/accept_t16_reflect.rs (reflect schedule fired through sched::Runner with ReflectLauncher, on MemStore and on a throwaway compose Postgres db: planted stale ephemeral tool retired + archived + tools.retire event in the reflect run's ledger and jsonl + tools.health retired; visit-count retire at 10 not 9 from earlier runs' ledger.jsonl; pinned tool only proposed (T-7); T-8 merge proposed once under the trailing proposals: key; only @phase 1 readers replayed through the readers launcher, scrubbed (a raw vault value planted in an earlier jsonl never reaches the prompt or any file); cron schedules still go to the inner launcher; plus a git-commit test). Unit tests in reflect.rs (History, last_use, replay prompt, tool scan) and proposals.rs (append once, refuse a file whose proposals: is not last, retire id, arg shape, no-fingerprint never grouped). crates/harness/tests/contract_paths.rs pins every harness path in B-189/B-197/B-198. Mutation check (pr-ready 6): unscrubbed replay prompt, visits_since = 0, planners replayed, proposals dedupe removed, sweep skipped, contacts never touched, timeout_proceed touching contacts: each turns at least one test red. mcp.example.json gains harness-mem (`harness mcp`) so ladder rung 6 can reach the mem tools."
+not_done: "1. Review and acceptance (tester runs ladder rungs 6, 7, 8 in a Claude Code session; this coder did not). 2. tasks.yaml T-16 status left as is for the sub-orchestrator. 3. B-189 (I-1 ledger_since, I-7 ToolStore::domains) and B-197/B-198 await supreme; workarounds in place. 4. The readers-only replay session relies on harness-web being the only server allowed (--allowedTools mcp__harness-web plus the deny list); a live replay against srv-web was not run here. 5. MCP tool names with dots (review.add) follow the existing servers' convention (csv.clean); not re-checked against Claude Code's tool-name rules."
+gotchas:
+  - "Builds share the machine with other areas: a first full build took 19 minutes and one rustc died with STATUS_STACK_BUFFER_OVERRUN (out of memory) at -j 2; rerunning fixed it. Run long cargo commands in the background and wait on the log, not on a sleep."
+  - "cargo test without --no-fail-fast stops at the first failing target, so a red lib test hides the integration tests."
+  - "toolstore @args are whitespace-separated (a:string b?:number); a comma makes parse_header fail."
+  - "Reflect history comes from runs/*/ledger.jsonl only (B-189); a test that wants reflect to see a raw value must append the jsonl line itself, since Ledger::write scrubs."
+decisions_made: [D-142]
+blockers_opened: [B-189]
+files_touched:
+  - crates/harness/src/reflect.rs
+  - crates/harness/src/proposals.rs
+  - crates/harness/src/mem_server.rs
+  - crates/harness/tests/accept_t16_reflect.rs
+  - crates/harness/tests/accept_t16_mem.rs
+  - crates/harness/tests/contract_paths.rs
+  - mcp.example.json
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/wt/core/wt/T16/target SB_VAULT_CANARY=sbcanary-x-<random hex> cargo test -j 2 -p harness-core -p harness --no-fail-fast"

@@ -1,0 +1,19 @@
+from: servers/suborch
+to: supreme
+task: T-14b
+date: "2026-10-27"
+state: "T-14b done on swarm/servers-T14b (origin/main merged in), PR to main opened. Items: D-543 <home>/bin for every home; D-544 msys etc, mingw64/etc, ProgramData Git are config folders; D-546 in-place repo updates outside runs/ stay Fill, stash/commit -a Delete with a non-ignored runs/; D-547 Read-class git sealed; D-549 open-then-verify writes; D-548 python -c stays Delete. Round 1 Blocking (D-545 dotfile relaxation lowered a class: .yarnrc + yarn --version) fixed by reverting it (D-550 (1)); also D-550 (2) every RUNS_CODE program use is Delete incl. --version (rust-toolchain.toml + cargo --version ran a planted cargo), D-551 commit --pathspec-from-file, D-552 verified create_dirs (NtCreateFile), D-553/D-554 fail-closed link and config checks. Round 2 Blocking (planted bare repo ran its diff driver under sealed git) fixed by D-555; round 3 Blocking (same on unsealed lines) fixed by D-556 with a dispatch test and live bash control (tests/accept_t14b_bare.rs). Round 4 approve, Blocking none. Accept: bench/results/accept-T-14b.md is round 1 (21 pass, 5 fail, 1 not-run pptx); the failing rows' tests (4b, 6b, 7b, 7c in accept_t14b.rs) pass now. cargo test --workspace -j 2 --no-fail-fast: 1302 passed 0 failed 15 ignored. Merge gate ok."
+not_done: "T-14c (tasks.yaml): review should-fix list. B-594 (blockers.yaml): Account asks on user-global git config proceed on timeout; a reviewer probe changed the user's real ~/.gitconfig that way (reverted, verified clean: 12 lines, no safe key)."
+gotchas:
+  - "Probes that run real shell lines through dispatch use the real HOME: an Account line whose ask times out proceeds and can change the user's global config. Point HOME at a scratch folder in probes."
+  - "D-550 (2) makes python/cargo/go/make --version ask; a narrower safe rule is a T-14c candidate."
+decisions_made: [D-555, D-556]
+blockers_opened: [B-594]
+files_touched:
+  - crates/srv-files/src/shell/mod.rs
+  - crates/srv-files/tests/accept_t14b_bare.rs
+  - agent-memory/decisions.yaml
+  - agent-memory/blockers.yaml
+  - agent-memory/tasks.yaml
+  - agent-memory/handoffs/T-14b-suborch-2.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-files --no-fail-fast"

@@ -394,10 +394,16 @@ impl ToolHandler for Fs {
                     ))),
                 }
             }
-            (Op::Write, Target::Path(p)) => write(&roots, parse(&args)?, &p),
+            (Op::Write, Target::Path(p)) => write(
+                &roots,
+                parse(&args)?,
+                &p,
+                plan.verdict.class >= Class::Delete,
+            ),
             (Op::Move, Target::Move(m)) => mv(&roots, parse(&args)?, m),
             (Op::Mkdir, Target::Path(p)) => {
-                std::fs::create_dir_all(&p).map_err(|e| io_err("mkdir", &roots, &p, e))?;
+                // One level at a time below a checked handle (D-552).
+                crate::safeio::create_dirs(&p).map_err(|e| io_err("mkdir", &roots, &p, e))?;
                 Ok(ToolOutput {
                     text: format!("made {}", text::one_line(&roots.shown(&p), 300)),
                     ..ToolOutput::default()
@@ -525,7 +531,7 @@ fn glob(roots: &Roots, a: GlobArgs) -> Result<ToolOutput, ToolError> {
 }
 
 /// `p`: [`Roots::resolve_out`] of `a.path`.
-fn write(roots: &Roots, a: WriteArgs, p: &Path) -> Result<ToolOutput, ToolError> {
+fn write(roots: &Roots, a: WriteArgs, p: &Path, links_ok: bool) -> Result<ToolOutput, ToolError> {
     use std::io::Write;
     if paths::is_dir(p) {
         return Err(ToolError::Args(format!(
@@ -534,15 +540,16 @@ fn write(roots: &Roots, a: WriteArgs, p: &Path) -> Result<ToolOutput, ToolError>
         )));
     }
     if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| io_err("mkdir", roots, parent, e))?;
+        crate::safeio::create_dirs(parent).map_err(|e| io_err("mkdir", roots, parent, e))?;
     }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(a.append)
-        .truncate(!a.append)
-        .open(p)
-        .map_err(|e| io_err("write", roots, p, e))?;
+    // Opened, then checked to be the classified file, before anything is replaced (D-549).
+    let mut f = crate::safeio::open_write(p, a.append).map_err(|e| io_err("write", roots, p, e))?;
+    if !crate::safeio::links_ok(&f, links_ok) {
+        return Err(ToolError::Failed(format!(
+            "not written: {} gained another hard link after the check; call it again",
+            text::one_line(&roots.shown(p), 300)
+        )));
+    }
     f.write_all(a.content.as_bytes())
         .and_then(|_| f.flush())
         .map_err(|e| io_err("write", roots, p, e))?;
@@ -584,13 +591,16 @@ fn mv(roots: &Roots, a: MoveArgs, m: MovePlan) -> Result<ToolOutput, ToolError> 
         return Err(ToolError::Args("cannot move a folder into itself".into()));
     }
     if let Some(parent) = m.to.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| io_err("mkdir", roots, parent, e))?;
+        crate::safeio::create_dirs(parent).map_err(|e| io_err("mkdir", roots, parent, e))?;
     }
+    // Both ends checked on a handle just before the rename (D-549).
+    crate::safeio::check_entry(&m.from).map_err(|e| io_err("move", roots, &m.from, e))?;
+    crate::safeio::check_parent(&m.to).map_err(|e| io_err("move", roots, &m.to, e))?;
     if let Err(e) = std::fs::rename(&m.from, &m.to) {
         // Across volumes rename fails; a file is copied then removed, a folder is not.
         if m.from.is_file() {
             std::fs::copy(&m.from, &m.to).map_err(|e| io_err("copy", roots, &m.from, e))?;
-            std::fs::remove_file(&m.from).map_err(|e| io_err("remove", roots, &m.from, e))?;
+            crate::safeio::remove_file(&m.from).map_err(|e| io_err("remove", roots, &m.from, e))?;
         } else {
             return Err(io_err("move", roots, &m.from, e));
         }
@@ -612,6 +622,8 @@ fn delete(roots: &Roots, a: DeleteArgs, p: &Path) -> Result<ToolOutput, ToolErro
     let shown = text::one_line(&roots.shown(p), 300);
     let meta = std::fs::symlink_metadata(p).map_err(|e| io_err("delete", roots, p, e))?;
     if meta.is_dir() {
+        // Checked on a handle just before the path-based removal (D-549).
+        crate::safeio::check_entry(p).map_err(|e| io_err("delete", roots, p, e))?;
         if a.recursive {
             // remove_dir_all does not follow links or junctions inside the folder.
             std::fs::remove_dir_all(p)
@@ -624,7 +636,7 @@ fn delete(roots: &Roots, a: DeleteArgs, p: &Path) -> Result<ToolOutput, ToolErro
             ))
         })?;
     } else {
-        std::fs::remove_file(p).map_err(|e| io_err("delete", roots, p, e))?;
+        crate::safeio::remove_file(p).map_err(|e| io_err("delete", roots, p, e))?;
     }
     Ok(ToolOutput {
         text: format!("deleted {shown}"),

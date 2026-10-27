@@ -131,10 +131,12 @@ impl ToolHandler for Clean {
             .map_err(|e| ToolError::Failed(format!("read {}: {e}", roots.shown(&input))))?;
         let cleaned = clean(table, &a.rules)?;
         if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent)
+            crate::safeio::create_dirs(parent)
                 .map_err(|e| ToolError::Failed(format!("mkdir: {e}")))?;
         }
-        write_table(&out, delim, &cleaned.header, &cleaned.rows)
+        // An out file hard-linked only after the check is refused (D-553), as fs.write.
+        let links_ok = v.class >= Class::Delete;
+        write_table(&out, delim, &cleaned.header, &cleaned.rows, links_ok)
             .map_err(|e| ToolError::Failed(format!("write {}: {e}", roots.shown(&out))))?;
         let report = cleaned.report(&text::one_line(&roots.shown(&out), 300));
         Ok(ToolOutput {
@@ -234,11 +236,18 @@ fn write_table(
     delim: u8,
     header: &[String],
     rows: &[Vec<String>],
+    links_ok: bool,
 ) -> Result<(), String> {
-    let mut w = ::csv::WriterBuilder::new()
-        .delimiter(delim)
-        .from_path(path)
-        .map_err(|e| e.to_string())?;
+    // Opened, then checked to be the classified file, before it is replaced (D-549), and
+    // refused when it gained a hard link the approved class did not count (D-553).
+    let f = crate::safeio::open_write(path, false).map_err(|e| e.to_string())?;
+    if !crate::safeio::links_ok(&f, links_ok) {
+        return Err(format!(
+            "not written: {} gained another hard link after the check; call it again",
+            crate::paths::plain(path)
+        ));
+    }
+    let mut w = ::csv::WriterBuilder::new().delimiter(delim).from_writer(f);
     w.write_record(header).map_err(|e| e.to_string())?;
     for r in rows {
         w.write_record(r).map_err(|e| e.to_string())?;

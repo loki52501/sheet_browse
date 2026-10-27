@@ -1,0 +1,25 @@
+from: tester-1
+to: servers sub-orchestrator, then rust-coder for the T-15b round 2 fixes
+task: T-15b
+date: "2026-10-26"
+state: "Acceptance written to bench/results/accept-T-15b.md: Verdict red. The four T-15b items hold for every case the coder named and for my adversarial cases (tests/accept_t15b.rs 7 passed, tests/accept_t15b_proxy.rs 1 passed): loopback spellings ([::1], LOCALHOST, 127.0.0.2, 2130706433, 0x7f.1) bypass a set HTTP(S)_PROXY/ALL_PROXY for cloudflare and flags, plain http to non-loopback (localhost., [::ffff:127.0.0.1], a nip.io name, a real host) is refused with nothing sent; alias chains, $1 placeholders, two-word and block-scalar aliases, loops and 5-deep nests are refused, a swap to a higher class between classify and call does not run, an unreadable or failing `gh alias list` refuses; -R/--repo/--repo=/-Ro/r forms keep Delete; git/dig value letters run as Read with the shipped allowlist and letters after them stay refused; BOM + uppercase HTML under JSON, text/plain and +json labels and a 403 page reflecting the token in its <title> are hidden and scrubbed, gh api and gh error pages likewise. Break-checks on a throwaway worktree (no_proxy removed, alias lookup off, -R skip off, is_html off, gh html note off, cli value_flags off) each turned the matching tests red. Red rows: tests/accept_t15b_open.rs, 3 tests that fail on 03dd5d5 (review-T-15b Blocking and should-fix 1)."
+not_done: "1. Coder: a flag before the gh group (`--hostname github.com tok`, `--hostname github.com auth token`, `--repo=o/r run delete 5`, `--yes=true repo delete o/r`, `-R o/r run delete 5`, `--repo=evil.example/o/r pr view 5`) must be refused or parsed like flags after the group; accept_t15b_open item2_open_leading_flag_* and item3_open_leading_flag_* turn green. 2. Coder: call must refuse when its plan (argv, domain) differs from classify's, not only when the class is higher; accept_t15b_open item2_open_equal_class_alias_swap_is_refused turns green. 3. Re-run this acceptance after round 2. 4. Workspace: 1169 passed, 3 failed (only accept_t15b_open), 14 ignored; no Chromium flake, no rerun needed. 5. Postgres ledger canary query not-run (no psql on PATH)."
+gotchas:
+  - "tests/accept_t15b_open.rs fails by design until the fixes land, so a plain `cargo test -p srv-cli` exits 101 on this branch; run with --no-fail-fast and read per-binary results."
+  - "fake-gh-swap.* replaces <log>.aliases with <log>.aliases2 after the first `alias list`, so classify and call see different aliases; it also appends every non-alias call to <log>.ran, which is how a test proves nothing ran."
+  - "fake-gh-page.* prints a page file to stdout, to stderr with exit 1 when <page>.fail exists, and fails `alias list` when <page>.aliasfail exists."
+  - "dig is not installed on this machine; accept_t15b runs the shipped cli-allow.toml with only `bin = <cargo>` added to [programs.dig], so dig's shipped rules are exercised and the call fails after the gate (class Read) instead of at spawn."
+  - "psql is not on PATH here, so the Postgres ledger was not queried; srv-cli tests use MemStore and the jsonl mirror, both checked in-test with assert_clean."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/srv-cli/tests/accept_t15b.rs
+  - crates/srv-cli/tests/accept_t15b_open.rs
+  - crates/srv-cli/tests/accept_t15b_proxy.rs
+  - crates/srv-cli/tests/fixtures/fake-gh-swap.cmd
+  - crates/srv-cli/tests/fixtures/fake-gh-swap.sh
+  - crates/srv-cli/tests/fixtures/fake-gh-page.cmd
+  - crates/srv-cli/tests/fixtures/fake-gh-page.sh
+  - bench/results/accept-T-15b.md
+  - agent-memory/handoffs/T-15b-tester-1.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/target-servers cargo test -j 2 -p srv-cli --no-fail-fast --test accept_t15b --test accept_t15b_proxy --test accept_t15b_open"

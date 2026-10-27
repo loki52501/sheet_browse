@@ -141,7 +141,8 @@ const FORBIDDEN: &[&str] = &[
 ];
 
 /// Programs that run a project's own code or any program they are given (build scripts,
-/// package scripts, hooks, interpreters): only their version is Read (S2, D-523).
+/// package scripts, hooks, interpreters): every use is Delete, a version probe too (D-550;
+/// S2 and D-523 kept `--version` Read).
 const RUNS_CODE: &[&str] = &[
     "cargo",
     "rustc",
@@ -1687,17 +1688,27 @@ fn forbidden_reason(name: &str) -> String {
     format!("{name}: {why}")
 }
 
+/// Every use is Delete, `--version` included (D-550). A version probe still reads the
+/// project's config from the cwd and its parents, which a write without an ask (scratch in
+/// runs/, Fill elsewhere) can plant: rustup's proxies run a `rust-toolchain.toml`
+/// `path` toolchain, yarn runs `yarnPath`, go switches to a go.mod `toolchain`, dotnet
+/// follows global.json, mvn reads `.mvn/jvm.config`, pytest loads `addopts` plugins, and
+/// version-manager shims (asdf, mise, volta, pyenv) pick a binary from project files.
 fn runs_code(name: &str, args: &[Word], v: &mut Verdict) {
     let version = args.len() == 1
         && args[0].is_static()
-        && (args[0].text == "--version"
-            || (args[0].text == "version" && matches!(name, "go" | "cargo" | "docker" | "podman")));
-    if !version {
+        && (args[0].text == "--version" || args[0].text == "version");
+    if version {
         v.raise(
             Class::Delete,
-            format!("{name} runs the project's own code or other programs (build scripts, package scripts, hooks, interpreters)"),
+            format!("{name} {}: the program or its launcher reads project config from this folder and its parents (toolchain files, rc files, shims), which can name another program to run", args[0].text),
         );
+        return;
     }
+    v.raise(
+        Class::Delete,
+        format!("{name} runs the project's own code or other programs (build scripts, package scripts, hooks, interpreters)"),
+    );
 }
 
 /// `printf` without `-v` (which assigns a variable by name, B2). The format must be a
@@ -4050,22 +4061,41 @@ fn config_worktree(env: &Env) -> Option<PathBuf> {
 /// a pathspec inside runs/ or above it, or `-A` with no pathspec, while runs/ is not
 /// ignored by the root `.gitignore` (or `-f` overrides that).
 fn adds_runs(env: &Env, p: &Parsed) -> Option<String> {
+    let whole = p.has(&["-A", "--all", "-u", "--update"]);
+    tree_reaches_runs(env, p, &p.ops, whole, false).then(|| {
+        "git add can stage a repository inside runs/ as a submodule, whose own config a later git status runs".into()
+    })
+}
+
+/// True when a git command that takes the files of the current repository (`add`,
+/// `commit -a`, `stash`) can reach runs/ (D-546): the repository's tree holds runs/, and
+/// a pathspec is in or above runs/, or there is none and `whole` (the command then takes
+/// the whole tree), and runs/ is not ignored by the root `.gitignore` (or `-f` or
+/// `with_ignored`, as `stash -a`, takes ignored files too).
+fn tree_reaches_runs(
+    env: &Env,
+    p: &Parsed,
+    ops: &[&Word],
+    whole: bool,
+    with_ignored: bool,
+) -> bool {
     let runs = &env.roots.runs;
-    let cwds = env.cwds.as_ref()?;
+    let Some(cwds) = env.cwds.as_ref() else {
+        return true;
+    };
     let roots: Vec<PathBuf> = cwds
         .iter()
         .filter_map(|c| find_repo(c).map(|r| r.root))
         .filter(|r| runs.starts_with(r))
         .collect();
     if roots.is_empty() {
-        return None;
+        return false;
     }
-    let why = "git add can stage a repository inside runs/ as a submodule, whose own config a later git status runs";
     if p.has(&["--pathspec-from-file"]) {
-        return Some(why.into());
+        return true;
     }
-    let mut reaches = p.ops.is_empty() && p.has(&["-A", "--all"]);
-    for op in &p.ops {
+    let mut reaches = ops.is_empty() && whole;
+    for op in ops {
         if op.text.starts_with(':') || !op.is_static() {
             reaches = true;
             continue;
@@ -4078,8 +4108,9 @@ fn adds_runs(env: &Env, p: &Parsed) -> Option<String> {
             }
         }
     }
-    let ignored = !p.has(&["-f", "--force"]) && roots.iter().all(|r| runs_ignored(r, runs));
-    (reaches && !ignored).then(|| why.to_string())
+    let ignored =
+        !with_ignored && !p.has(&["-f", "--force"]) && roots.iter().all(|r| runs_ignored(r, runs));
+    reaches && !ignored
 }
 
 /// True when `root/.gitignore` ignores `runs` by a plain line (`runs/`, `/runs`, ...) and
@@ -4131,7 +4162,212 @@ fn git_config_runs(kv: &str) -> bool {
         || key.contains("askpass")
 }
 
+/// The config files of a repository found from a folder: its git folder's `config` and
+/// `config.worktree`, the common folder's for a linked worktree (`commondir`), and every
+/// submodule's under `modules/`.
+fn repo_config_files(repo: &Repo) -> Vec<PathBuf> {
+    let mut dirs = vec![repo.git_dir.clone()];
+    if let Ok(c) = std::fs::read_to_string(repo.git_dir.join("commondir")) {
+        if let Ok(p) = paths::resolve(&repo.git_dir, &paths::msys_drive(c.trim())) {
+            dirs.push(p);
+        }
+    }
+    let mut files = Vec::new();
+    for d in &dirs {
+        files.push(d.join("config"));
+        files.push(d.join("config.worktree"));
+        // Submodule git folders, `modules/<name>[/modules/<name>...]/config`.
+        let mut stack = vec![(d.join("modules"), 0u8)];
+        while let Some((dir, depth)) = stack.pop() {
+            if depth > 6 || files.len() > 400 {
+                break;
+            }
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if e.file_type().is_ok_and(|t| t.is_dir()) {
+                    files.push(p.join("config"));
+                    stack.push((p, depth + 1));
+                }
+            }
+        }
+    }
+    files
+}
+
+/// The keys of a git config file (`section.key` or `section.subsection.key`, section and
+/// key lowercased), as git reads them: comments, a key after a header on the same line,
+/// quoted values and backslash continuation lines (whose next line is value, not a key).
+pub(crate) fn config_keys(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut section = String::new();
+    let mut continued = false;
+    for raw in text.lines() {
+        let line = raw.trim_start().trim_end_matches('\r');
+        if continued {
+            continued = value_continues(line);
+            continue;
+        }
+        let mut rest = line;
+        if let Some(h) = rest.strip_prefix('[') {
+            let Some(end) = header_end(h) else {
+                section.clear();
+                continue;
+            };
+            section = header_name(&h[..end]);
+            rest = h[end + 1..].trim_start();
+        }
+        if rest.is_empty() || rest.starts_with('#') || rest.starts_with(';') {
+            continue;
+        }
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        keys.push(format!("{section}.{}", name.to_ascii_lowercase()));
+        continued = value_continues(&rest[name.len()..]);
+    }
+    keys
+}
+
+/// Where a `[...]` header closes: the first `]` outside a quoted subsection.
+fn header_end(h: &str) -> Option<usize> {
+    let mut quoted = false;
+    let mut esc = false;
+    for (i, c) in h.char_indices() {
+        match c {
+            _ if esc => esc = false,
+            '\\' if quoted => esc = true,
+            '"' => quoted = !quoted,
+            ']' if !quoted => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `core`, `filter "lfs"` -> `filter.lfs`, `branch.main` (old form) -> `branch.main`.
+fn header_name(h: &str) -> String {
+    let h = h.trim();
+    match h.split_once(|c: char| c.is_whitespace()) {
+        Some((sec, sub)) => {
+            let sub = sub.trim().trim_matches('"').replace("\\\"", "\"");
+            format!("{}.{sub}", sec.to_ascii_lowercase())
+        }
+        None => h.to_ascii_lowercase(),
+    }
+}
+
+/// True when a value ends in a backslash outside quotes and comments (the next line goes
+/// on with it).
+fn value_continues(v: &str) -> bool {
+    let mut quoted = false;
+    let mut esc = false;
+    let mut last_bs = false;
+    for c in v.chars() {
+        last_bs = false;
+        match c {
+            _ if esc => esc = false,
+            '\\' => {
+                esc = true;
+                last_bs = true;
+            }
+            '"' => quoted = !quoted,
+            '#' | ';' if !quoted => return false,
+            _ => {}
+        }
+    }
+    last_bs && esc
+}
+
+/// Repository config keys that make a Read-class git command run a program and that the
+/// sealed environment (D-547, [`crate::shell::GitSeal`]) cannot switch off from the
+/// command line: filter and diff drivers (named per repository), an external diff,
+/// includes (their files are not read here), remote helpers and upload/receive
+/// programs, a git:// proxy, signature programs.
+fn unsealable_key(k: &str) -> bool {
+    let parts: Vec<&str> = k.split('.').collect();
+    let (sec, key) = (parts[0], parts[parts.len() - 1]);
+    let sub = parts.len() > 2;
+    match sec {
+        "filter" => sub && matches!(key, "clean" | "smudge" | "process"),
+        "diff" => (sub && matches!(key, "command" | "textconv")) || (!sub && key == "external"),
+        "include" | "includeif" => key == "path",
+        "remote" => sub && matches!(key, "uploadpack" | "receivepack" | "vcs" | "proxy"),
+        "core" => matches!(key, "gitproxy" | "alternaterefscommand"),
+        "gpg" => key == "program",
+        "uploadpack" => key == "packobjectshook",
+        _ => false,
+    }
+}
+
+/// A repository config file's text for [`config_keys`]: `Ok(None)` when it does not
+/// exist; `Err` (fail closed, D-554) when it cannot be read, is not UTF-8 (git reads such
+/// a file byte by byte, this parser would skip its keys) or starts with a byte order mark
+/// (git skips it, so the first header's keys would land in no section here).
+fn config_text(f: &Path) -> Result<Option<String>, &'static str> {
+    let bytes = match std::fs::read(f) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("cannot be read"),
+    };
+    let text = String::from_utf8(bytes).map_err(|_| "is not UTF-8 text")?;
+    if text.starts_with('\u{feff}') {
+        return Err("starts with a byte order mark");
+    }
+    Ok(Some(text))
+}
+
+/// Why a Read-class git in the current folders would still run a program its
+/// repository's config names (D-547): the first such key and the file it is in.
+fn unsealable_config(env: &Env) -> Option<String> {
+    for cwd in env.cwds.as_ref()? {
+        let Some(repo) = find_repo(cwd) else { continue };
+        for f in repo_config_files(&repo) {
+            let text = match config_text(&f) {
+                Ok(Some(t)) => t,
+                Ok(None) => continue,
+                Err(why) => {
+                    return Some(format!(
+                        "{} {why}, so the programs it names are not known",
+                        env.roots.shown(&f)
+                    ))
+                }
+            };
+            if let Some(k) = config_keys(&text).into_iter().find(|k| unsealable_key(k)) {
+                return Some(format!(
+                    "{} sets {}, a program git would run",
+                    env.roots.shown(&f),
+                    crate::text::one_line(&k, 80)
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// One git command. Its class is its own; when it is Read, the line runs git sealed
+/// (D-547) and a repository config key the seal cannot switch off makes it Delete.
 fn git(outer: &Env, args: &[Word], v: &mut Verdict) {
+    let mut g = Verdict::new(Class::Read);
+    let mut unsealable = None;
+    git_one(outer, args, &mut g, &mut unsealable);
+    g.runs_git = true;
+    if g.class > Class::Read {
+        g.git_above_read = true;
+    } else if let Some(why) = unsealable {
+        g.raise(Class::Delete, format!("git: {why}"));
+        g.git_above_read = true;
+    }
+    v.merge(g);
+}
+
+fn git_one(outer: &Env, args: &[Word], v: &mut Verdict, unsealable: &mut Option<String>) {
     // `git -C dir` changes the folder for this command only.
     let mut env = outer.clone();
     env.cd_replaces = true;
@@ -4189,6 +4425,7 @@ fn git(outer: &Env, args: &[Word], v: &mut Verdict) {
             v.raise(Class::Delete, format!("git {s}: {why}"));
             return;
         }
+        *unsealable = unsealable_config(env);
         // A repository whose working tree is the home folder (a dotfiles repository) or
         // a configuration folder: updating it can write startup files.
         if may_link("git", args) {
@@ -4687,9 +4924,24 @@ fn git(outer: &Env, args: &[Word], v: &mut Verdict) {
                     v.raise(Class::Delete, "git stash drop/clear deletes saved work")
                 }
                 None | Some("push" | "save" | "apply" | "pop" | "branch" | "create" | "store") => {
-                    if parse(&F, v).is_some() {
-                        v.raise(Class::Fill, "git stash changes the working tree");
+                    let Some(p) = parse(&F, v) else { return };
+                    // D-546: stashing takes changed files (and with -u/-a untracked ones)
+                    // out of the tree; reaching runs/ it removes the run's own files
+                    // (ledger, asks, files/) or a repository planted there.
+                    if matches!(first_op, None | Some("push" | "save")) {
+                        let pathspecs: Vec<&Word> = match first_op {
+                            Some("push") => p.ops.iter().skip(1).copied().collect(),
+                            _ => Vec::new(),
+                        };
+                        let all = p.has(&["-a", "--all"]);
+                        if tree_reaches_runs(env, &p, &pathspecs, true, all) {
+                            v.raise(
+                                Class::Delete,
+                                "git stash takes files out of a working tree that holds runs/ (the run's own files or a repository planted there)",
+                            );
+                        }
                     }
+                    v.raise(Class::Fill, "git stash changes the working tree");
                 }
                 Some(o) => v.raise(
                     Class::Delete,
@@ -4791,6 +5043,19 @@ fn git(outer: &Env, args: &[Word], v: &mut Verdict) {
             ]) {
                 v.raise(Class::Delete, "git commit without -m opens an editor");
             } else {
+                // D-546: -a and pathspecs stage files first, like git add; pathspecs
+                // read from a file (or stdin) are unknown here, so they reach runs/
+                // whenever the tree holds it (D-551).
+                let whole = p.has(&["-a", "--all"]);
+                let from_file = p.has(&["--pathspec-from-file"]);
+                if (whole || from_file || !p.ops.is_empty())
+                    && tree_reaches_runs(env, &p, &p.ops, whole, false)
+                {
+                    v.raise(
+                        Class::Delete,
+                        "git commit -a or with paths stages files of a working tree that holds runs/, where a planted repository becomes a submodule a later git status runs",
+                    );
+                }
                 v.raise(Class::Fill, "git commit changes the repository");
             }
         }
@@ -5642,7 +5907,17 @@ const GH_FLAGS: &[&str] = &[
     "--force",
 ];
 
+/// One gh command: gh runs git in its folder, so the line's git is sealed only when this
+/// is Read too (D-547).
 fn gh(env: &Env, args: &[Word], v: &mut Verdict) {
+    let mut g = Verdict::new(Class::Read);
+    gh_one(env, args, &mut g);
+    g.runs_git = true;
+    g.git_above_read = g.class > Class::Read;
+    v.merge(g);
+}
+
+fn gh_one(env: &Env, args: &[Word], v: &mut Verdict) {
     let mut g = Verdict::new(Class::Read);
     gh_command(args, &mut g);
     let refused = g.class >= Class::Delete;

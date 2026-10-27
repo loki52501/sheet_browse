@@ -75,6 +75,8 @@ foreach ($a in $Areas) {
     "`$env:TEMP = '$tmp'"
     "`$env:TMPDIR = '$tmp'"
     "`$env:CARGO_BUILD_JOBS = '2'"   # several sessions build at once; full parallelism exhausts RAM and the paging file
+    "`$env:CARGO_PROFILE_DEV_DEBUG = 'line-tables-only'"   # full debug info filled F: twice (per-task targets) and broke links (LNK1318)
+    "`$env:CARGO_PROFILE_TEST_DEBUG = 'line-tables-only'"
     "Set-Location -LiteralPath '$wt'"
     "claude '$($first -replace "'", "''")'"
   ) | Set-Content -Encoding ASCII (Join-Path $stateDir "launch.ps1")

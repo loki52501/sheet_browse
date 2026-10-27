@@ -186,7 +186,8 @@ fn text_diff(roots: &Roots, a: TextOpts, pa: &Path, pb: &Path) -> Result<ToolOut
             .map_err(|e| e.to_string())
             .and_then(|_| util::own_output_ok(roots, &path))
             .and_then(|_| {
-                std::fs::write(&path, harness_core::scrub(&unified)).map_err(|e| e.to_string())
+                crate::safeio::write(&path, harness_core::scrub(&unified).as_bytes())
+                    .map_err(|e| e.to_string())
             });
         match saved {
             Ok(()) => {

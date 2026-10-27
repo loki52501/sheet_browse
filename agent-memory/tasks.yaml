@@ -145,8 +145,15 @@ tasks:
     step: 3
     title: "srv-files follow-ups: pptx.write acceptance needs python-pptx installed (row 6d not-run); docs tests need SB_PYTHON with openpyxl; $HOME/bin missed when the bash PATH probe fails (add <home>/bin for every paths::homes() entry or fail closed); <msys_root>/etc/gitconfig and mingw64/etc not code locations yet; updating an existing repo outside runs/ in place (pull, checkout, stash pop) keeps its D-523 class; git stash -u / commit -a in a planted nested repo; hooks/drivers already present in a repo and an existing global git config still run under Read-class git; TOCTOU between reclassify and the syscall for links/junctions; dotfiles inside runs/ cost an ask (over-match); B-520..B-522 need supreme answers; not run on Linux/macOS"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md]
+    status: done
+    owner: servers/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/servers-T14b
+  - id: T-14c
+    step: 2
+    title: "T-14b review should-fix (bench/results/review-T-14b.md rounds 1-4): submodule scan stops silently at its 400-file/depth-6 cap (raise to Delete); find_repo misses non-absorbed submodule .git folders and fails open when it cannot resolve a gitdir; an invalid .git folder stops the classifier's walk while git keeps walking up; cache the seal's config reads (two git spawns per Read git line); the seal drops a global filter.lfs and shows an empty global file to git config --global; CODE_DIRS lacks project dot folders (.mvn, .volta, .yarn); off Windows create_dirs leaves a one-syscall window per level; D-550 (2) cost: --version of make/node/python/java/gcc/clang/docker could be Read when which finds a real .exe; unit test panics without git on PATH; accept_t14b_bare does not assert each line ran Allow with no ask; no_bare_discovery always sets pair 0 (an approved line setting only GIT_CONFIG_KEY_0 replaces it); B-594 (Account asks on user-global git config proceed on timeout)."
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
     status: todo
-    owner: servers
   - id: T-15
     step: 3
     title: "srv-cli: gh, dns, flags, allowlisted cli; ladder rungs 3, 5, 9"
@@ -160,6 +167,14 @@ tasks:
     step: 3
     title: "srv-cli follow-ups: Phase 1 ladder rungs 3, 5, 9 over MCP with srv-files; loopback http honours system proxy; gh alias set can map to auth (both ask); strict letter matching false positives (git log -Sconfig); HTML labelled text/plain still shown"
     docs: [docs/04-TOOL-SERVERS-PHASE1.md, docs/08-USE-CASES-AND-TESTS.md]
+    status: done
+    owner: servers/suborch
+    claimed_at: "2026-10-26"
+    branch: swarm/servers-T15b
+  - id: T-15c
+    step: 3
+    title: "T-15b review should-fix (bench/results/review-T-15b.md, rounds 1-5): --hostname on gh commands other than api (attestation verify) not host-checked, and D-594 moves a leading --hostname there; `-R o/r run view 5 --log` returns capped stdout instead of saving the log; B-591 (the D-595 plan is keyed by the ToolCtx address, an unwritten contract with core: needs a per-call token on I-2); should-fix 6 rest (`pr view rm`, `issue list --label delete` over-classed Delete, fails closed); no test for a third delete word reached through an alias expansion; gh stderr in a failed run can echo alias expansion words (D-596 gap); every non-read gh call spawns gh alias list twice (classify and call)."
+    docs: [docs/04-TOOL-SERVERS-PHASE1.md]
     status: todo
   - id: T-13c
     step: 2
@@ -178,7 +193,7 @@ tasks:
     step: 4
     title: "reviews SM-2, contacts in gate, baselines, watch diff + single notify, reflect readers-only, proposals"
     docs: [docs/01-HARNESS-CORE.md, docs/02-MEMORY.md, docs/06-TOOLFORGE.md]
-    status: todo
+    status: done
     blocked_by: [T-13, T-15]
   - id: T-17
     step: 5
@@ -369,6 +384,24 @@ tasks:
     title: "review-T-18 leftovers: run the Unix Pipe launch on Linux (only compiled and clippy-checked); a real-Chromium test for getFrameTree seeding and prerender activation (restored me tab with iframes, with T-22 acceptance 4); session_events channel after detach; CdpError::Closed keeps the method; sweep stale profiles/bench-* after a crash; B-601 tab titles (T-22)."
     status: todo
     from: T-18
+  - id: T-16b
+    step: follow-up
+    wave: 2
+    owner: core
+    branch: swarm/core-T16d
+    title: "T-16 deferrals (review-T-16 r1 should-fix 6, D-143): H-5/G-3 reflect 'compare output shape' (the ledger keeps only result_summary; needs a stored output shape per tool call); T-6 growth and G-3 forge proposals from reflect; G-3 expectation learning (T-5) from earlier runs; G-3 reflect 'after each task' (today only a reflect schedule fires a pass); H-5 'nightly' reflect is not auto-created (harnessd should make sure one nightly reflect row exists, D-142 (1)); and the live-ladder leftovers from accept-T-16 (rungs 6-8 all passed): `harness schedule list` shows the placeholder 'T-16' as next run for watch/reflect rows and `schedule add --kind watch|reflect` still prints 'harnessd runs it from T-16 (not in Phase 1)' (cli.rs); the launcher denies MultiEdit, which Claude Code 2.1.311 lacks (harnessd warns); `harness run` has no grounding preamble, so rung 6 session A wrote cards without fetching the paper (same gap as servers ladder failure 1); the print-session allow list is proven only by the launcher unit test because the ladder shim replaces --allowedTools."
+    docs: [docs/01-HARNESS-CORE.md, docs/06-TOOLFORGE.md, docs/03-TOOL-STORE.md]
+    status: todo
+    from: T-16
+  - id: T-16e
+    step: follow-up
+    wave: 3
+    owner: core
+    branch: swarm/core-T16e
+    title: "review-T-16 r3 R3-1 remainder (D-144): harnessd -p sessions now load no built-in tools (--tools \"\"), so the repo's Bash allow rules give them no path around the gate. Still open: they inherit harnessd's cwd and every configured MCP server (user-level connectors such as mail) and user/project settings; a user allow rule on another server's tool would be reachable from page-planted text. Give ClaudeLauncher::print the replay session's isolation: --strict-mcp-config with a generated config of the four harness servers (paths as srv_web_from_env does), cwd = run folder, --setting-sources local; deny Bash(harness schedule:*) for interactive sessions too. Also: core-pg build.rs with cargo:rerun-if-changed=../../migrations."
+    docs: [docs/01-HARNESS-CORE.md]
+    status: todo
+    from: T-16
   - id: T-05e
     step: follow-up
     wave: 2
@@ -385,3 +418,43 @@ tasks:
     title: "review-T-08b round 2 should-fix: the B-186 refusal in `harness gate set` checks the typed domain and class, but gate_rule_set stores the UTS-46-normalised key (gate::rule_domain: full-width to ASCII, soft hyphens dropped). Run the vault-value refusal on gate::rule_key's output too, with a full-width and a soft-hyphen test case."
     status: todo
     from: T-08b
+  - id: T-17b
+    step: follow-up
+    wave: 4
+    owner: core
+    branch: swarm/core-T17b
+    title: "T-17 baseline (phase1-2026-10-27, 13/30): interactive `harness run` sessions get no grounding preamble (run_preamble only reaches -p/harnessd), so rung 1/2 answered from memory with zero tool calls; give every run the preamble."
+    status: todo
+    from: T-17
+  - id: T-17c
+    step: follow-up
+    wave: 4
+    owner: core
+    branch: swarm/core-T17c
+    title: "T-17 baseline: sessions are not told their run id or files path, so fs.write/xlsx.write deliverables land in the session cwd, outside runs/<id>/files/ and missing from report.md (rungs 2/1, 4/2, 5/3); pass the run files path and make writes default there (B-564 bare names already work)."
+    status: todo
+    from: T-17
+  - id: T-17d
+    step: follow-up
+    wave: 4
+    owner: core
+    branch: swarm/core-T17d
+    title: "T-17 baseline rung 8: watch.observe hashes the model free-text state, so an unchanged page described in different words reads as changed and sends a second notification; normalise or structure the watched state before hashing."
+    status: todo
+    from: T-17
+  - id: T-17e
+    step: follow-up
+    wave: 4
+    owner: servers
+    branch: swarm/servers-T17e
+    title: "T-17 baseline: every rung-2 session burned 3 failed `api` calls guessing `pick` index syntax (versions[0]); document or accept the index form in the api tool description and errors."
+    status: todo
+    from: T-17
+  - id: T-17f
+    step: follow-up
+    wave: 4
+    owner: supreme
+    branch: swarm/bench-T17f
+    title: "T-17 baseline cannot reach >= 27/30: bench/phase1 has no rung-10.md and only one variant for rungs 6, 7, 8 (9 of 30 slots missing), and docs/08/09 never define the A/B use cases. Write the missing prompts and the A/B set, then re-run T-17."
+    status: todo
+    from: T-17

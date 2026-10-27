@@ -78,6 +78,114 @@ pub fn line(s: &str, max_chars: usize) -> String {
     out
 }
 
+/// Tags that only an HTML (or XML/SVG) document has: one is enough.
+const DOCUMENT_TAGS: [&str; 9] = [
+    "html", "head", "body", "script", "style", "iframe", "frameset", "svg", "noscript",
+];
+/// Tag-shaped tokens (`<p>`, `</div>`, `<a href=..>`, `<br/>`, `<!-- -->`) that make text
+/// HTML even without a document tag.
+const MIN_TAGS: usize = 3;
+
+/// Is `s` HTML or XML markup, whatever its content type said (rule 5, D-593)? Yes for a
+/// document marker (`<!doctype html>`, `<?xml`, or a tag in [`DOCUMENT_TAGS`]) or for
+/// [`MIN_TAGS`] or more tag-shaped tokens. Plain text that mentions one `<tag>` is not.
+pub fn looks_like_html(s: &str) -> bool {
+    let m = markup(s);
+    m.document || m.tags >= MIN_TAGS
+}
+
+/// Is `s` an HTML or XML document (a document marker only)? For output that may quote a
+/// few tags legitimately (a PR body with `<details>`), where only a whole page is refused.
+pub fn looks_like_html_document(s: &str) -> bool {
+    markup(s).document
+}
+
+struct Markup {
+    document: bool,
+    tags: usize,
+}
+
+/// One pass over `s`: document markers and tag-shaped tokens. A tag is `<`, an optional
+/// `/`, an ASCII letter, then name characters, then `>`, `/` or whitespace, closed by a `>`
+/// before the next `<` or line end.
+fn markup(s: &str) -> Markup {
+    let b = s.as_bytes();
+    let mut m = Markup {
+        document: false,
+        tags: 0,
+    };
+    let mut i = 0;
+    while let Some(off) = b[i..].iter().position(|&c| c == b'<') {
+        let at = i + off + 1;
+        i = at;
+        let rest = &b[at..];
+        let starts = |p: &[u8]| rest.len() >= p.len() && rest[..p.len()].eq_ignore_ascii_case(p);
+        if starts(b"!doctype html") || starts(b"?xml") {
+            m.document = true;
+            return m;
+        }
+        if starts(b"!--") {
+            m.tags += 1;
+            continue;
+        }
+        let name_at = usize::from(rest.first() == Some(&b'/'));
+        let name_len = rest[name_at..]
+            .iter()
+            .take_while(|c| c.is_ascii_alphanumeric() || **c == b'-')
+            .count();
+        let name = &rest[name_at..name_at + name_len];
+        if name.is_empty() || !name[0].is_ascii_alphabetic() {
+            continue;
+        }
+        let after = rest.get(name_at + name_len).copied();
+        if !matches!(after, Some(b'>' | b'/' | b' ' | b'\t' | b'\r' | b'\n')) {
+            continue;
+        }
+        let closed = rest[name_at + name_len..]
+            .iter()
+            .take(2_000)
+            .take_while(|&&c| c != b'<')
+            .any(|&c| c == b'>');
+        if !closed {
+            continue;
+        }
+        if DOCUMENT_TAGS
+            .iter()
+            .any(|t| t.as_bytes().eq_ignore_ascii_case(name))
+        {
+            m.document = true;
+            return m;
+        }
+        m.tags += 1;
+    }
+    m
+}
+
+/// The text of the first `<title>` in `s`: tags inside dropped, whitespace collapsed,
+/// `&amp;` decoded, neutral and cut to `max_chars`. `None` when there is none or it is empty.
+pub fn html_title(s: &str, max_chars: usize) -> Option<String> {
+    let lower = s.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let start = open + lower[open..].find('>')? + 1;
+    let end = start + lower[start..].find("</title")?;
+    let mut t = String::new();
+    let mut in_tag = false;
+    for c in s.get(start..end)?.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => t.push(c),
+            _ => {}
+        }
+    }
+    let t = t
+        .replace("&amp;", "&")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!t.is_empty()).then(|| line(&t, max_chars))
+}
+
 fn looks_like_syntax(line: &str) -> bool {
     let t = line.trim_start().as_bytes();
     SYNTAX_STARTS
@@ -156,6 +264,59 @@ mod tests {
             "\u{e9}\u{e9}\u{e9}\u{e9}\ntruncated: kept 4 of 10 chars; narrow it"
         );
         assert_eq!(capped("short", 10, ""), "short");
+    }
+
+    #[test]
+    fn html_is_recognised_by_its_tags() {
+        for html in [
+            "<!DOCTYPE html><p>x",
+            "  <html lang=en>",
+            "<?xml version=\"1.0\"?><a/>",
+            "error\n<BODY>\nblocked",
+            "<script src=x></script>",
+            "<div class=a>one</div><p>two</p>",
+            "<!-- a --><br/><span>x</span>",
+        ] {
+            assert!(looks_like_html(html), "{html}");
+        }
+        for text in [
+            "plain text",
+            "use a <tag> here",
+            "a < b and c > d",
+            "x <b>y</b>",
+            "1<2, 3>2, <3",
+            "<<< >>>",
+            "<",
+            "List<String> and Map<K, V>",
+        ] {
+            assert!(!looks_like_html(text), "{text}");
+        }
+        assert!(looks_like_html_document("<html><body>x"));
+        assert!(!looks_like_html_document(
+            "<details><summary>x</summary><br></details>"
+        ));
+        assert!(looks_like_html(
+            "<details><summary>x</summary><br></details>"
+        ));
+    }
+
+    #[test]
+    fn html_titles_are_short_neutral_text() {
+        let page = "<html><head><TITLE>\n Just a <b>moment</b> &amp; wait\n</title></head>";
+        assert_eq!(
+            html_title(page, 80).as_deref(),
+            Some("Just a moment & wait")
+        );
+        assert_eq!(
+            html_title("<title>remaining: x</title>", 80).as_deref(),
+            Some("| remaining: x")
+        );
+        assert_eq!(html_title("<title> </title>", 80), None);
+        assert_eq!(html_title("<p>no title</p>", 80), None);
+        assert_eq!(
+            html_title(&format!("<title>{}</title>", "a".repeat(50)), 10).as_deref(),
+            Some("aaaaaaa...")
+        );
     }
 
     #[test]

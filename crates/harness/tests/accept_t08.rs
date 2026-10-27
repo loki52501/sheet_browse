@@ -47,6 +47,19 @@ const CAP: Duration = Duration::from_secs(30);
 /// A real `*/1` firing: up to 60 s to the next minute boundary, plus start-up and the run.
 const CAP_MINUTE: Duration = Duration::from_secs(100);
 const DEFAULT_ADMIN_URL: &str = "postgres://sb@127.0.0.1:5433/postgres";
+
+/// The task part of a `claude -p` session's stdin: what follows the run preamble and its
+/// blank line (B-563, D-140 (10)). Asserts the preamble names the run.
+fn task_of(stdin: &str, run: &str) -> String {
+    assert!(
+        stdin.starts_with(&format!("Harness run {run}.\n")),
+        "stdin lacks the run preamble"
+    );
+    stdin
+        .split_once("\n\n")
+        .map(|(_, t)| t.to_owned())
+        .unwrap_or_default()
+}
 const CHILD_VAR: &str = "SB_T08_CHILD";
 
 // ------------------------------------------------------------------ throwaway database
@@ -784,11 +797,11 @@ async fn acc4_schedule_add_fires_with_real_harness_and_harnessd() {
     let argv = std::fs::read_to_string(calls.join(format!("{}.argv", run.0))).unwrap();
     assert_eq!(
         argv,
-        "-p\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
+        "-p\n--tools\n\n--allowedTools\nmcp__harness-web\nmcp__harness-files\nmcp__harness-cli\nmcp__harness-mem\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
         "claude argv (B-192 denials)"
     );
     let stdin = std::fs::read_to_string(calls.join(format!("{}.stdin", run.0))).unwrap();
-    assert_eq!(stdin, "say hi");
+    assert_eq!(task_of(&stdin, &run.0), "say hi");
     let envs = std::fs::read_to_string(calls.join(format!("{}.env", run.0))).unwrap();
     assert!(envs.contains(&format!("SB_RUN_ID={}\n", run.0)), "{envs}");
     let root = envs
@@ -801,7 +814,7 @@ async fn acc4_schedule_add_fires_with_real_harness_and_harnessd() {
         std::fs::canonicalize(&runs).unwrap()
     );
     let answer = std::fs::read_to_string(folder.join("files/answer.md")).unwrap();
-    assert_eq!(answer, "fake claude: say hi");
+    assert_eq!(answer, format!("fake claude: {stdin}"));
     let s2 = store
         .schedule_list()
         .await
@@ -1163,9 +1176,10 @@ async fn d116_4_schedule_fired_before_launch_and_no_hot_loop() {
 
 // ------------------------------------------------------------------ D-116 (5)
 
-/// (5) watch and reflect rows are stored, the loop skips them, fire() refuses them.
+/// (5), changed by T-16 (D-140): watch and reflect rows fire like cron rows, from the loop
+/// and from fire(); each firing is a fresh run with its own report.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn d116_5_watch_and_reflect_skipped_by_loop_and_fire() {
+async fn d116_5_watch_and_reflect_fire_from_loop_and_fire() {
     let (_db, pg) = TestDb::store().await;
     let tmp = tempfile::tempdir().unwrap();
     let runs = tmp.path().join("runs");
@@ -1174,8 +1188,8 @@ async fn d116_5_watch_and_reflect_skipped_by_loop_and_fire() {
     w.watch_target = Some("jobs".into());
     let mut r = cron_row("*/1 * * * *", "reflect", None);
     r.kind = ScheduleKind::Reflect;
-    pg.schedule_add(w).await.unwrap();
-    pg.schedule_add(r).await.unwrap();
+    let wid = pg.schedule_add(w).await.unwrap();
+    let rid = pg.schedule_add(r).await.unwrap();
     let tick = pg
         .schedule_add(cron_row("*/1 * * * *", "tick", None))
         .await
@@ -1185,19 +1199,25 @@ async fn d116_5_watch_and_reflect_skipped_by_loop_and_fire() {
     let mut lp = LoopUnderTest::daemon(pg.clone(), launcher.clone(), clock.clone(), &runs);
     assert_eq!(lp.deadline(|_| true).await, t(12, 1, 0));
     clock.set(t(12, 1, 0));
-    assert_eq!(lp.next_fired().await.schedule, tick);
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let f = lp.next_fired().await;
+        let done = f.result.as_ref().expect("firing ok");
+        assert!(done.folder.join("report.md").is_file());
+        ids.push(f.schedule);
+    }
+    ids.sort();
+    let mut want = vec![wid, rid, tick];
+    want.sort();
+    assert_eq!(ids, want);
     assert_eq!(lp.deadline(|x| x > t(12, 1, 0)).await, t(12, 2, 0));
-    clock.set(t(12, 2, 0));
-    assert_eq!(lp.next_fired().await.schedule, tick);
     assert!(lp.finish().await.is_empty());
-    let prompts: Vec<String> = launcher
-        .seen
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|s| s.prompt.clone())
-        .collect();
-    assert_eq!(prompts, ["tick", "tick"]);
+    for p in ["watch it", "reflect", "tick"] {
+        assert_eq!(launcher.count(p), 1, "{p}");
+    }
+    for s in pg.schedule_list().await.unwrap() {
+        assert_eq!(s.last_run, Some(t(12, 1, 0)), "{}", s.prompt);
+    }
 
     let runner = Runner {
         store: pg.clone(),
@@ -1205,50 +1225,32 @@ async fn d116_5_watch_and_reflect_skipped_by_loop_and_fire() {
         clock: clock.clone(),
         runs_root: runs.clone(),
     };
+    clock.set(t(12, 1, 30));
     for s in pg.schedule_list().await.unwrap() {
-        match s.kind {
-            ScheduleKind::Watch => {
-                assert!(matches!(
-                    runner.fire(&s).await,
-                    Err(SchedError::NotInPhase1("watch"))
-                ));
-                assert_eq!(s.last_run, None);
-            }
-            ScheduleKind::Reflect => {
-                assert!(matches!(
-                    runner.fire(&s).await,
-                    Err(SchedError::NotInPhase1("reflect"))
-                ));
-                assert_eq!(s.last_run, None);
-            }
-            ScheduleKind::Cron => {}
-        }
+        let f = runner.fire(&s).await.expect("fire");
+        assert_eq!(f.schedule, Some(s.id));
     }
-    // fire() refused before schedule_fired: last_run still unset.
-    for s in pg.schedule_list().await.unwrap() {
-        if s.kind != ScheduleKind::Cron {
-            assert_eq!(s.last_run, None, "{}", s.prompt);
-        }
+    for p in ["watch it", "reflect", "tick"] {
+        assert_eq!(launcher.count(p), 2, "{p}");
     }
-    assert_eq!(launcher.count("watch it") + launcher.count("reflect"), 0);
 }
 
-/// (5) "with one log line": the real harnessd prints one line per watch/reflect row, not
-/// one per pass. Two more passes are forced (marker writes) and observed through the
+/// (5), changed by T-16 (D-140): the real harnessd no longer logs "not in Phase 1" for
+/// watch and reflect rows. Two passes are forced (marker writes) and observed through the
 /// one-time warning of a bad-cron row inserted before each.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn d116_5_harnessd_logs_one_line_per_skipped_row() {
+async fn d116_5_harnessd_no_longer_skips_watch_and_reflect() {
     let (db, pg) = TestDb::store().await;
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().to_path_buf();
     let calls = dir.join("calls");
-    let mut w = cron_row("*/1 * * * *", "watch it", None);
+    let mut w = cron_row("0 0 1 1 *", "watch it", None);
     w.kind = ScheduleKind::Watch;
     w.watch_target = Some("jobs".into());
-    let mut r = cron_row("*/1 * * * *", "reflect", None);
+    let mut r = cron_row("0 0 1 1 *", "reflect", None);
     r.kind = ScheduleKind::Reflect;
-    let wid = pg.schedule_add(w).await.unwrap();
-    let rid = pg.schedule_add(r).await.unwrap();
+    pg.schedule_add(w).await.unwrap();
+    pg.schedule_add(r).await.unwrap();
 
     let mut d = tokio::process::Command::new(env!("CARGO_BIN_EXE_harnessd"));
     bin_env(&mut d, &dir, &db.url, &calls);
@@ -1271,27 +1273,7 @@ async fn d116_5_harnessd_logs_one_line_per_skipped_row() {
     }
     harnessd.kill().await.unwrap();
     let text = err.text();
-    let skipped: Vec<&str> = text
-        .lines()
-        .filter(|l| l.contains("not in Phase 1"))
-        .collect();
-    assert_eq!(skipped.len(), 2, "{text}");
-    assert!(
-        skipped
-            .iter()
-            .any(|l| l.starts_with(&format!("harnessd: schedule {wid}: kind watch"))),
-        "{text}"
-    );
-    assert!(
-        skipped
-            .iter()
-            .any(|l| l.starts_with(&format!("harnessd: schedule {rid}: kind reflect"))),
-        "{text}"
-    );
-    assert!(
-        !calls.exists() || std::fs::read_dir(&calls).unwrap().next().is_none(),
-        "claude was launched for a skipped row"
-    );
+    assert!(!text.contains("not in Phase 1"), "{text}");
 }
 
 // ------------------------------------------------------------------ D-116 (6)
@@ -1520,11 +1502,11 @@ async fn child_claude_launcher_stdin_scrub() {
     let argv = std::fs::read_to_string(calls.join(format!("{}.argv", f.run.0))).unwrap();
     assert_eq!(
         argv,
-        "-p\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
+        "-p\n--tools\n\n--allowedTools\nmcp__harness-web\nmcp__harness-files\nmcp__harness-cli\nmcp__harness-mem\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
         "the prompt must not be in argv (B-192 denials)"
     );
     let stdin = std::fs::read_to_string(calls.join(format!("{}.stdin", f.run.0))).unwrap();
-    assert_eq!(stdin, scrubbed);
+    assert_eq!(task_of(&stdin, &f.run.0), scrubbed);
     let envs = std::fs::read_to_string(calls.join(format!("{}.env", f.run.0))).unwrap();
     assert!(envs.contains(&format!("SB_RUN_ID={}\n", f.run.0)), "{envs}");
     let root = envs
@@ -1538,7 +1520,8 @@ async fn child_claude_launcher_stdin_scrub() {
     );
     let answer = std::fs::read_to_string(runs_abs.join(&f.run.0).join("files/answer.md")).unwrap();
     assert!(!answer.contains(&c), "answer.md holds the vault value");
-    assert!(answer.starts_with("fake claude: --version\n"), "{answer}");
+    assert!(answer.starts_with("fake claude: Harness run "), "{answer}");
+    assert!(answer.contains("\n\n--version\n"), "{answer}");
     assert!(answer.contains("leaked: @vault(test)"), "{answer}");
     let row = store.run_get(&f.run).await.unwrap().unwrap();
     assert_eq!(row.prompt, scrubbed, "runs.prompt");
@@ -1554,6 +1537,7 @@ async fn child_claude_launcher_stdin_scrub() {
             run: &run,
             runs_root: &runs_abs,
             prompt: "-h",
+            schedule: None,
         })
         .await
         .unwrap();

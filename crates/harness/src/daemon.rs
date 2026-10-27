@@ -5,6 +5,9 @@
 //! harnessd wraps its launcher in [`ReopenVault`], so every firing re-opens the vault and
 //! installs it before the prompt is scrubbed: a value added with `harness vault set` while
 //! harnessd runs is scrubbed from the next firing without a restart (D-124).
+//!
+//! Inside [`ReopenVault`], harnessd's launcher is a [`crate::reflect::ReflectLauncher`]:
+//! `reflect` firings run a reflect pass (T-16), every other run goes to `claude -p`.
 
 use crate::{CliError, Env};
 use async_trait::async_trait;

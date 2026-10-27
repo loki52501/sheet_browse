@@ -86,6 +86,26 @@ impl Runner {
         }
     }
 
+    /// The git a line's `git` resolves to: the one in the runner's Git install, else the
+    /// first on this server's PATH.
+    pub fn git_program(&self) -> Option<PathBuf> {
+        if let Runner::Bash(b) = self {
+            if let Some(root) = msys_root(b) {
+                let found = [
+                    root.join("mingw64").join("bin").join("git.exe"),
+                    root.join("cmd").join("git.exe"),
+                    root.join("bin").join("git.exe"),
+                ]
+                .into_iter()
+                .find(|p| p.is_file());
+                if found.is_some() {
+                    return found;
+                }
+            }
+        }
+        proc::find_program("git", |_| false)
+    }
+
     fn is_cmd_exe(&self) -> bool {
         matches!(self, Runner::Fallback(_)) && cfg!(windows)
     }
@@ -310,8 +330,262 @@ fn msys_root(bash: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The MSYS roots of the Git installs this server's commands can reach: the runner's
+/// bash and the `git` on this server's PATH (`<Git>/cmd/git.exe`, `<Git>/bin/git.exe`,
+/// `<Git>/mingw64/bin/git.exe`). Windows only.
+fn msys_roots() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Runner::Bash(b) = Runner::discover() {
+        out.extend(msys_root(&b));
+    }
+    if cfg!(windows) {
+        if let Some(git) = proc::find_program("git", |_| false) {
+            out.extend(git_root(&git));
+        }
+    }
+    out.dedup();
+    out
+}
+
+/// `<Git>` for a Git for Windows `git.exe` in `cmd/`, `bin/` or `mingw64/bin/`.
+fn git_root(git: &Path) -> Option<PathBuf> {
+    let dir = git.parent()?;
+    let name = dir.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let up = dir.parent()?;
+    match name.as_str() {
+        "cmd" => Some(up.to_path_buf()),
+        "bin" => {
+            let upname = up.file_name()?.to_string_lossy().to_ascii_lowercase();
+            if upname == "mingw64" || upname == "usr" {
+                up.parent().map(Path::to_path_buf)
+            } else {
+                Some(up.to_path_buf())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Folders whose every file is Git's own configuration (D-544): `<msys root>/etc`
+/// (`gitconfig`, `gitattributes`, bash's profile files) and `<msys root>/mingw64/etc`
+/// for each root of [`msys_roots`], and `%ProgramData%\Git` (older Git for Windows reads
+/// `config` there). A write below them is Delete like any other config write.
+pub fn git_config_dirs() -> Vec<PathBuf> {
+    git_config_dirs_of(&msys_roots())
+}
+
+/// [`git_config_dirs`] for given roots.
+pub fn git_config_dirs_of(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for r in roots {
+        out.push(r.join("etc"));
+        out.push(r.join("mingw64").join("etc"));
+    }
+    if cfg!(windows) {
+        if let Some(pd) = std::env::var_os("ProgramData").filter(|p| !p.is_empty()) {
+            out.push(PathBuf::from(pd).join("Git"));
+        }
+    }
+    out
+}
+
+/// Longest wait for each `git config --list` the seal reads.
+const SEAL_CAP: Duration = Duration::from_secs(5);
+
+/// Keys copied from the system and global config into a sealed git (D-547): settings
+/// that change what git reads or prints (line endings, symlinks, case, which folders
+/// are safe, colours, formats) and never name a program.
+const KEPT_KEYS: &[&str] = &[
+    "core.autocrlf",
+    "core.eol",
+    "core.safecrlf",
+    "core.symlinks",
+    "core.ignorecase",
+    "core.fscache",
+    "core.longpaths",
+    "core.quotepath",
+    "core.precomposeunicode",
+    "core.checkstat",
+    "core.trustctime",
+    "core.filemode",
+    "core.untrackedcache",
+    "core.preloadindex",
+    "core.whitespace",
+    "core.abbrev",
+    "core.commentchar",
+    "core.commentstring",
+    "core.protecthfs",
+    "core.protectntfs",
+    "core.bigfilethreshold",
+    "core.excludesfile",
+    "safe.directory",
+    "safe.barerepository",
+    "user.name",
+    "user.email",
+    "init.defaultbranch",
+    "http.sslbackend",
+    "http.sslcainfo",
+    "http.sslcapath",
+    "http.schannelcheckrevoke",
+    "http.schannelusesslcainfo",
+    "windows.appendatomically",
+    "i18n.commitencoding",
+    "i18n.logoutputencoding",
+    "diff.renames",
+    "diff.algorithm",
+    "diff.mnemonicprefix",
+    "diff.noprefix",
+    "diff.renamelimit",
+    "diff.indentheuristic",
+    "diff.colormoved",
+    "diff.context",
+    "diff.interhunkcontext",
+    "diff.relative",
+    "diff.statgraphwidth",
+    "diff.wserrorhighlight",
+    "status.showuntrackedfiles",
+    "status.relativepaths",
+    "status.short",
+    "status.branch",
+    "status.renames",
+    "status.renamelimit",
+    "status.aheadbehind",
+    "status.showstash",
+    "log.date",
+    "log.decorate",
+    "log.abbrevcommit",
+    "log.follow",
+    "log.mailmap",
+    "log.showroot",
+    "format.pretty",
+    "branch.sort",
+    "tag.sort",
+    "column.ui",
+    "grep.linenumber",
+    "grep.patterntype",
+    "grep.extendedregexp",
+    "grep.fullname",
+    "grep.column",
+    "feature.manyfiles",
+    "index.version",
+];
+/// Key prefixes copied the same way (pure output settings).
+const KEPT_PREFIXES: &[&str] = &["color.", "pretty.", "advice."];
+
+/// How a line whose every git command is Read runs git (D-547): without the system and
+/// global config files (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL` = an empty file, no
+/// system attributes), with only their data settings ([`KEPT_KEYS`]) copied back, and
+/// with command-line config, which beats every config file and reaches submodules,
+/// switching off what a repository's own config can make a read run: hooks
+/// (`core.hooksPath` = an empty folder), `core.fsmonitor`, `core.attributesFile`,
+/// `core.sshCommand`, credential helpers, askpass, the `ext::` transport, signature
+/// display and submodule recursion. Filter and diff drivers are named per repository,
+/// so the classifier makes a Read git in a repository whose config names one Delete
+/// instead (`classify::unsealable_config`).
+pub struct GitSeal {
+    dir: tempfile::TempDir,
+    kept: Vec<(String, String)>,
+}
+
+/// D-556: every git a line runs that is not sealed still never discovers a bare
+/// repository from the cwd. A bare repository's config and hooks sit at plain names
+/// (`foo/config`, `foo/hooks/`) that Fill writes outside runs/ can plant, and the
+/// classifier's repository scan only follows `.git`; a real bare repository is reached
+/// with `--git-dir`, which asks.
+pub fn no_bare_discovery(c: &mut std::process::Command) {
+    c.env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "safe.bareRepository")
+        .env("GIT_CONFIG_VALUE_0", "explicit");
+}
+
+impl GitSeal {
+    /// `git`: the git whose system and global config is read for [`KEPT_KEYS`] (none:
+    /// nothing is copied). `home`: HOME for that read (tests; the runner keeps HOME).
+    pub fn new(git: Option<&Path>, home: Option<&Path>) -> Result<GitSeal, String> {
+        let dir = tempfile::Builder::new()
+            .prefix("sb-gitseal-")
+            .tempdir()
+            .map_err(|e| format!("temp folder: {e}"))?;
+        std::fs::create_dir(dir.path().join("hooks")).map_err(|e| e.to_string())?;
+        std::fs::write(dir.path().join("global"), "").map_err(|e| e.to_string())?;
+        std::fs::write(dir.path().join("attributes"), "").map_err(|e| e.to_string())?;
+        let mut kept = Vec::new();
+        if let Some(git) = git {
+            for scope in ["--system", "--global"] {
+                let mut c = std::process::Command::new(git);
+                c.args(["config", scope, "--list", "-z"])
+                    .current_dir(dir.path());
+                sanitize_env(&mut c);
+                if let Some(h) = home {
+                    c.env("HOME", h);
+                }
+                if let Some(out) = probe_output_within(c, SEAL_CAP) {
+                    kept.extend(kept_entries(&out));
+                }
+            }
+        }
+        Ok(GitSeal { dir, kept })
+    }
+
+    fn file(&self, name: &str) -> String {
+        paths::plain(&self.dir.path().join(name)).replace('\\', "/")
+    }
+
+    /// Sets the sealed environment on `c` (after [`sanitize_env`], which removed every
+    /// inherited `GIT_CONFIG*`).
+    pub fn apply(&self, c: &mut std::process::Command) {
+        let mut pairs: Vec<(String, String)> = self.kept.clone();
+        for (k, v) in [
+            ("core.hooksPath", self.file("hooks")),
+            ("core.fsmonitor", "false".into()),
+            ("core.attributesFile", self.file("attributes")),
+            ("core.sshCommand", "ssh".into()),
+            ("credential.helper", String::new()),
+            ("core.askPass", String::new()),
+            ("protocol.ext.allow", "never".into()),
+            ("diff.ignoreSubmodules", "all".into()),
+            ("status.submoduleSummary", "false".into()),
+            ("submodule.recurse", "false".into()),
+            ("log.showSignature", "false".into()),
+            // D-555: a bare repository planted with Fill writes (no `.git` entry, so the
+            // classifier's repo scan never sees it) would run its own diff driver.
+            ("safe.bareRepository", "explicit".into()),
+        ] {
+            pairs.push((k.into(), v));
+        }
+        c.env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", self.file("global"))
+            .env("GIT_ATTR_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_CONFIG_COUNT", pairs.len().to_string());
+        for (i, (k, v)) in pairs.iter().enumerate() {
+            c.env(format!("GIT_CONFIG_KEY_{i}"), k);
+            c.env(format!("GIT_CONFIG_VALUE_{i}"), v);
+        }
+    }
+}
+
+/// The [`KEPT_KEYS`] entries of `git config --list -z` output (`key\nvalue\0`...).
+fn kept_entries(out: &str) -> Vec<(String, String)> {
+    out.split('\0')
+        .filter(|e| !e.is_empty())
+        .filter_map(|e| {
+            let (k, v) = e.split_once('\n').unwrap_or((e, "true"));
+            let lower = k.to_ascii_lowercase();
+            let kept = KEPT_KEYS.contains(&lower.as_str())
+                || KEPT_PREFIXES.iter().any(|p| lower.starts_with(p));
+            kept.then(|| (k.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
 /// Stdout of `c`, read to its end within [`PROBE_CAP`]; the process is killed after.
-fn probe_output(mut c: std::process::Command) -> Option<String> {
+fn probe_output(c: std::process::Command) -> Option<String> {
+    probe_output_within(c, PROBE_CAP)
+}
+
+/// Stdout of `c`, read to its end within `cap`; the process is killed after.
+fn probe_output_within(mut c: std::process::Command, cap: Duration) -> Option<String> {
     use std::io::Read;
     c.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -330,7 +604,7 @@ fn probe_output(mut c: std::process::Command) -> Option<String> {
         let _ = stdout.read_to_string(&mut s);
         let _ = tx.send(s);
     });
-    let got = rx.recv_timeout(PROBE_CAP).ok();
+    let got = rx.recv_timeout(cap).ok();
     let _ = child.kill();
     let _ = child.wait();
     got
@@ -426,7 +700,22 @@ impl ToolHandler for Shell {
             .reopen()
             .map_err(|e| ToolError::Failed(format!("temp file: {e}")))?;
         let tap = Tap::shared(KEEP_BYTES, Some(log));
+        // D-547: a line whose git is all Read runs it without system/global config,
+        // hooks or fsmonitor. The seal's folder lives until the process has ended.
+        let seal = if v.seal_git() {
+            let git = self.runner.git_program();
+            let made = tokio::task::spawn_blocking(move || GitSeal::new(git.as_deref(), None))
+                .await
+                .map_err(|e| ToolError::Failed(format!("git seal: {e}")))?;
+            Some(made.map_err(|e| ToolError::Failed(format!("not run: git seal: {e}")))?)
+        } else {
+            None
+        };
         let mut cmd = self.runner.command(&a.cmd)?;
+        match &seal {
+            Some(s) => s.apply(cmd.as_std_mut()),
+            None => no_bare_discovery(cmd.as_std_mut()),
+        }
         cmd.current_dir(paths::plain(&cwd));
         let started = Instant::now();
         let exit = proc::run(
@@ -539,13 +828,83 @@ fn save_whole(
     let path = util::fresh_name(&roots.files, &format!("shell-{stamp}"), "log");
     // The one write check every sink goes through (D-525): files/ must still be scratch.
     util::own_output_ok(roots, &path)?;
-    std::fs::write(&path, s).map_err(|e| e.to_string())?;
+    crate::safeio::write(&path, s.as_bytes()).map_err(|e| e.to_string())?;
     Ok(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review T-14b round 2 (D-555): a bare repository made with Fill writes is not found
+    /// by sealed git, so its diff driver never runs. The same line without the seal runs
+    /// the driver (the plant is live, so the test can fail).
+    #[test]
+    fn a_planted_bare_repository_runs_nothing_under_the_seal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let foo = tmp.path().join("foo");
+        let marker = tmp.path().join("marker");
+        let empty = tmp.path().join("empty-global");
+        std::fs::write(&empty, "").unwrap();
+        let st = std::process::Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&foo)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let m = paths::plain(&marker).replace('\\', "/");
+        let mut cfg = std::fs::OpenOptions::new()
+            .append(true)
+            .open(foo.join("config"))
+            .unwrap();
+        std::io::Write::write_all(
+            &mut cfg,
+            format!("[diff \"x\"]\n\tcommand = \"echo hit > '{m}' #\"\n").as_bytes(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(foo.join("info")).unwrap();
+        std::fs::write(foo.join("info").join("attributes"), "* diff=x\n").unwrap();
+        std::fs::write(foo.join("a"), "one\n").unwrap();
+        std::fs::write(foo.join("b"), "two\n").unwrap();
+        let run = |seal: Option<&GitSeal>| {
+            let mut c = std::process::Command::new("git");
+            c.args(["diff", "--no-index", "a", "b"]).current_dir(&foo);
+            sanitize_env(&mut c);
+            c.env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", &empty)
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "safe.bareRepository")
+                .env("GIT_CONFIG_VALUE_0", "all");
+            if let Some(s) = seal {
+                s.apply(&mut c);
+            }
+            let _ = c.output().unwrap();
+        };
+        run(None);
+        assert!(
+            marker.exists(),
+            "the planted driver is live without the seal"
+        );
+        std::fs::remove_file(&marker).unwrap();
+        let seal = GitSeal::new(None, None).unwrap();
+        run(Some(&seal));
+        assert!(
+            !marker.exists(),
+            "sealed git ran the bare repository's diff driver"
+        );
+        // D-556: a line that is not sealed (a git above Read in it) gets the same key.
+        let mut c = std::process::Command::new("git");
+        c.args(["diff", "--no-index", "a", "b"]).current_dir(&foo);
+        sanitize_env(&mut c);
+        c.env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &empty);
+        no_bare_discovery(&mut c);
+        let _ = c.output().unwrap();
+        assert!(
+            !marker.exists(),
+            "unsealed git ran the bare repository's diff driver"
+        );
+    }
 
     #[cfg(windows)]
     #[test]
@@ -641,25 +1000,89 @@ mod tests {
             dirs.contains(&names(planted.path())),
             "planted dir missing: {got:?}"
         );
+        let bin_names = |h: &Path| {
+            let b = h.join("bin");
+            paths::lower_names(
+                &std::fs::canonicalize(&b).unwrap_or_else(|_| std::path::absolute(&b).unwrap()),
+            )
+        };
         if cfg!(windows) && msys_root(&bash).is_some() {
-            let home_bin = dirs::home_dir().unwrap().join("bin");
-            let home_bin_names = paths::lower_names(
-                &std::fs::canonicalize(&home_bin)
-                    .unwrap_or_else(|_| std::path::absolute(&home_bin).unwrap()),
-            );
+            // Git Bash adds $HOME/bin, which is the profile folder's bin only when HOME
+            // is unset or equal to it (review-T-14 confirm, should-fix 1).
             assert!(
-                dirs.contains(&home_bin_names),
-                "Git Bash adds ~/bin: {got:?}"
+                paths::home_dirs()
+                    .iter()
+                    .any(|h| dirs.contains(&bin_names(h))),
+                "Git Bash adds $HOME/bin: {got:?}"
             );
             let usr_bin = msys_root(&bash).unwrap().join("usr").join("bin");
             assert!(dirs.contains(&names(&usr_bin)), "{got:?}");
         }
-        // The process-wide set always has ~/bin, whatever PATH the harness started with.
-        let home_bin = dirs::home_dir().unwrap().join("bin");
-        let home_bin_names = paths::lower_names(
-            &std::fs::canonicalize(&home_bin)
-                .unwrap_or_else(|_| std::path::absolute(&home_bin).unwrap()),
+        // The process-wide set has <h>/bin for every home folder, whatever PATH the
+        // harness started with (D-543).
+        for h in paths::home_dirs() {
+            assert!(paths::path_dirs().contains(&bin_names(&h)), "{h:?}");
+        }
+    }
+
+    /// D-543 (review-T-14 confirm, should-fix 1): when the PATH probe cannot run bash,
+    /// `<home>/bin` is still a PATH folder for every home folder, HOME included when it
+    /// is not the profile folder.
+    #[test]
+    fn home_bin_is_a_path_folder_when_the_probe_fails() {
+        let t = tempfile::tempdir().unwrap();
+        let fake_home = t.path().join("fakehome");
+        std::fs::create_dir_all(fake_home.join("bin")).unwrap();
+        let missing_bash = t.path().join("no-such-git").join("bin").join("bash.exe");
+        let probed = bash_path_with(&missing_bash, None);
+        assert!(!probed.relative, "{probed:?}");
+        let dirs = paths::path_dirs_from(
+            None,
+            None,
+            std::slice::from_ref(&fake_home),
+            Some(probed),
+            None,
         );
-        assert!(paths::path_dirs().contains(&home_bin_names));
+        let jq = fake_home.join("bin").join("jq");
+        let run = t
+            .path()
+            .join("base")
+            .join("runs")
+            .join("2026-10-25T00-00-00-t");
+        std::fs::create_dir_all(run.join("files")).unwrap();
+        let roots = Roots::from_run_dir(&run).unwrap();
+        let jq = paths::resolve(&roots.base, &paths::plain(&jq)).unwrap();
+        assert!(paths::code_path(&roots, &jq, &[], &dirs), "{dirs:?}");
+        // Without the home entry the same file is not a PATH folder (the check can fail).
+        let none = paths::path_dirs_from(None, None, &[], None, None);
+        assert!(!paths::code_path(&roots, &jq, &[], &none));
+    }
+
+    /// D-544: Git's own system config folders, from bash's or git's install root.
+    #[test]
+    fn git_config_dirs_cover_etc_and_mingw64_etc() {
+        let root = PathBuf::from(if cfg!(windows) { "C:\\Git" } else { "/opt/git" });
+        let got = git_config_dirs_of(std::slice::from_ref(&root));
+        assert!(got.contains(&root.join("etc")));
+        assert!(got.contains(&root.join("mingw64").join("etc")));
+        assert_eq!(
+            git_root(&root.join("cmd").join("git.exe")),
+            Some(root.clone())
+        );
+        assert_eq!(
+            git_root(&root.join("mingw64").join("bin").join("git.exe")),
+            Some(root.clone())
+        );
+        assert_eq!(git_root(&root.join("bin").join("git.exe")), Some(root));
+        if cfg!(windows) {
+            if let Runner::Bash(b) = Runner::discover() {
+                if let Some(r) = msys_root(&b) {
+                    let etc = paths::lower_names(
+                        &std::fs::canonicalize(r.join("etc")).unwrap_or(r.join("etc")),
+                    );
+                    assert!(paths::path_dirs().trees.contains(&etc), "{r:?}");
+                }
+            }
+        }
     }
 }

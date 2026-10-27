@@ -1,0 +1,15 @@
+from: reviewer
+to: supreme
+task: T-16
+date: "2026-10-26"
+state: "Round 3 review (supreme hold of PR #17, D-144) of bd1f47c..HEAD non-merge commits 3c4f830 and be24f1e is written to bench/results/review-T-16.md under '## Round 3 (supreme hold, D-144)'. Supreme asks (3) watch.txt scrubbed before write_atomic, (4) readers-only replay session (strict harness-web MCP config, cwd = run folder, --setting-sources local, --tools \"\", built-ins denied) and (5) schedule.add Account hinted `schedule` with seeded ('*','Account:schedule','ask') so a timeout skips are each closed in code, and each has a test that fails if the fix is removed (accept_t16_mem canary and timeout-skip, launcher the_replay_session_is_readers_only, gate a_schedule_add_ask_times_out_to_skip, accept_t03 seeds). Blocking: none. Verdict: approve. Not built by the reviewer, because a workspace test held the build lock."
+not_done: "R3-1 (should-fix, older than this delta and outside it): ClaudeLauncher::print firings set no cwd, --setting-sources or --tools, so started from the repo root they inherit Bash(psql *) and Bash(cargo *) and can add schedules or gate rules without the gate; give them the replay session's isolation and deny Bash(harness schedule:*). R3-2: HINT_SCHEDULE is not in interfaces.yaml:28 and needs an interface proposal for supreme. Notes: record the live --tools \"\" check in accept-T-16.md, fix the launcher.rs:36-37 'ignores --tools' wording, and add a core-pg build.rs with rerun-if-changed=../../migrations."
+gotchas:
+  - "sqlx::migrate! does not notice a new migration file unless core-pg or one of its dependencies is rebuilt (no build.rs in core-pg); this round is safe only because harness-core changed in the same commit."
+  - "accept_t16_mem and accept_t03 pass with a SKIPPED line when Postgres is down; the timeout-skip proof needs a run with no SKIPPED line."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-16.md
+  - agent-memory/handoffs/T-16-reviewer-2.yaml
+verify: "CARGO_BUILD_JOBS=1 cargo test -p harness-core --lib gate::tests::a_schedule_add_ask_times_out_to_skip && CARGO_BUILD_JOBS=1 cargo test -p harness --lib launcher::tests::the_replay_session_is_readers_only"

@@ -24,6 +24,11 @@ pub fn parse<T: DeserializeOwned>(args: &Value) -> Result<T, ToolError> {
 pub struct Verdict {
     pub class: Class,
     pub reasons: Vec<(Class, String)>,
+    /// The shell line runs git (or gh, which runs git).
+    pub runs_git: bool,
+    /// One of those git or gh commands is above Read on its own (a commit, a push, git
+    /// in runs/): the line's git then runs with the user's configuration (D-547).
+    pub git_above_read: bool,
 }
 
 impl Verdict {
@@ -31,7 +36,15 @@ impl Verdict {
         Verdict {
             class: floor,
             reasons: Vec::new(),
+            runs_git: false,
+            git_above_read: false,
         }
+    }
+
+    /// Every git in the line is Read-class, so it runs sealed: no system or global
+    /// config, no hooks, no fsmonitor, no credential helper (D-547).
+    pub fn seal_git(&self) -> bool {
+        self.runs_git && !self.git_above_read
     }
 
     /// Raises to `class` (never lowers) and records why.
@@ -43,6 +56,8 @@ impl Verdict {
     pub fn merge(&mut self, other: Verdict) {
         self.class = self.class.max(other.class);
         self.reasons.extend(other.reasons);
+        self.runs_git |= other.runs_git;
+        self.git_above_read |= other.git_above_read;
     }
 
     /// The reasons behind the final class, joined.
