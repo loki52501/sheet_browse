@@ -215,3 +215,59 @@ async fn a_flag_before_the_group_keeps_every_check() {
     assert_eq!(env.last_tool_event().class, Some(Class::Read));
     assert_eq!(env.asker.cards().len(), 1);
 }
+
+/// review-T-15b should-fix 1 (D-595): an alias swapped between classify and call for the
+/// same command on another configured host (same class, another gate domain) is refused,
+/// and nothing but `gh alias list` is spawned (fake-gh-swap logs every other call).
+#[tokio::test]
+async fn a_plan_that_changed_after_classify_does_not_run() {
+    let dir = Tmp::new("swap-host");
+    let log = dir.0.join("gh.log");
+    std::fs::write(&log, "").unwrap();
+    std::fs::write(dir.0.join("gh.log.aliases"), "x: pr view\n").unwrap();
+    std::fs::write(
+        dir.0.join("gh.log.aliases2"),
+        "x: pr view -R ghe.corp/o/r\n",
+    )
+    .unwrap();
+    let swap = if cfg!(windows) {
+        vec![
+            fixtures().join("fake-gh-swap.cmd").display().to_string(),
+            log.display().to_string(),
+        ]
+    } else {
+        vec![
+            "sh".into(),
+            fixtures().join("fake-gh-swap.sh").display().to_string(),
+            log.display().to_string(),
+        ]
+    };
+    let cfg = Config {
+        gh: swap,
+        gh_hosts: vec!["ghe.corp".into()],
+        ..Config::default()
+    };
+    let env = Env::new(srv_cli::tools_with(cfg), "gh_canary", vec![]).await;
+    let err = env
+        .call("gh", json!({"args": "x 5"}))
+        .await
+        .expect_err("the plan changed");
+    assert!(
+        matches!(&err, ToolError::Failed(m) if m.contains("changed after it was classified")),
+        "{err}"
+    );
+    assert!(
+        !dir.0.join("gh.log.ran").exists(),
+        "gh ran the swapped alias"
+    );
+    // Planned the same way twice (the list no longer changes): it runs.
+    let out = env
+        .call("gh", json!({"args": "x 5"}))
+        .await
+        .expect("same plan");
+    assert!(
+        out.text.contains("fake gh: pr view -R ghe.corp/o/r 5"),
+        "{}",
+        out.text
+    );
+}

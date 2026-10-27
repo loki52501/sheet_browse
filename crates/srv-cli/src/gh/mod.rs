@@ -33,6 +33,8 @@
 //! classifies and runs the expansion instead of the alias. `alias set` is classified at the
 //! class of the command its expansion runs (at least Account) and refused when that command
 //! would be refused or is a shell alias.
+//! `call` plans again with a fresh list and runs only when that plan (the words, the host,
+//! the class) equals the one classify made for it (D-595).
 //!
 //! `run view <id> --log` (or `--log-failed`) saves the whole log, scrubbed, to
 //! `runs/<run>/files/gh-run-<id>.log` and returns only the first failing step.
@@ -46,7 +48,8 @@ use async_trait::async_trait;
 use harness_core::class::Class;
 use harness_core::mcp::{Classified, ToolCtx, ToolError, ToolHandler, ToolOutput, ToolSpec};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 /// Stdout kept for a run log.
 const LOG_MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -97,12 +100,36 @@ pub fn tools_with(cfg: &Arc<Config>) -> Vec<ToolSpec> {
             },
             "required": ["args"]
         }),
-        handler: Arc::new(Gh { cfg: cfg.clone() }),
+        handler: Arc::new(Gh {
+            cfg: cfg.clone(),
+            planned: Mutex::new(VecDeque::new()),
+        }),
     }]
 }
 
 struct Gh {
     cfg: Arc<Config>,
+    /// What each classify planned, until its call (D-595).
+    planned: Mutex<VecDeque<Planned>>,
+}
+
+/// Classify's plan for one call, kept for the call that follows it (D-595).
+struct Planned {
+    /// The address of the call's [`ToolCtx`]. Core's `dispatch` hands one context, a local
+    /// of its pinned future, to classify and then to call, so the address names the call;
+    /// if it ever did not, call finds no plan and refuses (fails closed). B-591 proposes a
+    /// token in the interface instead.
+    ctx: usize,
+    run: String,
+    named: Vec<String>,
+    plan: GhPlan,
+}
+
+/// Plans kept at once; the oldest goes first (one whose call never came: the gate refused).
+const MAX_PLANNED: usize = 64;
+
+fn ctx_key(ctx: &ToolCtx) -> usize {
+    ctx as *const ToolCtx as usize
 }
 
 /// The gh arguments of a call, without a leading `gh` word, the group first
@@ -921,13 +948,44 @@ impl Gh {
         let aliases = self.aliases(argv).await?;
         plan(argv, &self.cfg.gh_hosts, &aliases)
     }
+
+    fn planned(&self) -> std::sync::MutexGuard<'_, VecDeque<Planned>> {
+        // A panic elsewhere cannot leave a half-written entry: push and remove are whole.
+        self.planned.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Keeps classify's plan for this call, replacing one an earlier context at the same
+    /// address left (its call never came).
+    fn remember(&self, ctx: &ToolCtx, named: &[String], plan: &GhPlan) {
+        let key = ctx_key(ctx);
+        let mut q = self.planned();
+        q.retain(|p| p.ctx != key);
+        q.push_back(Planned {
+            ctx: key,
+            run: ctx.run_id.0.clone(),
+            named: named.to_vec(),
+            plan: plan.clone(),
+        });
+        while q.len() > MAX_PLANNED {
+            q.pop_front();
+        }
+    }
+
+    /// Classify's plan for this call, taken out.
+    fn take_planned(&self, ctx: &ToolCtx) -> Option<Planned> {
+        let key = ctx_key(ctx);
+        let mut q = self.planned();
+        let i = q.iter().position(|p| p.ctx == key)?;
+        q.remove(i)
+    }
 }
 
 #[async_trait]
 impl ToolHandler for Gh {
-    async fn classify(&self, _ctx: &ToolCtx, args: &Value) -> Result<Classified, ToolError> {
+    async fn classify(&self, ctx: &ToolCtx, args: &Value) -> Result<Classified, ToolError> {
         let argv = gh_argv(args)?;
         let p = self.plan(&argv).await?;
+        self.remember(ctx, &argv, &p);
         let shown = text::line(&argv::show(&argv), 300);
         // An alias names the command it runs by its first two words only: an expansion
         // can hold anything the user typed.
@@ -950,12 +1008,23 @@ impl ToolHandler for Gh {
 
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput, ToolError> {
         let named = gh_argv(&args)?;
+        let seen = self.take_planned(ctx);
         // Planned again: the aliases may have changed since classify. What runs is the
-        // planned argument vector (an alias's expansion), never the alias itself.
+        // planned argument vector (an alias's expansion), never the alias itself, and only
+        // when it is exactly what classify planned: the same words on the same host at the
+        // same class (D-595).
         let p = self.plan(&named).await?;
+        let same = seen.is_some_and(|s| s.run == ctx.run_id.0 && s.named == named && s.plan == p);
         if p.call.class > ctx.class {
             return Err(ToolError::Failed(
                 "gh: the call's class is above what the gate approved; not run".into(),
+            ));
+        }
+        if !same {
+            return Err(ToolError::Failed(
+                "gh: what this call runs changed after it was classified (a gh alias was set \
+                 or changed); nothing ran. Call again to classify it as it is now."
+                    .into(),
             ));
         }
         let argv = p.argv;
