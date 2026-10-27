@@ -1,0 +1,17 @@
+from: rust-coder-2
+to: reviewer, tester, core/suborch
+task: T-05d
+date: "2026-10-26"
+state: "Round 2 (D-89, last round) done on swarm/core-T05d, addressing review-T-05d should-fix 1, 2 and the nits. vault::spellings now also base64-spells, through push_base64_spellings (same 3 alignments, 2 alphabets, core/tail/padded forms, 8-char floor), (1) the application/x-www-form-urlencoded spelling of each base text (new const PCT_FORM, uppercase hex, `+` for space), only where it differs byte for byte from the base text; (2) the Latin-1 bytes of each base text whose chars are non-ASCII and all U+00FF or below (latin1_bytes, what JS btoa encodes). MIME/PEM line-wrapped base64, UTF-16LE base64 and base64 of base64 are listed as known limits in the spellings() doc (owner core, B-152, T-05e). Nits: MIN_BASE64_CHARS doc says bytes (from 7 bytes every alignment has a core); base64_into zeroizes `b` and `n` per chunk; json_escape(t, false/true) computed once per base text and passed to push_spellings; module doc line reflowed. Two new unit tests: scrub_base64_of_form_urlencoded_body (login POST body `user=bob&password=<form>` mid-blob and at blob end, 4 engines, only edge characters survive) and scrub_base64_of_latin1_value (Basic `user:<latin1>` 4 engines, plus latin1_bytes None for ASCII and for chars over U+00FF). Red proofs: replacing the form push with a no-op fails scrub_base64_of_form_urlencoded_body (no @vault(pw) in the blob), replacing the Latin-1 push fails scrub_base64_of_latin1_value; both restored from a byte-identical copy (cmp). Gates: fmt --check clean; clippy -p harness-core --all-targets -D warnings clean; cargo test -p harness-core 385 passed, 0 failed, 3 ignored (lib 140). tasks.yaml: T-05d done, T-05e appended (todo)."
+not_done: "Nothing for T-05d. T-05e (B-152): MIME/PEM wrapped base64, UTF-16LE base64, base64 of base64, before step 3 consumers that echo encoded bodies. Form-urlencoded base64 is added for the base texts only, not for their JSON forms (a JSON string inside a form body, base64-encoded, is not covered); lower-case hex form bodies are not covered either (URLSearchParams and browsers write uppercase)."
+gotchas:
+  - "The project hook blocks Write to the session scratchpad (outside the worktree); keep temporary backups under target/ (ignored) and restore with cp + touch, never git stash."
+  - "The automaton matches ASCII-case-insensitively, but base64 over `%2f` and `%2F` differs in bytes, so only the uppercase-hex form spelling is base64-encoded."
+  - "No rows were added to tests/vault_accept_t05d.rs (tester-owned black-box suite); the tester may add a form-body and a btoa row there."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/src/vault.rs
+  - agent-memory/tasks.yaml
+  - agent-memory/handoffs/T-05d-rust-coder-2.yaml
+verify: "SB_VAULT_CANARY=sbcanary-x-<random hex> CARGO_TARGET_DIR=F:/sb-swarm/wt/core/wt/T05d/target cargo test -j 1 -p harness-core"

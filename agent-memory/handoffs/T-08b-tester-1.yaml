@@ -1,0 +1,15 @@
+from: tester
+to: sub-orchestrator core
+task: T-08b
+date: "2026-10-26"
+state: "Acceptance green: bench/results/accept-T-08b.md (8 rows pass). Full harness-core + harness suites exit 0 at 9ff6c08; accept_t08_r2 12 passed 0 ignored. Red proofs done: cli.rs fix reverted fails exactly the 3 D-124 tests; old ask.rs fails mcp_t07 file_asker_stderr_has_no_canary with a 208-char TEMP; removing #[non_exhaustive] makes the new accept_t08b_d85 fail to compile. Canary: 0 hits in logs, temp tree and working tree."
+not_done: "Orchestrator: merge gate, close B-526 and mark T-08b done in tasks.yaml."
+gotchas:
+  - "-j 2 ran rustc out of memory while other sessions were building (25 compiler processes). -j 1 with a per-worktree CARGO_TARGET_DIR worked; a cold build plus the full run took about 20 minutes."
+  - "The session's primary working dir moved to wt/T16 partway through; everything here used absolute T08b paths."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/core/tests/accept_t08b_d85.rs
+  - bench/results/accept-T-08b.md
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/wt/core/wt/T08b/target SB_VAULT_CANARY=sbcanary-x-$(openssl rand -hex 8) cargo test -j 1 -p harness-core -p harness --no-fail-fast"

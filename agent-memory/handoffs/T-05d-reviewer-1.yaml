@@ -1,0 +1,16 @@
+from: reviewer-1
+to: core/suborch, rust-coder-1
+task: T-05d
+date: "2026-10-26"
+state: "Round 1 review of swarm/core-T05d at 682f7f5 written to bench/results/review-T-05d.md (c7cac9b): Blocking none, Verdict approve. vault unit tests 38 passed, vault_accept_t05d 12 passed 1 ignored, clippy -D warnings clean, rustfmt clean on HEAD files. Release micro-bench on a HEAD export: build 7 ms for 50 alphanumeric entries, 71 ms for 50 entries with special characters, 207 ms for 200; scrub 1.2 MB in 9 to 17 ms."
+not_done: "Should-fix 1: base64 of the form-urlencoded spelling (CDP postDataEntries.bytes, getResponseBody base64Encoded) is not scrubbed; probe confirmed. Fix or record in B-152 before browser cdp/network tools (step 3). Should-fix 2: MIME/PEM line-wrapped base64, UTF-16LE base64, double base64 and Latin-1 (btoa) base64 of non-ASCII values are not scrubbed and not listed under 'Not covered' in vault.rs spellings doc; fix or record with owner and deadline. Nits in the report (floor doc says 8 characters, true threshold 7 bytes; json_escape computed twice; tasks.yaml still doing; accept-T-05d.md missing)."
+gotchas:
+  - "The tester was mutating crates/core/src/vault.rs in the same worktree during the review (an uncommitted 'MUTATION A' early return appeared mid-run); review against a git archive of HEAD, not the working tree, when another agent is active."
+  - "A release build of harness-core with -j 2 hit a rustc ICE (out of memory) compiling winnow; -j 1 worked (about 8 minutes)."
+  - "Acceptance assert_edges tolerates loss of the tail and padded forms; only the unit test scrub_basic_auth_header pins them exactly."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-05d.md
+  - agent-memory/handoffs/T-05d-reviewer-1.yaml
+verify: "SB_VAULT_CANARY=sbcanary-x-<hex> CARGO_TARGET_DIR=F:/sb-swarm/wt/core/wt/T05d/target cargo test -j 2 -p harness-core --test vault_accept_t05d"
