@@ -292,7 +292,7 @@ tasks:
     owner: core/suborch
     branch: swarm/core-T08b
     title: "D-85 not done at merge: SchedError #[non_exhaustive]. Plus T-08 red acceptance rows: D-124 (1) ledger header and tools pin/unpin/retire echo ids as literals, and `harness gate set --note` stores no vault value (scrub the note before the database; vault rule)."
-    status: doing
+    status: done
     claimed_at: "2026-10-25"
     from: T-08
   - id: T-10b

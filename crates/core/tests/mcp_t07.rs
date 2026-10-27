@@ -1559,6 +1559,11 @@ async fn file_asker_stderr_child() {
         EntryKind::Secret,
     )]));
     let root = Tmp::new();
+    // The parent set TEMP to long_temp(); without it this guard proves nothing.
+    assert!(
+        root.0.as_os_str().len() > 200,
+        "the child's temp folder is not past the line cap"
+    );
     let run = RunFolder::create(&root.0, "ask", "ask test").unwrap();
     let asker = FileAsker::new(&root.0, run.id.clone(), vault);
     let k = AskCard {
@@ -1575,9 +1580,32 @@ async fn file_asker_stderr_child() {
     assert_eq!(asker.ask(&k).await, AskOutcome::TimeoutSkip);
 }
 
+/// The child's temp folder: under a fresh [`Tmp`], padded with 30-char segments until the
+/// path alone is past the 200-char card line cap (B-526), and under MAX_PATH so Windows'
+/// GetTempPath still returns it. The run folder (and its `asks` path) is longer still, so a
+/// fail-closed line that puts the path before "nobody saw" is cut on every machine.
+fn long_temp(base: &Tmp) -> PathBuf {
+    let mut p = base.0.clone();
+    while p.as_os_str().len() < 210 {
+        p.push("p".repeat(30));
+    }
+    assert!(
+        p.as_os_str().len() < 250,
+        "the base temp folder is too long to pad: {}",
+        p.display()
+    );
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
 #[test]
 fn file_asker_stderr_has_no_canary() {
+    let base = Tmp::new();
+    let temp = long_temp(&base);
     let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .env("TEMP", &temp)
+        .env("TMP", &temp)
+        .env("TMPDIR", &temp)
         .args([
             "file_asker_stderr_child",
             "--exact",

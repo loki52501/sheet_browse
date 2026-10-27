@@ -529,6 +529,10 @@ async fn d124_1_reading_commands_print_the_literal() {
     let card = harness_core::ask::card_path(&ask_dir, 1);
     std::fs::create_dir_all(card.parent().unwrap()).unwrap();
     std::fs::write(&card, "{}").unwrap();
+    // A tool folder named with the value (made before it was in the vault).
+    let tool_dir = format!("{v}.com");
+    std::fs::create_dir_all(e.tools_root.join(&tool_dir)).unwrap();
+    std::fs::write(e.tools_root.join(&tool_dir).join("probe.js"), "// t\n").unwrap();
 
     let cases: Vec<(Vec<String>, bool)> = vec![
         (vec!["schedule".into(), "list".into()], true),
@@ -540,6 +544,8 @@ async fn d124_1_reading_commands_print_the_literal() {
             vec!["tools".into(), "list".into(), "luma.com".into()],
             false,
         ),
+        (vec!["tools".into(), "list".into()], true),
+        (vec!["tools".into(), "list".into(), tool_dir.clone()], true),
         (vec!["ledger".into(), run.0.clone()], true),
         (
             vec!["ask".into(), ask_run.clone(), "1".into(), "yes".into()],
@@ -637,8 +643,9 @@ async fn d124_1_ledger_header_prints_run_ids_as_literals() {
     assert!(leaks.is_empty(), "{}", leaks.join(" | "));
 }
 
-/// `harness tools pin|unpin|retire <domain>/<name>` echo the tool id; a vault value in it
-/// (typed by the user) must print as the literal, as `ask` does for its run argument.
+/// `harness tools pin|unpin|retire <domain>/<name>` echo the tool id on success. A tool whose
+/// name became a vault value after its `tools.health` row and file existed (as the ledger
+/// header test seeds run ids) must echo the literal from all three commands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn d124_1_tools_commands_echo_the_tool_id_as_literal() {
     let _g = LOCK.lock().await;
@@ -648,32 +655,177 @@ async fn d124_1_tools_commands_echo_the_tool_id_as_literal() {
     vault_with_canary(&e);
     let v = canary();
     let c = ctx(e.clone(), store.clone(), None);
+    store
+        .tool_health_set(health_row("luma.com", v, None))
+        .await
+        .unwrap();
+    let dir = e.tools_root.join("luma.com");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{v}.js")), "// tool\n").unwrap();
     let tool = format!("luma.com/{v}");
     let mut leaks = Vec::new();
-    for a in [
-        vec!["tools", "pin", &tool],
-        vec!["tools", "unpin", &tool],
-        vec!["tools", "retire", &tool, "--no-commit"],
+    for (a, word) in [
+        (vec!["tools", "pin", &tool], "pinned"),
+        (vec!["tools", "unpin", &tool], "unpinned"),
+        (vec!["tools", "retire", &tool, "--no-commit"], "retired"),
     ] {
         empty_global_vault();
         let (r, out) = run_cli(&c, &a).await;
         let what = redact(&a.join(" "));
-        let shown = match r {
-            Ok(()) => out,
-            Err(e) => binary_error_line(&e),
-        };
+        r.unwrap_or_else(|e| panic!("{what}: {}", redact(&binary_error_line(&e))));
         assert!(installed(), "{what} did not install the vault");
-        println!("d124_1 tools: {what} -> {}", redact(&shown).trim());
-        if shown.contains(v) {
-            leaks.push(format!("{what} printed the value: {}", redact(&shown)));
+        println!("d124_1 tools: {what} -> {}", redact(&out).trim());
+        let echo = format!("luma.com/{LITERAL}: {word}");
+        if out.contains(v) || !out.contains(&echo) {
+            leaks.push(format!("{what} did not echo `{echo}`: {}", redact(&out)));
         }
     }
-    // Pin on an unknown id is refused; it must not create a row named with the value.
-    let health = db.dump_tables(&["tools.health"]).await;
-    if health.contains(v) {
-        leaks.push(format!("tools.health holds the value: {}", redact(&health)));
-    }
     assert!(leaks.is_empty(), "{}", leaks.join(" | "));
+    let h = store.tool_health("luma.com").await.unwrap();
+    assert_eq!(h.len(), 1);
+    assert_eq!(h[0].status, ToolStatus::Retired);
+    assert!(!h[0].pinned);
+}
+
+/// Pin and unpin of an id with no `tools.health` row and no file are refused with NotFound
+/// and create no row, with or without a vault value in the id (D-124 (1)); the error line
+/// shows the literal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn d124_1_tools_pin_unpin_of_an_unknown_id_is_not_found() {
+    let _g = LOCK.lock().await;
+    let (db, store) = TestDb::store().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let e = env(tmp.path(), &db);
+    vault_with_canary(&e);
+    let v = canary();
+    let c = ctx(e.clone(), store.clone(), None);
+    let with_value = format!("luma.com/{v}");
+    for (tool, literal) in [
+        ("luma.com/unknown-tool", false),
+        (with_value.as_str(), true),
+    ] {
+        for cmd in ["pin", "unpin"] {
+            empty_global_vault();
+            let (r, out) = run_cli(&c, &["tools", cmd, tool]).await;
+            let what = redact(&format!("tools {cmd} {tool}"));
+            let err = r.expect_err(&what);
+            assert!(installed(), "{what} did not install the vault");
+            assert!(
+                matches!(err, CliError::NotFound(_)),
+                "{what}: want NotFound, got {}",
+                redact(&binary_error_line(&err))
+            );
+            assert!(out.is_empty(), "{what} printed {}", redact(&out));
+            let line = binary_error_line(&err);
+            assert_clean(&line, literal, &what);
+            assert!(
+                line.contains("no tool luma.com/"),
+                "{what}: {}",
+                redact(&line)
+            );
+        }
+    }
+    let health = db.dump_tables(&["tools.health"]).await;
+    assert_eq!(
+        health.trim(),
+        "== tools.health",
+        "a refused pin or unpin wrote a row: {}",
+        redact(&health)
+    );
+}
+
+/// `harness gate set <domain> <class>`: the domain and class are the rule's key, so a vault
+/// value in either is refused (B-186 default), the error names the entry and never the value,
+/// and gate.rules stays empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn b186_gate_set_refuses_a_vault_value_in_the_domain_or_class() {
+    let _g = LOCK.lock().await;
+    let (db, store) = TestDb::store().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let e = env(tmp.path(), &db);
+    vault_with_canary(&e);
+    let v = canary();
+    let c = ctx(e.clone(), store.clone(), None);
+    let domain = format!("{v}.com");
+    let class = format!("Send{v}");
+    for (args, what) in [
+        (vec!["gate", "set", &domain, "Send", "ask"], "domain"),
+        (vec!["gate", "set", "example.com", &class, "ask"], "class"),
+    ] {
+        empty_global_vault();
+        let (r, out) = run_cli(&c, &args).await;
+        let label = redact(&args.join(" "));
+        let err = r.expect_err(&label);
+        assert!(installed(), "{label} did not install the vault");
+        assert!(
+            matches!(err, CliError::Usage(_)),
+            "{label}: want Usage, got {}",
+            redact(&binary_error_line(&err))
+        );
+        assert!(out.is_empty(), "{label} printed {}", redact(&out));
+        // The unscrubbed message itself already names the entry, not the value.
+        let raw = format!("{err:#}");
+        assert_clean(&raw, true, &label);
+        assert!(
+            raw.contains(&format!("the {what} ")) && raw.contains("B-186"),
+            "{label}: {}",
+            redact(&raw)
+        );
+    }
+    let rules = db.dump_tables(&["gate.rules"]).await;
+    assert!(
+        !rules.contains(v),
+        "gate.rules holds the value: {}",
+        redact(&rules)
+    );
+    assert!(
+        !rules.contains("example.com"),
+        "a refused rule was stored: {}",
+        redact(&rules)
+    );
+    // A clean rule still goes in.
+    empty_global_vault();
+    let (r, _) = run_cli(&c, &["gate", "set", "example.com", "Send", "ask"]).await;
+    r.unwrap();
+}
+
+/// `harness schedule add` under SB_RUN_ID prints the parent run id; a run started before its
+/// id's text was in the vault must print as the literal (like the ledger header).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn d124_1_schedule_add_prints_the_parent_run_as_literal() {
+    let _g = LOCK.lock().await;
+    let (db, store) = TestDb::store().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut e = env(tmp.path(), &db);
+    vault_with_canary(&e);
+    let v = canary();
+    let parent = RunId(format!("2026-10-25T09-00-00-{v}"));
+    std::fs::create_dir_all(e.runs_root.join(&parent.0)).unwrap();
+    store
+        .run_start(Run {
+            id: parent.clone(),
+            started: Utc.with_ymd_and_hms(2026, 10, 25, 9, 0, 0).unwrap(),
+            ended: None,
+            prompt: "p".into(),
+            status: RunStatus::Running,
+            folder: "runs/x".into(),
+            parent_run: None,
+            strict: false,
+        })
+        .await
+        .unwrap();
+    e.run_id = Some(parent.clone());
+    let c = ctx(e.clone(), store.clone(), None);
+    empty_global_vault();
+    let (r, out) = run_cli(&c, &["schedule", "add", "*/5 * * * *", "say hi"]).await;
+    r.unwrap_or_else(|e| panic!("schedule add: {}", redact(&binary_error_line(&e))));
+    assert!(installed());
+    assert_clean(&out, true, "schedule add output");
+    assert!(
+        out.contains(&format!("parent run 2026-10-25T09-00-00-{LITERAL}")),
+        "{}",
+        redact(&out)
+    );
 }
 
 /// Commands that write (rows, run folders, files) store no vault value, print none, and each
@@ -709,8 +861,19 @@ async fn d124_1_writing_commands_store_and_print_no_value() {
     let add_prompt = format!("{v} check mail");
     let why = format!("{v} broke it");
     let run_prompt = format!("log in as {v} please");
+    let watch_target = format!("https://example.com/{v}/inbox");
     let cases: Vec<Vec<&str>> = vec![
         vec!["schedule", "add", "*/1 * * * *", &add_prompt],
+        vec![
+            "schedule",
+            "add",
+            "*/2 * * * *",
+            "watch the inbox",
+            "--kind",
+            "watch",
+            "--watch-target",
+            &watch_target,
+        ],
         vec!["schedule", "list"],
         vec!["gate", "set", "example.com", "Send", "ask"],
         vec!["tools", "pin", "luma.com/login"],
@@ -740,10 +903,17 @@ async fn d124_1_writing_commands_store_and_print_no_value() {
         println!("d124_1 write ok: {what}");
     }
     let list = store.schedule_list().await.unwrap();
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].prompt, format!("{LITERAL} check mail"));
+    assert_eq!(list.len(), 2);
+    let cron = list.iter().find(|s| s.kind == ScheduleKind::Cron).unwrap();
+    assert_eq!(cron.prompt, format!("{LITERAL} check mail"));
+    let watch = list.iter().find(|s| s.kind == ScheduleKind::Watch).unwrap();
+    assert_eq!(
+        watch.watch_target.as_deref().map(redact),
+        Some(format!("https://example.com/{LITERAL}/inbox")),
+        "schedules.watch_target is stored scrubbed"
+    );
     empty_global_vault();
-    let id = list[0].id.to_string();
+    let id = cron.id.to_string();
     let (r, out) = run_cli(&c, &["schedule", "rm", &id]).await;
     r.unwrap();
     assert!(installed(), "schedule rm did not install the vault");
