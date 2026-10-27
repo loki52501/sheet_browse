@@ -907,6 +907,7 @@ impl ToolHandler for Gh {
             } else {
                 err
             };
+            let err = html_page_note(&err).unwrap_or(err);
             return Err(ToolError::Failed(format!(
                 "gh {} ({}): {}",
                 text::line(&argv::show(&named), 200),
@@ -918,8 +919,14 @@ impl ToolHandler for Gh {
             return save_log(ctx, &argv, &out).await;
         }
         let stdout = out.stdout_text();
+        let html_page = argv
+            .first()
+            .filter(|g| *g == "api")
+            .and_then(|_| html_page_note(&stdout));
         let mut t = if stdout.trim().is_empty() {
             "(no output)".to_string()
+        } else if let Some(note) = html_page {
+            note
         } else {
             text::capped(
                 stdout.trim_end(),
@@ -945,6 +952,24 @@ impl ToolHandler for Gh {
             ..ToolOutput::default()
         })
     }
+}
+
+/// What the model reads instead of `out` when it is a whole HTML page (rule 5, D-593):
+/// `gh api` prints whatever the host answered (a GHE login or proxy page), and a failing
+/// call may print it as its error. Only a document counts here, not a few tags, because gh
+/// output may quote some (a PR body's `<details>`). JSON is never a page.
+fn html_page_note(out: &str) -> Option<String> {
+    if crate::http::is_json(out) || !text::looks_like_html_document(out) {
+        return None;
+    }
+    Some(format!(
+        "the answer is an HTML page ({} bytes{}), not shown (to read a public page as text \
+         use the web tools' fetch)",
+        out.len(),
+        text::html_title(out, 120)
+            .map(|t| format!("; page title \"{t}\""))
+            .unwrap_or_default()
+    ))
 }
 
 /// Saves the scrubbed log to `files/` and returns the first failing step.
@@ -1346,6 +1371,21 @@ far: api https://any.host/x\nt2: v\n";
         }
         assert_eq!(c("alias delete pv").unwrap(), Class::Delete);
         assert_eq!(c("alias list").unwrap(), Class::Account);
+    }
+
+    /// T-15b item 4 (D-593): a whole HTML page from `gh api` is not shown; a PR body that
+    /// quotes a few tags, and JSON, are.
+    #[test]
+    fn html_pages_from_gh_are_not_shown() {
+        let page = "<!DOCTYPE html><html><head><title>Sign in</title></head><body>x</body>";
+        let note = html_page_note(page).expect("a page");
+        assert!(
+            !note.contains('<') && note.contains("page title \"Sign in\""),
+            "{note}"
+        );
+        assert!(html_page_note("<details><summary>a</summary><br></details>").is_none());
+        assert!(html_page_note(r#"{"body":"<html><body>x</body></html>"}"#).is_none());
+        assert!(html_page_note("plain").is_none());
     }
 
     #[test]
