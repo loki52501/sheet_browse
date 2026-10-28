@@ -1,0 +1,53 @@
+from: rust-coder B (core area, T-28 parts b, d, e)
+to: core/suborch, then reviewer and tester (a coder never accepts its own work)
+task: T-28
+date: "2026-10-27"
+state: "Parts b (D-151, D-152, D-156), d (D-153) and e (D-155) are written and committed on swarm/core-T28 (b5ef2e1, ef90bcf, a4462bc, e01c5d3); coder A's parts a and c are now proven too. PROVEN on this tree: `cargo fmt --all -- --check` clean; `cargo clippy -j 1 -p harness -p toolstore -p harness-core --all-targets -- -D warnings` clean; `cargo test -j 1 --no-fail-fast -p harness -p toolstore -p harness-core` 722 passed, 0 failed, 4 ignored (harness 105: lib 34 incl. forge 8 and judge 4, integration 71; harness-core 414: lib 148, integration 261 incl. report_browser_t28 and contract_paths, doc 5; toolstore 203: lib 147 incl. recipe 19, accept_t11 41, accept_t11b 9, contract_paths 6). Step 0 (coder A's unproven items) was green before any change: clippy clean, toolstore and harness-core suites all ok. Mutations seen red then restored: save without the vault scrub (save_scrubs_a_planted_vault_value), rule-7 check off (run_refuses_bad_args_and_missing_or_retired_recipes), recipe retire at > 3 instead of >= 3 (toolstore three_failed_runs_retire_and_archive_a_recipe and judge three_failing_windows_...). merge_gate.py core --worktree . prints `gate ok for core` (T-28 is not in its task list yet). NOT PROVEN: cargo test --workspace (not run: RAM, per brief); the harness-forge binary was never started over stdio (no stdio test; it is mem_server's bootstrap + serve pattern, and every tool is tested in process through harness_core::mcp::dispatch); no live BrowserOS session ran tools.run steps or saved a recipe from a real browseros.jsonl (rule 1: no model here); bench/fixtures/ladder_session.py keeps its own ALLOWED list (D-155 covers harnessd -p sessions only)."
+public_api:
+  harness:
+    - "harness::forge { SERVER = \"forge\", LIST_TOOL, RUN_TOOL, SAVE_TOOL, RUN_INSTRUCTION, tools(&Harness, &Path) -> Vec<ToolSpec>, serve() -> Result<(), CliError>, tools_root_from_env() -> Result<PathBuf, CliError>, prepare_run(&Recipe, &Map) -> Result<Prepared, String>, bind_args(&Recipe, &Map) -> Result<Map, String>, signature(&Recipe) -> String, percent_encode, regex_escape, Prepared { steps, tools, expects } }"
+    - "harness::forge_save { SaveRequest, SaveStep, SaveArg, build_recipe(folder, &SaveRequest, jsonl, &dyn Fn(&str) -> String) -> Result<Recipe, String>, default_match(url) -> String, target_in_summary(summary, ref) -> Option<Target>, DROPPED_KEYS, MIN_VALUE_CHARS }"
+    - "harness::judge { JUDGE_TOOL = \"tools.judge\", judge_recipe_runs(runs_root, &ToolStore, &dyn MemoryStore, &Ledger, current: &RunId, now, day) -> Result<Judged, ReflectError> (async), verdict(&[String], Option<&str>, &[&BrowserLine]) -> RunOutcome, browser_lines, parse_hook_ts, at_key, BrowserLine, Verdict, Judged }"
+    - "reflect::Reflected gains `pub judged: judge::Judged`; proposals::StaleWhy gains RecipeFails(i32); launcher::HARNESS_ALLOWED_TOOLS: [&str; 6]; binary harness-forge (src/bin/harness_forge.rs)"
+  toolstore:
+    - "Target { role, name: String (empty = any name, omitted from the file), nth: Option<Nth> }; pub enum Nth { Index(u32) /* >= 1 */, Arg(String) /* exactly one {arg} of an int arg */ } (re-exported at the root)"
+    - "RECIPE_FAILS_TO_RETIRE: i32 = 3; recipe::MAX_DESCRIPTION_CHARS = 300 (B-214)"
+    - "ToolStore::tool_file(domain, name) -> Result<PathBuf, StoreError> (the .js, else the .recipe.yaml, else the .js path); try_recipe_archive_path(domain, name, version) -> Result<PathBuf, StoreError>; archived_recipe(domain, name, version) -> Option<PathBuf>"
+    - "record: a recipe row (file <name>.recipe.yaml, no <name>.js) retires at 3 fails of its version unless pinned; archive/sweep move <name>.recipe.yaml to _archive/<domain>/<name>.<version>[.<n>].recipe.yaml"
+not_done: "1. Review round (D-89) and the tester's accept-T-28.md. 2. Supreme: interfaces.yaml for B-213 and B-216. 3. T-28b (D-156 leftovers, tasks.yaml). 4. B-1500 is still open: the hook writes ok:true for BrowserOS results that failed in substance (wait matched:false, grep No matches), so the judge can call such a run Ok and tools.save accepts such a line. 5. A live run: start a session with SB_RUN_ID, call tools.run for mail.google.com/inbox through harness-forge, execute through browseros, then reflect; and save a recipe with tools.save from that run's browseros.jsonl."
+gotchas:
+  - "Shared CARGO_TARGET_DIR: another worktree's build of harness-core can overwrite libharness_core-<hash>.rlib under the same hash; the symptom is `no BROWSEROS_FILE in ledger` (or any T-28 item missing) while clippy passes. `touch crates/core/src/ledger.rs` forces a rebuild from this tree."
+  - "Restoring a mutated file with cp/mv keeps the copy's older mtime, so cargo keeps the mutated build and tests stay red; touch the restored files."
+  - "The Write tool refuses paths outside the worktree (scratchpad too); use bash redirects for logs there. Python on Windows writes CRLF; git normalizes it (warnings only)."
+  - "Judge windows are per second (the hook's ts has no fraction): [second of tools.run, second of the next tools.run of the run); a line in the next event's second goes to the next window. Runs that are running or have no runs row are not judged (fail closed)."
+  - "tools.run's ledger event carries consequences {folder, name, tools, expects (filled)}; the judge reads those first and only falls back to the recipe file (expects only without placeholders)."
+  - "tools.save commits with ToolStore::git_commit in the git repo that holds SB_TOOLS_ROOT, on its checked-out branch; a commit failure is reported in the reply (file and ephemeral row stay). Tests git-init a temp root."
+  - "Fixture jsonl lines and the canary are built at run time (forge_tests.rs line(), canary()); Vault::in_memory is never installed globally in the harness lib tests."
+decisions_made: []
+blockers_opened: [B-214, B-215, B-216]
+files_touched:
+  - crates/harness/Cargo.toml
+  - Cargo.lock
+  - crates/harness/src/lib.rs
+  - crates/harness/src/forge.rs
+  - crates/harness/src/forge_save.rs
+  - crates/harness/src/forge_tests.rs
+  - crates/harness/src/judge.rs
+  - crates/harness/src/judge_tests.rs
+  - crates/harness/src/reflect.rs
+  - crates/harness/src/proposals.rs
+  - crates/harness/src/launcher.rs
+  - crates/harness/src/bin/harness_forge.rs
+  - crates/harness/src/bin/harnessd.rs
+  - crates/harness/tests/accept_t08.rs
+  - crates/harness/tests/accept_t08_r2.rs
+  - crates/harness/tests/contract_paths.rs
+  - crates/toolstore/src/lib.rs
+  - crates/toolstore/src/recipe.rs
+  - crates/toolstore/src/tests_recipe.rs
+  - crates/toolstore/src/archive.rs
+  - crates/toolstore/src/lifecycle.rs
+  - crates/toolstore/tests/contract_paths.rs
+  - mcp.example.json
+  - agent-memory/blockers.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/wt/core/target cargo test -j 1 --no-fail-fast -p harness -p toolstore -p harness-core (722 passed, 0 failed, 4 ignored on e01c5d3)"
