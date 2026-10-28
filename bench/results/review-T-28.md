@@ -42,3 +42,43 @@ Real data used: `F:/sb-swarm/wt/servers/runs/t27-accept-*/browseros.jsonl` (the 
 Two blocking items: the D-153 judge fails every successful run of a recipe with `expects` (B1), and hand-written recipes start ephemeral, so the sweep archives them (B2). There are seven should-fix items.
 
 Verdict: request changes
+
+# Round 2 (reviewer-2, last round, D-89)
+
+Scope: `git diff 24e371e..HEAD -- crates/` (ddab1f9 for B2, 4d8426b for B1; the main merge 0391286 and prompts/ are not reviewed). Four files: `crates/harness/src/judge.rs`, `crates/harness/src/judge_tests.rs`, `crates/toolstore/src/lifecycle.rs`, `crates/toolstore/src/tests_recipe.rs`.
+Ran: `cargo test -j 1 -p harness --lib -- judge` (5/5 ok), `cargo test -j 1 -p toolstore --lib recipe` (18/18 ok), `cargo test -j 1 -p toolstore --lib` (148/148 ok; the `lifecycle` filter matches no test names). I did not run clippy because RAM is tight.
+Real data used: `F:/sb-swarm/wt/servers/runs/t27-accept-3/browseros.jsonl` and `t27-accept-5/browseros.jsonl`, lines 15-16. Their shape is `args: {"page", "for": "text", "value": "Message sent" | "<subject>", "timeout"?, "session"}`, and `result_summary` is the MCP content array as JSON text with first item `{"type": "text", "text": "matched (text)"}`. The text is not repeated.
+
+## Blocking
+
+- none
+
+## Should fix
+
+Carried over to T-28b (supreme deferral). None of these were touched by the fix commits:
+1. Round 1 S-1: `parse_recipe` does not match `check_recipes.py` / D-1503 (`screenshot`/`pdf`/`download` allowed, no navigate URL rules, no arg-key or act-kind allowlist, no check that declared args are used).
+2. Round 1 S-2: B-599 (1) `@vault(` can be spliced across placeholders in `bind_args` (`forge.rs:492-499`), and `@vault(` is accepted in arg `default`.
+3. Round 1 S-3: `forge::clip` cuts before it scrubs (rule 2 hardening).
+4. Round 1 S-4: `regex_escape` escapes `# & - ~`, which a `u`/`v`-flag ECMAScript regex refuses.
+5. Round 1 S-5: rule 7 gaps (literal em dash or ` -- ` in a recipe's own act text, and `--` at an edge or before `\n`).
+6. Round 1 S-6: `judge_one` records before `write_mark` (`judge.rs`), so a failed mark write counts the same run twice.
+7. Round 1 S-7: the D-150 text does not match B-214 (300) or B-216 (`Nth`).
+8. Round 1 nits (write_new temp name, `_generic` in tools.save, window floor second, ledger rescans).
+
+New, minor, also for T-28b:
+9. `new_row` (`crates/toolstore/src/lifecycle.rs:153-170`) now tells a forged recipe from a hand-written one only by whether `register_forged` made its row. If that row is lost (a fresh DB, or a failed register whose file removal also failed), a `tools.save` recipe comes back `Saved` and the sweep never removes it. `forge_save.rs:586` already writes `# Saved by tools.save from run ...` as the first line. Treating that header as the recipe's `@forged` would match the `.js` rule.
+
+## Notes
+
+- **B1 fixed (confirmed).** `BrowserLine` now carries `args` (`judge.rs:90-91`, read at :158). `waited_for_text` (`judge.rs:114-129`) needs ok, `tool == "wait"`, `args.for == "text"`, `args.value == expects` exactly, and an answer that is `matched` alone or followed by a space or `(`. `answer()` takes the first `text` item of the content array, and `cut_first_text` (`judge.rs:166-190`) handles an array cut by the hook's 300-char limit. Against lines 15-16 of both live files, the answer is `matched (text)` and the args match, so send and the filled draft subject are judged Ok. `verdict` (`judge.rs:217-232`) keeps the summary-contains fallback but excludes a wait asked for this very text, so `not matched`, `matched:false` and `timed out waiting for text Message sent` cannot pass by echoing the text. This closes the B-1500 part that round 1 tied to B1. The tests assert these behaviours: `verdict_rules` uses the real `matched (text)` answer plus five not-matched forms and two wrong-arg cases, and `real_wait_lines_count_as_the_expects_text` writes the hook's own JSONL shape, reads it through `browser_lines`, and checks send, draft and two cut summaries.
+- **B2 fixed (confirmed).** `new_row` (`lifecycle.rs:153-170`) checks `<name>.js` first and keeps the old rule when it is a file (`@forged` gives Ephemeral, otherwise Saved). With no `.js`, a `<name>.recipe.yaml` that is a file gives `Saved`, and with neither file the row is Ephemeral as before. `tools.save` still registers its recipes Ephemeral through `register_forged` (`forge_save.rs:598`). `an_idle_hand_written_recipe_survives_the_sweep` asserts that a hand-written recipe last used 42 days ago, with 20 site visits, stays Saved and on disk, and that a `register_forged` recipe idle for the same time is retired and archived. The D-153 three-fail retire still applies to a Saved recipe (`three_failed_runs_retire_and_archive_a_recipe`, now asserting Saved up to the third fail), and pinned still goes to a proposal.
+- **Rule 2 (vault): no new path.** The judge only compares `args.for` and `args.value` with the filled expects text. `args` does not reach a return, the judge's ledger event (`judge.rs:503-505` writes run, at, domain, name, verdict, status and retired), a `why` (fixed strings), or a log line. `BrowserLine` derives Debug, but nothing formats it, and it already held `summary`, which carries the same hook data. The data source is the servers hook's `browseros.jsonl`, which existed before. The fixtures hold no vault value and no key-shaped string.
+- **Other rules:** nothing in this diff calls the gate (rule 4 does not apply). No sleeps (rule 6). No model-facing HTML (rule 5). No keys (rule 1). No user-sent text (rule 7). Edge handling: there is no `unwrap` on external input. `cut_first_text` slices at an ASCII needle end and at `char_indices` positions, so the slices are on char boundaries, and its JSON decode falls back to the raw slice. `is_ok_and` needs Rust 1.70.
+- **Spec ids:** 4d8426b claims T-28, D-153 and B-1500, and the code does D-153's expects test and the B-1500 matched check for the expects wait. ddab1f9 claims T-28 and D-153 ("existing lifecycle rules") and matches. No behaviour was added outside the spec. Interfaces: `BrowserLine.args` is a new pub field on a harness-internal struct that is not in `agent-memory/interfaces.yaml`, and no exhaustive struct literal outside the crate breaks.
+- B-1500 in general (tools.save accepting ok:true lines that failed in substance, and the fallback matching an echo in a non-wait line) and B-599 (3) (a challenge stop counts toward the 3 fails) remain open for T-28b.
+
+## Verdict
+
+Both round 1 Blocking items are fixed and tested against the real BrowserOS line shape. The fixes add no hard-rule break, and the vault rule holds. Should-fix items 1-8 are carried over to T-28b, and item 9 is new and minor.
+
+Verdict: approve
