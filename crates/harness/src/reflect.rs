@@ -9,12 +9,16 @@
 //!    good call of every site tool (an ok `web` event named `<namespace>.<tool>`, with the
 //!    page the run fetched from that folder before it). The jsonl mirrors stand in for an
 //!    I-1 `ledger_since(ts)` (D-142, interface change B-189).
+//!    Recipe runs ([`crate::judge`], T-28, D-153): every ok `forge` `tools.run` of a run no
+//!    longer running, not judged before, is judged from that run's `browseros.jsonl`,
+//!    recorded with `ToolStore::record` and marked by a core `tools.judge` event; a recipe's
+//!    third failed run retires it and archives `<name>.recipe.yaml` (pinned: a T-7 proposal).
 //! 2. [`ToolStore::sweep`] (T-7, D-303): ephemeral tools unused 14 days or over 10 site visits
 //!    are retired and archived, retired files still in place are archived, archived files
 //!    older than 90 days are deleted; pinned tools are never touched. Its `tools.*` events go
 //!    into this run's ledger.
-//! 3. Commits exactly the paths the sweep moved or deleted (each retired or archived tool's
-//!    old and new path, each deleted archive file), with [`ToolStore::git_commit`] and a
+//! 3. Commits exactly the paths the judge and the sweep moved or deleted (each retired or
+//!    archived tool's old and new path, each deleted archive file), with [`ToolStore::git_commit`] and a
 //!    message carrying T-16. Nothing else in the tool folders is staged: a user's edit or an
 //!    unreviewed forged tool next to a swept one stays uncommitted. srv-web's relocations
 //!    (D-560) are not committed by reflect.
@@ -55,6 +59,7 @@ use std::sync::Arc;
 use toolstore::{
     namespace, parse_header, valid_domain, SiteConfig, SweepAction, ToolHeader, ToolKind,
     ToolStore, EPHEMERAL_IDLE_DAYS, EPHEMERAL_IDLE_VISITS, GENERIC, MISSES_TO_RETIRE,
+    RECIPE_SUFFIX,
 };
 
 /// `--allowedTools` of the replay session: the harness-web server only (G-3).
@@ -482,6 +487,8 @@ pub struct Replay {
 /// What one reflect pass did.
 #[derive(Debug, Clone, Default)]
 pub struct Reflected {
+    /// The recipe runs judged in this pass (D-153).
+    pub judged: crate::judge::Judged,
     pub actions: Vec<SweepAction>,
     /// The tools commit, if one was made.
     pub commit: Option<String>,
@@ -578,7 +585,14 @@ pub fn swept_paths(store: &ToolStore, root: &Path, actions: &[SweepAction]) -> V
             | SweepAction::Archived {
                 domain, name, to, ..
             } => {
-                if let Ok(from) = store.try_tool_path(domain, name) {
+                // A recipe's archive name ends in .recipe.yaml (D-153, B-212).
+                let recipe = to.to_string_lossy().ends_with(RECIPE_SUFFIX);
+                let from = if recipe {
+                    store.try_recipe_path(domain, name)
+                } else {
+                    store.try_tool_path(domain, name)
+                };
+                if let Ok(from) = from {
                     add(&from);
                 }
                 add(to);
@@ -627,8 +641,15 @@ impl ReflectLauncher {
         store: &ToolStore,
         run: &RunId,
         actions: &[SweepAction],
+        judged: &[PathBuf],
     ) -> Result<Option<String>, String> {
-        let paths = swept_paths(store, &self.tools_root, actions);
+        let mut paths = swept_paths(store, &self.tools_root, actions);
+        for p in judged {
+            if !paths.contains(p) {
+                paths.push(p.clone());
+            }
+        }
+        paths.sort();
         if paths.is_empty() {
             return Ok(None);
         }
@@ -637,7 +658,7 @@ impl ReflectLauncher {
             return Ok(None);
         }
         let msg = scrub(&format!(
-            "tools: reflect sweep of run {} (T-16; T-7, D-560)",
+            "tools: reflect sweep of run {} (T-16; T-7, D-560; T-28, D-153)",
             run.0
         ));
         store
@@ -656,20 +677,34 @@ impl ReflectLauncher {
         let store = ToolStore::new(&self.tools_root);
         let history = History::read(req.runs_root, &store, Some(&run.id));
 
-        // 2. Sweep, with visits since each tool's last use.
         let run_store = RunStore {
             inner: self.store.clone(),
             ledger: ledger.clone(),
         };
+
+        // 1b. Judge recipe runs (D-153): each verdict is recorded, and a recipe's third
+        // failed run retires and archives it (pinned: a proposal below).
+        let judged = crate::judge::judge_recipe_runs(
+            req.runs_root,
+            &store,
+            &run_store,
+            &ledger,
+            &run.id,
+            now,
+            &day,
+        )
+        .await?;
+
+        // 2. Sweep, with visits since each tool's last use.
         let visits = |h: &ToolHealth| {
-            let path = store.try_tool_path(&h.domain, &h.name).ok();
+            let path = store.tool_file(&h.domain, &h.name).ok();
             history.visits_since(&h.domain, last_use(h, path.as_deref()))
         };
         let actions = store.sweep(&run_store, now, &visits).await?;
 
         // 3. Commit.
         let (commit, commit_error) = if self.commit {
-            match self.commit_tools(&store, &run.id, &actions) {
+            match self.commit_tools(&store, &run.id, &actions, &judged.moved) {
                 Ok(c) => (c, None),
                 Err(e) => (None, Some(scrub(&e))),
             }
@@ -744,6 +779,7 @@ impl ReflectLauncher {
                 ));
             }
         }
+        items.extend(judged.proposals.iter().cloned());
         let written = proposals::write_proposals(
             self.proposals_file.as_deref(),
             &run.files(),
@@ -790,11 +826,17 @@ impl ReflectLauncher {
                 SweepAction::Deleted { path, .. } => deleted.push(rel(root, path)),
             }
         }
+        for v in judged.verdicts.iter().filter(|v| v.retired) {
+            retired.push(format!("{}/{} (recipe)", v.folder, v.name));
+        }
         let merges = items.iter().filter(|p| p.id.starts_with("t8-")).count();
         let retires = items.len() - merges;
         let summary = format!(
-            "sweep: retired {}, archived {}, deleted {}; proposals: {merges} merge, {retires} \
-             retire ({} new); replay: {} readers; commit: {}",
+            "recipes: judged {} runs ({} failed); sweep: retired {}, archived {}, deleted {}; \
+             proposals: {merges} merge, {retires} retire ({} new); replay: {} readers; \
+             commit: {}",
+            judged.judged(),
+            judged.failed(),
             retired.len(),
             archived.len(),
             deleted.len(),
@@ -831,6 +873,8 @@ impl ReflectLauncher {
                 "proposals_new": written.new,
                 "proposals_known": written.known,
                 "replay": replays.iter().map(|r| r.tool.clone()).collect::<Vec<_>>(),
+                "judged": judged.judged(),
+                "judged_failed": judged.failed(),
                 "commit": commit,
             }),
             duration_ms: 0,
@@ -867,6 +911,7 @@ impl ReflectLauncher {
         }
 
         Ok(Reflected {
+            judged,
             actions,
             commit,
             commit_error,

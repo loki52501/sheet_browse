@@ -678,3 +678,132 @@ fn repo_recipes_parse() {
         "luma.com is an alias of lu.ma"
     );
 }
+
+fn result(name: &str, outcome: RunOutcome) -> ToolRunResult {
+    ToolRunResult {
+        domain: FOLDER.into(),
+        name: name.into(),
+        outcome,
+        at: harness_core::memory::ts_now(),
+    }
+}
+
+fn failed(name: &str) -> ToolRunResult {
+    result(
+        name,
+        RunOutcome::Failed {
+            why: "step 3 (act) not seen".into(),
+        },
+    )
+}
+
+/// D-153, B-212: a recipe whose version reaches RECIPE_FAILS_TO_RETIRE failed runs is retired
+/// and its file archived as `_archive/<domain>/<name>.<version>.recipe.yaml`; an ok run only
+/// counts; a pinned recipe and a `.js` tool with the same failures stay.
+#[tokio::test]
+async fn three_failed_runs_retire_and_archive_a_recipe() {
+    let (_dir, ts) = mail_root();
+    let store = MemStore::new();
+    let ok = ts
+        .record(&store, result("inbox", RunOutcome::Ok))
+        .await
+        .unwrap();
+    assert_eq!(
+        (ok.status, ok.runs, ok.fails),
+        (ToolStatus::Ephemeral, 1, 0)
+    );
+    for i in 1..RECIPE_FAILS_TO_RETIRE {
+        let h = ts.record(&store, failed("inbox")).await.unwrap();
+        assert_eq!((h.status, h.fails), (ToolStatus::Ephemeral, i));
+    }
+    let file = ts.try_recipe_path(FOLDER, "inbox").unwrap();
+    assert!(file.is_file());
+    let h = ts.record(&store, failed("inbox")).await.unwrap();
+    assert_eq!(h.status, ToolStatus::Retired);
+    assert!(
+        h.why
+            .as_deref()
+            .unwrap()
+            .starts_with("recipe retired after 3 failed runs"),
+        "{:?}",
+        h.why
+    );
+    let archived = ts.root.join("_archive/mail.google.com/inbox.1.recipe.yaml");
+    assert!(!file.exists());
+    assert_eq!(fs::read_to_string(&archived).unwrap(), WAVE3);
+    assert_eq!(
+        ts.archived_recipe(FOLDER, "inbox", 1),
+        Some(archived.clone())
+    );
+    assert_eq!(ts.archived_recipe(FOLDER, "inbox", 2), None);
+    let retire = store
+        .ledger()
+        .into_iter()
+        .map(|(_, e)| e)
+        .find(|e| e.tool == "tools.retire")
+        .unwrap();
+    assert_eq!(
+        retire.consequences,
+        json!({"archived": "_archive/mail.google.com/inbox.1.recipe.yaml"})
+    );
+    // A later failure of the retired row archives nothing more.
+    let h = ts.record(&store, failed("inbox")).await.unwrap();
+    assert_eq!(h.status, ToolStatus::Retired);
+    // The same version archived twice takes the next free name.
+    put(&ts.root, "mail.google.com/inbox.recipe.yaml", WAVE3);
+    let again = ts.archive(FOLDER, "inbox", 1).unwrap().unwrap();
+    assert_eq!(
+        again,
+        ts.root
+            .join("_archive/mail.google.com/inbox.1.2.recipe.yaml")
+    );
+    assert_eq!(ts.archived_recipe(FOLDER, "inbox", 1), Some(again));
+
+    // Pinned (T-7): counted, never retired here (reflect proposes it instead).
+    ts.set_pinned(&store, FOLDER, "draft", true).await.unwrap();
+    for _ in 0..RECIPE_FAILS_TO_RETIRE + 1 {
+        ts.record(&store, failed("draft")).await.unwrap();
+    }
+    let h = ts.health(&store, FOLDER, "draft").await.unwrap().unwrap();
+    assert_eq!((h.status, h.fails), (ToolStatus::Ephemeral, 4));
+    assert!(ts.try_recipe_path(FOLDER, "draft").unwrap().is_file());
+    // A .js tool keeps the T-7 rule: plain failures do not retire it.
+    for _ in 0..RECIPE_FAILS_TO_RETIRE {
+        ts.record(&store, failed("unread")).await.unwrap();
+    }
+    let h = ts.health(&store, FOLDER, "unread").await.unwrap().unwrap();
+    assert_ne!(h.status, ToolStatus::Retired);
+    assert!(ts.root.join("mail.google.com/unread.js").is_file());
+}
+
+/// D-303 for recipes: a retired recipe whose file is still in place is archived by the sweep.
+#[tokio::test]
+async fn sweep_archives_a_retired_recipe_left_in_place() {
+    let (_dir, ts) = mail_root();
+    let store = MemStore::new();
+    store
+        .tool_health_set(row("draft", ToolStatus::Retired, 2))
+        .await
+        .unwrap();
+    let done = ts
+        .sweep(&store, harness_core::memory::ts_now(), &|_| 0)
+        .await
+        .unwrap();
+    let to = ts.root.join("_archive/mail.google.com/draft.2.recipe.yaml");
+    assert!(
+        done.contains(&SweepAction::Archived {
+            domain: FOLDER.into(),
+            name: "draft".into(),
+            version: 2,
+            to: to.clone(),
+        }),
+        "{done:?}"
+    );
+    assert!(to.is_file());
+    assert!(!ts.try_recipe_path(FOLDER, "draft").unwrap().exists());
+    assert_eq!(
+        ts.tool_file(FOLDER, "unread").unwrap(),
+        ts.root.join("mail.google.com/unread.js"),
+        "a .js tool wins over a recipe of the same name"
+    );
+}

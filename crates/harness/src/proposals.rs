@@ -21,7 +21,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use toolstore::{ArgSpec, ToolHeader, GENERIC, MISSES_TO_RETIRE};
+use toolstore::{ArgSpec, ToolHeader, GENERIC, MISSES_TO_RETIRE, RECIPE_FAILS_TO_RETIRE};
 
 /// Environment variable naming the proposals file (default: see [`default_proposals_file`]).
 pub const PROPOSALS_FILE_VAR: &str = "SB_PROPOSALS_FILE";
@@ -174,6 +174,8 @@ pub enum StaleWhy {
     Idle(String),
     /// needs_repair with this many misses.
     Misses(i32),
+    /// A recipe with this many failed runs in its version (D-153).
+    RecipeFails(i32),
 }
 
 /// T-7 retire proposal for a pinned tool that would have been retired.
@@ -190,6 +192,9 @@ pub fn retire_proposal(
         StaleWhy::Misses(n) => {
             format!("pinned and needs_repair after {n} misses (T-7 retires at {MISSES_TO_RETIRE})")
         }
+        StaleWhy::RecipeFails(n) => format!(
+            "pinned recipe with {n} failed runs (D-153 retires at {RECIPE_FAILS_TO_RETIRE})"
+        ),
     };
     let mut f = Map::new();
     f.insert("kind".into(), json!("retire"));

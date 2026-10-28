@@ -51,7 +51,7 @@ pub use invariants::{
 };
 pub use lifecycle::{
     SweepAction, ARCHIVE_DELETE_DAYS, CLEAN_RUNS_TO_SAVE, EPHEMERAL_IDLE_DAYS,
-    EPHEMERAL_IDLE_VISITS, MISSES_TO_RETIRE,
+    EPHEMERAL_IDLE_VISITS, MISSES_TO_RETIRE, RECIPE_FAILS_TO_RETIRE,
 };
 pub use loader::{glob_match, namespace, skeleton_line, url_path, LoadReport};
 pub use recipe::{

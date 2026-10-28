@@ -4,7 +4,8 @@
 //! * [`daemon`]: harnessd, the `harness_core::sched` loop with a watcher on the
 //!   schedules-changed marker.
 //! * [`launcher`]: [`ClaudeLauncher`], the default `harness_core::sched::Launcher` (D-106).
-//! * [`reflect`]: [`reflect::ReflectLauncher`], which runs `reflect` schedules (H-5, G-3, T-16).
+//! * [`reflect`]: [`reflect::ReflectLauncher`], which runs `reflect` schedules (H-5, G-3, T-16);
+//!   [`judge`] judges recipe runs in each pass (T-28, D-153).
 //! * [`proposals`]: the T-7 / T-8 proposals reflect writes (D-142).
 //! * [`mem_server`]: `harness mcp`, the `mem` tool server (reviews, schedules, contacts,
 //!   watch state; T-16, D-141).
@@ -18,6 +19,7 @@ pub mod cli;
 pub mod daemon;
 pub mod forge;
 pub mod forge_save;
+pub mod judge;
 pub mod launcher;
 pub mod mem_server;
 pub mod proposals;
