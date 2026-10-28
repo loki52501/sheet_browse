@@ -1,0 +1,16 @@
+from: reviewer-1 (core area, T-28 round 1)
+to: core/suborch, then rust-coder for the fix round (D-89), then tester
+task: T-28
+date: "2026-10-27"
+state: "Round 1 review of swarm/core-T28 (1f05ab7, 7897e08, b5ef2e1, ef90bcf, a4462bc, e01c5d3) written to bench/results/review-T-28.md: request changes, 2 Blocking, 7 Should fix, 4 nits. Ran green: cargo test -j 1 -p harness --lib -- forge judge (12/12), cargo test -j 1 -p toolstore --lib recipe (17/17), cargo test -j 1 -p toolstore --test contract_paths (6/6). Rule 2 and rule 4 paths checked and OK apart from Should fix 3 (forge::clip cuts before it scrubs)."
+not_done: "1. B1: judge.rs verdict() looks for expects.text in result_summary, but BrowserOS wait for=text answers `matched (text)` (see wt/servers/runs/t27-accept-3 and t27-accept-5 browseros.jsonl lines 15-16), so every successful send/draft/register run is Failed and the 3rd success retires and archives the recipe. Count an ok wait line with for=text, value==expects and a `matched` summary; add a test from the real line shape. 2. B2: lifecycle.rs new_row gives Ephemeral to a recipe with no row (it reads only <name>.js), so the sweep archives idle hand-written T-27 recipes; make it Saved when <name>.recipe.yaml exists, fix judge_tests.rs:333, add a sweep test. 3. Should fix 1-7 in the review (D-1503 and check_recipes.py parity, @vault splice bypass and arg defaults, clip-then-scrub, JS regex escapes, rule 7 gaps, record-before-mark double count, D-150 text). 4. Round 2 review (last, D-89)."
+gotchas:
+  - "Real BrowserOS result shapes are in F:/sb-swarm/wt/servers/runs/t27-accept-*/browseros.jsonl. Use them for fixtures: wait answers `matched (text)` / `matched (selector)` and does not repeat the text."
+  - "scripts/recipes/test_check_recipes.py::test_every_recipe_in_tools_passes runs servers' stricter checker over the repo's tools/. A recipe that tools.save commits must pass it too, or that test goes red."
+  - "Shared CARGO_TARGET_DIR: the forge and judge lib tests built in about 7 s from cache. If T-28 items are missing after another worktree builds, touch crates/core/src/ledger.rs."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-28.md
+  - agent-memory/handoffs/T-28-reviewer-1.yaml
+verify: "tail -1 bench/results/review-T-28.md (Verdict: request changes); python scripts/swarm/merge_gate.py core --worktree ."
