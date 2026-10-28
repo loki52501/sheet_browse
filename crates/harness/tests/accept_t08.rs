@@ -797,7 +797,7 @@ async fn acc4_schedule_add_fires_with_real_harness_and_harnessd() {
     let argv = std::fs::read_to_string(calls.join(format!("{}.argv", run.0))).unwrap();
     assert_eq!(
         argv,
-        "-p\n--tools\n\n--allowedTools\nmcp__harness-web\nmcp__harness-files\nmcp__harness-cli\nmcp__harness-mem\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
+        "-p\n--tools\n\n--allowedTools\nmcp__harness-web\nmcp__harness-files\nmcp__harness-cli\nmcp__harness-mem\nmcp__harness-forge\nmcp__browseros\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
         "claude argv (B-192 denials)"
     );
     let stdin = std::fs::read_to_string(calls.join(format!("{}.stdin", run.0))).unwrap();
@@ -897,7 +897,9 @@ async fn d116_2_one_crate_lib_and_two_bins() {
             "harness Cargo.toml lacks {dep}"
         );
     }
-    assert!(toml.contains("[lib]") && toml.matches("[[bin]]").count() == 2);
+    // D-151 (T-28): harness-forge is the third binary of the crate.
+    assert!(toml.contains("[lib]") && toml.matches("[[bin]]").count() == 3);
+    assert!(toml.contains("name = \"harness-forge\""));
 }
 
 // ------------------------------------------------------------------ D-116 (3)
@@ -1502,7 +1504,7 @@ async fn child_claude_launcher_stdin_scrub() {
     let argv = std::fs::read_to_string(calls.join(format!("{}.argv", f.run.0))).unwrap();
     assert_eq!(
         argv,
-        "-p\n--tools\n\n--allowedTools\nmcp__harness-web\nmcp__harness-files\nmcp__harness-cli\nmcp__harness-mem\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
+        "-p\n--tools\n\n--allowedTools\nmcp__harness-web\nmcp__harness-files\nmcp__harness-cli\nmcp__harness-mem\nmcp__harness-forge\nmcp__browseros\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
         "the prompt must not be in argv (B-192 denials)"
     );
     let stdin = std::fs::read_to_string(calls.join(format!("{}.stdin", f.run.0))).unwrap();
@@ -1546,8 +1548,15 @@ async fn child_claude_launcher_stdin_scrub() {
     // D-145 (T-17b): `--append-system-prompt <run preamble>` follows the prompt; the
     // preamble is one line naming the run id and its files/ path.
     let lines: Vec<&str> = argv.lines().collect();
-    assert_eq!(lines.get(1).copied(), Some("--append-system-prompt"), "run preamble flag: {argv}");
-    assert!(lines.get(2).is_some_and(|p| p.starts_with("Harness run ")), "run preamble: {argv}");
+    assert_eq!(
+        lines.get(1).copied(),
+        Some("--append-system-prompt"),
+        "run preamble flag: {argv}"
+    );
+    assert!(
+        lines.get(2).is_some_and(|p| p.starts_with("Harness run ")),
+        "run preamble: {argv}"
+    );
     let rest = [&lines[..1], &lines[3..]].concat().join("\n");
     assert_eq!(
         rest,

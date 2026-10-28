@@ -26,6 +26,9 @@ use std::path::{Path, PathBuf};
 pub const CLEAN_RUNS_TO_SAVE: i32 = 3;
 /// T-7: needs_repair -> retired after this many misses (fails, D-302).
 pub const MISSES_TO_RETIRE: i32 = 5;
+/// T-28, D-153: a recipe is retired after this many failed runs of one version (reflect
+/// judges each run from the run's `browseros.jsonl`; WAVE3 (d)).
+pub const RECIPE_FAILS_TO_RETIRE: i32 = 3;
 /// T-7 / D-303: an ephemeral tool unused this long is retired.
 pub const EPHEMERAL_IDLE_DAYS: i64 = 14;
 /// T-7 / D-303: ... or unused over this many site visits.
@@ -142,16 +145,28 @@ impl ToolStore {
     }
 
     /// A first row for a tool on disk with no row yet: `ephemeral` when its header says
-    /// `@forged`, else `saved` (hand-written, G-5); `ephemeral` when the file is missing.
+    /// `@forged`, else `saved` (hand-written, G-5). With no `<name>.js`, a `<name>.recipe.yaml`
+    /// in place is a hand-written recipe and starts `saved` too (T-28, D-153: the existing
+    /// lifecycle rules; `tools.save` registers its own recipes `ephemeral` through
+    /// [`ToolStore::register_forged`]). `ephemeral` when neither file is there. The file
+    /// chosen is the one [`ToolStore::tool_file`] gives.
     fn new_row(&self, domain: &str, name: &str) -> ToolHealth {
-        let status = match self
-            .try_tool_path(domain, name)
-            .ok()
-            .and_then(|p| fs::read_to_string(p).ok())
-            .and_then(|s| parse_header(&s).ok())
-        {
-            Some(h) if h.forged.is_none() => ToolStatus::Saved,
-            _ => ToolStatus::Ephemeral,
+        let js = self.try_tool_path(domain, name).ok();
+        let status = match js.as_ref().filter(|p| p.is_file()) {
+            Some(p) => match fs::read_to_string(p)
+                .ok()
+                .and_then(|s| parse_header(&s).ok())
+            {
+                Some(h) if h.forged.is_none() => ToolStatus::Saved,
+                _ => ToolStatus::Ephemeral,
+            },
+            None if self
+                .try_recipe_path(domain, name)
+                .is_ok_and(|r| r.is_file()) =>
+            {
+                ToolStatus::Saved
+            }
+            None => ToolStatus::Ephemeral,
         };
         ToolHealth {
             domain: domain.to_string(),
@@ -289,7 +304,7 @@ impl ToolStore {
             Ok(a) => a,
             Err(e @ StoreError::Memory(_)) => return Err(e),
             Err(e) => {
-                let path = self.try_tool_path(&h.domain, &h.name)?;
+                let path = self.tool_file(&h.domain, &h.name)?;
                 let rel = self.rel(&path);
                 let summary = format!(
                     "retired {}/{}; archive of {rel} failed, retried at the next sweep",
@@ -329,6 +344,9 @@ impl ToolStore {
     ///   (another run relocated it first) is recorded as `Ok` and writes nothing (D-577);
     /// - `Failed`: fails += 1, streak reset, why;
     /// - `FingerprintMiss` / `ExpectsMiss`: as `Failed`, and status needs_repair;
+    /// - a recipe (T-28, D-153) with fails >= 3 ([`RECIPE_FAILS_TO_RETIRE`]) in its version
+    ///   and not pinned: retired, `<name>.recipe.yaml` archived as
+    ///   `_archive/<domain>/<name>.<version>.recipe.yaml` (same D-316 handling as below);
     /// - needs_repair with fails >= 5 and not pinned: retired, file archived; when the archive
     ///   step fails the result is still `Ok` with the row retired, the ledger gets an ok:true
     ///   `tools.retire` and an ok:false `tools.archive` event, and the next sweep archives the
@@ -359,6 +377,11 @@ impl ToolStore {
         } = result;
         let mut h = self.row(store, &domain, &name).await?;
         let retired = h.status == ToolStatus::Retired;
+        // D-153: a recipe (its file is `<name>.recipe.yaml`, no `<name>.js`) retires after
+        // RECIPE_FAILS_TO_RETIRE failed runs, whatever its status.
+        let recipe = self
+            .tool_file(&domain, &name)
+            .is_ok_and(|p| p.is_file() && p.extension().is_some_and(|x| x != "js"));
         // D-577: another run (or call) already wrote this fingerprint; this clean run on the
         // relocated page is an Ok, not a second patch and version bump.
         let outcome = match outcome {
@@ -456,6 +479,13 @@ impl ToolStore {
         if h.status == ToolStatus::NeedsRepair && h.fails >= MISSES_TO_RETIRE && !pinned {
             let last = h.why.clone().unwrap_or_default();
             let why = format!("retired after {} misses; last {last}", h.fails);
+            self.retire(store, &mut h, why, at, set_mtime).await?;
+        } else if recipe && !retired && h.fails >= RECIPE_FAILS_TO_RETIRE && !pinned {
+            let last = h.why.clone().unwrap_or_default();
+            let why = format!(
+                "recipe retired after {} failed runs (D-153); last {last}",
+                h.fails
+            );
             self.retire(store, &mut h, why, at, set_mtime).await?;
         }
         store.tool_health_set(h.clone()).await?;
@@ -667,7 +697,8 @@ impl ToolStore {
                 if !valid_name(&h.name) || h.pinned || self.site_pinned(&domain, &h.name) {
                     continue;
                 }
-                let path = self.try_tool_path(&domain, &h.name)?;
+                // A recipe row stands for `<name>.recipe.yaml` (D-153).
+                let path = self.tool_file(&domain, &h.name)?;
                 match h.status {
                     ToolStatus::Ephemeral => {
                         // Last use is the later of the last success and the last failure. A

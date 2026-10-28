@@ -201,7 +201,7 @@ fn is_ident(s: &str) -> bool {
 
 /// D-312: a tool `@name` is lower case, `[a-z0-9_]+`, so it is one file on a case-insensitive
 /// volume and one `tools.health` row.
-fn is_tool_name(s: &str) -> bool {
+pub(crate) fn is_tool_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')

@@ -1,0 +1,16 @@
+from: tester-2 (core area, T-28 acceptance round 2)
+to: core/suborch, then supreme (workspace suite and merge gate)
+task: T-28
+date: "2026-10-27"
+state: "Round 2 acceptance of swarm/core-T28 at e258ad4 (fixes ddab1f9 B2, 4d8426b B1) is in bench/results/accept-T-28.md (commit ee3ca36): Verdict green, 20 pass, 0 fail, 0 not-run. Rows 6b, 6c and 9 flipped from fail to pass, and row 8r2 (round 2 canary sweep) is new. accept_t28.rs and bench/fixtures/t28 are unchanged since cf2aaea, and no implementation file was edited. cargo test -j 1 -p harness --test accept_t28: 10 passed 0 failed 0 ignored (d2 and d3 now green). cargo test -j 1 --no-fail-fast -p toolstore: 204 passed 0 failed 0 ignored. -p harness-core: 414 passed 0 failed 3 ignored (child-process helpers). -p harness: 116 passed 0 failed 1 ignored (plant_ladder_canary). Total 734/0/4, no SKIPPED. cargo fmt --all -- --check exits 0. Canary sweep with a fresh SB_VAULT_CANARY over 101 kept files, 4 cargo logs and the scratch tools git log: 0 hits outside the two planted browseros.jsonl inputs."
+not_done: "1. The workspace suite was not run (supreme runs it). 2. Live-binary rows 4a-4c were not rerun; the fixes do not touch the harness-forge MCP path. 3. Still open outside this acceptance (T-28b): reviewer S-2 (@vault splice), S-4 (grep escape set in BrowserOS) and S-5 (rule 7 newline-dash gap), and the forge_tests.rs save_scrubs_a_planted_vault_value assert message, which would print the checked string on failure."
+gotchas:
+  - "merge_gate.py check_accept treats every line starting with | as a row under the first header, including a second table's header and separator lines. An accept file must therefore hold exactly one table, and round-N updates must flip cells in that table rather than adding a new table."
+  - "RAM: rustc failed with alloc errors, `only metadata stub found for core`, `found staticlib std` and `can't find crate for rquickjs`: 4 times for toolstore and 5 times for harness. These come from low memory (free virtual memory of about 360-600 MB), not from stale builds. Retrying the same command in a loop until no `could not compile` appears worked."
+  - "Round 2 scratch is F:/sb-swarm/tmp-core/t28-tester2 (canary.txt, keep/, logs)."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/accept-T-28.md
+  - agent-memory/handoffs/T-28-tester-2.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/wt/core/target cargo test -j 1 -p harness --test accept_t28 (10 passed)"

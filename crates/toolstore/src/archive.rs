@@ -5,6 +5,7 @@
 //! days later (D-303). A fresh clone resets mtimes, which only delays deletion.
 
 use crate::domain::{check_tool_id, ARCHIVE};
+use crate::recipe::RECIPE_SUFFIX;
 use crate::{StoreError, ToolStore};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -72,9 +73,64 @@ impl ToolStore {
             .unwrap_or_default()
     }
 
+    /// The file a tool row stands for: `tools/<domain>/<name>.js` when it exists, else
+    /// `tools/<domain>/<name>.recipe.yaml` when that exists (T-28, D-153), else the `.js`
+    /// path. `Err(BadPath)` as [`ToolStore::try_tool_path`].
+    pub fn tool_file(&self, domain: &str, name: &str) -> Result<PathBuf, StoreError> {
+        let js = self.try_tool_path(domain, name)?;
+        if js.is_file() {
+            return Ok(js);
+        }
+        match self.try_recipe_path(domain, name) {
+            Ok(r) if r.is_file() => Ok(r),
+            _ => Ok(js),
+        }
+    }
+
+    /// `tools/_archive/<domain>/<name>.<version>.recipe.yaml` (B-212), or `Err(BadPath)`.
+    pub fn try_recipe_archive_path(
+        &self,
+        domain: &str,
+        name: &str,
+        version: i32,
+    ) -> Result<PathBuf, StoreError> {
+        self.try_recipe_path(domain, name)?;
+        Ok(self
+            .root
+            .join(ARCHIVE)
+            .join(domain)
+            .join(format!("{name}.{version}{RECIPE_SUFFIX}")))
+    }
+
+    /// The newest archived copy of recipe `name` at `version`: the last existing of
+    /// `<name>.<version>.recipe.yaml`, `<name>.<version>.2.recipe.yaml`, ... (the names
+    /// [`ToolStore::archive`] picks in order). `None` when there is none.
+    pub fn archived_recipe(&self, domain: &str, name: &str, version: i32) -> Option<PathBuf> {
+        let base = self.try_recipe_archive_path(domain, name, version).ok()?;
+        if !base.is_file() {
+            return None;
+        }
+        let mut last = base;
+        for n in 2.. {
+            let p = self
+                .root
+                .join(ARCHIVE)
+                .join(domain)
+                .join(format!("{name}.{version}.{n}{RECIPE_SUFFIX}"));
+            if !p.is_file() {
+                break;
+            }
+            last = p;
+        }
+        Some(last)
+    }
+
     /// Moves `tools/<domain>/<name>.js` to the archive as `version`. If that archive name is
     /// taken (the same version archived twice), `<name>.<version>.<n>.js` is used. Returns
     /// the archive path; `Ok(None)` when the tool file does not exist.
+    ///
+    /// A recipe (no `<name>.js`, a `<name>.recipe.yaml`) is archived the same way as
+    /// `<name>.<version>.recipe.yaml` / `<name>.<version>.<n>.recipe.yaml` (T-28, B-212).
     ///
     /// Fails closed (D-314): the tool's mtime is set to now before the move (a rename keeps
     /// it), so an archived file always carries its archive time and the 90-day sweep never
@@ -98,18 +154,26 @@ impl ToolStore {
         version: i32,
         set_mtime: SetMtime,
     ) -> Result<Option<PathBuf>, StoreError> {
-        let from = self.try_tool_path(domain, name)?;
+        let from = self.tool_file(domain, name)?;
         if !from.is_file() {
             return Ok(None);
         }
-        let mut to = self.try_archive_path(domain, name, version)?;
-        let mut n = 2;
-        while to.exists() {
-            to = self
-                .root
+        let suffix = if from.extension().is_some_and(|x| x == "js") {
+            ".js"
+        } else {
+            RECIPE_SUFFIX
+        };
+        let at = |n: Option<i32>| {
+            let n = n.map(|n| format!(".{n}")).unwrap_or_default();
+            self.root
                 .join(ARCHIVE)
                 .join(domain)
-                .join(format!("{name}.{version}.{n}.js"));
+                .join(format!("{name}.{version}{n}{suffix}"))
+        };
+        let mut to = at(None);
+        let mut n = 2;
+        while to.exists() {
+            to = at(Some(n));
             n += 1;
         }
         // D-314: stamp the tool in place first. A failure here leaves it untouched where it

@@ -95,3 +95,46 @@ fn api_fetch_signature() {
 fn fingerprint_signature() {
     let _: fn(&Tool, &[sb_sheet::IndexRow]) -> FingerprintResult = toolstore::fingerprint;
 }
+
+/// T-28 (D-150, B-213): the recipe kind, at the paths harness-forge and servers T-27 use.
+#[test]
+fn recipe_paths_exist() {
+    use toolstore::recipe::{MAX_DESCRIPTION_CHARS, MAX_RECIPE_BYTES, MAX_STEPS, TARGET_ACT_KINDS};
+    use toolstore::{
+        fill_placeholders, key_shaped, parse_recipe, placeholders, render_recipe, ArgType, Expects,
+        Recipe, RecipeArg, RecipeReport, RecipeStep, Target, RECIPE_KIND, RECIPE_SUFFIX,
+        RECIPE_TOOLS,
+    };
+    let _: fn(&str, &str, &str) -> Result<Recipe, StoreError> = parse_recipe;
+    let _: fn(&Recipe) -> String = render_recipe;
+    let _: fn(&str) -> Vec<&str> = placeholders;
+    let _: fn(&str, &serde_json::Map<String, serde_json::Value>) -> String = fill_placeholders;
+    let _: fn(&str) -> bool = key_shaped;
+    let _: fn(&ToolStore, &str) -> RecipeReport = ToolStore::recipes;
+    let _: fn(&ToolStore, &str, &str) -> Result<Option<Recipe>, StoreError> = ToolStore::recipe;
+    let _: fn(&ToolStore, &str, &str) -> Result<PathBuf, StoreError> = ToolStore::try_recipe_path;
+    let _ = ToolStore::recipes_live;
+    let _ = (RECIPE_KIND, RECIPE_SUFFIX, RECIPE_TOOLS, TARGET_ACT_KINDS);
+    let _ = (MAX_STEPS, MAX_DESCRIPTION_CHARS, MAX_RECIPE_BYTES);
+    let _ = |a: RecipeArg, s: RecipeStep, t: Target, e: Expects, k: ArgType| (a, s, t, e, k);
+    let _ = |e: StoreError| match e {
+        StoreError::Recipe { path, msg } => (path, msg),
+        _ => (PathBuf::new(), String::new()),
+    };
+}
+
+/// T-28 (D-153, D-156, B-216): target nth, the recipe retire limit and the recipe file and
+/// archive paths harness::judge and harness::forge use.
+#[test]
+fn recipe_lifecycle_paths_exist() {
+    use toolstore::{Nth, Target, RECIPE_FAILS_TO_RETIRE};
+    let _: i32 = RECIPE_FAILS_TO_RETIRE;
+    let _ = |t: Target| match t.nth {
+        Some(Nth::Index(n)) => n,
+        Some(Nth::Arg(_)) | None => 1,
+    };
+    let _: fn(&ToolStore, &str, &str) -> Result<PathBuf, StoreError> = ToolStore::tool_file;
+    let _: fn(&ToolStore, &str, &str, i32) -> Result<PathBuf, StoreError> =
+        ToolStore::try_recipe_archive_path;
+    let _: fn(&ToolStore, &str, &str, i32) -> Option<PathBuf> = ToolStore::archived_recipe;
+}

@@ -10,7 +10,8 @@
 //!
 //! Modules: `header` (T-2, I-12), `domain` (T-1), `loader` (T-3), `fingerprint` (T-4),
 //! `lifecycle` (T-5, T-7, D-302, D-303), `invariants` (T-9, G-4, D-307), `archive` (archive
-//! moves and the git commit helper).
+//! moves and the git commit helper), `recipe` (the WAVE3 recipe kind, `<name>.recipe.yaml`,
+//! T-28, D-150).
 
 pub mod runner;
 pub use runner::{
@@ -25,9 +26,12 @@ pub mod header;
 pub mod invariants;
 pub mod lifecycle;
 pub mod loader;
+pub mod recipe;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_recipe;
 #[cfg(test)]
 mod tests_review;
 
@@ -47,9 +51,14 @@ pub use invariants::{
 };
 pub use lifecycle::{
     SweepAction, ARCHIVE_DELETE_DAYS, CLEAN_RUNS_TO_SAVE, EPHEMERAL_IDLE_DAYS,
-    EPHEMERAL_IDLE_VISITS, MISSES_TO_RETIRE,
+    EPHEMERAL_IDLE_VISITS, MISSES_TO_RETIRE, RECIPE_FAILS_TO_RETIRE,
 };
 pub use loader::{glob_match, namespace, skeleton_line, url_path, LoadReport};
+pub use recipe::{
+    fill_placeholders, key_shaped, parse_recipe, placeholders, render_recipe, ArgType, Expects,
+    Nth, Recipe, RecipeArg, RecipeReport, RecipeStep, Target, RECIPE_KIND, RECIPE_SUFFIX,
+    RECIPE_TOOLS,
+};
 
 use harness_core::memory::Ts;
 use std::path::{Path, PathBuf};
@@ -84,6 +93,10 @@ pub enum StoreError {
     /// D-310: a domain or tool name that is not a single safe path component.
     #[error("bad path: {0}")]
     BadPath(String),
+    /// T-28, D-150: a `<name>.recipe.yaml` that breaks a recipe rule (or is unreadable).
+    /// `msg` never holds a vault value or a key-shaped string.
+    #[error("{path}: bad recipe: {msg}")]
+    Recipe { path: PathBuf, msg: String },
 }
 
 /// What `record` stores after a run (T-4, T-5, T-7).

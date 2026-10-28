@@ -4,6 +4,8 @@
     "harness-files": { "command": "target/release/srv-files", "args": [] },
     "harness-cli":   { "command": "target/release/srv-cli",   "args": [] },
     "harness-mem":   { "command": "target/release/harness",   "args": ["mcp"] },
+    "harness-forge": { "command": "target/release/harness-forge", "args": [] },
+    "browseros":     { "type": "http", "url": "http://127.0.0.1:9010/mcp" },
     "sheetbrowse":   { "command": "target/release/sb-mcp",    "args": ["--profile", "bench"] }
   }
 }

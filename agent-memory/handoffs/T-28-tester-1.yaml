@@ -1,0 +1,21 @@
+from: tester-1 (core area, T-28 acceptance round 1)
+to: core/suborch, then rust-coder for the fix round (D-89), then tester round 2
+task: T-28
+date: "2026-10-27"
+state: "Acceptance of swarm/core-T28 (code at cf4e82b) written to bench/results/accept-T-28.md: Verdict red, 16 pass, 3 fail, 0 not-run. New tests: crates/harness/tests/accept_t28.rs (10 tests, every forge call through harness_core::mcp::dispatch; judge fed by real tools.run dispatches) and fixture bench/fixtures/t28/browseros.jsonl (canary and run id filled at run time). Green: (a) 7 merged recipes parse, 0 skipped, refusals; (b) tools.list/tools.run over ./tools for mail.google.com, calendar.google.com, lu.ma (luma.com alias), run refusals, defaults, URL encoding, grep escape, tools.save from the fixture with git commit and @vault(name) only; real harness-forge binary over MCP stdio on throwaway Postgres sb_t28_tester (initialize, tools/list, tools.list, tools.run, tools.save; all 5 calls in ledger.events and ledger.jsonl); (c) report Browser: section with canary scrubbed; (d) 3 fails retire and archive, running run skipped, second pass judges nothing; (e) allowed tools and mcp.example.json; canary sweep 0 hits over 85 files plus pg_dump. Red: 6b judge fails a successful run on the real BrowserOS wait shape (reviewer B1), 6c hand-written recipe row starts Ephemeral not Saved (reviewer B2), and therefore row 9: cargo test -p toolstore 203/0/0, -p harness-core 414/0/3 ignored, -p harness 113/2 failed/1 ignored."
+not_done: "1. Fix B1: judge::verdict must accept an ok wait line with args.for == text, args.value == expects and a summary starting `matched` (BrowserLine needs args); accept_t28 d2_successful_send_with_real_wait_lines_is_judged_ok goes green. 2. Fix B2: toolstore lifecycle new_row returns Saved when <name>.recipe.yaml exists; accept_t28 d3_hand_written_recipe_row_is_saved_after_a_judged_run goes green (judge_tests.rs an_ok_window_records_ok asserts Ephemeral and must change). 3. Round 2 acceptance: rerun `cargo test -j 1 -p harness --test accept_t28` and the three suites one crate at a time, then flip rows 6b, 6c, 9. 4. Not covered here: reviewer S-2 (@vault splice through two placeholders), S-5 (`\\n-- \\n` rule 7 gap), S-4 (whether BrowserOS accepts \\- \\# \\& \\~ in grep patterns). 5. forge_tests.rs save_scrubs_a_planted_vault_value prints the checked string in its assert message (would print the vault value on failure)."
+gotchas:
+  - "Memory: with about 600 MB free, rustc failed with os error 1455 (paging file too small), which also shows up as `only metadata stub found for core`, `cannot determine resolution for tokio::test` or `invalid metadata files`. These are not stale builds. Retry, and run the suites one crate at a time (-p toolstore, then -p harness-core, then -p harness)."
+  - "The hung cargo/rustc processes 46148/56204/13900/46300 are a different session's build (D:/sb-swarm-target-t05d, started 2026-10-26). They do not share our target dir and were left alone."
+  - "SB_T28_KEEP=<dir> keeps every file accept_t28 writes, for the canary sweep. Unset, it uses temp dirs. The planted browseros.jsonl inputs hold the raw canary by design (they stand in for the hook); exclude them from the sweep."
+  - "The live binary needs a runs row for SB_RUN_ID. Without SB_RUN_ID, bootstrap creates its own run folder (<ts>-harness-forge), and the client writes browseros.jsonl into it before tools.save. Script: F:/sb-swarm/tmp-core/t28-tester/mcp_client.py. Copy the binaries out of the shared target before running them."
+  - "Real BrowserOS result shapes are in F:/sb-swarm/wt/servers/runs/t27-accept-*/browseros.jsonl. A matched wait for=text has the summary `matched (text)`, never the text."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/harness/tests/accept_t28.rs
+  - bench/fixtures/t28/browseros.jsonl
+  - bench/fixtures/t28/README.md
+  - bench/results/accept-T-28.md
+  - agent-memory/handoffs/T-28-tester-1.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/wt/core/target cargo test -j 1 -p harness --test accept_t28 (now 8 passed, 2 failed: d2, d3)"

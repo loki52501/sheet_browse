@@ -71,7 +71,7 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
 }
 
 /// The version of `name`'s retired row in `rows`, if that row is retired (D-315).
-fn retired_version(rows: &[ToolHealth], name: &str) -> Option<i32> {
+pub(crate) fn retired_version(rows: &[ToolHealth], name: &str) -> Option<i32> {
     rows.iter()
         .find(|h| h.name == name && h.status == ToolStatus::Retired)
         .map(|h| h.version)

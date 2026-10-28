@@ -102,3 +102,63 @@ fn launcher_and_mem_server_paths() {
         CliError::Serve(e)
     }
 }
+
+/// T-28 (D-151..D-153, D-155, D-156, B-216): harness-forge, the reflect judge and the -p
+/// allow list.
+#[test]
+#[allow(clippy::type_complexity)]
+fn forge_and_judge_paths() {
+    use harness::forge::{
+        self, bind_args, percent_encode, prepare_run, regex_escape, signature, tools_root_from_env,
+        Prepared, LIST_TOOL, RUN_INSTRUCTION, RUN_TOOL, SAVE_TOOL,
+    };
+    use harness::forge_save::{
+        build_recipe, default_match, target_in_summary, SaveArg, SaveRequest, SaveStep,
+        DROPPED_KEYS, MIN_VALUE_CHARS,
+    };
+    use harness::judge::{
+        at_key, browser_lines, judge_recipe_runs, parse_hook_ts, verdict, BrowserLine, Judged,
+        Verdict, JUDGE_TOOL,
+    };
+    use harness::launcher::HARNESS_ALLOWED_TOOLS;
+    use serde_json::{Map, Value};
+    use toolstore::{Recipe, RunOutcome, Target};
+
+    let _tools: fn(&Harness, &Path) -> Vec<ToolSpec> = forge::tools;
+    let _serve = forge::serve;
+    let _root: fn() -> Result<PathBuf, CliError> = tools_root_from_env;
+    let _prep: fn(&Recipe, &Map<String, Value>) -> Result<Prepared, String> = prepare_run;
+    let _bind: fn(&Recipe, &Map<String, Value>) -> Result<Map<String, Value>, String> = bind_args;
+    let _sig: fn(&Recipe) -> String = signature;
+    let _enc: (fn(&str) -> String, fn(&str) -> String) = (percent_encode, regex_escape);
+    let _: (&str, &str, &str, &str, &str) = (
+        forge::SERVER,
+        LIST_TOOL,
+        RUN_TOOL,
+        SAVE_TOOL,
+        RUN_INSTRUCTION,
+    );
+    assert_eq!(forge::SERVER, "forge");
+    let _build: fn(&str, &SaveRequest, &str, &dyn Fn(&str) -> String) -> Result<Recipe, String> =
+        build_recipe;
+    let _m: fn(&str) -> String = default_match;
+    let _t: fn(&str, &str) -> Option<Target> = target_in_summary;
+    let _ = |s: SaveStep, a: SaveArg| (s.line, a.ty);
+    let _: ([&str; 6], usize) = (DROPPED_KEYS, MIN_VALUE_CHARS);
+    let _judge = judge_recipe_runs;
+    let _v: fn(&[String], Option<&str>, &[&BrowserLine]) -> RunOutcome = verdict;
+    let _l: fn(&Path) -> Vec<BrowserLine> = browser_lines;
+    let _p: fn(&str) -> Option<Ts> = parse_hook_ts;
+    let _a: fn(Ts) -> String = at_key;
+    let _r: Option<(Judged, Verdict)> = None;
+    assert_eq!(JUDGE_TOOL, "tools.judge");
+    // D-155: five harness servers and BrowserOS.
+    let _: [&str; 6] = HARNESS_ALLOWED_TOOLS;
+    assert!(HARNESS_ALLOWED_TOOLS.contains(&"mcp__browseros"));
+    assert!(HARNESS_ALLOWED_TOOLS.contains(&"mcp__harness-forge"));
+    assert_eq!(
+        READERS_ALLOWED_TOOLS,
+        ["mcp__harness-web"],
+        "replay stays readers-only"
+    );
+}

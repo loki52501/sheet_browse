@@ -273,8 +273,19 @@ tasks:
     step: 6
     title: "(docs/11 shape, D-98) toolstore `recipe` kind + harness-forge MCP server: tools.list/run/save over BrowserOS, save from browseros.jsonl, report.md includes browser calls, reflect retires a recipe after 3 failures, launcher allows browseros and harness-forge. Owner core, branch swarm/core-T28."
     docs: [docs/06-TOOLFORGE.md]
+    status: done
+    owner: core/suborch
+    claimed_at: "2026-10-27"
+    done: "2026-10-27 review-T-28 round 2 approve (reviewer-2), accept-T-28 round 2 green 20/20 (tester-2); crates toolstore 204, harness-core 414, harness 116 pass"
+    blocked_by: [T-26]   # WAVE3 (supreme 31b2ae9) opens T-28 now; T-26 is not a prerequisite for the build
+  - id: T-28b
+    step: 6
+    title: "tools.run run-time rules not in T-28 (D-156): B-599 (2) nth counted inside the last wait selector's region, (3) a Challenge stop does not count toward the 3-fail retire, (5) CSS-escape of placeholders in selectors, (6) recipient chip check before Send, (7) refuse_if step field for paid/approval Luma events"
+    docs: [prompts/suborch/WAVE3.md]
     status: todo
-    blocked_by: [T-26]
+    owner: core
+    also: "review-T-28.md Should fix 1-7, nits and round 2 item 9: recipe validator parity with D-1503/check_recipes.py; @vault( splice across placeholders and in arg defaults; forge::clip scrubs before it cuts; regex_escape set valid under u/v flags; rule 7 gaps (recipe text, bounded --); judge writes mark before record; amend D-150 (B-214, B-216); tools.save recipes recognisable without their row; forge_tests save_scrubs_a_planted_vault_value assert message must not print the checked string; B-1500, B-599 (3)"
+    blocked_by: [T-28]
   - id: T-29
     step: 6
     title: "Re-run Phase 1 baseline (no regression) + Phase 2 ladder; bench/results/phase2-<date>.md"
@@ -436,7 +447,7 @@ tasks:
     owner: core/suborch
     branch: swarm/core-T17b
     title: "T-17 baseline (phase1-2026-10-27, 13/30): interactive `harness run` sessions get no grounding preamble (run_preamble only reaches -p/harnessd), so rung 1/2 answered from memory with zero tool calls; give every run the preamble."
-    status: doing
+    status: done  # merged to main by supreme (#23, d49c0fd)
     claimed_at: "2026-10-27"
     from: T-17
   - id: T-17c
@@ -445,7 +456,7 @@ tasks:
     owner: core/suborch
     branch: swarm/core-T17c
     title: "T-17 baseline: sessions are not told their run id or files path, so fs.write/xlsx.write deliverables land in the session cwd, outside runs/<id>/files/ and missing from report.md (rungs 2/1, 4/2, 5/3); pass the run files path and make writes default there (B-564 bare names already work)."
-    status: doing
+    status: done  # merged to main by supreme (#23, d49c0fd)
     claimed_at: "2026-10-27"
     from: T-17
   - id: T-17d

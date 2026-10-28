@@ -1,0 +1,54 @@
+from: rust-coder A (core area, T-28 parts a and c)
+to: core/suborch, then rust-coder B (harness-forge, tools.save, reflect judge), reviewer, tester
+task: T-28
+date: "2026-10-27"
+state: "Part A (D-150) and part C (D-154) code is written and committed on swarm/core-T28 (toolstore commit, then harness-core commit). Part A: toolstore::recipe parses and validates tools/<domain>/<name>.recipe.yaml (the WAVE3 example parses verbatim), renders YAML that round-trips, and ToolStore lists recipes, lists them live (a retired tools.health row hides the recipe even with its file in place, as D-315), and loads one by name. The .js scan already filters on the `js` extension, so recipe files are neither loaded nor listed as skipped (tested). Part C: write_report appends `Browser: <k> calls` and one line per browseros.jsonl line when the run folder has that file. PROVEN: cargo fmt --all --check clean; `cargo test -p toolstore --lib recipe` 13/13 pass; `cargo test -p harness-core --lib write_report` 5/5 pass. Mutations seen red then restored: wait for=time check, forbidden-key check, 200-line cap. NOT PROVEN (the host killed the runs for low memory): cargo clippy -p toolstore -p harness-core --all-targets -D warnings never finished; the B-210 test case added last, crates/core/tests/report_browser_t28.rs (canary in browseros.jsonl) and both contract_paths.rs additions have not been compiled or run; full cargo test -p toolstore / -p harness-core and cargo test --workspace not run; downstream crates (srv-web, sb-mcp, harness) not checked against the new StoreError::Recipe variant (no exhaustive match on StoreError was found outside toolstore by grep)."
+public_api:
+  toolstore_root_reexports: "toolstore::{parse_recipe, render_recipe, placeholders, fill_placeholders, key_shaped, Recipe, RecipeArg, RecipeStep, Target, Expects, ArgType, RecipeReport, RECIPE_KIND, RECIPE_SUFFIX, RECIPE_TOOLS}"
+  toolstore_recipe_module: "toolstore::recipe::{TARGET_ACT_KINDS, MAX_STEPS, MAX_DESCRIPTION_CHARS, MAX_RECIPE_BYTES}"
+  signatures:
+    - "pub fn parse_recipe(text: &str, folder: &str, stem: &str) -> Result<Recipe, StoreError>  // every D-150 rule except the .js collision; Err is StoreError::Recipe { path: <folder>/<stem>.recipe.yaml, msg }"
+    - "pub fn render_recipe(r: &Recipe) -> String  // parse_recipe(&render_recipe(&r), &r.domain, &r.name) == Ok(r); \"\" on a serializer error (parse refuses it)"
+    - "pub fn placeholders(s: &str) -> Vec<&str>  // `{name}` = `{` [A-Za-z0-9_]+ `}`"
+    - "pub fn fill_placeholders(s: &str, values: &serde_json::Map<String, serde_json::Value>) -> String  // one pass; strings as is, numbers/bools as JSON text; unknown placeholders stay"
+    - "pub fn key_shaped(s: &str) -> bool  // the hook's KEY_PATTERNS, no regex"
+    - "impl ToolStore { pub fn try_recipe_path(&self, domain: &str, name: &str) -> Result<PathBuf, StoreError> }  // folder only, no folder_for; BadPath on a bad domain or a name outside [a-z0-9_]+"
+    - "impl ToolStore { pub fn recipes(&self, domain: &str) -> RecipeReport }  // host or folder; own folder only (no _generic merge, B-212); files only"
+    - "impl ToolStore { pub async fn recipes_live(&self, store: &dyn MemoryStore, domain: &str) -> Result<RecipeReport, StoreError> }  // retired rows to skipped as `retired (v<N>)`"
+    - "impl ToolStore { pub fn recipe(&self, domain: &str, name: &str) -> Result<Option<Recipe>, StoreError> }  // Ok(None) no file (exact file name), Err(Recipe) invalid or .js collision, Err(BadPath); does NOT read tools.health"
+    - "pub enum StoreError { ..., Recipe { path: PathBuf, msg: String } }  // new variant"
+    - "Recipe { name, domain, description, matches: Vec<String>, args: Vec<RecipeArg>, steps: Vec<RecipeStep>, expects: Option<Expects> } + Recipe::arg(&self, name) -> Option<&RecipeArg>, Recipe::step_tools(&self) -> Vec<&str>"
+    - "RecipeArg { name, ty: ArgType, default: Option<serde_json::Value>, required: bool }; ArgType { String, Int, Bool } + as_str(), accepts(&Value)"
+    - "RecipeStep { tool, target: Option<Target>, targets: Option<Vec<Target>>, args: serde_json::Value (always an object), returns: Option<String> }; Target { role, name, nth: Option<u32> }; Expects { text }"
+    - "RecipeReport { recipes: Vec<Recipe>, skipped: Vec<(PathBuf, String)> }"
+  harness_core:
+    - "harness_core::ledger::BROWSEROS_FILE: &str = \"browseros.jsonl\"; harness_core::ledger::BROWSER_LINES_MAX: usize = 200"
+    - "harness_core::run::RunFolder::browseros_jsonl(&self) -> PathBuf"
+    - "write_report(run: &RunFolder, prompt: &str, events: &[LedgerEvent]) -> ledger::Result<String> (unchanged, D-90)"
+not_done: "For coder B, in order. 1. tools.run (D-151): call ts.recipe(folder, name), then ts.health(store, folder, name) and refuse a retired row; check args with Recipe::arg / ArgType::accepts, apply defaults, fill with fill_placeholders over step args strings and target names. 2. tools.save (D-152): build a Recipe, render_recipe, then parse_recipe(&text, folder, name) must pass; refuse when try_recipe_path(..).exists() or <name>.js exists; write atomically; register the row; git_commit. 3. D-153: record/retire/archive/sweep only know `<name>.js`. RECIPE_FAILS_TO_RETIRE and archiving `<name>.recipe.yaml` (e.g. _archive/<domain>/<name>.<v>.recipe.yaml) are not built (B-212); until then a retired recipe is hidden by recipes_live only and its file stays in place. 4. interfaces.yaml lists none of the new paths (proposal B-213 for supreme)."
+gotchas:
+  - "parse_recipe checks every string of the YAML tree (keys too) for `***`, key shapes and core::scrub changes BEFORE the typed parse, so serde messages (unknown field, unknown variant) can never echo a vault value. Keep that order if you add rules."
+  - "core::scrub only knows vault values when a vault is installed globally (Vault::install_global). harness-core's lib test binary must never install one (vault::tests::global_scrub_before_and_after_install asserts the slot is empty), which is why the D-154 canary test is its own file crates/core/tests/report_browser_t28.rs. The toolstore lib tests install a canary-only vault (tests_recipe::install_canary_vault)."
+  - "The secret hook refuses writes that contain key-shaped literals: tests build them at run time (format!(\"{}{}\", \"sk-\", ...))."
+  - "required: true together with a default is refused (B-210); tools.save must not write both."
+  - "@vault(k) is allowed only at act args text, value and fields[i].value; anywhere else (other act args, other tools, targets, description, expects, match) it is refused. A secret-looking key (password, otp, pin, card, token, api_key...) may hold only {arg}/@vault refs, never a literal string or number."
+  - "Browser: lines are numbered by 1-based file line (blank lines skipped, numbers kept), the same number tools.save takes. Format details are B-211."
+  - "Builds: CARGO_TARGET_DIR=F:/sb-swarm/wt/core/target is shared with the other coder; expect several minutes of `Blocking waiting for file lock`."
+decisions_made: []
+blockers_opened: [B-210, B-211, B-212, B-213]
+files_touched:
+  - Cargo.toml
+  - Cargo.lock
+  - crates/toolstore/Cargo.toml
+  - crates/toolstore/src/lib.rs
+  - crates/toolstore/src/recipe.rs
+  - crates/toolstore/src/tests_recipe.rs
+  - crates/toolstore/src/header.rs
+  - crates/toolstore/src/loader.rs
+  - crates/toolstore/tests/contract_paths.rs
+  - crates/core/src/ledger.rs
+  - crates/core/src/run.rs
+  - crates/core/tests/report_browser_t28.rs
+  - crates/core/tests/contract_paths.rs
+  - agent-memory/blockers.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/wt/core/target cargo clippy -j 1 -p toolstore -p harness-core --all-targets -- -D warnings && cargo test -j 1 -p toolstore -p harness-core (not yet green as a whole: killed for low memory; run this first)"

@@ -1,0 +1,16 @@
+from: reviewer-2 (core area, T-28 round 2, last round per D-89)
+to: core/suborch, then tester, then supreme (merge gate)
+task: T-28
+date: "2026-10-27"
+state: "Round 2 review of git diff 24e371e..HEAD -- crates/ (ddab1f9 B2, 4d8426b B1) appended to bench/results/review-T-28.md: approve, Blocking none. B1 is fixed: the judge counts an ok wait with args for=text and value==expects whose answer is `matched`, checked against t27-accept-3 and t27-accept-5 browseros.jsonl lines 15-16, and the fallback excludes a not-matched wait on the same text. B2 is fixed: new_row makes a recipe with no .js but with <name>.recipe.yaml Saved, and an idle hand-written recipe survives the sweep (tested). No new rule-2 path, because args are only compared, never returned, logged or ledgered. Ran green: cargo test -j 1 -p harness --lib -- judge (5/5), -p toolstore --lib recipe (18/18), -p toolstore --lib (148/148). merge_gate.check_review returns None."
+not_done: "1. T-28b: round 1 Should fix 1-7 and nits are carried over (D-1503/check_recipes.py parity, @vault splice and arg defaults, clip before scrub, regex_escape set, rule 7 gaps, record before write_mark, D-150 text). 2. T-28b, new minor item: new_row tells a forged recipe from a hand-written one only by the register_forged row, so a lost row turns a tools.save recipe Saved. The '# Saved by tools.save' first line could serve as its @forged. 3. B-1500 general and B-599 (3) are still open. 4. clippy was not run in round 2 (RAM)."
+gotchas:
+  - "merge_gate.py reads the LAST '## Blocking' section and the LAST 'Verdict:' line, so a round section appended under a single-# heading works with round 1 left in place."
+  - "cargo test -p toolstore --lib lifecycle matches no test names. The lifecycle tests are tests_recipe::* and the full lib run."
+  - "Run python for merge_gate without -I: it needs the user-site yaml module."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-28.md
+  - agent-memory/handoffs/T-28-reviewer-2.yaml
+verify: "tail -1 bench/results/review-T-28.md (Verdict: approve); python scripts/swarm/merge_gate.py core --worktree ."
