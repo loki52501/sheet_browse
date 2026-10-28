@@ -6,7 +6,8 @@
 //! the second of the run's next forge `tools.run` (a line in that second belongs to the next
 //! window). The run is `Ok` when the recipe's step tools occur in order among the window's
 //! ok lines and, with `expects.text`, that text is in some window line's result summary;
-//! else `Failed{why}`. Only runs no longer running are judged.
+//! else `Failed{why}`. Only runs no longer running are judged (a run with no `runs` row is not:
+//! its state is unknown).
 //!
 //! Each verdict is recorded with [`ToolStore::record`] (Ok or Failed) and written as a core
 //! `tools.judge` event, so a second pass judges nothing again. A recipe whose version
@@ -257,12 +258,12 @@ pub async fn judge_recipe_runs(
             continue;
         }
         let run_id = RunId(name.clone());
-        if store
-            .run_get(&run_id)
-            .await?
-            .is_some_and(|r| r.status == RunStatus::Running)
-        {
-            continue;
+        // Fail closed: a run still running, or one with no runs row (its state is unknown;
+        // every harness run has one, B-175), is not judged: a window cut short would count
+        // as a failure.
+        match store.run_get(&run_id).await? {
+            Some(r) if r.status != RunStatus::Running => {}
+            _ => continue,
         }
         let lines = browser_lines(&dir.join(BROWSEROS_FILE));
         for (i, e) in forge_runs.iter().enumerate() {

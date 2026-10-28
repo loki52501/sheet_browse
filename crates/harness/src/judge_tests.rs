@@ -153,6 +153,30 @@ impl Fx {
             .collect()
     }
 
+    /// The `runs` row of `f` with `status` (the judge reads it, D-153).
+    async fn status(&self, f: &RunFolder, status: RunStatus) {
+        self.store
+            .run_start(Run {
+                id: f.id.clone(),
+                started: t(0, 0),
+                ended: None,
+                prompt: "work".into(),
+                status,
+                folder: f.dir.to_string_lossy().into_owned(),
+                parent_run: None,
+                strict: false,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// A finished run (row `done`) with these events and lines.
+    async fn done(&self, at: Ts, events: &[LedgerEvent], lines: &[String]) -> RunFolder {
+        let f = run(&self.runs, at, events, lines);
+        self.status(&f, RunStatus::Done).await;
+        f
+    }
+
     async fn row(&self) -> Option<ToolHealth> {
         ToolStore::new(&self.tools)
             .health(&*self.store, FOLDER, "inbox")
@@ -199,45 +223,31 @@ async fn three_failing_windows_retire_and_archive_and_a_second_pass_judges_nothi
     let mut lines = failing(a);
     lines.push(bline(b, 0, "grep", true));
     lines.extend(failing(b + Duration::seconds(1)).into_iter().skip(1));
-    run(
-        &fx.runs,
-        a,
-        &[run_event(a, true), run_event(b, true)],
-        &lines,
-    );
+    fx.done(a, &[run_event(a, true), run_event(b, true)], &lines)
+        .await;
     // Run 2: a failed tools.run (not judged) and one failing window.
     let c = t(2, 0);
-    run(
-        &fx.runs,
-        c,
-        &[
-            run_event(c - Duration::seconds(30), false),
-            run_event(c, true),
-        ],
-        &failing(c),
-    );
+    let events = [
+        run_event(c - Duration::seconds(30), false),
+        run_event(c, true),
+    ];
+    fx.done(c, &events, &failing(c)).await;
     // Run 3 is still running: not judged.
     let d = t(3, 0);
     let running = run(&fx.runs, d, &[run_event(d, true)], &failing(d));
-    fx.store
-        .run_start(Run {
-            id: running.id.clone(),
-            started: d,
-            ended: None,
-            prompt: "work".into(),
-            status: RunStatus::Running,
-            folder: running.dir.to_string_lossy().into_owned(),
-            parent_run: None,
-            strict: false,
-        })
-        .await
-        .unwrap();
+    fx.status(&running, RunStatus::Running).await;
+    // Run 4 has no runs row: its state is unknown, never judged (fail closed).
+    let e = t(3, 30);
+    let unknown = run(&fx.runs, e, &[run_event(e, true)], &failing(e));
 
     let done = fx.reflect(t(4, 0), git_ok).await;
     let j = &done.judged;
     assert_eq!(j.judged(), 3, "{:?}", j.verdicts);
     assert_eq!(j.failed(), 3);
-    assert!(j.verdicts.iter().all(|v| v.run != running.id));
+    assert!(j
+        .verdicts
+        .iter()
+        .all(|v| v.run != running.id && v.run != unknown.id));
     let why = |i: usize| match &j.verdicts[i].outcome {
         Some(RunOutcome::Failed { why }) => why.clone(),
         o => panic!("{o:?}"),
@@ -300,6 +310,10 @@ async fn three_failing_windows_retire_and_archive_and_a_second_pass_judges_nothi
     assert_eq!(third.judged.verdicts[0].outcome, None);
     assert_eq!(third.judged.verdicts[0].note, "recipe retired");
     assert_eq!(fx.row().await.unwrap().fails, 3, "nothing recorded for it");
+    assert_eq!(
+        third.judged.verdicts[0].run, running.id,
+        "run 4 has no row still"
+    );
     let _ = &fx.tmp;
 }
 
@@ -309,7 +323,7 @@ async fn an_ok_window_records_ok() {
     let a = t(1, 0);
     let mut lines = failing(a);
     lines.push(bline(a, 4, "grep", true));
-    run(&fx.runs, a, &[run_event(a, true)], &lines);
+    fx.done(a, &[run_event(a, true)], &lines).await;
     let done = fx.reflect(t(2, 0), false).await;
     assert_eq!(done.judged.verdicts.len(), 1);
     assert_eq!(done.judged.verdicts[0].outcome, Some(RunOutcome::Ok));
@@ -327,7 +341,7 @@ async fn a_pinned_recipe_is_proposed_not_retired() {
     let fx = fixture(Some("pinned: [inbox]\n"));
     for h in 1..=3 {
         let a = t(h, 0);
-        run(&fx.runs, a, &[run_event(a, true)], &failing(a));
+        fx.done(a, &[run_event(a, true)], &failing(a)).await;
     }
     let done = fx.reflect(t(5, 0), false).await;
     assert_eq!(done.judged.failed(), 3);

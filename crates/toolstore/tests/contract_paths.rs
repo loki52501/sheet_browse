@@ -122,3 +122,19 @@ fn recipe_paths_exist() {
         _ => (PathBuf::new(), String::new()),
     };
 }
+
+/// T-28 (D-153, D-156, B-216): target nth, the recipe retire limit and the recipe file and
+/// archive paths harness::judge and harness::forge use.
+#[test]
+fn recipe_lifecycle_paths_exist() {
+    use toolstore::{Nth, Target, RECIPE_FAILS_TO_RETIRE};
+    let _: i32 = RECIPE_FAILS_TO_RETIRE;
+    let _ = |t: Target| match t.nth {
+        Some(Nth::Index(n)) => n,
+        Some(Nth::Arg(_)) | None => 1,
+    };
+    let _: fn(&ToolStore, &str, &str) -> Result<PathBuf, StoreError> = ToolStore::tool_file;
+    let _: fn(&ToolStore, &str, &str, i32) -> Result<PathBuf, StoreError> =
+        ToolStore::try_recipe_archive_path;
+    let _: fn(&ToolStore, &str, &str, i32) -> Option<PathBuf> = ToolStore::archived_recipe;
+}
