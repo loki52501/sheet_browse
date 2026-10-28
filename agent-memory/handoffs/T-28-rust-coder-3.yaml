@@ -1,0 +1,19 @@
+from: rust-coder-3 (core area, T-28 round-2 fix, last round per D-89)
+to: core/suborch, then reviewer and tester (a coder never accepts its own work)
+task: T-28
+date: "2026-10-27"
+state: "Both Blocking items of bench/results/review-T-28.md are fixed, one commit each on swarm/core-T28. B2 (ddab1f9): toolstore new_row gives Saved when there is no <name>.js and <name>.recipe.yaml is in place (same file choice as tool_file); register_forged still forces Ephemeral for tools.save's recipes. B1 (4d8426b): judge BrowserLine gains `args: Value`; an ok `wait` with args.for == \"text\", args.value == the filled expects text and an answer starting with `matched` (alone or followed by space or `(`) counts; `not matched`, `matched:false`, `matched: false` do not (B-1500); a wait asked for this text is decided by its answer only (no fallback echo); the answer is the first text item of the hook's content-array summary, also when the hook's 300-char cut left it unparsable; summary-contains stays as fallback. PROVEN: accept_t28 10/10 incl. d2_successful_send_with_real_wait_lines_is_judged_ok and d3_hand_written_recipe_row_is_saved_after_a_judged_run (not edited); toolstore 204 passed 0 failed (lib 148 incl. new an_idle_hand_written_recipe_survives_the_sweep, accept_t11 41, accept_t11b 9, contract_paths 6); harness-core 414 passed 0 failed 3 ignored; harness 116 passed 0 failed 1 ignored (lib 35 incl. judge 5); mutations seen red then restored: judge without the matched-wait rule (verdict_rules, real_wait_lines_count_as_the_expects_text, accept d2), new_row recipe arm giving Ephemeral (an_idle_hand_written_recipe_survives_the_sweep, three_failed_runs_retire_and_archive_a_recipe, accept d3); cargo fmt clean; cargo clippy -j 1 -p harness -p toolstore (with and without --all-targets) -D warnings clean."
+not_done: "1. Re-review and re-accept (D-89 last round). 2. Should-fix items of review-T-28.md go to T-28b (not touched here). 3. B-1500 stays open at the hook (ok:true on matched:false); the judge now reads `matched` for the expects wait only, other steps still count on ok:true. 4. cargo test --workspace not run (RAM)."
+gotchas:
+  - "The real hook summary is the MCP content array as JSON text ([{\"type\": \"text\", \"text\": \"matched (text)\"}, {session note}]), not the bare answer; BrowserLine::answer() unwraps it. Do not test against a bare `matched (text)` summary only."
+  - "Pinned and other recipe rows created by record are now Saved, so tests that asserted Ephemeral for hand-written recipes (tests_recipe three_failed_runs_..., judge an_ok_window_records_ok, a_pinned_recipe_is_proposed_not_retired) were updated; recipe retirement at 3 fails is status-independent, so nothing else moved."
+  - "Python heredocs that write Rust escapes lose one level of backslashes in this shell; check '\\' and \"\n\" after writing, or use the Edit tool."
+  - "RAM: run one crate at a time with -j 1; other worktrees share the machine (os error 1455 means retry)."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - crates/toolstore/src/lifecycle.rs
+  - crates/toolstore/src/tests_recipe.rs
+  - crates/harness/src/judge.rs
+  - crates/harness/src/judge_tests.rs
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/wt/core/target cargo test -j 1 -p harness --test accept_t28 (10 passed, incl. d2 and d3)"
