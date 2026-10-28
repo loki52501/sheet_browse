@@ -1543,8 +1543,14 @@ async fn child_claude_launcher_stdin_scrub() {
         .unwrap();
     assert!(exit.success());
     let argv = std::fs::read_to_string(calls.join(format!("{}.argv", run.id.0))).unwrap();
+    // D-145 (T-17b): `--append-system-prompt <run preamble>` follows the prompt; the
+    // preamble is one line naming the run id and its files/ path.
+    let lines: Vec<&str> = argv.lines().collect();
+    assert_eq!(lines.get(1).copied(), Some("--append-system-prompt"), "run preamble flag: {argv}");
+    assert!(lines.get(2).is_some_and(|p| p.starts_with("Harness run ")), "run preamble: {argv}");
+    let rest = [&lines[..1], &lines[3..]].concat().join("\n");
     assert_eq!(
-        argv,
+        rest,
         " -h\n--disallowedTools\nBash(harness ask:*)\nBash(harness gate:*)\nBash(harness vault:*)",
         "B-192 denials after the prompt"
     );

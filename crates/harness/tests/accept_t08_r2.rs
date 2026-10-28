@@ -448,6 +448,17 @@ fn want_argv(first: &str) -> Vec<String> {
     v
 }
 
+/// D-145 (T-17b): an interactive launch carries `--append-system-prompt <run preamble>` right
+/// after the prompt. Checks that pair is there and is the run preamble, then drops it so the
+/// rest compares against [`want_argv`] as before.
+fn without_preamble(argv: &[String]) -> Vec<String> {
+    assert_eq!(argv.get(1).map(String::as_str), Some("--append-system-prompt"), "run preamble flag: {argv:?}");
+    assert!(argv.get(2).is_some_and(|p| p.starts_with("Harness run ")), "run preamble: {argv:?}");
+    let mut v = argv.to_vec();
+    v.drain(1..3);
+    v
+}
+
 /// Whether a process with this id is still alive (Windows: tasklist).
 fn process_alive(pid: u32) -> bool {
     if cfg!(windows) {
@@ -951,7 +962,7 @@ async fn d124_1_writing_commands_store_and_print_no_value() {
         .collect();
     assert_eq!(argv_files.len(), 1);
     let argv: Vec<String> = read(&argv_files[0]).lines().map(str::to_owned).collect();
-    assert_eq!(argv, want_argv(&format!("log in as {LITERAL} please")));
+    assert_eq!(without_preamble(&argv), want_argv(&format!("log in as {LITERAL} please")));
 
     let health = store.tool_health("luma.com").await.unwrap();
     let reg = health.iter().find(|h| h.name == "register").unwrap();
@@ -1544,7 +1555,7 @@ async fn d124_5_b192_argv_denies_user_only_commands_and_the_prompt_arrives() {
             } else {
                 p.to_owned()
             };
-            assert_eq!(argv, want_argv(&first), "{label}: interactive argv");
+            assert_eq!(without_preamble(&argv), want_argv(&first), "{label}: interactive argv");
             println!("d124_5 {label} interactive argv {argv:?}");
         }
     }
