@@ -355,18 +355,25 @@ async fn a_pinned_recipe_is_proposed_not_retired() {
 #[test]
 fn verdict_rules() {
     let at = t(1, 0);
-    let l = |tool: &str, ok: bool, summary: &str| BrowserLine {
+    let l = |tool: &str, ok: bool, summary: &str, args: Value| BrowserLine {
         ts: at,
         tool: tool.into(),
         ok,
         summary: summary.into(),
+        args,
     };
     let tools: Vec<String> = ["navigate", "act", "wait"].map(String::from).to_vec();
+    // BrowserOS's answer to a wait for=text that matched: `matched (text)`, no text repeated.
     let w = [
-        l("navigate", true, ""),
-        l("snapshot", true, ""),
-        l("act", true, ""),
-        l("wait", true, "Message sent"),
+        l("navigate", true, "", json!({})),
+        l("snapshot", true, "", json!({})),
+        l("act", true, "", json!({})),
+        l(
+            "wait",
+            true,
+            "matched (text)",
+            json!({"for": "text", "value": "Message sent"}),
+        ),
     ];
     let refs: Vec<&BrowserLine> = w.iter().collect();
     assert_eq!(verdict(&tools, Some("Message sent"), &refs), RunOutcome::Ok);
@@ -374,6 +381,58 @@ fn verdict_rules() {
         verdict(&tools, Some("You're In"), &refs),
         RunOutcome::Failed { why } if why.contains("expects")
     ));
+    // Fallback: the text in some line's summary (a read that returned it).
+    let mut fb = w.to_vec();
+    fb[3] = l(
+        "wait",
+        true,
+        "matched (selector)",
+        json!({"for": "selector"}),
+    );
+    fb.push(l("read", true, "You're In! See you there", json!({})));
+    let refs: Vec<&BrowserLine> = fb.iter().collect();
+    assert_eq!(verdict(&tools, Some("You're In"), &refs), RunOutcome::Ok);
+    // B-1500: answers that come back ok:true but did not match are failures, even when they
+    // echo the text (the fallback does not apply to a wait asked for this text).
+    for answer in [
+        "not matched (text)",
+        "matched:false",
+        "matched: false",
+        "matchedfalse",
+        "timed out waiting for text Message sent",
+    ] {
+        let mut bad = w.to_vec();
+        bad[3] = l(
+            "wait",
+            true,
+            answer,
+            json!({"for": "text", "value": "Message sent"}),
+        );
+        let refs: Vec<&BrowserLine> = bad.iter().collect();
+        assert!(
+            matches!(
+                verdict(&tools, Some("Message sent"), &refs),
+                RunOutcome::Failed { why } if why.contains("expects")
+            ),
+            "{answer}"
+        );
+    }
+    // A matched wait for another value, or for=selector, is not the expects text.
+    for args in [
+        json!({"for": "text", "value": "Message"}),
+        json!({"for": "selector", "value": "Message sent"}),
+    ] {
+        let mut other = w.to_vec();
+        other[3] = l("wait", true, "matched (text)", args.clone());
+        let refs: Vec<&BrowserLine> = other.iter().collect();
+        assert!(
+            matches!(
+                verdict(&tools, Some("Message sent"), &refs),
+                RunOutcome::Failed { .. }
+            ),
+            "{args}"
+        );
+    }
     // Out of order is a failure.
     let rev: Vec<&BrowserLine> = w.iter().rev().collect();
     assert!(matches!(
@@ -387,4 +446,87 @@ fn verdict_rules() {
         parse_hook_ts("2026-10-27T02:00:05+0100"),
         Some(Utc.with_ymd_and_hms(2026, 10, 27, 1, 0, 5).unwrap())
     );
+}
+
+/// B1 on the line shape the hook really writes (checked against the T-27 live runs,
+/// t27-accept-3 / t27-accept-5 lines 15-16): the summary is the MCP content array as JSON
+/// text, and the matched wait never repeats the text. Read through `browser_lines`, then
+/// judged: Ok for send (`Message sent`) and for draft (the filled subject); a summary cut
+/// mid-array by the hook still reads as `matched`.
+#[test]
+fn real_wait_lines_count_as_the_expects_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("browseros.jsonl");
+    let at = t(1, 0);
+    let line = |secs: i64, tool: &str, args: Value, summary: String| {
+        let ts = (at + Duration::seconds(secs))
+            .with_timezone(&chrono::FixedOffset::east_opt(-7 * 3600).unwrap())
+            .format("%Y-%m-%dT%H:%M:%S%z")
+            .to_string();
+        json!({"run_id": "t", "ts": ts, "server": "browseros", "tool": tool, "class": null,
+               "mode": "external", "args": args, "result_summary": summary, "ok": true,
+               "why": null, "session_id": "s"})
+        .to_string()
+    };
+    let content = |text: &str| {
+        json!([{"type": "text", "text": text},
+               {"type": "text", "text": "[browseros-neo session: s. Pass this exact value as the `session` argument "}])
+        .to_string()
+    };
+    let subject = "[sbtest] T-28 judge draft 20261027T1543";
+    let lines = [
+        line(
+            0,
+            "navigate",
+            json!({"page": 22, "url": "https://mail.google.com/mail/u/0/"}),
+            content("Navigated"),
+        ),
+        line(
+            1,
+            "act",
+            json!({"page": 22, "kind": "click", "ref": "e13"}),
+            content("clicked"),
+        ),
+        line(
+            2,
+            "wait",
+            json!({"page": 22, "for": "text", "value": "Message sent",
+                               "session": "s"}),
+            content("matched (text)"),
+        ),
+        line(
+            3,
+            "wait",
+            json!({"page": 26, "for": "text", "value": subject, "timeout": 30000,
+                               "session": "s"}),
+            content("matched (text)"),
+        ),
+    ];
+    std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+    let read = browser_lines(&file);
+    assert_eq!(read.len(), 4);
+    assert_eq!(read[2].answer(), "matched (text)");
+    assert!(read[2].waited_for_text("Message sent"));
+    assert!(
+        !read[2].summary.contains("Message sent"),
+        "the shape B1 is about"
+    );
+    let refs: Vec<&BrowserLine> = read.iter().collect();
+    let tools: Vec<String> = ["navigate", "act", "wait"].map(String::from).to_vec();
+    assert_eq!(verdict(&tools, Some("Message sent"), &refs), RunOutcome::Ok);
+    assert_eq!(verdict(&tools, Some(subject), &refs), RunOutcome::Ok);
+    assert!(matches!(
+        verdict(&tools, Some("You're In"), &refs),
+        RunOutcome::Failed { .. }
+    ));
+    // The hook cuts summaries (300 chars): an array cut mid-way still reads.
+    let mut cut = read[2].clone();
+    cut.summary = cut.summary.chars().take(60).collect();
+    assert!(serde_json::from_str::<Value>(&cut.summary).is_err());
+    assert_eq!(cut.answer(), "matched (text)");
+    assert!(cut.waited_for_text("Message sent"));
+    cut.summary = r#"[{"type": "text", "text": "matched (te"#.into();
+    assert!(cut.waited_for_text("Message sent"));
+    cut.summary = r#"[{"type":"text","text":"not matched"#.into();
+    assert!(!cut.waited_for_text("Message sent"));
 }

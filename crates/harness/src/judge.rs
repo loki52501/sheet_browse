@@ -5,8 +5,10 @@
 //! name}`), the window is that run's `browseros.jsonl` lines from the event's second until
 //! the second of the run's next forge `tools.run` (a line in that second belongs to the next
 //! window). The run is `Ok` when the recipe's step tools occur in order among the window's
-//! ok lines and, with `expects.text`, that text is in some window line's result summary;
-//! else `Failed{why}`. Only runs no longer running are judged (a run with no `runs` row is not:
+//! ok lines and, with `expects.text`, an ok `wait` line asked `for: "text"` with that `value`
+//! and answered `matched` (BrowserOS says `matched (text)` and does not repeat the text; a
+//! `matched:false` answer comes back ok:true, B-1500), or, as a fallback, the text is in some
+//! window line's result summary; else `Failed{why}`. Only runs no longer running are judged (a run with no `runs` row is not:
 //! its state is unknown).
 //!
 //! Each verdict is recorded with [`ToolStore::record`] (Ok or Failed) and written as a core
@@ -85,6 +87,46 @@ pub struct BrowserLine {
     pub tool: String,
     pub ok: bool,
     pub summary: String,
+    /// The call's args as the hook wrote them (`Value::Null` when the line has none).
+    pub args: Value,
+}
+
+impl BrowserLine {
+    /// The answer text of the line: the first `text` item when the summary is an MCP content
+    /// array (`[{"type": "text", "text": "matched (text)"}, ...]`, the hook's shape; also when
+    /// the hook's length cut left it unparsable), else the summary itself.
+    pub fn answer(&self) -> String {
+        serde_json::from_str::<Value>(&self.summary)
+            .ok()
+            .and_then(|v| {
+                v.as_array()?
+                    .iter()
+                    .find(|i| i.get("type").and_then(Value::as_str) == Some("text"))?
+                    .get("text")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .or_else(|| cut_first_text(&self.summary))
+            .unwrap_or_else(|| self.summary.clone())
+    }
+
+    /// An ok `wait` asked `for: "text"` with exactly `text` as its value, whose answer is
+    /// `matched` (alone, or followed by a space or `(`): `not matched`, `matched:false` and
+    /// the like are not (B-1500: those come back ok:true).
+    pub fn waited_for_text(&self, text: &str) -> bool {
+        if !self.ok || self.tool != "wait" {
+            return false;
+        }
+        let arg = |k: &str| self.args.get(k).and_then(Value::as_str);
+        if arg("for") != Some("text") || arg("value") != Some(text) {
+            return false;
+        }
+        let answer = self.answer();
+        match answer.trim_start().strip_prefix("matched") {
+            Some(rest) => rest.is_empty() || rest.starts_with([' ', '(']),
+            None => false,
+        }
+    }
 }
 
 /// The hook's `ts` (`%Y-%m-%dT%H:%M:%S%z`, local offset) or RFC 3339.
@@ -113,9 +155,38 @@ pub fn browser_lines(path: &Path) -> Vec<BrowserLine> {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned(),
+                args: v.get("args").cloned().unwrap_or(Value::Null),
             })
         })
         .collect()
+}
+
+/// The first `"text"` item's value of a content array the hook's length cut left unparsable
+/// (up to its closing quote, or to the end when that was cut too).
+fn cut_first_text(s: &str) -> Option<String> {
+    if !s.trim_start().starts_with('[') {
+        return None;
+    }
+    let at = ["\"text\": \"", "\"text\":\""]
+        .iter()
+        .filter_map(|k| s.find(k).map(|i| i + k.len()))
+        .min()?;
+    let raw = &s[at..];
+    let mut end = raw.len();
+    let mut esc = false;
+    for (i, c) in raw.char_indices() {
+        match c {
+            _ if esc => esc = false,
+            '\\' => esc = true,
+            '"' => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let quoted = format!("\"{}\"", &raw[..end]);
+    Some(serde_json::from_str::<String>(&quoted).unwrap_or_else(|_| raw[..end].to_owned()))
 }
 
 fn floor_sec(t: Ts) -> Ts {
@@ -123,7 +194,8 @@ fn floor_sec(t: Ts) -> Ts {
 }
 
 /// D-153's test over one window: the step tools in order among the ok lines, then the
-/// expects text in some line's summary.
+/// expects text: an ok `wait for=text` on it that matched ([`BrowserLine::waited_for_text`]),
+/// or the text in some line's summary (fallback).
 pub fn verdict(tools: &[String], expects: Option<&str>, window: &[&BrowserLine]) -> RunOutcome {
     if window.is_empty() {
         return RunOutcome::Failed {
@@ -143,7 +215,17 @@ pub fn verdict(tools: &[String], expects: Option<&str>, window: &[&BrowserLine])
         }
     }
     if let Some(text) = expects {
-        if !window.iter().any(|l| l.summary.contains(text)) {
+        // A wait asked for this very text is decided by its answer alone, so one that did not
+        // match (B-1500) cannot pass on the fallback by echoing the text.
+        let asked = |l: &BrowserLine| {
+            l.tool == "wait"
+                && l.args.get("for").and_then(Value::as_str) == Some("text")
+                && l.args.get("value").and_then(Value::as_str) == Some(text)
+        };
+        if !window
+            .iter()
+            .any(|l| l.waited_for_text(text) || (!asked(l) && l.summary.contains(text)))
+        {
             return RunOutcome::Failed {
                 why: "expects text not seen in any call's result".into(),
             };
