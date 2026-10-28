@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "harnessd"
 path = "src/bin/harnessd.rs"
 
+[[bin]]
+name = "harness-forge"
+path = "src/bin/harness_forge.rs"
+
 [lib]
 name = "harness"
 path = "src/lib.rs"
@@ -27,6 +31,7 @@ core-pg.workspace = true
 harness-core.workspace = true
 notify.workspace = true
 rpassword.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 # Only `harness db status` (reads _sqlx_migrations without migrating, D-116).
 sqlx.workspace = true

@@ -57,8 +57,9 @@ pub const TARGET_ACT_KINDS: [&str; 8] = [
 ];
 /// A recipe has 1..=MAX_STEPS steps.
 pub const MAX_STEPS: usize = 50;
-/// `description` is one line of 1..=MAX_DESCRIPTION_CHARS chars.
-pub const MAX_DESCRIPTION_CHARS: usize = 200;
+/// `description` is one line of 1..=MAX_DESCRIPTION_CHARS chars. 300, not D-150's 200: the
+/// merged T-27 `lu.ma/register` recipe states its free-events-only limits in 247 (B-214).
+pub const MAX_DESCRIPTION_CHARS: usize = 300;
 /// A larger file is refused before it is parsed.
 pub const MAX_RECIPE_BYTES: usize = 64 * 1024;
 
@@ -108,14 +109,26 @@ pub struct RecipeArg {
 }
 
 /// A locator the model resolves to a ref from a fresh snapshot or `grep over=ax` at run
-/// time: accessibility role and name, and which match (`nth`, 0-based) when several fit.
+/// time (B-596 (1), D-156): the accessibility role, a case-sensitive prefix of the
+/// accessible name (empty: any name, omitted from the file), and which match (`nth`,
+/// 1-based in snapshot order, default 1) when several fit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Target {
     pub role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nth: Option<u32>,
+    pub nth: Option<Nth>,
+}
+
+/// A target's `nth`: a number (1 or more), or a string that is exactly one placeholder of
+/// an `int` arg (`"{index}"`), which `tools.run` fills with the arg's value (D-156).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Nth {
+    Index(u32),
+    Arg(String),
 }
 
 /// One BrowserOS call. `args` is always a JSON object (`{}` when the file has none).
@@ -520,9 +533,28 @@ fn undeclared(at: &str, s: &str, declared: &[String]) -> Result<(), String> {
     }
 }
 
-fn check_target(at: &str, t: &Target, declared: &[String]) -> Result<(), String> {
+fn check_target(
+    at: &str,
+    t: &Target,
+    declared: &[String],
+    int_args: &[String],
+) -> Result<(), String> {
     if t.role.trim().is_empty() {
         return Err(format!("{at}: target role is empty"));
+    }
+    match &t.nth {
+        None => {}
+        Some(Nth::Index(n)) if *n >= 1 => {}
+        Some(Nth::Index(_)) => return Err(format!("{at}: target nth is 1-based (1 or more)")),
+        Some(Nth::Arg(s)) => {
+            let ph = placeholders(s);
+            let whole = ph.len() == 1 && s.len() == ph[0].len() + 2;
+            if !whole || !int_args.iter().any(|a| a == ph[0]) {
+                return Err(format!(
+                    "{at}: target nth must be a number or exactly one {{arg}} of an int arg"
+                ));
+            }
+        }
     }
     for (what, s) in [("role", &t.role), ("name", &t.name)] {
         if !one_line(s) || s.chars().count() > MAX_LOCATOR_CHARS {
@@ -639,7 +671,12 @@ impl ArgWalk<'_> {
     }
 }
 
-fn check_step(i: usize, step: &RecipeStep, declared: &[String]) -> Result<(), String> {
+fn check_step(
+    i: usize,
+    step: &RecipeStep,
+    declared: &[String],
+    int_args: &[String],
+) -> Result<(), String> {
     let at = format!("steps[{}]", i + 1);
     if !RECIPE_TOOLS.contains(&step.tool.as_str()) {
         return Err(format!(
@@ -652,14 +689,14 @@ fn check_step(i: usize, step: &RecipeStep, declared: &[String]) -> Result<(), St
         return Err(format!("{at}: args must be a mapping"));
     };
     if let Some(t) = &step.target {
-        check_target(&at, t, declared)?;
+        check_target(&at, t, declared, int_args)?;
     }
     if let Some(ts) = &step.targets {
         if ts.is_empty() {
             return Err(format!("{at}: targets is empty"));
         }
         for t in ts {
-            check_target(&at, t, declared)?;
+            check_target(&at, t, declared, int_args)?;
         }
     }
     if let Some(r) = &step.returns {
@@ -793,6 +830,11 @@ fn build(raw: RawRecipe, folder: &str, stem: &str) -> Result<Recipe, String> {
         });
     }
     let declared: Vec<String> = args.iter().map(|a| a.name.clone()).collect();
+    let int_args: Vec<String> = args
+        .iter()
+        .filter(|a| a.ty == ArgType::Int)
+        .map(|a| a.name.clone())
+        .collect();
     if raw.steps.is_empty() || raw.steps.len() > MAX_STEPS {
         return Err(format!(
             "a recipe has 1..={MAX_STEPS} steps, not {}",
@@ -804,7 +846,7 @@ fn build(raw: RawRecipe, folder: &str, stem: &str) -> Result<Recipe, String> {
         plain_string("match", m, &declared)?;
     }
     for (i, s) in raw.steps.iter().enumerate() {
-        check_step(i, s, &declared)?;
+        check_step(i, s, &declared, &int_args)?;
     }
     if let Some(e) = &raw.expects {
         let n = e.text.chars().count();

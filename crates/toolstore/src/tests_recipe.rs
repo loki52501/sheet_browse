@@ -6,7 +6,7 @@
 //! (rule 1, rule 2). The canary test installs a process-wide vault holding only the canary
 //! (no other test in this binary touches the global scrub).
 
-use crate::recipe::{MAX_STEPS, RECIPE_SUFFIX};
+use crate::recipe::{MAX_DESCRIPTION_CHARS, MAX_STEPS, RECIPE_SUFFIX};
 use crate::*;
 use harness_core::memory::{MemoryStore, ToolHealth, ToolStatus};
 use harness_core::testing::MemStore;
@@ -353,10 +353,10 @@ fn each_rule_is_refused() {
             "description must be one line",
         ),
         (
-            "description over 200 chars",
+            "description over 300 chars (B-214)",
             WAVE3.replacen(
                 "\"List the latest N inbox threads: sender, subject, date, snippet\"",
-                &"x".repeat(201),
+                &"x".repeat(MAX_DESCRIPTION_CHARS + 1),
                 1,
             ),
             "description must be one line",
@@ -613,4 +613,68 @@ async fn recipes_live_skips_a_retired_row() {
     // A host that is not a folder lists nothing.
     let none = ts.recipes_live(&store, "..").await.unwrap();
     assert_eq!(none, RecipeReport::default());
+}
+
+/// B-596 (1), D-156: a target's name may be left out (any name) and `nth` is 1-based, or a
+/// whole placeholder of an int arg; both round-trip.
+#[test]
+fn target_name_optional_and_nth_rules() {
+    let base = "name: inbox\ndomain: mail.google.com\nkind: recipe\ndescription: d\n\
+                args:\n  index: {type: int, default: 1}\n  who: {type: string, default: x}\n\
+                steps:\n";
+    let step =
+        |t: &str| format!("{base}  - tool: act\n    target: {t}\n    args: {{kind: click}}\n");
+    let r = parse(&step("{role: row, nth: \"{index}\"}")).unwrap();
+    assert_eq!(
+        r.steps[0].target,
+        Some(Target {
+            role: "row".into(),
+            name: String::new(),
+            nth: Some(Nth::Arg("{index}".into())),
+        })
+    );
+    assert_eq!(parse(&render_recipe(&r)).unwrap(), r);
+    let r = parse(&step("{role: row, name: Inbox, nth: 2}")).unwrap();
+    assert_eq!(r.steps[0].target.as_ref().unwrap().nth, Some(Nth::Index(2)));
+    assert_eq!(parse(&render_recipe(&r)).unwrap(), r);
+    for (bad, why) in [
+        ("{role: row, nth: 0}", "1-based"),
+        ("{role: row, nth: \"{who}\"}", "int arg"),
+        ("{role: row, nth: \"x{index}\"}", "int arg"),
+        ("{role: row, nth: \"{nope}\"}", "int arg"),
+        ("{role: \"\", name: x}", "role is empty"),
+    ] {
+        let m = msg(parse(&step(bad)));
+        assert!(m.contains(why), "{bad}: {m}");
+    }
+}
+
+/// D-1500: the merged T-27 recipes (and any other `tools/**/*.recipe.yaml` of the repo) load
+/// with toolstore's parser, each through its folder.
+#[test]
+fn repo_recipes_parse() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools");
+    let ts = ToolStore::new(&root);
+    let mut seen = 0;
+    for e in fs::read_dir(&root).unwrap().flatten() {
+        let folder = e.file_name().into_string().unwrap();
+        if !e.path().is_dir() || !valid_domain(&folder) {
+            continue;
+        }
+        let report = ts.recipes(&folder);
+        assert!(report.skipped.is_empty(), "{folder}: {:?}", report.skipped);
+        for r in &report.recipes {
+            assert_eq!(
+                parse_recipe(&render_recipe(r), &r.domain, &r.name).unwrap(),
+                *r
+            );
+        }
+        seen += report.recipes.len();
+    }
+    assert!(seen >= 7, "mail 4, calendar 2, lu.ma 1; saw {seen}");
+    assert_eq!(
+        ts.recipes("luma.com").recipes.len(),
+        1,
+        "luma.com is an alias of lu.ma"
+    );
 }

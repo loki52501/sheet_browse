@@ -56,7 +56,8 @@ pub use lifecycle::{
 pub use loader::{glob_match, namespace, skeleton_line, url_path, LoadReport};
 pub use recipe::{
     fill_placeholders, key_shaped, parse_recipe, placeholders, render_recipe, ArgType, Expects,
-    Recipe, RecipeArg, RecipeReport, RecipeStep, Target, RECIPE_KIND, RECIPE_SUFFIX, RECIPE_TOOLS,
+    Nth, Recipe, RecipeArg, RecipeReport, RecipeStep, Target, RECIPE_KIND, RECIPE_SUFFIX,
+    RECIPE_TOOLS,
 };
 
 use harness_core::memory::Ts;

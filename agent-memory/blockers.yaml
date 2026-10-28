@@ -327,6 +327,16 @@ blockers:
     question: "D-150 names ToolStore recipes(domain) / recipes_live / recipe but not whether a site's list merges `_generic/*.recipe.yaml` at lower precedence as load() does for .js tools, nor whether the D-153 3-fails retire (RECIPE_FAILS_TO_RETIRE) and the archive of a recipe file (lifecycle record/retire/archive and sweep only know `<name>.js`) belong to part (a)."
     default_taken: "recipes(domain) lists the folder's own recipes only (no _generic merge). Part (a) does not change record/retire/archive/sweep: a retired recipe row hides the recipe through recipes_live while its file stays in place (D-315 semantics). Coder B (D-153) adds RECIPE_FAILS_TO_RETIRE and archiving `<name>.recipe.yaml` to `_archive/<domain>/<name>.<version>.recipe.yaml`."
     needs_user: false
+  - id: B-214
+    task: T-28
+    question: "D-150 caps a recipe description at 200 chars, but the merged T-27 recipe tools/lu.ma/register.recipe.yaml has a 247-char description (it states the free-events-only limits, B-597/B-599 (7)), and the WAVE3 core brief requires tools.list and tools.run to load tools/lu.ma. Raise the cap, or should servers shorten the description?"
+    default_taken: "toolstore::recipe::MAX_DESCRIPTION_CHARS = 300 (still one line); the T-27 files are not edited. tools.list shows a description whole (no cut below 300) because it may say when not to run the recipe. Servers may shorten it later; the cap can then go back to 200."
+    needs_user: false
+  - id: B-215
+    task: T-28
+    question: "D-156 / D-151 do not say what tools.run does with a declared arg that is neither required nor has a default when the caller leaves it out (its {arg} placeholders would stay unfilled). Also D-152 says every occurrence of a declared `value` in saved strings becomes {name} but not how a bool or int value is matched, nor which strings count."
+    default_taken: "tools.run refuses the call (`arg x has no value and the recipe gives no default; pass it`), so no step ever carries an unfilled placeholder. tools.save matches string values and the decimal text of int values (both >= 2 chars) inside step args strings, target names and expects (not description, match or object keys), longest value first in one pass; a navigate url also matches the value percent-encoded and a grep pattern the value regex-escaped (the forms tools.run fills back); a JSON number equal to an int value becomes the whole placeholder \"{name}\". Bool values are never substituted (`true` would hit unrelated text)."
+    needs_user: false
   - id: B-206
     task: T-17c
     question: "D-146 says every relative output path resolves under this run's files/. Three spellings it does not settle: (1) a relative path that already names a place inside the runs root from the base, e.g. `runs/<id>/files/x.csv`, which is exactly how srv-files replies show a path in files/ (Roots::shown) and which sessions reuse; taken literally it would nest as files/runs/<id>/files/x.csv. (2) Windows drive-relative `C:x` (the server process's per-drive cwd). (3) `~`, `~/x` and rooted `/x` or `\\x`."
