@@ -328,10 +328,8 @@ async fn an_ok_window_records_ok() {
     assert_eq!(done.judged.verdicts.len(), 1);
     assert_eq!(done.judged.verdicts[0].outcome, Some(RunOutcome::Ok));
     let row = fx.row().await.unwrap();
-    assert_eq!(
-        (row.status, row.runs, row.fails),
-        (ToolStatus::Ephemeral, 1, 0)
-    );
+    // A hand-written recipe's first row is saved, as a hand-written .js tool's (B2, G-5).
+    assert_eq!((row.status, row.runs, row.fails), (ToolStatus::Saved, 1, 0));
     assert!(fx.tools.join(FOLDER).join("inbox.recipe.yaml").is_file());
     assert_eq!(fx.judge_events()[0].consequences["verdict"], json!("ok"));
 }
@@ -346,7 +344,7 @@ async fn a_pinned_recipe_is_proposed_not_retired() {
     let done = fx.reflect(t(5, 0), false).await;
     assert_eq!(done.judged.failed(), 3);
     assert!(fx.tools.join(FOLDER).join("inbox.recipe.yaml").is_file());
-    assert_eq!(fx.row().await.unwrap().status, ToolStatus::Ephemeral);
+    assert_eq!(fx.row().await.unwrap().status, ToolStatus::Saved);
     let ids: Vec<&str> = done.proposals.iter().map(|p| p.id.as_str()).collect();
     assert!(
         ids.contains(&"t7-retire-mail.google.com-inbox-v1"),

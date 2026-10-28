@@ -708,13 +708,11 @@ async fn three_failed_runs_retire_and_archive_a_recipe() {
         .record(&store, result("inbox", RunOutcome::Ok))
         .await
         .unwrap();
-    assert_eq!(
-        (ok.status, ok.runs, ok.fails),
-        (ToolStatus::Ephemeral, 1, 0)
-    );
+    // A hand-written recipe's first row is saved, as a hand-written .js tool's (T-28 B2).
+    assert_eq!((ok.status, ok.runs, ok.fails), (ToolStatus::Saved, 1, 0));
     for i in 1..RECIPE_FAILS_TO_RETIRE {
         let h = ts.record(&store, failed("inbox")).await.unwrap();
-        assert_eq!((h.status, h.fails), (ToolStatus::Ephemeral, i));
+        assert_eq!((h.status, h.fails), (ToolStatus::Saved, i));
     }
     let file = ts.try_recipe_path(FOLDER, "inbox").unwrap();
     assert!(file.is_file());
@@ -765,7 +763,7 @@ async fn three_failed_runs_retire_and_archive_a_recipe() {
         ts.record(&store, failed("draft")).await.unwrap();
     }
     let h = ts.health(&store, FOLDER, "draft").await.unwrap().unwrap();
-    assert_eq!((h.status, h.fails), (ToolStatus::Ephemeral, 4));
+    assert_eq!((h.status, h.fails), (ToolStatus::Saved, 4));
     assert!(ts.try_recipe_path(FOLDER, "draft").unwrap().is_file());
     // A .js tool keeps the T-7 rule: plain failures do not retire it.
     for _ in 0..RECIPE_FAILS_TO_RETIRE {
@@ -806,4 +804,51 @@ async fn sweep_archives_a_retired_recipe_left_in_place() {
         ts.root.join("mail.google.com/unread.js"),
         "a .js tool wins over a recipe of the same name"
     );
+}
+
+/// T-28 B2 (D-153 "existing lifecycle rules", G-5): a hand-written recipe's first row (made by
+/// `record`) is `saved`, so the T-7 sweep never retires it however long it sits idle or many
+/// site visits go by; a recipe `tools.save` registered (`register_forged`) stays `ephemeral`
+/// and is swept as before.
+#[tokio::test]
+async fn an_idle_hand_written_recipe_survives_the_sweep() {
+    let (_dir, ts) = mail_root();
+    let store = MemStore::new();
+    let now = harness_core::memory::ts_now();
+    let long_ago = now - chrono::Duration::days(EPHEMERAL_IDLE_DAYS * 3);
+    let mut run = result("inbox", RunOutcome::Ok);
+    run.at = long_ago;
+    let h = ts.record(&store, run).await.unwrap();
+    assert_eq!((h.status, h.runs), (ToolStatus::Saved, 1));
+    // tools.save's own recipe: ephemeral, last used as long ago.
+    let f = ts.register_forged(&store, FOLDER, "draft").await.unwrap();
+    assert_eq!(f.status, ToolStatus::Ephemeral);
+    let mut run = result("draft", RunOutcome::Ok);
+    run.at = long_ago;
+    ts.record(&store, run).await.unwrap();
+
+    let done = ts
+        .sweep(&store, now, &|_| EPHEMERAL_IDLE_VISITS * 2)
+        .await
+        .unwrap();
+    assert!(
+        !done.iter().any(|a| matches!(
+            a,
+            SweepAction::Retired { name, .. } | SweepAction::Archived { name, .. }
+                if name == "inbox"
+        )),
+        "{done:?}"
+    );
+    let h = ts.health(&store, FOLDER, "inbox").await.unwrap().unwrap();
+    assert_eq!(h.status, ToolStatus::Saved);
+    assert!(ts.try_recipe_path(FOLDER, "inbox").unwrap().is_file());
+    // The forged one is idle and ephemeral: retired and archived (the rule is unchanged).
+    assert!(
+        done.iter().any(|a| matches!(
+            a,
+            SweepAction::Retired { name, .. } if name == "draft"
+        )),
+        "{done:?}"
+    );
+    assert!(!ts.try_recipe_path(FOLDER, "draft").unwrap().exists());
 }

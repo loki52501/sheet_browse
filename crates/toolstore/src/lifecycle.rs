@@ -145,16 +145,28 @@ impl ToolStore {
     }
 
     /// A first row for a tool on disk with no row yet: `ephemeral` when its header says
-    /// `@forged`, else `saved` (hand-written, G-5); `ephemeral` when the file is missing.
+    /// `@forged`, else `saved` (hand-written, G-5). With no `<name>.js`, a `<name>.recipe.yaml`
+    /// in place is a hand-written recipe and starts `saved` too (T-28, D-153: the existing
+    /// lifecycle rules; `tools.save` registers its own recipes `ephemeral` through
+    /// [`ToolStore::register_forged`]). `ephemeral` when neither file is there. The file
+    /// chosen is the one [`ToolStore::tool_file`] gives.
     fn new_row(&self, domain: &str, name: &str) -> ToolHealth {
-        let status = match self
-            .try_tool_path(domain, name)
-            .ok()
-            .and_then(|p| fs::read_to_string(p).ok())
-            .and_then(|s| parse_header(&s).ok())
-        {
-            Some(h) if h.forged.is_none() => ToolStatus::Saved,
-            _ => ToolStatus::Ephemeral,
+        let js = self.try_tool_path(domain, name).ok();
+        let status = match js.as_ref().filter(|p| p.is_file()) {
+            Some(p) => match fs::read_to_string(p)
+                .ok()
+                .and_then(|s| parse_header(&s).ok())
+            {
+                Some(h) if h.forged.is_none() => ToolStatus::Saved,
+                _ => ToolStatus::Ephemeral,
+            },
+            None if self
+                .try_recipe_path(domain, name)
+                .is_ok_and(|r| r.is_file()) =>
+            {
+                ToolStatus::Saved
+            }
+            None => ToolStatus::Ephemeral,
         };
         ToolHealth {
             domain: domain.to_string(),
