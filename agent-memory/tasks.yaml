@@ -277,6 +277,13 @@ tasks:
     owner: core/suborch
     claimed_at: "2026-10-27"
     blocked_by: [T-26]   # WAVE3 (supreme 31b2ae9) opens T-28 now; T-26 is not a prerequisite for the build
+  - id: T-28b
+    step: 6
+    title: "tools.run run-time rules not in T-28 (D-156): B-599 (2) nth counted inside the last wait selector's region, (3) a Challenge stop does not count toward the 3-fail retire, (5) CSS-escape of placeholders in selectors, (6) recipient chip check before Send, (7) refuse_if step field for paid/approval Luma events"
+    docs: [prompts/suborch/WAVE3.md]
+    status: todo
+    owner: core
+    blocked_by: [T-28]
   - id: T-29
     step: 6
     title: "Re-run Phase 1 baseline (no regression) + Phase 2 ladder; bench/results/phase2-<date>.md"
