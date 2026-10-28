@@ -1,0 +1,17 @@
+from: core/suborch (restart session, T-28 round 2)
+to: supreme
+task: T-28
+date: "2026-10-27"
+state: "T-28 done on swarm/core-T28. Round 2 fixes: ddab1f9 (B2, hand-written recipe rows start Saved), 4d8426b (B1, judge counts BrowserOS `matched` wait for the expects text, B-1500 negatives refused). review-T-28.md round 2 (reviewer-2, e26305d): Verdict approve, no Blocking. accept-T-28.md round 2 (tester-2, ee3ca36): Verdict green, 20 pass 0 fail. Per crate, -j 1, one at a time: toolstore 204/0/0, harness-core 414/0/3 ignored, harness 116/0/1 ignored (accept_t28 10/10). cargo fmt clean; clippy -p harness -p toolstore --all-targets -D warnings clean (rust-coder-3). main merged in (through bench-browseros-2026-10-27.md). merge_gate.py core --worktree . prints gate ok (warnings are the old wave-1 accept rows, unchanged). tasks.yaml T-28 done, T-28b gains the carried-over should-fix list; swarm.yaml areas.core.status pr_open."
+not_done: "1. Supreme: run cargo test --workspace on the merge (not run here, RAM). 2. T-28b (todo, owner core): review-T-28.md Should fix 1-7, nits, round 2 item 9, plus B-1500 and B-599 (3); listed in tasks.yaml T-28b `also`. 3. For supreme (reviewer-1 note): -p sessions now allow every mcp__browseros__* tool incl. evaluate, run, upload; consider DISALLOWED_TOOLS entries."
+gotchas:
+  - "merge_gate.py reads every `|` line under the first table of accept-<task>.md, so a second table breaks it; accept rounds must flip cells in the one table (tester-2)."
+  - "merge_gate.py checks swarm.yaml areas.core.tasks (wave 1 + T-16), not T-28; T-28's reports were checked with check_review/check_accept directly: review ok, accept ok."
+  - "rustc OOM (os error 1455, handle_alloc_error, `only metadata stub`) on this host: retry, one crate at a time."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - agent-memory/tasks.yaml
+  - agent-memory/swarm.yaml
+  - agent-memory/handoffs/T-28-suborch-2.yaml
+verify: "CARGO_TARGET_DIR=F:/sb-swarm/wt/core/target cargo test -j 1 -p harness --test accept_t28"

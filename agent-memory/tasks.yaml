@@ -273,9 +273,10 @@ tasks:
     step: 6
     title: "(docs/11 shape, D-98) toolstore `recipe` kind + harness-forge MCP server: tools.list/run/save over BrowserOS, save from browseros.jsonl, report.md includes browser calls, reflect retires a recipe after 3 failures, launcher allows browseros and harness-forge. Owner core, branch swarm/core-T28."
     docs: [docs/06-TOOLFORGE.md]
-    status: doing
+    status: done
     owner: core/suborch
     claimed_at: "2026-10-27"
+    done: "2026-10-27 review-T-28 round 2 approve (reviewer-2), accept-T-28 round 2 green 20/20 (tester-2); crates toolstore 204, harness-core 414, harness 116 pass"
     blocked_by: [T-26]   # WAVE3 (supreme 31b2ae9) opens T-28 now; T-26 is not a prerequisite for the build
   - id: T-28b
     step: 6
@@ -283,6 +284,7 @@ tasks:
     docs: [prompts/suborch/WAVE3.md]
     status: todo
     owner: core
+    also: "review-T-28.md Should fix 1-7, nits and round 2 item 9: recipe validator parity with D-1503/check_recipes.py; @vault( splice across placeholders and in arg defaults; forge::clip scrubs before it cuts; regex_escape set valid under u/v flags; rule 7 gaps (recipe text, bounded --); judge writes mark before record; amend D-150 (B-214, B-216); tools.save recipes recognisable without their row; forge_tests save_scrubs_a_planted_vault_value assert message must not print the checked string; B-1500, B-599 (3)"
     blocked_by: [T-28]
   - id: T-29
     step: 6
