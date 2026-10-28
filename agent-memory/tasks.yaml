@@ -424,7 +424,7 @@ tasks:
     owner: core/suborch
     branch: swarm/core-T17b
     title: "T-17 baseline (phase1-2026-10-27, 13/30): interactive `harness run` sessions get no grounding preamble (run_preamble only reaches -p/harnessd), so rung 1/2 answered from memory with zero tool calls; give every run the preamble."
-    status: doing
+    status: done  # merged to main by supreme (#23, d49c0fd)
     claimed_at: "2026-10-27"
     from: T-17
   - id: T-17c
@@ -433,7 +433,7 @@ tasks:
     owner: core/suborch
     branch: swarm/core-T17c
     title: "T-17 baseline: sessions are not told their run id or files path, so fs.write/xlsx.write deliverables land in the session cwd, outside runs/<id>/files/ and missing from report.md (rungs 2/1, 4/2, 5/3); pass the run files path and make writes default there (B-564 bare names already work)."
-    status: doing
+    status: done  # merged to main by supreme (#23, d49c0fd)
     claimed_at: "2026-10-27"
     from: T-17
   - id: T-17d
