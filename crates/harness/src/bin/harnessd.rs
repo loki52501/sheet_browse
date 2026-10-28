@@ -12,8 +12,9 @@
 //! directory; local settings only; built-in tools denied). No reflect schedule is created
 //! automatically: add one with `harness schedule add` (kind reflect) (D-142, T-16b).
 //!
-//! Every other firing is a `claude -p` session allowed the four harness MCP servers
-//! (`harness::launcher::HARNESS_ALLOWED_TOOLS`); the gate in each server decides each call.
+//! Every other firing is a `claude -p` session allowed the five harness MCP servers and
+//! BrowserOS (`harness::launcher::HARNESS_ALLOWED_TOOLS`, D-155); the gate in each harness
+//! server decides each call.
 
 use clap::Parser;
 use harness::daemon::{Daemon, ReopenVault};

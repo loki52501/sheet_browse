@@ -22,7 +22,8 @@
 //!
 //! `--allowedTools` ([`ClaudeLauncher::allowed_tools`]): a `claude -p` session refuses every
 //! tool that needs a permission and has no allow rule, so [`ClaudeLauncher::print`] allows
-//! the four harness servers ([`HARNESS_ALLOWED_TOOLS`], the names in `mcp.example.json`).
+//! the five harness servers and BrowserOS ([`HARNESS_ALLOWED_TOOLS`], the names in
+//! `mcp.example.json`, D-155).
 //! That is safe because the gate inside each server is the permission layer (H-1, rule 4).
 //! Every `claude -p` session also gets `--tools ""`: no built-in tool is loaded, so the
 //! project's Bash allow rules (`Bash(psql *)`, `Bash(cargo *)`, ...) give a fired session no
@@ -65,13 +66,16 @@ pub const DISALLOWED_TOOLS: [&str; 3] = [
     "Bash(harness vault:*)",
 ];
 
-/// `--allowedTools` of every `claude -p` session harnessd starts: the harness MCP servers
-/// (names as in `mcp.example.json`). The gate in each server decides each call (H-1).
-pub const HARNESS_ALLOWED_TOOLS: [&str; 4] = [
+/// `--allowedTools` of every `claude -p` session harnessd starts: the harness MCP servers and
+/// BrowserOS (names as in `mcp.example.json`; D-155, T-28 (e)). The gate in each harness
+/// server decides each call (H-1); BrowserOS calls are recorded by the browseros hook (D-98).
+pub const HARNESS_ALLOWED_TOOLS: [&str; 6] = [
     "mcp__harness-web",
     "mcp__harness-files",
     "mcp__harness-cli",
     "mcp__harness-mem",
+    "mcp__harness-forge",
+    "mcp__browseros",
 ];
 
 /// Claude Code built-in tools the readers-only replay session denies, behind `--tools ""`
@@ -629,8 +633,9 @@ mod tests {
         assert_eq!(task, "-h say hi\n\nsecond paragraph");
     }
 
-    /// Review T-16 r1 should-fix 1: a scheduled `claude -p` session may call the four
-    /// harness servers (names as in mcp.example.json); the gate decides each call.
+    /// Review T-16 r1 should-fix 1, D-155: a scheduled `claude -p` session may call the five
+    /// harness servers and BrowserOS (names as in mcp.example.json); the gate decides each
+    /// harness call.
     #[test]
     fn print_sessions_allow_the_harness_servers() {
         let p = ClaudeLauncher::print("claude");
@@ -640,7 +645,9 @@ mod tests {
                 "mcp__harness-web",
                 "mcp__harness-files",
                 "mcp__harness-cli",
-                "mcp__harness-mem"
+                "mcp__harness-mem",
+                "mcp__harness-forge",
+                "mcp__browseros"
             ]
         );
         let example: serde_json::Value =
