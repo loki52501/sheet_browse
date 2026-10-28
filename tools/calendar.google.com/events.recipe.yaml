@@ -1,0 +1,16 @@
+# T-27. Read only. Schedule view rows carry time, title, organiser, location and date.
+name: events
+domain: calendar.google.com
+kind: recipe
+description: "List the next N events and tasks from today in the Schedule view, one line each: day, time, title, organiser, location, date"
+match: ["/calendar/*"]
+args:
+  count: {type: int, default: 10}
+steps:
+  - tool: navigate
+    args: {url: "https://calendar.google.com/calendar/u/0/r/agenda"}
+  - tool: wait
+    args: {for: selector, value: "[role=main] [role=grid]", timeout: 30000}  # cold loads of Google pages exceed the 10 s default
+  - tool: grep
+    args: {over: ax, pattern: '^\s*- row "[A-Z][a-z]+day, ', limit: "{count}"}
+    returns: events

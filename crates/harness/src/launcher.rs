@@ -9,9 +9,11 @@
 //!   (default [`DEFAULT_SESSION_CAP`], `SB_SESSION_CAP_SECS` in harnessd): past it the session
 //!   is killed (its process tree on Windows) and the launch fails. Its stdout is capped at
 //!   [`ClaudeLauncher::max_answer_bytes`]; the rest is read and dropped.
-//! * `harness run`: interactive `claude <prompt>` with inherited stdio, no cap (the user is
-//!   at the terminal), and no preamble (argv through the `claude.cmd` shim cannot carry its
-//!   newlines safely).
+//! * `harness run`: interactive `claude <prompt>` with inherited stdio and no cap (the user
+//!   is at the terminal). The same run preamble goes in `--append-system-prompt` as one line
+//!   ([`preamble_line`], D-145): its lines joined with one space, since argv through the
+//!   `claude.cmd` shim cannot carry newlines safely. The user's prompt stays the first
+//!   argument, exactly as typed.
 //!
 //! Every session gets `--disallowedTools` with [`DISALLOWED_TOOLS`] (B-192): a session must
 //! not answer its own asks, change gate rules or vault entries through the CLI (rule 4).
@@ -264,6 +266,9 @@ impl ClaudeLauncher {
                 req.prompt.to_owned()
             };
             cmd.arg(p);
+            // D-145: the run preamble a -p session reads on stdin, as one argv element with
+            // no newline; before the variadic lists so neither swallows it.
+            cmd.arg("--append-system-prompt").arg(preamble_line(req));
         } else {
             cmd.arg("-p")
                 .stdin(Stdio::piped())
@@ -377,6 +382,18 @@ pub fn answer_text(kept: &[u8], total: usize, cap: usize) -> String {
         "{}\n\n[answer cut: kept {end} of {total} bytes]\n",
         &text[..end]
     )
+}
+
+/// [`run_preamble`] as one line for `--append-system-prompt` (D-145): its lines (split on
+/// `\n` and `\r`) trimmed and joined with a single space, so the argv element has no
+/// newline and the `claude.cmd` shim carries it whole.
+pub fn preamble_line(req: &LaunchRequest<'_>) -> String {
+    run_preamble(req)
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// What a `claude -p` session reads on stdin: [`run_preamble`], a blank line, the task.
@@ -522,9 +539,71 @@ mod tests {
         want.extend(deny);
         assert_eq!(argv(&p.command(&p.program, &req, tmp.path())), want);
         let i = ClaudeLauncher::interactive("claude");
-        let mut want = vec![" -h say hi"];
+        let line = preamble_line(&req);
+        let mut want = vec![" -h say hi", "--append-system-prompt", line.as_str()];
         want.extend(deny);
         assert_eq!(argv(&i.command(&i.program, &req, tmp.path())), want);
+    }
+
+    /// D-145 (T-17b, B-563): an interactive session gets the run preamble in
+    /// `--append-system-prompt` as one line naming the run id and the absolute files/ path,
+    /// after the prompt and before `--disallowedTools`; a -p session does not (it reads
+    /// the preamble on stdin).
+    #[test]
+    fn interactive_sessions_get_the_preamble_as_one_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = RunFolder::create(tmp.path(), "x", "x").unwrap();
+        let req = LaunchRequest {
+            run: &run,
+            runs_root: tmp.path(),
+            prompt: "find jobs\nand save them",
+            schedule: None,
+        };
+        let i = ClaudeLauncher::interactive("claude");
+        let args = argv(&i.command(&i.program, &req, tmp.path()));
+        assert_eq!(
+            args[0], "find jobs\nand save them",
+            "the prompt is unchanged"
+        );
+        let flag = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .expect("interactive argv has --append-system-prompt");
+        let deny = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert!(flag > 0 && flag + 1 < deny, "{args:?}");
+        let value = &args[flag + 1];
+        let files = std::path::absolute(run.files())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(std::path::Path::new(&files).is_absolute(), "{files}");
+        assert!(value.contains(&run.id.0), "{value}");
+        assert!(value.contains(&files), "{value}");
+        assert!(
+            value.contains("Cite only what tools returned in this run"),
+            "{value}"
+        );
+        assert!(!value.contains('\n') && !value.contains('\r'), "{value:?}");
+        assert!(
+            !value.contains("  "),
+            "lines joined by one space: {value:?}"
+        );
+        assert_eq!(
+            value,
+            &run_preamble(&req).lines().collect::<Vec<_>>().join(" ")
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            DISALLOWED_TOOLS.last().copied()
+        );
+
+        let p = ClaudeLauncher::print("claude");
+        let args = argv(&p.command(&p.program, &req, tmp.path()));
+        assert!(
+            !args.iter().any(|a| a == "--append-system-prompt"),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|a| a.contains(&run.id.0)), "{args:?}");
     }
 
     /// B-563 (D-140 (10)): a `-p` session reads the run preamble, one blank line, then the

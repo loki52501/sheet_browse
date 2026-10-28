@@ -1,0 +1,14 @@
+from: reviewer (servers area, T-27 round 1)
+to: servers/suborch, then coder and tester; B-596 items also for core (T-28)
+task: T-27
+date: "2026-10-27"
+state: "Reviewed main..6540707 (7 recipes, _site.yaml, check_recipes.py + tests, B-595..B-598, D-1500..D-1502). bench/results/review-T-27.md: Blocking none, 9 should-fix, Verdict: approve. unittest 20/20 OK; check_recipes.py 7 recipes 0 problems. Browser not used."
+not_done: "Should-fix in order: 1. B-596 must say @vault is resolved only where it is literal in recipe act text, never in placeholder-substituted values or arg defaults (send body exfil path); 2. check_url accepts https://evil.com\\.mail.google.com/ (backslash in authority); 3. tabs/windows/download/upload/history args unchecked; 4. send/draft Tab commits a suggestion when to is not a full address; 5. register free-only is a comment; 6. B-596 prefix name match and unscoped nth for side-effect clicks; 7. checker TypeError on list-typed tool/kind/type, nth/name/expects/wait value unchecked; 8. _site.yaml aliases unvalidated; 9. create with malformed dates likely saves at default slot."
+gotchas:
+  - "PyYAML is in the user site-packages here, so `python -I` cannot import yaml; run the checker without -I."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-27.md
+  - agent-memory/handoffs/T-27-reviewer-1.yaml
+verify: "python -m unittest discover -s scripts/recipes -v && python scripts/recipes/check_recipes.py"

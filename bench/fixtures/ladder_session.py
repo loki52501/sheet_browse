@@ -2,8 +2,9 @@
 starts when SB_CLAUDE points at this wrapper's .cmd shim.
 
 `harness run "<prompt>"` creates the run the normal way (runs/<id>/ with prompt.md, a
-`runs` row with status running), then spawns `$SB_CLAUDE " <prompt>" --disallowedTools
-<harness ask/gate/vault>` with SB_RUN_ID and SB_RUNS_ROOT set, and after it exits writes
+`runs` row with status running), then spawns `$SB_CLAUDE " <prompt>" --append-system-prompt
+<run preamble as one line> --disallowedTools <harness ask/gate/vault>` (D-145) with SB_RUN_ID
+and SB_RUNS_ROOT set, and after it exits writes
 report.md from the ledger and ends the row. This wrapper turns that interactive launch into
 a headless one:
 
@@ -11,6 +12,7 @@ a headless one:
          --mcp-config $SB_LADDER_MCP --strict-mcp-config
          --setting-sources local          (cwd is an empty scratch folder: no settings load)
          --permission-mode default
+         --append-system-prompt <value>   (forwarded when harness passed it, D-145)
          --allowedTools mcp__harness-web mcp__harness-files mcp__harness-cli
          --disallowedTools <the three from harness> Bash PowerShell Edit Write MultiEdit
                            NotebookEdit WebFetch WebSearch Read Glob Grep Task Agent
@@ -56,6 +58,14 @@ def main() -> int:
     harness_deny = []
     if "--disallowedTools" in args:
         harness_deny = args[args.index("--disallowedTools") + 1:]
+        args = args[:args.index("--disallowedTools")]
+    # D-145: the run preamble (one line) an interactive `harness run` passes; forwarded so
+    # the headless session learns its run id and files/ folder as a real one would.
+    system = []
+    if "--append-system-prompt" in args:
+        i = args.index("--append-system-prompt")
+        if i + 1 < len(args):
+            system = ["--append-system-prompt", args[i + 1]]
     root = os.environ["SB_RUNS_ROOT"]
     run_id = os.environ["SB_RUN_ID"]
     run_dir = os.path.join(root, run_id)
@@ -77,6 +87,7 @@ def main() -> int:
     cmd = [claude, "-p", "--output-format", "stream-json", "--verbose",
            "--mcp-config", os.environ["SB_LADDER_MCP"], "--strict-mcp-config",
            "--setting-sources", "local", "--permission-mode", "default",
+           *system,
            "--allowedTools", *allowed,
            "--disallowedTools", *harness_deny, *EXTRA_DENY]
     with open(os.path.join(logs, run_id + ".cmd.json"), "w", encoding="utf-8") as f:

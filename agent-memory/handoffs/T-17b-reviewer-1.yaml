@@ -1,0 +1,15 @@
+from: reviewer-1
+to: core/suborch (then rust-coder for round 2, tester)
+task: T-17b
+date: "2026-10-27"
+state: "Reviewed swarm/core-T17b (b2cbcf4, f739e05, a549823, 2d532ae) for T-17b and T-17c against D-145, D-146, B-206, WAVE3 core 1 and phase1 Failures 1, 2, 5, 7, by reading the code and git only (no cargo, host RAM). Report: bench/results/review-T-17b.md. Verdict approve, Blocking none. Path escapes out of files/ (.., links, junctions, trailing dots and spaces, verbatim, UNC, drive-relative) fail closed. Bookkeeping stays unreachable as scratch, and classes are still computed on the resolved path. The interactive argv keeps the prompt first and --disallowedTools last, and -p is unchanged."
+not_done: "1) Build and test first (should-fix 1): cargo clippy -j 1 -p harness -p srv-files --all-targets -- -D warnings; cargo test -j 1 -p harness --lib launcher; cargo test -j 1 -p srv-files; then the workspace. a549823 was never compiled. 2) Should-fix 2: scrub preamble_line's joined result (launcher.rs:390-397). 3) Should-fix 3: add a Windows test that spawns through a .cmd shim in a folder whose name has spaces and %. 4) Should-fix 4: assert make_link succeeded on Windows (paths.rs:1026), and add ../ledger.jsonl and ../asks/1.answer refusal cases. 5) Should-fix 5: move_dest's base-folder arm accepts .. and C:x folders that resolve_out refuses (fs.rs:190-193). 6) If T-17c is gated separately, it needs bench/results/review-T-17c.md."
+gotchas:
+  - "The session cwd is F:/sb-swarm/wt/core/wt/T28 (swarm/core-T28). The T-17b branch is checked out in F:/sb-swarm/wt/core. Use absolute paths and git -C."
+  - "merge_gate.py reads the last 'Verdict:' line and requires '## Blocking' to be '- none'. Accept files only warn and do not block, so the build in should-fix 1 must be enforced by merge.ps1 or the suborch."
+decisions_made: []
+blockers_opened: []
+files_touched:
+  - bench/results/review-T-17b.md
+  - agent-memory/handoffs/T-17b-reviewer-1.yaml
+verify: "python scripts/swarm/merge_gate.py core --worktree F:/sb-swarm/wt/core"

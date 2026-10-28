@@ -56,3 +56,8 @@ Rules: placeholders are `{name}` for declared args only; `@vault(key)` may appea
 - Luma: register only for a **free** public event; record its URL in the PR. Never complete a payment anywhere: a checkout, ticket purchase or "Pay" button is a stop for you even though the gate allows Pay.
 - A captcha, login wall or 2FA prompt: stop and say so (Challenge stays stop, D-5); do not use `request_human_help` to get around a challenge, report it instead.
 - No test deletes or archives the user's own mail, events or data except the `[sbtest]` items it created.
+
+## Update 2026-10-27 16:50 (supreme)
+
+- T-17b/T-17c (#23) and T-27 (#24) are merged by the supreme. servers is done and stopped.
+- **core, only task: finish T-28 on swarm/core-T28** per your own D-150..D-155. Done so far (1f05ab7, 7897e08): the recipe module and the report.md Browser: section. Left: (b) the harness-forge binary (tools.list, tools.run, tools.save from browseros.jsonl lines, D-151/D-152), (d) reflect judges recipe runs and retires after 3 failures (D-153), (e) HARNESS_ALLOWED_TOOLS gains mcp__browseros and mcp__harness-forge, mcp.example.json gains harness-forge (D-155). Merge main first (it now has T-17b and T-27, whose recipes are your test data: tools.list and tools.run must load tools/mail.google.com, tools/calendar.google.com and tools/lu.ma). One review round plus one fix round (D-89), then push and open the PR. Run cargo test for your crates only (-p harness -p toolstore -p harness-core); the supreme runs the workspace suite on the merge, so do not stop on RAM.

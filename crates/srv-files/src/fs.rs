@@ -8,11 +8,12 @@
 //! `shell("rm -rf runs/x")` has (S3, B-520). Every call rechecks its class against the
 //! approved one before it acts.
 //!
-//! Bare names (B-564, T-13c): `fs.write` puts a bare file name in this run's `files/`
-//! ([`Roots::resolve_out`], D-570); `fs.read`, `fs.delete` and a move's source fall back to
-//! `files/<name>` when the base has no such file ([`Roots::resolve_existing`], D-571); a
-//! move's bare destination follows D-573. Classify and call act on one resolved `Plan`
-//! (D-572).
+//! Relative paths (B-564, T-13c, D-146): `fs.write` and `fs.mkdir` put a relative path
+//! under this run's `files/` and refuse one that leaves it ([`Roots::resolve_out`], D-570
+//! amended by D-146); `fs.read`, `fs.delete` and a move's source fall back to
+//! `files/<path>` when the base has no such file ([`Roots::resolve_existing`], D-571); a
+//! move's relative destination follows D-573. Classify and call act on one resolved
+//! `Plan` (D-572).
 
 use crate::paths::{self, Place, Roots};
 use crate::text::{self, MAX_CHARS, READ_DEFAULT_CHARS};
@@ -58,7 +59,7 @@ pub fn tools() -> Vec<ToolSpec> {
     vec![
         spec(
             "fs.read",
-            "Read a text file. Relative paths start at the folder that holds runs/; a bare file name not found there is read from this run's files/ (where fs.write put it). Returns at most max_chars (default 8000, up to 20000) from char offset; a trailer names the next offset.",
+            "Read a text file. Relative paths start at the folder that holds runs/; one not found there is read from this run's files/ (where fs.write put it). Returns at most max_chars (default 8000, up to 20000) from char offset; a trailer names the next offset.",
             Class::Read,
             Op::Read,
             json!({"type":"object","properties":{
@@ -69,7 +70,7 @@ pub fn tools() -> Vec<ToolSpec> {
         ),
         spec(
             "fs.write",
-            "Write (or append) text to a file, creating folders. A bare file name (report.csv) lands in this run's files/ (runs/<run>/files/, the reply names it) and is listed in the run report: use one for deliverables. ./name, folder/name and absolute paths keep their meaning (relative to the folder that holds runs/). Replacing a file outside runs/ asks first.",
+            "Write (or append) text to a file, creating folders. A relative path (report.csv, out/report.csv) lands in this run's files/ (runs/<run>/files/, the reply names it) and is listed in the run report: use one for deliverables. A relative path that leaves files/ (../x) is refused; absolute paths keep their meaning. Replacing a file outside runs/ asks first.",
             Class::Fill,
             Op::Write,
             json!({"type":"object","properties":{
@@ -90,7 +91,7 @@ pub fn tools() -> Vec<ToolSpec> {
         ),
         spec(
             "fs.move",
-            "Move or rename a file or folder. Into an existing folder keeps the name. A bare `to` name for something in runs/ lands in this run's files/; a bare `from` not found next to runs/ is this run's files/<name>. Replacing a file, or moving something from outside runs/ into it, asks first.",
+            "Move or rename a file or folder. Into an existing folder keeps the name. A relative `to` for something in runs/ lands in this run's files/; a relative `from` not found next to runs/ is this run's files/<path>. Replacing a file, or moving something from outside runs/ into it, asks first.",
             Class::Fill,
             Op::Move,
             json!({"type":"object","properties":{
@@ -101,7 +102,7 @@ pub fn tools() -> Vec<ToolSpec> {
         ),
         spec(
             "fs.mkdir",
-            "Create a folder and its parents.",
+            "Create a folder and its parents. A relative path is made in this run's files/, like fs.write (so fs.mkdir out then fs.write out/x.csv agree); one that leaves files/ is refused.",
             Class::Fill,
             Op::Mkdir,
             json!({"type":"object","properties":{"path":{"type":"string"}},
@@ -109,7 +110,7 @@ pub fn tools() -> Vec<ToolSpec> {
         ),
         spec(
             "fs.delete",
-            "Delete a file, or a folder with recursive=true. A bare name not found next to runs/ is this run's files/<name>. Inside runs/ it just runs (class Read, like shell rm there); anywhere else it is class Delete and asks first.",
+            "Delete a file, or a folder with recursive=true. A relative path not found next to runs/ is this run's files/<path>. Inside runs/ it just runs (class Read, like shell rm there); anywhere else it is class Delete and asks first.",
             Class::Read,
             Op::Delete,
             json!({"type":"object","properties":{
@@ -174,16 +175,23 @@ struct MovePlan {
     verdict: Verdict,
 }
 
-/// The destination of a move (D-573): a bare `to` for a source inside runs/ lands in this
-/// run's files/ like a bare fs.write, unless the base folder holds a folder of that name
-/// (then the move goes into it, as before). For a source outside runs/ a bare `to` stays
-/// a rename next to it in the base folder; that move is Delete either way (D-523).
+/// The destination of a move (D-573, widened from bare names to relative paths by
+/// D-146): for a source inside runs/, `to` resolves like an fs.write output
+/// ([`Roots::resolve_out`]: a relative path lands under this run's files/), except that
+/// when files/ has no folder of that name and the base folder has one, the move goes into
+/// the base folder's (as before). A relative `to` that leaves files/ and names no base
+/// folder is refused. For a source outside runs/ `to` resolves against the base folder
+/// (a rename next to it there); that move is Delete either way (D-523).
 fn move_dest(roots: &Roots, from: &Path, raw: &str) -> Result<PathBuf, ToolError> {
     let in_base = roots.resolve(raw)?;
-    if paths::is_bare(raw) && roots.place(from).scratch() && !paths::is_dir(&in_base) {
-        return roots.resolve_out(raw);
+    if !roots.place(from).scratch() {
+        return Ok(in_base);
     }
-    Ok(in_base)
+    match roots.resolve_out(raw) {
+        Ok(p) if paths::is_dir(&p) => Ok(p),
+        _ if paths::is_dir(&in_base) => Ok(in_base),
+        out => out,
+    }
 }
 
 fn plan_move(roots: &Roots, a: &MoveArgs) -> Result<MovePlan, ToolError> {
@@ -333,10 +341,10 @@ impl Fs {
                 }
             }
             Op::Mkdir => {
-                // A folder name is not an output file: a bare name stays in the base
-                // folder, so `fs.mkdir out` then `fs.write out/x.csv` agree (D-570).
+                // A folder follows the output rule, so `fs.mkdir out` then
+                // `fs.write out/x.csv` agree (D-146, amends D-570).
                 let a: PathArgs = parse(args)?;
-                let p = roots.resolve(&a.path)?;
+                let p = roots.resolve_out(&a.path)?;
                 one(mkdir_verdict(roots, &p), p)
             }
             Op::Delete => {
@@ -453,7 +461,7 @@ fn read(roots: &Roots, a: ReadArgs, p: &Path) -> Result<ToolOutput, ToolError> {
         ));
     }
     if let Some(other) = roots.shadowed(&a.path, p) {
-        // D-571: the base wins; say so, so the session knows which of the two it read.
+        // D-571, D-146: the base wins; say so, so the session knows which it read.
         out.push_str(&format!(
             "\nnote: this is {shown}; this run's {} has the same name (read that path for it)",
             text::one_line(&roots.shown(&other), 300)
@@ -747,9 +755,11 @@ mod tests {
             Class::Delete
         );
         // A folder out of runs/ carries files nobody checked.
-        assert_eq!(mv(&r, "runs/x/home", "./newdir"), Class::Delete);
-        // A bare name keeps it in runs/ (this run's files/, D-573).
+        let out_of_runs = paths::plain(&r.base.join("newdir")).replace('\\', "/");
+        assert_eq!(mv(&r, "runs/x/home", &out_of_runs), Class::Delete);
+        // A relative name keeps it in runs/ (this run's files/, D-573, D-146).
         assert_eq!(mv(&r, "runs/x/home", "newdir"), Class::Fill);
+        assert_eq!(mv(&r, "runs/x/home", "./newdir"), Class::Fill);
         assert_eq!(mv(&r, "runs/x/home", "runs/x/home2"), Class::Fill);
         assert_eq!(mv(&r, "runs/x/a.txt", "new.txt"), Class::Fill);
     }
@@ -781,8 +791,30 @@ mod tests {
         let m = plan("runs/x/a.txt", "archive");
         assert_eq!(m.to, r.base.join("archive").join("a.txt"));
         assert_eq!(m.verdict.class, Class::Fill);
+        // D-146: any relative `to` for a scratch source is under files/.
         let m = plan("runs/x/a.txt", "./b.txt");
-        assert_eq!(m.to, r.base.join("b.txt"));
+        assert_eq!(m.to, r.files.join("b.txt"));
+        assert_eq!(m.verdict.class, Class::Fill);
+        let m = plan("runs/x/a.txt", "sub/b.txt");
+        assert_eq!(m.to, r.files.join("sub").join("b.txt"));
+        // A folder of that name in files/ wins over the base folder's.
+        std::fs::create_dir_all(r.files.join("archive")).unwrap();
+        let m = plan("runs/x/a.txt", "archive");
+        assert_eq!(m.to, r.files.join("archive").join("a.txt"));
+        // Leaving files/ with no base folder of that name is refused.
+        let refused = plan_move(
+            &r,
+            &MoveArgs {
+                from: "runs/x/a.txt".into(),
+                to: "../../nowhere.txt".into(),
+                overwrite: false,
+            },
+        );
+        assert!(matches!(refused, Err(ToolError::Args(_))));
+        // A source outside runs/ keeps renaming in the base folder.
+        let m = plan("file.txt", "sub/other.txt");
+        assert_eq!(m.to, r.base.join("sub").join("other.txt"));
+        assert_eq!(m.verdict.class, Class::Delete);
         // A bare source the base lacks is this run's files/<name>.
         std::fs::write(r.files.join("c.txt"), "c").unwrap();
         let m = plan("c.txt", "d.txt");
